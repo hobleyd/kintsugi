@@ -1,0 +1,4 @@
+/target/
+# Prebuilt binary staged for the distributable installer archive; produced by
+# packaging/publish-release.ps1 rather than committed.
+/packaging/kintsugi-agent.exe

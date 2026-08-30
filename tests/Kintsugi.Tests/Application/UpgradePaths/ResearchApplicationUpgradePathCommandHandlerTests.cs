@@ -32,6 +32,10 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
     private ResearchApplicationUpgradePathCommandHandler CreateHandler() =>
         new(_repository.Object, _researchClient.Object, _artifactSigningService.Object, _unitOfWork.Object);
 
+    /// <summary>Where every Homebrew-managed row lives — its manager's own bucket, not an OS one
+    /// and not the old shared "generic" one. See PlatformBucket.ForPackageManager.</summary>
+    private static readonly string HomebrewBucket = PlatformBucket.ForPackageManager(PackageManagerCatalog.Homebrew);
+
     // Always carries the shared, non-null Settings — a test needing to exercise the
     // Settings-is-null branch (see below) constructs a ResearchApplicationUpgradePathCommand
     // directly instead, since an optional parameter defaulting to null can't distinguish "the
@@ -48,7 +52,7 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
     public async Task Handle_PackageManagerManaged_ForHomebrew_ResolvesToADeterministicScript_WithoutCallingAi()
     {
         _researchClient
-            .Setup(c => c.CheckScriptVersionAsync(It.IsAny<string>(), "Firefox", "Firefox", It.IsAny<CancellationToken>()))
+            .Setup(c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string>(), "Firefox", "Firefox", It.IsAny<CancellationToken>()))
             .ReturnsAsync("128.0");
 
         var result = await CreateHandler().Handle(Command(UpgradePathWorkKind.PackageManagerManaged, "Homebrew"), CancellationToken.None);
@@ -73,7 +77,7 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
     public async Task Handle_PackageManagerManaged_ProducesTheIdenticalScript_RegardlessOfApplicationName()
     {
         _researchClient
-            .Setup(c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Setup(c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync("1.0");
 
         var firefoxResult = await CreateHandler().Handle(Command(UpgradePathWorkKind.PackageManagerManaged, "Homebrew"), CancellationToken.None);
@@ -89,9 +93,9 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
     [Fact]
     public async Task Handle_PackageManagerManaged_RetiresALegacyPackageManagerCommandRow_StoredUnderTheRealOsPlatform()
     {
-        // Reproduces a row left over from before Homebrew moved to the fixed Generic/Script shape:
+        // Reproduces a row left over from before Homebrew moved to the fixed per-manager/Script shape:
         // stored under the real OS platform, as PackageManagerCommand. Left in place, it would keep
-        // winning GetSummariesAsync's per-host platform lookup (tried before its Generic fallback)
+        // winning GetSummariesAsync's per-host platform lookup (tried before its package-manager fallback)
         // and permanently shadow the correctly-shaped row this run resolves to below — so "Find
         // Upgrade Paths" must actually retire it, not just create a second row alongside it.
         var legacyRow = UpgradePath.Create(
@@ -100,24 +104,24 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
         _repository.Setup(r => r.GetAllForApplicationAsync("Firefox", It.IsAny<CancellationToken>())).ReturnsAsync(new List<UpgradePath> { legacyRow });
 
         await CreateHandler().Handle(
-            Command(UpgradePathWorkKind.PackageManagerManaged, "Homebrew", platform: PlatformBucket.Generic), CancellationToken.None);
+            Command(UpgradePathWorkKind.PackageManagerManaged, "Homebrew", platform: HomebrewBucket), CancellationToken.None);
 
         _repository.Verify(r => r.Remove(legacyRow), Times.Once);
         _repository.Verify(r => r.AddAsync(
-            It.Is<UpgradePath>(p => p.Platform == PlatformBucket.Generic && p.Method == UpgradeMethod.Script),
+            It.Is<UpgradePath>(p => p.Platform == HomebrewBucket && p.Method == UpgradeMethod.Script),
             It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
-    public async Task Handle_PackageManagerManaged_RetiresALegacyRow_EvenWhenTheGenericRowIsAlreadyFoundAndSkipped()
+    public async Task Handle_PackageManagerManaged_RetiresALegacyRow_EvenWhenThePackageManagerRowIsAlreadyFoundAndSkipped()
     {
-        // A second "Find Upgrade Paths" run (after a first run already created the correct "generic"
-        // row, but before this cleanup existed) takes the "already Found, skip" branch below — which
+        // A second "Find Upgrade Paths" run (after a first run already created the correct
+        // per-manager row, but before this cleanup existed) takes the "already Found, skip" branch — which
         // doesn't reach ApplyPackageManagerCommandAsync at all. The cleanup must still run, or the
         // legacy row would keep shadowing the correct one forever.
-        _repository.Setup(r => r.GetAsync("Firefox", PlatformBucket.Generic, It.IsAny<CancellationToken>()))
+        _repository.Setup(r => r.GetAsync("Firefox", HomebrewBucket, It.IsAny<CancellationToken>()))
             .ReturnsAsync(UpgradePath.Create(
-                "Firefox", PlatformBucket.Generic, UpgradePathStatus.Found, "128.0", UpgradeMethod.Script,
+                "Firefox", HomebrewBucket, UpgradePathStatus.Found, "128.0", UpgradeMethod.Script,
                 null, null, null, null, null, "#!/bin/bash\n...", "Firefox"));
         var legacyRow = UpgradePath.Create(
             "Firefox", PlatformBucket.MacOs, UpgradePathStatus.Found, "127.0", UpgradeMethod.PackageManagerCommand,
@@ -125,7 +129,7 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
         _repository.Setup(r => r.GetAllForApplicationAsync("Firefox", It.IsAny<CancellationToken>())).ReturnsAsync(new List<UpgradePath> { legacyRow });
 
         var result = await CreateHandler().Handle(
-            Command(UpgradePathWorkKind.PackageManagerManaged, "Homebrew", platform: PlatformBucket.Generic), CancellationToken.None);
+            Command(UpgradePathWorkKind.PackageManagerManaged, "Homebrew", platform: HomebrewBucket), CancellationToken.None);
 
         Assert.True(result.Skipped);
         _repository.Verify(r => r.Remove(legacyRow), Times.Once);
@@ -166,15 +170,15 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
         // self-heal the moment some other row's identical script content turns out to be signed —
         // e.g. a human just signed a sibling Homebrew application sharing this exact script.
         var existing = UpgradePath.Create(
-            "Firefox", PlatformBucket.Generic, UpgradePathStatus.Found, "128.0", UpgradeMethod.Script,
+            "Firefox", HomebrewBucket, UpgradePathStatus.Found, "128.0", UpgradeMethod.Script,
             null, null, null, null, null, "#!/bin/bash\n...", "Firefox");
-        _repository.Setup(r => r.GetAsync("Firefox", PlatformBucket.Generic, It.IsAny<CancellationToken>())).ReturnsAsync(existing);
+        _repository.Setup(r => r.GetAsync("Firefox", HomebrewBucket, It.IsAny<CancellationToken>())).ReturnsAsync(existing);
         _repository
             .Setup(r => r.FindExistingSignatureForScriptAsync("#!/bin/bash\n...", It.IsAny<CancellationToken>()))
             .ReturnsAsync("signed:already-reviewed-elsewhere");
 
         await CreateHandler().Handle(
-            Command(UpgradePathWorkKind.PackageManagerManaged, "Homebrew", platform: PlatformBucket.Generic), CancellationToken.None);
+            Command(UpgradePathWorkKind.PackageManagerManaged, "Homebrew", platform: HomebrewBucket), CancellationToken.None);
 
         Assert.Equal("signed:already-reviewed-elsewhere", existing.ScriptSignature);
         _unitOfWork.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Once);
@@ -203,13 +207,77 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
     }
 
     [Fact]
-    public async Task Handle_Research_OnANonMacOsPlatform_ResolvesToNotFound_WithoutCallingAi()
+    public async Task Handle_Research_OnAnUnsupportedPlatform_ResolvesToNotFound_WithoutCallingAi()
     {
-        var result = await CreateHandler().Handle(Command(UpgradePathWorkKind.Research, platform: "Windows"), CancellationToken.None);
+        // Linux (and the catch-all "generic" OS bucket) have no prompt written for them and no way
+        // to validate or run what came back, so they resolve to NotFound rather than producing a
+        // script nothing can check. macOS and Windows both do have one — see the tests below.
+        var result = await CreateHandler().Handle(Command(UpgradePathWorkKind.Research, platform: PlatformBucket.Linux), CancellationToken.None);
 
         Assert.Equal(UpgradePathStatus.NotFound, result.Status);
-        Assert.Contains("macOS", result.Note);
+        Assert.Contains("only supported on macOS and Windows", result.Note);
         _researchClient.Verify(c => c.GenerateScriptAsync(It.IsAny<AiProviderSettings>(), It.IsAny<UpgradePathScriptGenerationRequest>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Handle_Research_OnWindows_CallsTheAi_AndPersistsTheGeneratedScript()
+    {
+        _researchClient
+            .Setup(c => c.GenerateScriptAsync(It.IsAny<AiProviderSettings>(), It.IsAny<UpgradePathScriptGenerationRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new UpgradePathScriptResult(UpgradePathStatus.Found, "Set-StrictMode -Version Latest\n...", null));
+        _researchClient
+            .Setup(c => c.CheckScriptVersionAsync(It.IsAny<string>(), PlatformBucket.Windows, "Firefox", "Mozilla Firefox", It.IsAny<CancellationToken>()))
+            .ReturnsAsync("129.0");
+
+        var result = await CreateHandler().Handle(
+            Command(UpgradePathWorkKind.Research, platform: PlatformBucket.Windows, applicationIdentifier: "Mozilla Firefox"),
+            CancellationToken.None);
+
+        Assert.Equal(UpgradePathStatus.Found, result.Status);
+        Assert.Equal(UpgradeMethod.Script, result.Method);
+        Assert.Equal("129.0", result.LatestVersion);
+        // The platform is what picks the interpreter the version check runs the script under — a
+        // PowerShell script handed to bash would fail every time, silently leaving LatestVersion
+        // null and so making the application permanently unpatchable.
+        _researchClient.Verify(
+            c => c.CheckScriptVersionAsync(It.IsAny<string>(), PlatformBucket.Windows, "Firefox", "Mozilla Firefox", It.IsAny<CancellationToken>()),
+            Times.Once);
+    }
+
+    [Fact]
+    public async Task Handle_PackageManagerManaged_ForWinget_ResolvesToAPowerShellScript_AddressedByPackageId()
+    {
+        _researchClient
+            .Setup(c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string>(), "Firefox", "Mozilla.Firefox", It.IsAny<CancellationToken>()))
+            .ReturnsAsync("129.0");
+
+        var result = await CreateHandler().Handle(
+            Command(UpgradePathWorkKind.PackageManagerManaged, PackageManagerCatalog.Winget,
+                platform: PlatformBucket.ForPackageManager(PackageManagerCatalog.Winget), applicationIdentifier: "Mozilla.Firefox"),
+            CancellationToken.None);
+
+        Assert.Equal(UpgradePathStatus.Found, result.Status);
+        Assert.Equal(UpgradeMethod.Script, result.Method);
+        Assert.NotNull(result.Script);
+        Assert.Contains("winget upgrade --exact --id $AppId", result.Script);
+        // Not a bash script — the whole reason package-manager rows moved to their own bucket.
+        Assert.DoesNotContain("#!/bin/bash", result.Script);
+        Assert.Equal("129.0", result.LatestVersion);
+        _researchClient.Verify(c => c.GenerateScriptAsync(It.IsAny<AiProviderSettings>(), It.IsAny<UpgradePathScriptGenerationRequest>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Handle_PackageManagerManaged_ForChocolatey_ResolvesToAPowerShellScript()
+    {
+        var result = await CreateHandler().Handle(
+            Command(UpgradePathWorkKind.PackageManagerManaged, PackageManagerCatalog.Chocolatey,
+                platform: PlatformBucket.ForPackageManager(PackageManagerCatalog.Chocolatey), applicationIdentifier: "firefox"),
+            CancellationToken.None);
+
+        Assert.Equal(UpgradePathStatus.Found, result.Status);
+        Assert.NotNull(result.Script);
+        Assert.Contains("choco upgrade $AppId", result.Script);
+        Assert.DoesNotContain("#!/bin/bash", result.Script);
     }
 
     [Fact]
@@ -233,7 +301,7 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
             .Setup(c => c.GenerateScriptAsync(Settings, It.IsAny<UpgradePathScriptGenerationRequest>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new UpgradePathScriptResult(UpgradePathStatus.Found, "#!/bin/bash\n...", null));
         _researchClient
-            .Setup(c => c.CheckScriptVersionAsync("#!/bin/bash\n...", "Firefox", "org.mozilla.firefox", It.IsAny<CancellationToken>()))
+            .Setup(c => c.CheckScriptVersionAsync("#!/bin/bash\n...", PlatformBucket.MacOs, "Firefox", "org.mozilla.firefox", It.IsAny<CancellationToken>()))
             .ReturnsAsync("129.0");
 
         var result = await CreateHandler().Handle(Command(UpgradePathWorkKind.Research, applicationIdentifier: "org.mozilla.firefox"), CancellationToken.None);
@@ -253,7 +321,7 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
             .Setup(c => c.GenerateScriptAsync(Settings, It.IsAny<UpgradePathScriptGenerationRequest>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new UpgradePathScriptResult(UpgradePathStatus.Found, "#!/bin/bash\n...", null));
         _researchClient
-            .Setup(c => c.CheckScriptVersionAsync("#!/bin/bash\n...", "Firefox", "org.mozilla.firefox", It.IsAny<CancellationToken>()))
+            .Setup(c => c.CheckScriptVersionAsync("#!/bin/bash\n...", PlatformBucket.MacOs, "Firefox", "org.mozilla.firefox", It.IsAny<CancellationToken>()))
             .ReturnsAsync("129.0");
 
         await CreateHandler().Handle(Command(UpgradePathWorkKind.Research, applicationIdentifier: "org.mozilla.firefox"), CancellationToken.None);
@@ -272,7 +340,7 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
 
         Assert.Equal(UpgradePathStatus.NotFound, result.Status);
         Assert.Equal(UpgradeMethod.Unknown, result.Method);
-        _researchClient.Verify(c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        _researchClient.Verify(c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
@@ -344,7 +412,7 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
         // a human to sign it via the "Sign Script" action.
         Assert.Null(existing.ScriptSignature);
         _unitOfWork.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Never);
-        _researchClient.Verify(c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        _researchClient.Verify(c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         _researchClient.Verify(c => c.GenerateScriptAsync(It.IsAny<AiProviderSettings>(), It.IsAny<UpgradePathScriptGenerationRequest>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 

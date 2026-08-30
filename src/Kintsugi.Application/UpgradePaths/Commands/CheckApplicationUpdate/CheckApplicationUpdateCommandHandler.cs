@@ -32,7 +32,7 @@ public class CheckApplicationUpdateCommandHandler : IRequestHandler<CheckApplica
         try
         {
             var previousVersion = existing.LatestVersion;
-            var discovered = await _researchClient.CheckScriptVersionAsync(existing.Script, existing.ApplicationName, existing.ApplicationIdentifier, cancellationToken);
+            var discovered = await _researchClient.CheckScriptVersionAsync(existing.Script, existing.Platform, existing.ApplicationName, existing.ApplicationIdentifier, cancellationToken);
             if (discovered is null)
             {
                 // The script itself may have broken (e.g. the vendor changed how it distributes

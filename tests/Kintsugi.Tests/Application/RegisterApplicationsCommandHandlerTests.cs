@@ -16,6 +16,10 @@ public class RegisterApplicationsCommandHandlerTests
     private readonly Mock<IUnitOfWork> _unitOfWork = new();
     private readonly Host _host = new("host-1", "SERIAL-1", "macOS 15.0");
 
+    /// <summary>Where every Homebrew-managed row lives — its manager's own bucket, not the host's
+    /// OS bucket and not the old shared "generic" one. See PlatformBucket.ForPackageManager.</summary>
+    private static readonly string HomebrewBucket = PlatformBucket.ForPackageManager(PackageManagerCatalog.Homebrew);
+
     private RegisterApplicationsCommandHandler CreateHandler() =>
         new(_hostRepository.Object, _installedApplicationRepository.Object, _upgradePathRepository.Object, _unitOfWork.Object);
 
@@ -119,7 +123,7 @@ public class RegisterApplicationsCommandHandlerTests
     public async Task Handle_SeedsANewUpgradePath_FromAPackageManagerReportedAvailableVersion()
     {
         SetUpHost(_host);
-        _upgradePathRepository.Setup(r => r.GetAsync("firefox", PlatformBucket.Generic, It.IsAny<CancellationToken>())).ReturnsAsync((UpgradePath?)null);
+        _upgradePathRepository.Setup(r => r.GetAsync("firefox", HomebrewBucket, It.IsAny<CancellationToken>())).ReturnsAsync((UpgradePath?)null);
 
         await CreateHandler().Handle(
             new RegisterApplicationsCommand("SERIAL-1", new[]
@@ -128,14 +132,14 @@ public class RegisterApplicationsCommandHandlerTests
             }),
             CancellationToken.None);
 
-        // Stored under the fixed "generic" platform bucket (not the host's real OS) and as a
-        // Method.Script row (not PackageManagerCommand) — the same shape "Find Upgrade Paths"
-        // produces for Homebrew — so this row is findable by (application, "generic") and an agent
-        // recognizes it as patchable once signed. The script text itself never names "firefox" —
+        // Stored under Homebrew's own bucket (not the host's real OS) and as a Method.Script row
+        // (not PackageManagerCommand) — the same shape "Find Upgrade Paths" produces — so this row
+        // is findable by the (application, manager-bucket) key and an agent recognizes it as
+        // patchable once signed. The script text itself never names "firefox" —
         // it reads --appName at runtime instead (see HomebrewUpgradeScript.Build) — so every other
         // Homebrew-managed application gets this exact same content.
         _upgradePathRepository.Verify(r => r.AddAsync(
-            It.Is<UpgradePath>(p => p.ApplicationName == "firefox" && p.Platform == PlatformBucket.Generic && p.LatestVersion == "129.0"
+            It.Is<UpgradePath>(p => p.ApplicationName == "firefox" && p.Platform == HomebrewBucket && p.LatestVersion == "129.0"
                 && p.Method == UpgradeMethod.Script && p.Command == null && p.Script != null
                 && !p.Script.Contains("firefox") && p.Script.Contains("brew update && brew upgrade \"$APP_NAME\"")
                 && p.ApplicationIdentifier == "firefox"),
@@ -146,7 +150,7 @@ public class RegisterApplicationsCommandHandlerTests
     public async Task Handle_InheritsAnExistingSignature_WhenCreatingARow_AndIdenticalScriptContentIsAlreadySigned()
     {
         SetUpHost(_host);
-        _upgradePathRepository.Setup(r => r.GetAsync("firefox", PlatformBucket.Generic, It.IsAny<CancellationToken>())).ReturnsAsync((UpgradePath?)null);
+        _upgradePathRepository.Setup(r => r.GetAsync("firefox", HomebrewBucket, It.IsAny<CancellationToken>())).ReturnsAsync((UpgradePath?)null);
         _upgradePathRepository
             .Setup(r => r.FindExistingSignatureForScriptAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync("signed:already-reviewed-elsewhere");
@@ -168,9 +172,9 @@ public class RegisterApplicationsCommandHandlerTests
     {
         SetUpHost(_host);
         var existingPath = UpgradePath.Create(
-            "firefox", PlatformBucket.Generic, UpgradePathStatus.Found, "127.0", UpgradeMethod.Script,
+            "firefox", HomebrewBucket, UpgradePathStatus.Found, "127.0", UpgradeMethod.Script,
             null, null, null, null, null, "#!/bin/bash\n...", "firefox");
-        _upgradePathRepository.Setup(r => r.GetAsync("firefox", PlatformBucket.Generic, It.IsAny<CancellationToken>())).ReturnsAsync(existingPath);
+        _upgradePathRepository.Setup(r => r.GetAsync("firefox", HomebrewBucket, It.IsAny<CancellationToken>())).ReturnsAsync(existingPath);
         _upgradePathRepository
             .Setup(r => r.FindExistingSignatureForScriptAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync("signed:already-reviewed-elsewhere");
@@ -190,9 +194,9 @@ public class RegisterApplicationsCommandHandlerTests
     {
         SetUpHost(_host);
         var existingPath = UpgradePath.Create(
-            "firefox", PlatformBucket.Generic, UpgradePathStatus.Found, "127.0", UpgradeMethod.Script,
+            "firefox", HomebrewBucket, UpgradePathStatus.Found, "127.0", UpgradeMethod.Script,
             null, null, null, null, null, "#!/bin/bash\n...", "firefox");
-        _upgradePathRepository.Setup(r => r.GetAsync("firefox", PlatformBucket.Generic, It.IsAny<CancellationToken>())).ReturnsAsync(existingPath);
+        _upgradePathRepository.Setup(r => r.GetAsync("firefox", HomebrewBucket, It.IsAny<CancellationToken>())).ReturnsAsync(existingPath);
 
         await CreateHandler().Handle(
             new RegisterApplicationsCommand("SERIAL-1", new[]
@@ -214,10 +218,10 @@ public class RegisterApplicationsCommandHandlerTests
         // check-in.
         SetUpHost(_host);
         var existingPath = UpgradePath.Create(
-            "firefox", PlatformBucket.Generic, UpgradePathStatus.Found, "127.0", UpgradeMethod.Script,
+            "firefox", HomebrewBucket, UpgradePathStatus.Found, "127.0", UpgradeMethod.Script,
             null, null, null, null, null, "#!/bin/bash\n...", "firefox");
         existingPath.SignScript("signed:already-approved");
-        _upgradePathRepository.Setup(r => r.GetAsync("firefox", PlatformBucket.Generic, It.IsAny<CancellationToken>())).ReturnsAsync(existingPath);
+        _upgradePathRepository.Setup(r => r.GetAsync("firefox", HomebrewBucket, It.IsAny<CancellationToken>())).ReturnsAsync(existingPath);
 
         await CreateHandler().Handle(
             new RegisterApplicationsCommand("SERIAL-1", new[]
@@ -232,10 +236,11 @@ public class RegisterApplicationsCommandHandlerTests
     [Fact]
     public async Task Handle_RetiresALegacyPackageManagerCommandRow_StoredUnderTheRealOsPlatform()
     {
-        // Reproduces a row this handler used to write before Homebrew moved to the fixed
-        // Generic/Script shape: stored under the host's real OS platform, as PackageManagerCommand.
-        // Left in place, it would keep winning GetSummariesAsync's per-host platform lookup (tried
-        // before its Generic fallback) and permanently shadow the correctly-shaped row below.
+        // Reproduces a row this handler used to write before Homebrew moved to a fixed
+        // per-manager/Script shape: stored under the host's real OS platform, as
+        // PackageManagerCommand. Left in place, it would keep winning GetSummariesAsync's per-host
+        // platform lookup (tried before its package-manager fallback) and permanently shadow the
+        // correctly-shaped row below.
         SetUpHost(_host);
         var legacyRow = UpgradePath.Create(
             "firefox", "macOS", UpgradePathStatus.Found, "127.0", UpgradeMethod.PackageManagerCommand,
@@ -243,7 +248,7 @@ public class RegisterApplicationsCommandHandlerTests
         _upgradePathRepository
             .Setup(r => r.GetAllForApplicationAsync("firefox", It.IsAny<CancellationToken>()))
             .ReturnsAsync(new List<UpgradePath> { legacyRow });
-        _upgradePathRepository.Setup(r => r.GetAsync("firefox", PlatformBucket.Generic, It.IsAny<CancellationToken>())).ReturnsAsync((UpgradePath?)null);
+        _upgradePathRepository.Setup(r => r.GetAsync("firefox", HomebrewBucket, It.IsAny<CancellationToken>())).ReturnsAsync((UpgradePath?)null);
 
         await CreateHandler().Handle(
             new RegisterApplicationsCommand("SERIAL-1", new[]
@@ -254,8 +259,49 @@ public class RegisterApplicationsCommandHandlerTests
 
         _upgradePathRepository.Verify(r => r.Remove(legacyRow), Times.Once);
         _upgradePathRepository.Verify(r => r.AddAsync(
-            It.Is<UpgradePath>(p => p.Platform == PlatformBucket.Generic && p.Method == UpgradeMethod.Script),
+            It.Is<UpgradePath>(p => p.Platform == HomebrewBucket && p.Method == UpgradeMethod.Script),
             It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task Handle_SeedsAWingetRow_UnderWingetsOwnBucket_WithAPowerShellScript()
+    {
+        SetUpHost(_host);
+        var wingetBucket = PlatformBucket.ForPackageManager(PackageManagerCatalog.Winget);
+        _upgradePathRepository.Setup(r => r.GetAsync("VLC media player", wingetBucket, It.IsAny<CancellationToken>())).ReturnsAsync((UpgradePath?)null);
+
+        await CreateHandler().Handle(
+            new RegisterApplicationsCommand("SERIAL-1", new[]
+            {
+                new ApplicationEntry("VLC media player", "3.0.20", PackageManager: PackageManagerCatalog.Winget,
+                    ApplicationIdentifier: "VideoLAN.VLC", AvailableVersion: "3.0.21"),
+            }),
+            CancellationToken.None);
+
+        // A separate bucket from Homebrew's, carrying a PowerShell script and the winget package id
+        // (not the display name) as its identifier — winget addresses a package by id.
+        _upgradePathRepository.Verify(r => r.AddAsync(
+            It.Is<UpgradePath>(p => p.Platform == wingetBucket && p.Method == UpgradeMethod.Script
+                && p.ApplicationIdentifier == "VideoLAN.VLC" && p.Script != null
+                && !p.Script.Contains("#!/bin/bash") && p.Script.Contains("winget upgrade")),
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task Handle_DoesNotSeedAnUpgradePath_ForAnUnrecognizedPackageManager()
+    {
+        // There is no script to write for a manager this system doesn't know how to drive —
+        // seeding one anyway would previously have written Homebrew's bash script for it.
+        SetUpHost(_host);
+
+        await CreateHandler().Handle(
+            new RegisterApplicationsCommand("SERIAL-1", new[]
+            {
+                new ApplicationEntry("some-package", "1.0", PackageManager: "SomeNewManager", AvailableVersion: "1.1"),
+            }),
+            CancellationToken.None);
+
+        _upgradePathRepository.Verify(r => r.AddAsync(It.IsAny<UpgradePath>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]

@@ -16,13 +16,17 @@ public record RegisterApplicationsCommand(string SerialNumber, IReadOnlyList<App
 /// match the <see cref="Name"/> of another entry in the same report (that
 /// entry's own installation, e.g. "Homebrew") — the two are linked as
 /// parent/child. Left null (or unmatched), the entry is reported standalone.
-/// <see cref="ApplicationIdentifier"/> is the app bundle's CFBundleIdentifier
-/// (e.g. "com.example.MyApp"); null for Homebrew-sourced entries.
+/// <see cref="ApplicationIdentifier"/> is whatever stably names this application
+/// on its platform: a macOS app bundle's CFBundleIdentifier (e.g.
+/// "com.example.MyApp"), a Windows application's key name under the uninstall
+/// registry, or a winget/Chocolatey package id. Null for Homebrew-sourced
+/// entries, which have no identifier separate from their name.
 /// <see cref="AvailableVersion"/> is the latest version known to be available
-/// independently of any upgrade research (currently: a Homebrew formula/cask's
-/// catalog version) — when present alongside <see cref="PackageManager"/>, it
-/// seeds that application's <see cref="Kintsugi.Domain.Entities.UpgradePath"/>
-/// directly, without waiting on AI research.
+/// independently of any upgrade research (a package manager's own catalog
+/// version) — when present alongside a <see cref="PackageManager"/> this system
+/// recognizes (see <c>PackageManagerCatalog</c>), it seeds that application's
+/// <see cref="Kintsugi.Domain.Entities.UpgradePath"/> directly, without waiting
+/// on AI research.
 /// </summary>
 public record ApplicationEntry(
     string Name,

@@ -35,22 +35,50 @@ public class PrepareUpgradePathScanQueryHandler : IRequestHandler<PrepareUpgrade
         foreach (var group in byName)
         {
             var applicationName = group.Key;
-            var managedBy = group.Select(v => v.ParentApplicationName).FirstOrDefault(p => p is not null);
 
-            if (managedBy is not null)
+            // Split by how each *variant* is managed rather than by the application as a whole:
+            // one name can legitimately be Homebrew-managed on a Mac, winget-managed on one
+            // Windows host, and plain-installed on another. Treating the first manager seen as
+            // covering every platform (which it used to) meant those other platforms silently got
+            // no work item at all, and so no upgrade path ever.
+            var managed = group.Where(v => v.ParentApplicationName is not null).ToList();
+            var unmanaged = group.Where(v => v.ParentApplicationName is null).ToList();
+
+            foreach (var managerGroup in managed.GroupBy(v => v.ParentApplicationName!, StringComparer.OrdinalIgnoreCase))
             {
-                // Package-manager-managed applications resolve to a fixed command without ever
-                // calling the AI (see ResearchApplicationUpgradePathCommandHandler), so they belong
-                // in the plan regardless of whether the AI agent is configured — only the Research
-                // items below actually need it.
-                workItems.Add(new UpgradePathWorkItem(applicationName, PlatformBucket.Generic, Array.Empty<string>(), UpgradePathWorkKind.PackageManagerManaged, managedBy));
+                // Package-manager-managed applications resolve to a fixed, server-written script
+                // without ever calling the AI (see ResearchApplicationUpgradePathCommandHandler), so
+                // they belong in the plan regardless of whether the AI agent is configured — only
+                // the Research items below actually need it.
+                workItems.Add(new UpgradePathWorkItem(
+                    applicationName,
+                    PlatformBucket.ForPackageManager(managerGroup.Key),
+                    Array.Empty<string>(),
+                    UpgradePathWorkKind.PackageManagerManaged,
+                    managerGroup.Key,
+                    // winget and Chocolatey both address a package by its id, not its display name
+                    // — so the identifier is genuinely load-bearing for those, unlike Homebrew where
+                    // the package name is the identifier. Falls back to the name for the latter.
+                    managerGroup.Select(v => v.ApplicationIdentifier).FirstOrDefault(id => id is not null) ?? applicationName));
+            }
+
+            if (unmanaged.Count == 0)
+            {
                 continue;
             }
 
             if (packageManagerNames.Contains(applicationName))
             {
-                // The application is itself a tracked package manager (e.g. the "Homebrew" row).
-                workItems.Add(new UpgradePathWorkItem(applicationName, PlatformBucket.Generic, Array.Empty<string>(), UpgradePathWorkKind.PackageManagerSelfUpdate, applicationName));
+                // The application is itself a tracked package manager (e.g. the "Homebrew" or
+                // "winget" row) — a manager is its own manager, so its self-update row lives in the
+                // very bucket its managed applications do.
+                workItems.Add(new UpgradePathWorkItem(
+                    applicationName,
+                    PlatformBucket.ForPackageManager(applicationName),
+                    Array.Empty<string>(),
+                    UpgradePathWorkKind.PackageManagerSelfUpdate,
+                    applicationName,
+                    applicationName));
                 continue;
             }
 
@@ -60,7 +88,7 @@ public class PrepareUpgradePathScanQueryHandler : IRequestHandler<PrepareUpgrade
             // unsupported platform. That keeps this plan usable both for the fleet-wide scan (which
             // just wants every application to get *some* resolution attempt) and for a single-row
             // refresh (which needs to find its matching item regardless of AI configuration).
-            foreach (var platformGroup in group.GroupBy(v => PlatformBucket.From(v.OperatingSystem)))
+            foreach (var platformGroup in unmanaged.GroupBy(v => PlatformBucket.From(v.OperatingSystem)))
             {
                 var knownVersions = platformGroup.Select(v => v.Version).Distinct().ToList();
                 var applicationIdentifier = platformGroup.Select(v => v.ApplicationIdentifier).FirstOrDefault(id => id is not null);

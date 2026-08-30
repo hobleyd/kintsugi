@@ -6,6 +6,7 @@ using Moq;
 using Kintsugi.Application.AiSettings;
 using Kintsugi.Application.Common.Exceptions;
 using Kintsugi.Application.Common.Interfaces;
+using Kintsugi.Application.UpgradePaths;
 using Kintsugi.Domain.Enums;
 using Kintsugi.Infrastructure.Ai;
 
@@ -188,6 +189,47 @@ public class AiUpgradePathResearchClientTests
     }
 
     [Fact]
+    public void BuildDefaultPrompt_ForWindows_AsksForAPowerShellScript_ThatStillRunsItsVersionCheckOnLinux()
+    {
+        var client = CreateClient(new QueueingHandler());
+
+        var prompt = client.BuildDefaultPrompt(new UpgradePathScriptGenerationRequest("Firefox", PlatformBucket.Windows, Array.Empty<string>()));
+
+        Assert.Contains("PowerShell script", prompt);
+        Assert.Contains("script.ps1 --appName", prompt);
+        // The constraint that makes server-side version checking possible at all: --update-version
+        // has to run under pwsh on this Linux server, so it can't reach for the registry or WMI.
+        Assert.Contains("plain Linux server under PowerShell", prompt);
+        Assert.Contains("no registry access", prompt);
+        Assert.DoesNotContain("#!/bin/bash", prompt);
+    }
+
+    [Fact]
+    public void BuildDefaultPrompt_ForMacOs_StillAsksForBash()
+    {
+        var client = CreateClient(new QueueingHandler());
+
+        var prompt = client.BuildDefaultPrompt(new UpgradePathScriptGenerationRequest("Firefox", PlatformBucket.MacOs, Array.Empty<string>()));
+
+        Assert.Contains("bash script", prompt);
+        Assert.Contains("`#!/bin/bash`", prompt);
+        Assert.DoesNotContain("PowerShell", prompt);
+    }
+
+    [Fact]
+    public void BuildDefaultPrompt_ForWindows_DescribesTheIdentifierAsARegistryKey_NotABundleId()
+    {
+        var client = CreateClient(new QueueingHandler());
+
+        var prompt = client.BuildDefaultPrompt(
+            new UpgradePathScriptGenerationRequest("Firefox", PlatformBucket.Windows, Array.Empty<string>(), "Mozilla Firefox"));
+
+        Assert.Contains("Mozilla Firefox", prompt);
+        Assert.Contains("uninstall registry", prompt);
+        Assert.DoesNotContain("macOS bundle ID", prompt);
+    }
+
+    [Fact]
     public void BuildDefaultPrompt_IncludesTheApplicationIdentifier_WhenProvided()
     {
         var client = CreateClient(new QueueingHandler());
@@ -203,7 +245,7 @@ public class AiUpgradePathResearchClientTests
         var client = CreateClient(new QueueingHandler());
         const string script = "#!/bin/bash\necho \"129.0\"\nexit 0\n";
 
-        var result = await client.CheckScriptVersionAsync(script, "Firefox", "org.mozilla.firefox", CancellationToken.None);
+        var result = await client.CheckScriptVersionAsync(script, PlatformBucket.MacOs, "Firefox", "org.mozilla.firefox", CancellationToken.None);
 
         Assert.Equal("129.0", result);
     }
@@ -214,7 +256,7 @@ public class AiUpgradePathResearchClientTests
         var client = CreateClient(new QueueingHandler());
         const string script = "#!/bin/bash\necho \"broken\" >&2\nexit 1\n";
 
-        var result = await client.CheckScriptVersionAsync(script, "Firefox", "org.mozilla.firefox", CancellationToken.None);
+        var result = await client.CheckScriptVersionAsync(script, PlatformBucket.MacOs, "Firefox", "org.mozilla.firefox", CancellationToken.None);
 
         Assert.Null(result);
     }
@@ -225,7 +267,7 @@ public class AiUpgradePathResearchClientTests
         var client = CreateClient(new QueueingHandler());
         const string script = "#!/bin/bash\necho \"129.0\"\necho \"unexpected extra line\"\n";
 
-        var result = await client.CheckScriptVersionAsync(script, "Firefox", "org.mozilla.firefox", CancellationToken.None);
+        var result = await client.CheckScriptVersionAsync(script, PlatformBucket.MacOs, "Firefox", "org.mozilla.firefox", CancellationToken.None);
 
         Assert.Null(result);
     }
@@ -236,7 +278,7 @@ public class AiUpgradePathResearchClientTests
         var client = CreateClient(new QueueingHandler());
         const string script = "#!/bin/bash\nexit 0\n";
 
-        var result = await client.CheckScriptVersionAsync(script, "Firefox", "org.mozilla.firefox", CancellationToken.None);
+        var result = await client.CheckScriptVersionAsync(script, PlatformBucket.MacOs, "Firefox", "org.mozilla.firefox", CancellationToken.None);
 
         Assert.Null(result);
     }

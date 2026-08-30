@@ -35,13 +35,18 @@ public interface IUpgradePathResearchClient
     /// Runs an already-generated script's own `--update-version` mode locally, server-side — no AI
     /// call involved. This is the whole point of generating a durable script instead of a one-shot
     /// answer: once a script exists, checking for a new release costs a subprocess call, not an AI
-    /// call. The prompt requires `--update-version` to work under plain bash + curl with no
-    /// platform-specific tooling precisely so this can run on the (Linux) server itself rather than
+    /// call. The prompt requires `--update-version` to make only HTTP calls, with no
+    /// platform-specific tooling, precisely so this can run on the (Linux) server itself rather than
     /// needing an agent. Returns null on any failure — a non-zero exit, a timeout, empty output —
     /// so callers can treat that as "the script broke" and fall back to asking the AI to regenerate
     /// it, per the reason this method exists.
     /// </summary>
-    Task<string?> CheckScriptVersionAsync(string script, string applicationName, string applicationIdentifier, CancellationToken cancellationToken);
+    /// <param name="platform">The <see cref="Kintsugi.Application.UpgradePaths.PlatformBucket"/>
+    /// the script is stored under — what decides whether it runs under bash or <c>pwsh</c> (see
+    /// <see cref="Kintsugi.Application.UpgradePaths.ScriptLanguages.For"/>). Passed explicitly
+    /// rather than sniffed from the script text so the interpreter that runs a script is always the
+    /// one the prompt that generated it, and the validator that checked it, both assumed.</param>
+    Task<string?> CheckScriptVersionAsync(string script, string platform, string applicationName, string applicationIdentifier, CancellationToken cancellationToken);
 }
 
 /// <param name="KnownInstalledVersions">Distinct versions currently seen installed across managed

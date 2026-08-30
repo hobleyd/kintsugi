@@ -21,6 +21,7 @@ public record UpgradePathWorkItem(
     IReadOnlyList<string> KnownVersions,
     UpgradePathWorkKind Kind,
     string? PackageManagerName,
-    // The app bundle's CFBundleIdentifier, when known — a disambiguating search signal handed to
-    // the AI researcher. Only ever populated for the macOS platform bucket.
+    // The application's platform identifier, when known — a disambiguating search signal handed to
+    // the AI researcher for a Research item, and the value a package-manager script is handed as
+    // --appId (which winget and Chocolatey genuinely address a package by).
     string? ApplicationIdentifier = null);

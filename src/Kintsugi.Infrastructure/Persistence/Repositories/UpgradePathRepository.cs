@@ -62,6 +62,7 @@ public class UpgradePathRepository : IUpgradePathRepository
                 a.Name,
                 a.Version,
                 a.ApplicationIdentifier,
+                a.ParentApplicationId,
                 h.Hostname,
                 h.SerialNumber,
                 h.OperatingSystem
@@ -71,16 +72,14 @@ public class UpgradePathRepository : IUpgradePathRepository
 
         var upgradePaths = await _context.UpgradePaths.ToListAsync(cancellationToken);
         var byNameAndPlatform = BuildByNameAndPlatformLookup(upgradePaths);
+        var packageManagerNames = await LoadPackageManagerNamesAsync(installed.Select(x => x.ParentApplicationId), cancellationToken);
 
         var results = new List<UpgradeStatusDto>();
 
         foreach (var app in installed)
         {
-            var platform = PlatformBucket.From(app.OperatingSystem);
-            var key = (app.Name.ToLowerInvariant(), platform);
-
-            if (!byNameAndPlatform.TryGetValue(key, out var path)
-                && !byNameAndPlatform.TryGetValue((app.Name.ToLowerInvariant(), PlatformBucket.Generic), out path))
+            var path = ResolvePath(byNameAndPlatform, app.Name, app.OperatingSystem, PackageManagerOf(packageManagerNames, app.ParentApplicationId));
+            if (path is null)
             {
                 continue;
             }
@@ -121,26 +120,30 @@ public class UpgradePathRepository : IUpgradePathRepository
         // full materialization GetAppUpdateCountsByHostAsync already does below, and bounded the
         // same way (by total installed-application rows, not by anything larger).
         var installed = await _context.InstalledApplications
-            .Join(_context.Hosts, a => a.HostId, h => h.Id, (a, h) => new { a.Name, a.Version, a.HostId, h.Hostname, h.OperatingSystem })
+            .Join(_context.Hosts, a => a.HostId, h => h.Id, (a, h) => new { a.Name, a.Version, a.HostId, a.ParentApplicationId, h.Hostname, h.OperatingSystem })
             .ToListAsync(cancellationToken);
 
         var upgradePaths = await _context.UpgradePaths.ToListAsync(cancellationToken);
         var byNameAndPlatform = BuildByNameAndPlatformLookup(upgradePaths);
+        var packageManagerNames = await LoadPackageManagerNamesAsync(installed.Select(x => x.ParentApplicationId), cancellationToken);
 
         var results = new List<UpgradePathSummaryDto>();
 
         foreach (var appGroup in installed.GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase))
         {
-            foreach (var platformGroup in appGroup.GroupBy(x => PlatformBucket.From(x.OperatingSystem)))
-            {
-                var platform = platformGroup.Key;
-                var key = (appGroup.Key.ToLowerInvariant(), platform);
+            // Grouped by the row each installation actually resolves to, not by the host's OS
+            // bucket: a package-manager-managed installation resolves to its *manager's* bucket, so
+            // the same application name installed from Homebrew on a Mac and from winget on a PC is
+            // two summary rows with two different scripts — which is exactly the distinction the
+            // OS-only grouping used to collapse (and, before per-manager buckets, silently handed
+            // the Windows host a bash script over).
+            var resolved = appGroup
+                .Select(x => (Row: x, Path: ResolvePath(byNameAndPlatform, x.Name, x.OperatingSystem, PackageManagerOf(packageManagerNames, x.ParentApplicationId))))
+                .Where(x => x.Path is not null);
 
-                if (!byNameAndPlatform.TryGetValue(key, out var path)
-                    && !byNameAndPlatform.TryGetValue((appGroup.Key.ToLowerInvariant(), PlatformBucket.Generic), out path))
-                {
-                    continue;
-                }
+            foreach (var platformGroup in resolved.GroupBy(x => x.Path!.Platform, x => x.Row, StringComparer.Ordinal))
+            {
+                var path = byNameAndPlatform[(appGroup.Key.ToLowerInvariant(), platformGroup.Key)];
 
                 var hostCount = platformGroup.Select(x => x.HostId).Distinct().Count();
                 // No LatestVersion means nothing concrete is known yet (an unresearched app, a
@@ -161,11 +164,10 @@ public class UpgradePathRepository : IUpgradePathRepository
 
                 results.Add(new UpgradePathSummaryDto(
                     appGroup.Key,
-                    // path.Platform, not the loop's platform bucket: for a package-manager-managed
-                    // row (always stored under PlatformBucket.Generic) those two differ — reporting
-                    // the OS bucket here instead of the row's real key would round-trip back to the
-                    // API (e.g. the Applications page's per-row instructions panel) as a platform
-                    // that can never match the item PrepareUpgradePathScanQueryHandler builds for it.
+                    // The row's own bucket — an OS one for an AI-researched row, its manager's for a
+                    // package-manager-managed one. This round-trips back to the API (e.g. the
+                    // Applications page's per-row instructions panel) as the platform that has to
+                    // match the item PrepareUpgradePathScanQueryHandler builds for it.
                     path.Platform,
                     path.Status,
                     path.LatestVersion,
@@ -201,21 +203,19 @@ public class UpgradePathRepository : IUpgradePathRepository
         // Fleet-wide, but bounded by total installed-application rows (like GetSummariesAsync's
         // join below), not by anything larger — safe to pull into memory for the per-host matching.
         var installed = await _context.InstalledApplications
-            .Join(_context.Hosts, a => a.HostId, h => h.Id, (a, h) => new { a.HostId, a.Name, a.Version, h.OperatingSystem })
+            .Join(_context.Hosts, a => a.HostId, h => h.Id, (a, h) => new { a.HostId, a.Name, a.Version, a.ParentApplicationId, h.OperatingSystem })
             .ToListAsync(cancellationToken);
 
         var upgradePaths = await _context.UpgradePaths.ToListAsync(cancellationToken);
         var byNameAndPlatform = BuildByNameAndPlatformLookup(upgradePaths);
+        var packageManagerNames = await LoadPackageManagerNamesAsync(installed.Select(x => x.ParentApplicationId), cancellationToken);
 
         var counts = new Dictionary<Guid, int>();
 
         foreach (var app in installed)
         {
-            var platform = PlatformBucket.From(app.OperatingSystem);
-            var key = (app.Name.ToLowerInvariant(), platform);
-
-            if (!byNameAndPlatform.TryGetValue(key, out var path)
-                && !byNameAndPlatform.TryGetValue((app.Name.ToLowerInvariant(), PlatformBucket.Generic), out path))
+            var path = ResolvePath(byNameAndPlatform, app.Name, app.OperatingSystem, PackageManagerOf(packageManagerNames, app.ParentApplicationId));
+            if (path is null)
             {
                 continue;
             }
@@ -229,6 +229,61 @@ public class UpgradePathRepository : IUpgradePathRepository
         }
 
         return counts;
+    }
+
+    /// <summary>
+    /// Names of the package managers referenced by <paramref name="parentIds"/> — the applications
+    /// other reported applications name as their manager. Resolved in one query rather than per
+    /// row, and bounded by how many distinct package managers a fleet has (in practice: one or two).
+    /// </summary>
+    private async Task<IReadOnlyDictionary<Guid, string>> LoadPackageManagerNamesAsync(IEnumerable<Guid?> parentIds, CancellationToken cancellationToken)
+    {
+        var ids = parentIds.Where(id => id.HasValue).Select(id => id!.Value).Distinct().ToList();
+        if (ids.Count == 0)
+        {
+            return new Dictionary<Guid, string>();
+        }
+
+        return await _context.InstalledApplications
+            .Where(a => ids.Contains(a.Id))
+            .Select(a => new { a.Id, a.Name })
+            .ToDictionaryAsync(a => a.Id, a => a.Name, cancellationToken);
+    }
+
+    private static string? PackageManagerOf(IReadOnlyDictionary<Guid, string> packageManagerNames, Guid? parentApplicationId) =>
+        parentApplicationId.HasValue && packageManagerNames.TryGetValue(parentApplicationId.Value, out var name) ? name : null;
+
+    /// <summary>
+    /// The upgrade path one installed application resolves to, or null if none has been researched
+    /// for it yet. Tries the host's own OS bucket first, then the bucket belonging to whichever
+    /// package manager owns this installation.
+    /// </summary>
+    /// <remarks>
+    /// The second lookup used to be a single shared <see cref="PlatformBucket.Generic"/> bucket,
+    /// which only held Homebrew rows — so a Windows host with an application whose name happened to
+    /// match a Homebrew formula would fall back onto a signed <c>#!/bin/bash</c> script and, since
+    /// the signature is genuine, its agent would happily run it. Falling back to the *manager's*
+    /// bucket instead means a row can only ever be inherited by an installation that manager
+    /// actually manages. An application with no manager (<paramref name="packageManagerName"/> null)
+    /// falls back to a bucket named after itself, which finds its own self-update row when the
+    /// application is itself a package manager, and simply misses otherwise.
+    /// </remarks>
+    private static UpgradePath? ResolvePath(
+        IReadOnlyDictionary<(string Name, string Platform), UpgradePath> byNameAndPlatform,
+        string applicationName,
+        string? operatingSystem,
+        string? packageManagerName)
+    {
+        var name = applicationName.ToLowerInvariant();
+
+        if (byNameAndPlatform.TryGetValue((name, PlatformBucket.From(operatingSystem)), out var path))
+        {
+            return path;
+        }
+
+        return byNameAndPlatform.TryGetValue((name, PlatformBucket.ForPackageManager(packageManagerName ?? applicationName)), out path)
+            ? path
+            : null;
     }
 
     // ApplicationName is matched case-insensitively (see GetAsync's own comment for why), but the
