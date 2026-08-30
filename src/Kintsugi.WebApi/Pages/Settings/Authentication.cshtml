@@ -29,59 +29,152 @@
     Register this callback URL with your identity provider: <code>@Model.CallbackUrl</code>
 </div>
 
-<div class="panel">
-    <form method="post" class="settings-form">
-        <div class="field">
-            <label for="provider">Provider</label>
-            <select id="provider" asp-for="Input.Provider">
-                <option value="@AuthProvider.GoogleWorkspace">Google Workspace</option>
-                <option value="@AuthProvider.MicrosoftEntra">Microsoft Entra</option>
-                <option value="@AuthProvider.GenericOidc">Generic OAuth2 / OIDC (Auth0, Okta, etc.)</option>
-                <option value="@AuthProvider.Clerk">Clerk</option>
-            </select>
+<div class="settings-columns">
+    <div class="panel">
+        <form method="post" class="settings-form">
+            <div class="field">
+                <label for="provider">Provider</label>
+                <select id="provider" asp-for="Input.Provider">
+                    <option value="@AuthProvider.GoogleWorkspace">Google Workspace</option>
+                    <option value="@AuthProvider.MicrosoftEntra">Microsoft Entra</option>
+                    <option value="@AuthProvider.GenericOidc">Generic OAuth2 / OIDC (Auth0, Okta, etc.)</option>
+                    <option value="@AuthProvider.Clerk">Clerk</option>
+                </select>
+            </div>
+
+            <div class="field">
+                <label for="clientId">Client ID</label>
+                <input type="text" id="clientId" asp-for="Input.ClientId" autocomplete="off" />
+            </div>
+
+            <div class="field">
+                <label for="clientSecret">Client Secret</label>
+                <input type="password" id="clientSecret" asp-for="Input.ClientSecret" autocomplete="off"
+                       placeholder="@(Model.HasClientSecret ? "•••••••••••• (leave blank to keep current secret)" : "")" />
+                @if (Model.HasClientSecret)
+                {
+                    <p class="hint">A client secret is already configured. Leave blank to keep it.</p>
+                }
+            </div>
+
+            <div class="field" data-provider-field="entra">
+                <label for="tenantId">Tenant ID</label>
+                <input type="text" id="tenantId" asp-for="Input.TenantId" autocomplete="off" placeholder="e.g. contoso.onmicrosoft.com or a GUID" />
+                <p class="hint" data-provider-field="entra">Your Microsoft Entra directory (tenant) ID.</p>
+            </div>
+
+            <div class="field" data-provider-field="oidc">
+                <label for="authority">Authority (issuer URL)</label>
+                <input type="text" id="authority" asp-for="Input.Authority" autocomplete="off" placeholder="https://your-tenant.us.auth0.com" />
+                <p class="hint" data-provider-field="oidc">The base issuer URL your provider publishes discovery metadata under (<code>/.well-known/openid-configuration</code>).</p>
+            </div>
+
+            <div class="field" data-provider-field="google">
+                <label for="hostedDomain">Restrict to Workspace domain (optional)</label>
+                <input type="text" id="hostedDomain" asp-for="Input.HostedDomain" autocomplete="off" placeholder="e.g. example.com" />
+                <p class="hint" data-provider-field="google">Leave blank to allow sign-in from any Google account. Set this to only allow accounts in your Google Workspace domain.</p>
+            </div>
+
+            <div class="field field-inline">
+                <input type="checkbox" id="isEnabled" asp-for="Input.IsEnabled" />
+                <label for="isEnabled">Require sign-in to access this site</label>
+            </div>
+            <p class="hint">Make sure the provider above is fully configured and working before enabling this — there is no other way back into the site once it's on except signing in.</p>
+
+            <button type="submit" class="btn-primary">Save Settings</button>
+        </form>
+    </div>
+
+    @* Setup instructions for whichever provider is selected. These restate decisions that live in
+       code, so keep them in step with it: which fields a provider requires is
+       UpdateAuthenticationSettingsCommandValidator, what the issuer URL ends up being is
+       AuthenticationSettings.ResolveAuthority, and the fixed scopes, the code flow and the Google
+       hosted-domain enforcement are DynamicOpenIdConnectOptionsConfigurator. Keyed on the exact
+       AuthProvider name rather than reusing data-provider-field below, because that attribute
+       groups Clerk with GenericOidc — correct for the fields, wrong for the instructions. *@
+    <aside class="panel settings-aside">
+        <h2>Setting this up</h2>
+        <p>
+            Whichever provider you use, register this site as a <strong>confidential web application</strong>
+            — the sign-in uses the authorization code flow and always sends a client secret, so an app
+            registered as a single-page or native/mobile client will be rejected by the provider. It
+            requests the <code>openid</code>, <code>profile</code> and <code>email</code> scopes, and its
+            redirect URI is the callback URL shown above.
+        </p>
+        <p>
+            Logging out signs out of the provider as well, so register
+            <code>@Model.SignOutCallbackUrl</code> too — as a second redirect URI, or in whatever field
+            the provider calls its post-sign-out redirect. Without it, logging out fails at the provider.
+        </p>
+
+        <div data-provider-help="GoogleWorkspace">
+            <h3>Google Workspace</h3>
+            <ol>
+                <li>In the Google Cloud console, open <strong>APIs &amp; Services → Credentials</strong> and choose <strong>Create credentials → OAuth client ID</strong>.</li>
+                <li>Set the application type to <strong>Web application</strong>.</li>
+                <li>Add the callback URL above under <strong>Authorised redirect URIs</strong>.</li>
+                <li>Copy the generated client ID and client secret into the form.</li>
+                <li>Optionally set <strong>Restrict to Workspace domain</strong> to your Workspace domain.</li>
+            </ol>
+            <p>
+                There is no authority to enter: Google's issuer is always
+                <code>https://accounts.google.com</code>.
+            </p>
+            <p class="hint">
+                The domain restriction is enforced, not just a hint to the account chooser — a sign-in
+                whose account is outside that domain is rejected after the token is validated.
+            </p>
         </div>
 
-        <div class="field">
-            <label for="clientId">Client ID</label>
-            <input type="text" id="clientId" asp-for="Input.ClientId" autocomplete="off" />
+        <div data-provider-help="MicrosoftEntra">
+            <h3>Microsoft Entra</h3>
+            <ol>
+                <li>In the Entra admin center, open <strong>App registrations → New registration</strong>.</li>
+                <li>Under <strong>Redirect URI</strong>, choose the <strong>Web</strong> platform and enter the callback URL above.</li>
+                <li>Under <strong>Certificates &amp; secrets</strong>, add a new client secret and copy its <strong>Value</strong> (not its ID) into the form.</li>
+                <li>Copy the <strong>Application (client) ID</strong> from the app's Overview page into <strong>Client ID</strong>.</li>
+                <li>Copy the <strong>Directory (tenant) ID</strong> from the same page into <strong>Tenant ID</strong>.</li>
+            </ol>
+            <p>
+                The tenant ID is a GUID or a domain such as <code>contoso.onmicrosoft.com</code> — not a
+                URL. The issuer is built from it as
+                <code>https://login.microsoftonline.com/{tenant}/v2.0</code>.
+            </p>
         </div>
 
-        <div class="field">
-            <label for="clientSecret">Client Secret</label>
-            <input type="password" id="clientSecret" asp-for="Input.ClientSecret" autocomplete="off"
-                   placeholder="@(Model.HasClientSecret ? "•••••••••••• (leave blank to keep current secret)" : "")" />
-            @if (Model.HasClientSecret)
-            {
-                <p class="hint">A client secret is already configured. Leave blank to keep it.</p>
-            }
+        <div data-provider-help="GenericOidc">
+            <h3>Generic OAuth2 / OIDC</h3>
+            <ol>
+                <li>Create an application of the provider's confidential web type — a <strong>Regular Web Application</strong> in Auth0, a <strong>Web Application</strong> in Okta.</li>
+                <li>Add the callback URL above to its allowed callback / redirect URIs.</li>
+                <li>Allow the <strong>authorization code</strong> grant, and the <code>openid</code>, <code>profile</code> and <code>email</code> scopes.</li>
+                <li>Copy its client ID and client secret into the form.</li>
+                <li>Enter the provider's base issuer URL as the <strong>Authority</strong>.</li>
+            </ol>
+            <p>
+                The authority must be an absolute URL that serves discovery metadata at
+                <code>/.well-known/openid-configuration</code> — for example
+                <code>https://your-tenant.us.auth0.com</code> or
+                <code>https://your-org.okta.com/oauth2/default</code>. Open that URL in a browser to
+                confirm it returns JSON before saving.
+            </p>
         </div>
 
-        <div class="field" data-provider-field="entra">
-            <label for="tenantId">Tenant ID</label>
-            <input type="text" id="tenantId" asp-for="Input.TenantId" autocomplete="off" placeholder="e.g. contoso.onmicrosoft.com or a GUID" />
-            <p class="hint" data-provider-field="entra">Your Microsoft Entra directory (tenant) ID.</p>
+        <div data-provider-help="Clerk">
+            <h3>Clerk</h3>
+            <ol>
+                <li>In the Clerk dashboard, create an <strong>OAuth application</strong> for this site.</li>
+                <li>Add the callback URL above as its redirect URI.</li>
+                <li>Grant it the <code>openid</code>, <code>profile</code> and <code>email</code> scopes.</li>
+                <li>Copy its client ID and client secret into the form.</li>
+                <li>Enter the instance's issuer URL — the Frontend API URL shown in the dashboard, or your custom Clerk domain if you have set one — as the <strong>Authority</strong>.</li>
+            </ol>
+            <p>
+                As with any other OIDC provider, that URL must serve
+                <code>/.well-known/openid-configuration</code>; check it in a browser before saving.
+            </p>
         </div>
-
-        <div class="field" data-provider-field="oidc">
-            <label for="authority">Authority (issuer URL)</label>
-            <input type="text" id="authority" asp-for="Input.Authority" autocomplete="off" placeholder="https://your-tenant.us.auth0.com" />
-            <p class="hint" data-provider-field="oidc">The base issuer URL your provider publishes discovery metadata under (<code>/.well-known/openid-configuration</code>).</p>
-        </div>
-
-        <div class="field" data-provider-field="google">
-            <label for="hostedDomain">Restrict to Workspace domain (optional)</label>
-            <input type="text" id="hostedDomain" asp-for="Input.HostedDomain" autocomplete="off" placeholder="e.g. example.com" />
-            <p class="hint" data-provider-field="google">Leave blank to allow sign-in from any Google account. Set this to only allow accounts in your Google Workspace domain.</p>
-        </div>
-
-        <div class="field field-inline">
-            <input type="checkbox" id="isEnabled" asp-for="Input.IsEnabled" />
-            <label for="isEnabled">Require sign-in to access this site</label>
-        </div>
-        <p class="hint">Make sure the provider above is fully configured and working before enabling this — there is no other way back into the site once it's on except signing in.</p>
-
-        <button type="submit" class="btn-primary">Save Settings</button>
-    </form>
+    </aside>
 </div>
 
 <script>
@@ -90,6 +183,7 @@
         var entraFields = document.querySelectorAll('[data-provider-field="entra"]');
         var oidcFields = document.querySelectorAll('[data-provider-field="oidc"]');
         var googleFields = document.querySelectorAll('[data-provider-field="google"]');
+        var helpBlocks = document.querySelectorAll('[data-provider-help]');
 
         function toggle(elements, show) {
             elements.forEach(function (el) { el.style.display = show ? '' : 'none'; });
@@ -100,6 +194,12 @@
             toggle(entraFields, provider === 'MicrosoftEntra');
             toggle(oidcFields, provider === 'GenericOidc' || provider === 'Clerk');
             toggle(googleFields, provider === 'GoogleWorkspace');
+
+            // Exact match, so Clerk gets its own instructions even though it shares the
+            // authority field with GenericOidc above.
+            helpBlocks.forEach(function (el) {
+                el.style.display = el.getAttribute('data-provider-help') === provider ? '' : 'none';
+            });
         }
 
         providerSelect.addEventListener('change', sync);
