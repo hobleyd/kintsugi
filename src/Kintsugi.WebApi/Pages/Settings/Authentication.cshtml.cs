@@ -28,7 +28,13 @@ public class AuthenticationModel : PageModel
     public bool HasClientSecret { get; private set; }
     public bool SaveSucceeded { get; private set; }
 
+    // Both paths are fixed in DynamicOpenIdConnectOptionsConfigurator (CallbackPath and
+    // SignedOutCallbackPath); the page shows them so they can be pasted into a provider's app
+    // registration. The sign-out one is the post_logout_redirect_uri the provider sends the
+    // browser back to, and it is genuinely reachable: Account/Logout.cshtml.cs signs out of the
+    // OpenIdConnect scheme as well as the cookie, which is what initiates that round trip.
     public string CallbackUrl => $"{Request.Scheme}://{Request.Host}/signin-oidc";
+    public string SignOutCallbackUrl => $"{Request.Scheme}://{Request.Host}/signout-callback-oidc";
 
     public async Task OnGetAsync(CancellationToken cancellationToken)
     {
