@@ -1,0 +1,5 @@
+/target/
+# Prebuilt binary staged for the distributable installer archive; regenerate
+# with cargo-zigbuild rather than committing it.
+/packaging/kintsugi-agent
+

@@ -32,7 +32,11 @@ public static class HomebrewUpgradeScript
             ? """
               latest_version() {
                 local redirect
-                redirect=$(curl -fsSL -o /dev/null -w '%{redirect_url}' "https://github.com/Homebrew/brew/releases/latest") || return 1
+                # -fsS, deliberately NOT -fsSL: %{redirect_url} reports the redirect curl did *not*
+                # follow, so adding -L makes curl follow it to the tag page and report an empty
+                # string — the check then fails, LatestVersion stays null, and Homebrew's own row
+                # silently never updates.
+                redirect=$(curl -fsS -o /dev/null -w '%{redirect_url}' "https://github.com/Homebrew/brew/releases/latest") || return 1
                 [ -n "$redirect" ] || return 1
                 printf '%s' "${redirect##*/}"
               }

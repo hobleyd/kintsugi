@@ -1,0 +1,20 @@
+# kintsugi-agent configuration.
+# Installed at /etc/kintsugi-agent/config.toml
+#
+# Change api_base_url once the backend has a stable production address,
+# then run: sudo systemctl start kintsugi-agent.service
+# (no rebuild needed).
+api_base_url = "https://kintsugi.example.com:8443"
+
+# One-time secret this agent presents to enroll its mutual-TLS identity (see identity.rs) —
+# without it, every request to the server beyond enrollment itself is rejected. Get the current
+# value from whoever manages the server's .env (AGENT_ENROLLMENT_TOKEN). Only needed until
+# enrollment succeeds once (look for "enrolled agent identity" in daemon.log, or
+# `journalctl -u kintsugi-agent`); safe to leave here afterward, or blank it out — it's never used
+# again unless this host's identity is wiped and it needs to re-enroll from scratch.
+enrollment_token = ""
+
+# Whether and how often patching actually runs is controlled centrally in Settings > Patching
+# Policy on the server, not here — see kintsugi-agent-ui.service for the per-user process that
+# reads it and drives the confirm/delay/patch flow on a desktop, and kintsugi-agent.service for
+# the root service that does the same unattended on a host with nobody logged in.
