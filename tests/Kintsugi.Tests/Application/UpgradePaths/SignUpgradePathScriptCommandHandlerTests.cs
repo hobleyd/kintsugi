@@ -50,7 +50,7 @@ public class SignUpgradePathScriptCommandHandlerTests
             null, null, null, null, null, "#!/bin/bash\n...", "org.mozilla.firefox");
         _repository.Setup(r => r.GetAsync("Firefox", "macOS", It.IsAny<CancellationToken>())).ReturnsAsync(existing);
         _researchClient
-            .Setup(c => c.CheckScriptVersionAsync("#!/bin/bash\n...", "Firefox", "org.mozilla.firefox", It.IsAny<CancellationToken>()))
+            .Setup(c => c.CheckScriptVersionAsync("#!/bin/bash\n...", PlatformBucket.MacOs, "Firefox", "org.mozilla.firefox", It.IsAny<CancellationToken>()))
             .ReturnsAsync("129.0");
 
         var result = await CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", "macOS"), CancellationToken.None);
@@ -72,7 +72,7 @@ public class SignUpgradePathScriptCommandHandlerTests
 
         Assert.Equal("128.0", result.LatestVersion);
         _researchClient.Verify(
-            c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+            c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]

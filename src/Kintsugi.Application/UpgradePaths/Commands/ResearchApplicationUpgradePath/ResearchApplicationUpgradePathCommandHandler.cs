@@ -7,12 +7,10 @@ namespace Kintsugi.Application.UpgradePaths.Commands.ResearchApplicationUpgradeP
 
 public class ResearchApplicationUpgradePathCommandHandler : IRequestHandler<ResearchApplicationUpgradePathCommand, ResearchApplicationUpgradePathResult>
 {
-    // Homebrew is the only package manager the agent currently tracks. Both its formulae and
-    // casks upgrade via the same `brew upgrade <name>` invocation (Homebrew 3+ auto-detects
-    // which kind a name refers to), and Homebrew updates itself via `brew update`. Recognizing it
-    // gets a deterministic, server-written script (see HomebrewUpgradeScript.Build) rather than an AI call
-    // — the upgrade instructions are already well known, there's nothing to research.
-    private const string Homebrew = "Homebrew";
+    // Which package managers are recognized — and the fixed, server-written script each one's
+    // applications resolve to instead of an AI call — lives in PackageManagerCatalog, so the
+    // registration-time seeding path (RegisterApplicationsCommandHandler) recognizes exactly the
+    // same set this scan does.
 
     private readonly IUpgradePathRepository _upgradePathRepository;
     private readonly IUpgradePathResearchClient _researchClient;
@@ -37,7 +35,7 @@ public class ResearchApplicationUpgradePathCommandHandler : IRequestHandler<Rese
         {
             if (request.Kind is UpgradePathWorkKind.PackageManagerManaged or UpgradePathWorkKind.PackageManagerSelfUpdate)
             {
-                await RetireLegacyPackageManagerRowAsync(request.ApplicationName, cancellationToken);
+                await RetireLegacyPackageManagerRowAsync(request.ApplicationName, request.Platform, cancellationToken);
             }
 
             var existing = await _upgradePathRepository.GetAsync(request.ApplicationName, request.Platform, cancellationToken);
@@ -106,33 +104,49 @@ public class ResearchApplicationUpgradePathCommandHandler : IRequestHandler<Rese
     }
 
     /// <summary>
-    /// Removes a row this application may still carry from before Homebrew moved to the fixed
-    /// Generic/Script shape — stored under the host's real OS platform, as
-    /// <see cref="UpgradeMethod.PackageManagerCommand"/> (the same legacy shape
-    /// <c>RegisterApplicationsCommandHandler</c>'s own copy of this cleanup retires). Left in
-    /// place, it would keep winning <c>GetSummariesAsync</c>'s per-host platform lookup (tried
-    /// before its Generic fallback) and permanently shadow the row this handler resolves to below
-    /// — including on a fresh "Find Upgrade Paths" run, since that skips straight past this cleanup
-    /// once a "generic" row already exists and is Found, so this must run unconditionally rather
-    /// than only when nothing's resolved yet. Saves immediately: the "already Found, skip" branch
-    /// right after this doesn't always call <see cref="IUnitOfWork.SaveChangesAsync"/> itself, and
-    /// a Remove nobody flushes is a no-op.
+    /// Removes rows this application may still carry from either of two superseded shapes, both of
+    /// which would keep winning <c>GetSummariesAsync</c>'s per-host platform lookup (tried before
+    /// its package-manager fallback) and permanently shadow the row this handler resolves to below:
+    /// <list type="bullet">
+    /// <item>a row stored under the host's real OS platform as
+    /// <see cref="UpgradeMethod.PackageManagerCommand"/>, from before Homebrew moved to a fixed
+    /// Script shape (the same legacy shape <c>RegisterApplicationsCommandHandler</c>'s own copy of
+    /// this cleanup retires); and</item>
+    /// <item>a row under the old shared <see cref="PlatformBucket.Generic"/> bucket, from before
+    /// package-manager rows moved to their own per-manager bucket. The
+    /// <c>SplitPackageManagerPlatformBucket</c> migration rewrites the ones that existed at deploy
+    /// time, so this only catches a row some older node wrote in between.</item>
+    /// </list>
+    /// This must run unconditionally rather than only when nothing's resolved yet, since the
+    /// "already Found, skip" branch right after it would otherwise leave the shadowing row in place
+    /// forever. Saves immediately: that branch doesn't always call
+    /// <see cref="IUnitOfWork.SaveChangesAsync"/> itself, and a Remove nobody flushes is a no-op.
     /// </summary>
-    private async Task RetireLegacyPackageManagerRowAsync(string applicationName, CancellationToken cancellationToken)
+    private async Task RetireLegacyPackageManagerRowAsync(string applicationName, string currentPlatform, CancellationToken cancellationToken)
     {
-        var legacyRow = (await _upgradePathRepository.GetAllForApplicationAsync(applicationName, cancellationToken))
-            .FirstOrDefault(p => p.Platform != PlatformBucket.Generic && p.Method == UpgradeMethod.PackageManagerCommand);
-        if (legacyRow is not null)
+        var legacyRows = (await _upgradePathRepository.GetAllForApplicationAsync(applicationName, cancellationToken))
+            .Where(p => p.Platform != currentPlatform
+                && ((p.Platform != PlatformBucket.Generic && p.Method == UpgradeMethod.PackageManagerCommand)
+                    || p.Platform == PlatformBucket.Generic))
+            .ToList();
+
+        if (legacyRows.Count == 0)
         {
-            _upgradePathRepository.Remove(legacyRow);
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
+            return;
         }
+
+        foreach (var row in legacyRows)
+        {
+            _upgradePathRepository.Remove(row);
+        }
+
+        await _unitOfWork.SaveChangesAsync(cancellationToken);
     }
 
     private async Task<ResearchApplicationUpgradePathResult> ApplyPackageManagerCommandAsync(
         ResearchApplicationUpgradePathCommand request, string managerName, bool isSelfUpdate, CancellationToken cancellationToken)
     {
-        if (!managerName.Equals(Homebrew, StringComparison.OrdinalIgnoreCase))
+        if (!PackageManagerCatalog.TryGet(managerName, out var packageManager))
         {
             var unrecognizedNote = isSelfUpdate
                 ? $"{request.ApplicationName}: a new package manager type — no default self-update command is known for it."
@@ -146,30 +160,37 @@ public class ResearchApplicationUpgradePathCommandHandler : IRequestHandler<Rese
 
         // A deterministic, server-written script — not AI-generated — implementing the same
         // --appName/--appId/--update-version/--update CLI contract a Research-kind script does, so
-        // a Homebrew-managed application gets a real, checkable, signable upgrade path too instead
-        // of a bare command with no way to learn the latest version short of asking the Mac. There's
-        // no real bundle identifier for a Homebrew formula/cask (see InstalledApplication.ApplicationIdentifier),
-        // so the package name itself stands in as this row's ApplicationIdentifier — the script
-        // never treats it as anything but an opaque value the CLI contract requires it accept. The
-        // package name itself never appears in the script text (see HomebrewUpgradeScript.Build) —
-        // it's every formula/cask's identical content that lets one signed script cover them all.
-        var script = HomebrewUpgradeScript.Build(isSelfUpdate);
+        // a package-manager-managed application gets a real, checkable, signable upgrade path too
+        // instead of a bare command with no way to learn the latest version short of asking the
+        // managed host. bash for Homebrew, PowerShell for winget/Chocolatey — see
+        // PackageManagerCatalog.
+        var script = packageManager.BuildScript(isSelfUpdate);
 
-        // Runs right here on the server via plain curl against Homebrew's public API (or, for
-        // Homebrew's own self-update row, GitHub's releases redirect) — never on the Mac — so the
-        // Applications page shows a real latest version immediately, the same way a freshly
-        // generated Research-kind script's version gets checked once it exists.
-        var latestVersion = await _researchClient.CheckScriptVersionAsync(script, request.ApplicationName, request.ApplicationName, cancellationToken);
+        // What the script is addressed by. Homebrew has no real bundle identifier for a
+        // formula/cask (see InstalledApplication.ApplicationIdentifier), so the package name stands
+        // in; winget and Chocolatey both genuinely address a package by its id, which the scan
+        // planner carries through on the work item. Either way the script only ever reads it from
+        // --appId at runtime and never bakes it into its own text (see the *UpgradeScript builders)
+        // — that identical content across every application is what lets one signed script cover
+        // them all.
+        var applicationIdentifier = request.ApplicationIdentifier ?? request.ApplicationName;
 
-        // Every Homebrew script (per isSelfUpdate) is byte-identical across every application, so
-        // once a human has signed this exact content anywhere, a freshly (re-)resolved row inherits
-        // that same trust immediately rather than sitting unsigned until someone happens to sign
-        // this particular application too.
+        // Runs right here on the server (bash or pwsh, per the script's own platform bucket) against
+        // the manager's public catalog — never on the managed host — so the Applications page shows
+        // a real latest version immediately, the same way a freshly generated Research-kind script's
+        // version gets checked once it exists.
+        var latestVersion = await _researchClient.CheckScriptVersionAsync(
+            script, request.Platform, request.ApplicationName, applicationIdentifier, cancellationToken);
+
+        // Every script from one manager (per isSelfUpdate) is byte-identical across every
+        // application, so once a human has signed this exact content anywhere, a freshly
+        // (re-)resolved row inherits that same trust immediately rather than sitting unsigned until
+        // someone happens to sign this particular application too.
         var scriptSignature = await _upgradePathRepository.FindExistingSignatureForScriptAsync(script, cancellationToken);
 
         var entity = await UpsertAsync(
             request.ApplicationName, request.Platform, UpgradePathStatus.Found, latestVersion, UpgradeMethod.Script,
-            null, null, null, null, null, script, request.ApplicationName, cancellationToken, scriptSignature);
+            null, null, null, null, null, script, applicationIdentifier, cancellationToken, scriptSignature);
 
         return ToResult(entity, Skipped: false, note: null);
     }
@@ -183,9 +204,13 @@ public class ResearchApplicationUpgradePathCommandHandler : IRequestHandler<Rese
     /// </summary>
     private async Task<ResearchApplicationUpgradePathResult> GenerateScriptViaAiAsync(ResearchApplicationUpgradePathCommand request, CancellationToken cancellationToken)
     {
-        if (request.Platform != PlatformBucket.MacOs)
+        // macOS gets a bash script, Windows a PowerShell one (see BuildScriptGenerationPrompt);
+        // every other bucket — Linux, or an OS this system doesn't recognize at all — has no
+        // prompt written for it and no way to validate or run what came back, so it resolves to
+        // NotFound with a note rather than producing a script nothing can check.
+        if (request.Platform != PlatformBucket.MacOs && request.Platform != PlatformBucket.Windows)
         {
-            var unsupportedNote = $"{request.ApplicationName}: AI-generated upgrade scripts are currently only supported on macOS.";
+            var unsupportedNote = $"{request.ApplicationName}: AI-generated upgrade scripts are currently only supported on macOS and Windows.";
             var unsupportedEntity = await UpsertAsync(request.ApplicationName, request.Platform, UpgradePathStatus.NotFound, null, UpgradeMethod.Unknown, null, null, null, null, unsupportedNote, null, request.ApplicationIdentifier, cancellationToken);
             return ToResult(unsupportedEntity, Skipped: false, unsupportedNote);
         }
@@ -219,7 +244,7 @@ public class ResearchApplicationUpgradePathCommandHandler : IRequestHandler<Rese
         string? latestVersion = null;
         if (result.Status == UpgradePathStatus.Found && result.Script is not null && !string.IsNullOrWhiteSpace(request.ApplicationIdentifier))
         {
-            latestVersion = await _researchClient.CheckScriptVersionAsync(result.Script, request.ApplicationName, request.ApplicationIdentifier, cancellationToken);
+            latestVersion = await _researchClient.CheckScriptVersionAsync(result.Script, request.Platform, request.ApplicationName, request.ApplicationIdentifier, cancellationToken);
         }
 
         var entity = await UpsertAsync(

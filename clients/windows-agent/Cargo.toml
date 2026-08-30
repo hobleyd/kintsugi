@@ -1,0 +1,72 @@
+[package]
+name = "kintsugi-agent"
+version = "0.5.0"
+edition = "2021"
+description = "Background agent that registers this PC with the patching system's host inventory."
+
+[[bin]]
+name = "kintsugi-agent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+gethostname = "0.5"
+# rustls, not native-tls. The macOS agent picked rustls to dodge a Security-framework bug; here the
+# reason is different but points the same way — schannel (native-tls's Windows backend) can only
+# present a client certificate that has been imported into a Windows certificate store, which would
+# mean this agent's private key living in the user/machine store rather than in a file it controls
+# the ACL on. rustls parses the PEM entirely in Rust, so the key stays exactly where identity.rs
+# put it. "-native-roots" keeps server-certificate trust on the Windows root store, which is what
+# an enterprise's own internal CA is deployed into.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
+# Referenced directly (not just transitively via reqwest) so main.rs can install its process-wide
+# default crypto provider once at startup — see the call in main().
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+base64 = "0.22"
+# This agent's own mutual-TLS identity: generates its client keypair/CSR locally at enrollment
+# (rcgen — the private key never leaves this machine) and verifies the server's signature over
+# every Script/Command it's handed before ever executing one (p256) — see identity.rs.
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
+# Verifying a downloaded self-update package's checksum. The macOS agent shells out to `shasum`
+# (a macOS builtin); Windows' nearest equivalent, `certutil -hashfile`, prints a multi-line report
+# that has to be scraped, so hashing in-process is both simpler and less brittle here.
+sha2 = "0.10"
+# The Windows registry is where installed applications are actually enumerated from — see
+# system_info::scan_installed_programs.
+winreg = "0.52"
+
+[target.'cfg(windows)'.dependencies]
+# The Service Control Manager plumbing for the SYSTEM half of this agent (see service.rs) — the
+# Windows counterpart to the macOS agent's LaunchDaemon plist.
+windows-service = "0.7"
+
+# windows-sys, not the higher-level `windows` crate: everything this agent needs from Win32 is a
+# handful of raw calls (a tray icon, two windows, a message loop), and windows-sys' plain extern
+# fns have a far more stable surface across releases than `windows`' generated wrapper types — the
+# same "talk to the platform directly rather than through a layer that churns" reasoning the macOS
+# agent applies to AppKit.
+[target.'cfg(windows)'.dependencies.windows-sys]
+version = "0.59"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_Controls",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

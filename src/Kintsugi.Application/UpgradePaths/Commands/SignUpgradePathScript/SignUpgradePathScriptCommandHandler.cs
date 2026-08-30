@@ -57,7 +57,7 @@ public class SignUpgradePathScriptCommandHandler : IRequestHandler<SignUpgradePa
         if (!string.IsNullOrWhiteSpace(existing.ApplicationIdentifier))
         {
             var latestVersion = await _researchClient.CheckScriptVersionAsync(
-                existing.Script, existing.ApplicationName, existing.ApplicationIdentifier, cancellationToken);
+                existing.Script, existing.Platform, existing.ApplicationName, existing.ApplicationIdentifier, cancellationToken);
             existing.UpdateDiscoveredLatestVersion(latestVersion);
         }
 

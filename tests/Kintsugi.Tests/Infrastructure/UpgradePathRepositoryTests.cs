@@ -24,6 +24,25 @@ public class UpgradePathRepositoryTests
         return new ApplicationDbContext(options);
     }
 
+    /// <summary>Where every Homebrew-managed row lives — see PlatformBucket.ForPackageManager.</summary>
+    private static readonly string HomebrewBucket = PlatformBucket.ForPackageManager(PackageManagerCatalog.Homebrew);
+
+    private static void AddHomebrewManagedApplication(ApplicationDbContext context, Guid hostId, string name, string version) =>
+        AddManagedApplication(context, hostId, name, version, PackageManagerCatalog.Homebrew);
+
+    /// <summary>
+    /// Adds <paramref name="name"/> to a host alongside the package manager that manages it, linked
+    /// as parent/child exactly the way RegisterApplicationsCommandHandler does — the link the
+    /// repository's fallback lookup reads to know which manager's bucket to check.
+    /// </summary>
+    private static void AddManagedApplication(ApplicationDbContext context, Guid hostId, string name, string version, string packageManagerName)
+    {
+        var manager = new InstalledApplication(hostId, packageManagerName, "1.0");
+        var managed = new InstalledApplication(hostId, name, version);
+        managed.SetParent(manager.Id);
+        context.InstalledApplications.AddRange(manager, managed);
+    }
+
     [Fact]
     public async Task GetAsync_ReturnsNull_WhenNoMatchingRowExists()
     {
@@ -207,17 +226,17 @@ public class UpgradePathRepositoryTests
     }
 
     [Fact]
-    public async Task GetStatusesAsync_FallsBackToTheGenericPlatformEntry_WhenNoPlatformSpecificOneExists()
+    public async Task GetStatusesAsync_FallsBackToThePackageManagersEntry_WhenNoPlatformSpecificOneExists()
     {
         await using var context = CreateContext();
         var host = new Host("host-1", "SERIAL-1", "macOS 15.0");
         context.Hosts.Add(host);
-        context.InstalledApplications.Add(new InstalledApplication(host.Id, "SomeCli", "1.0.0"));
-        // A generic (platform-agnostic) upgrade path — e.g. a package-manager command that behaves
-        // the same everywhere it runs — should still be matched for a macOS host.
+        AddHomebrewManagedApplication(context, host.Id, "SomeCli", "1.0.0");
+        // A Homebrew-managed application's upgrade path lives under Homebrew's own bucket rather
+        // than any OS one, so it's this fallback — not the (name, "macOS") lookup — that has to find it.
         context.UpgradePaths.Add(UpgradePath.Create(
-            "SomeCli", PlatformBucket.Generic, UpgradePathStatus.Found, "1.1.0", UpgradeMethod.PackageManagerCommand,
-            null, "brew upgrade somecli", null, null, null));
+            "SomeCli", HomebrewBucket, UpgradePathStatus.Found, "1.1.0", UpgradeMethod.Script,
+            null, null, null, null, null, "#!/bin/bash\n..."));
         await context.SaveChangesAsync();
         var repository = new UpgradePathRepository(context);
 
@@ -225,6 +244,29 @@ public class UpgradePathRepositoryTests
 
         Assert.Single(result);
         Assert.Equal("1.1.0", result[0].LatestVersion);
+    }
+
+    [Fact]
+    public async Task GetStatusesAsync_NeverHandsAWindowsHost_APackageManagerRowThatManagerDoesNotManage()
+    {
+        // The regression the per-manager bucket exists to prevent: a Windows host with an
+        // application whose name matches a Homebrew formula used to fall back onto the shared
+        // "generic" bucket and be handed a signed `#!/bin/bash` script — which its agent, seeing a
+        // genuine signature, would have run.
+        await using var context = CreateContext();
+        var windowsHost = new Host("pc-1", "SERIAL-PC", "Windows 11 Pro");
+        context.Hosts.Add(windowsHost);
+        // Installed standalone on Windows — no package manager of its own.
+        context.InstalledApplications.Add(new InstalledApplication(windowsHost.Id, "wget", "1.21"));
+        context.UpgradePaths.Add(UpgradePath.Create(
+            "wget", HomebrewBucket, UpgradePathStatus.Found, "1.24", UpgradeMethod.Script,
+            null, null, null, null, null, "#!/bin/bash\nbrew update && brew upgrade \"$APP_NAME\"\n"));
+        await context.SaveChangesAsync();
+        var repository = new UpgradePathRepository(context);
+
+        var result = await repository.GetStatusesAsync("SERIAL-PC", CancellationToken.None);
+
+        Assert.Empty(result);
     }
 
     [Fact]
@@ -364,16 +406,16 @@ public class UpgradePathRepositoryTests
         await using var context = CreateContext();
         var host = new Host("mac-host", "SERIAL-MAC", "macOS 15.0");
         context.Hosts.Add(host);
-        context.InstalledApplications.Add(new InstalledApplication(host.Id, "rectangle", "1.0.0"));
+        AddHomebrewManagedApplication(context, host.Id, "rectangle", "1.0.0");
 
         // The stale row is created (and CheckedUtc stamped) first; a real time gap before creating
         // the fresh one — rather than a fabricated timestamp — is what makes "most recently checked"
         // deterministic here, since UpgradePath.CheckedUtc always stamps DateTimeOffset.UtcNow and
         // has no public way to set it to an arbitrary value.
-        context.UpgradePaths.Add(UpgradePath.Create("Rectangle", PlatformBucket.Generic, UpgradePathStatus.Found, "0.9.0", UpgradeMethod.PackageManagerCommand, null, "brew upgrade rectangle", null, null, null));
+        context.UpgradePaths.Add(UpgradePath.Create("Rectangle", HomebrewBucket, UpgradePathStatus.Found, "0.9.0", UpgradeMethod.PackageManagerCommand, null, "brew upgrade rectangle", null, null, null));
         await context.SaveChangesAsync();
         await Task.Delay(10);
-        context.UpgradePaths.Add(UpgradePath.Create("rectangle", PlatformBucket.Generic, UpgradePathStatus.Found, "1.0.0", UpgradeMethod.Script, null, null, null, null, null, "#!/bin/bash\n..."));
+        context.UpgradePaths.Add(UpgradePath.Create("rectangle", HomebrewBucket, UpgradePathStatus.Found, "1.0.0", UpgradeMethod.Script, null, null, null, null, null, "#!/bin/bash\n..."));
         await context.SaveChangesAsync();
 
         var repository = new UpgradePathRepository(context);
@@ -385,9 +427,9 @@ public class UpgradePathRepositoryTests
     }
 
     [Fact]
-    public async Task GetSummariesAsync_ForAGenericPackageManagerPath_ReportsTheStoredGenericPlatform_NotTheInstalledHostsOsBucket()
+    public async Task GetSummariesAsync_ForAPackageManagerPath_ReportsTheStoredManagerBucket_NotTheInstalledHostsOsBucket()
     {
-        // The row is persisted under PlatformBucket.Generic regardless of which OS bucket the
+        // The row is persisted under its manager's bucket regardless of which OS bucket the
         // installed hosts fall into (see PrepareUpgradePathScanQueryHandler). The Applications page
         // round-trips this value back to the API (e.g. the per-row instructions panel) to look the
         // item back up by (name, platform) — reporting the installed hosts' OS bucket here instead
@@ -395,16 +437,42 @@ public class UpgradePathRepositoryTests
         await using var context = CreateContext();
         var host = new Host("mac-host", "SERIAL-MAC", "macOS 15.0");
         context.Hosts.Add(host);
-        context.InstalledApplications.Add(new InstalledApplication(host.Id, "firefox", "128.0"));
+        AddHomebrewManagedApplication(context, host.Id, "firefox", "128.0");
         context.UpgradePaths.Add(UpgradePath.Create(
-            "firefox", PlatformBucket.Generic, UpgradePathStatus.Found, "128.0", UpgradeMethod.Script,
+            "firefox", HomebrewBucket, UpgradePathStatus.Found, "128.0", UpgradeMethod.Script,
             null, null, null, null, null, "#!/bin/bash\n..."));
         await context.SaveChangesAsync();
         var repository = new UpgradePathRepository(context);
 
-        var summary = (await repository.GetSummariesAsync(CancellationToken.None)).Single();
+        var summary = (await repository.GetSummariesAsync(CancellationToken.None)).Single(s => s.ApplicationName == "firefox");
 
-        Assert.Equal(PlatformBucket.Generic, summary.Platform);
+        Assert.Equal(HomebrewBucket, summary.Platform);
+    }
+
+    [Fact]
+    public async Task GetSummariesAsync_ForOneApplicationManagedByTwoDifferentManagers_ReportsARowPerManager()
+    {
+        // A Mac installing VLC from Homebrew and a PC installing it from winget are two genuinely
+        // different upgrade mechanisms with two different scripts — grouping by the host's OS bucket
+        // alone used to collapse them into one row, which meant one of the two hosts was shown (and
+        // handed) the wrong manager's upgrade path.
+        await using var context = CreateContext();
+        var mac = new Host("mac-host", "SERIAL-MAC", "macOS 15.0");
+        var pc = new Host("pc-1", "SERIAL-PC", "Windows 11 Pro");
+        context.Hosts.AddRange(mac, pc);
+        AddHomebrewManagedApplication(context, mac.Id, "vlc", "3.0.20");
+        AddManagedApplication(context, pc.Id, "vlc", "3.0.20", PackageManagerCatalog.Winget);
+        context.UpgradePaths.AddRange(
+            UpgradePath.Create("vlc", HomebrewBucket, UpgradePathStatus.Found, "3.0.21", UpgradeMethod.Script, null, null, null, null, null, "#!/bin/bash\n..."),
+            UpgradePath.Create("vlc", PlatformBucket.ForPackageManager(PackageManagerCatalog.Winget), UpgradePathStatus.Found, "3.0.21", UpgradeMethod.Script, null, null, null, null, null, "winget...\n"));
+        await context.SaveChangesAsync();
+        var repository = new UpgradePathRepository(context);
+
+        var summaries = (await repository.GetSummariesAsync(CancellationToken.None)).Where(s => s.ApplicationName == "vlc").ToList();
+
+        Assert.Equal(2, summaries.Count);
+        Assert.Contains(summaries, s => s.Platform == HomebrewBucket);
+        Assert.Contains(summaries, s => s.Platform == PlatformBucket.ForPackageManager(PackageManagerCatalog.Winget));
     }
 
     [Fact]
@@ -479,15 +547,15 @@ public class UpgradePathRepositoryTests
     }
 
     [Fact]
-    public async Task GetAppUpdateCountsByHostAsync_FallsBackToTheGenericPlatformEntry_WhenNoPlatformSpecificOneExists()
+    public async Task GetAppUpdateCountsByHostAsync_FallsBackToThePackageManagersEntry_WhenNoPlatformSpecificOneExists()
     {
         await using var context = CreateContext();
         var host = new Host("host-1", "SERIAL-1", "macOS 15.0");
         context.Hosts.Add(host);
-        context.InstalledApplications.Add(new InstalledApplication(host.Id, "SomeCli", "1.0.0"));
+        AddHomebrewManagedApplication(context, host.Id, "SomeCli", "1.0.0");
         context.UpgradePaths.Add(UpgradePath.Create(
-            "SomeCli", PlatformBucket.Generic, UpgradePathStatus.Found, "1.1.0", UpgradeMethod.PackageManagerCommand,
-            null, "brew upgrade somecli", null, null, null));
+            "SomeCli", HomebrewBucket, UpgradePathStatus.Found, "1.1.0", UpgradeMethod.Script,
+            null, null, null, null, null, "#!/bin/bash\n..."));
         await context.SaveChangesAsync();
         var repository = new UpgradePathRepository(context);
 

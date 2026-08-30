@@ -4,10 +4,12 @@ using Kintsugi.Domain.Exceptions;
 namespace Kintsugi.Domain.Entities;
 
 /// <summary>
-/// One published build of the kintsugi-agent installer package for a given platform (currently
-/// just "macos") — what the Clients page offers for download, and what a running agent compares
-/// its own version against to decide whether to self-update (see
-/// <c>PublishAgentPackageCommandHandler</c> and the macOS agent's own <c>self_update</c> module).
+/// One published build of the kintsugi-agent installer package for a given platform ("macos" or
+/// "windows") — what the Clients page offers for download, and what a running agent compares its
+/// own version against to decide whether to self-update (see
+/// <c>PublishAgentPackageCommandHandler</c> and each agent's own <c>self_update</c> module). Note
+/// this platform namespace is the agent build's, and is deliberately separate from
+/// <c>PlatformBucket</c>'s upgrade-path buckets.
 /// The newest row for a platform (by <see cref="BaseEntity.CreatedAtUtc"/>) is always "the" current
 /// version for that platform — there is no separate publish/unpublish step, and a (platform,
 /// version) pair's content is never overwritten once published (see

@@ -10,6 +10,7 @@ using Microsoft.Extensions.Logging;
 using Kintsugi.Application.AiSettings;
 using Kintsugi.Application.Common.Exceptions;
 using Kintsugi.Application.Common.Interfaces;
+using Kintsugi.Application.UpgradePaths;
 using Kintsugi.Domain.Enums;
 
 namespace Kintsugi.Infrastructure.Ai;
@@ -83,7 +84,12 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
         var script = CleanScriptText(text)
             ?? throw new ExternalServiceException("The model's response did not contain a usable script.");
 
-        var (isValid, errors) = await ValidateScriptAsync(script, cancellationToken);
+        // bash for macOS, PowerShell for Windows — the same choice BuildScriptGenerationPrompt made
+        // when it asked for the script, so the validator can never be checking a script against the
+        // wrong language's rules.
+        var language = ScriptLanguages.For(request.Platform);
+
+        var (isValid, errors) = await ValidateScriptAsync(script, language, cancellationToken);
         if (isValid)
         {
             _logger.LogInformation("Script generated for {ApplicationName} ({Platform}) passed validation on the first attempt", request.ApplicationName, request.Platform);
@@ -95,7 +101,7 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
         var fixedScript = CleanScriptText(await AskProviderRawAsync(settings, BuildScriptFixPrompt(request, script, errors!), cancellationToken))
             ?? throw new ExternalServiceException("The model's fix attempt did not contain a usable script.");
 
-        var (fixedIsValid, fixedErrors) = await ValidateScriptAsync(fixedScript, cancellationToken);
+        var (fixedIsValid, fixedErrors) = await ValidateScriptAsync(fixedScript, language, cancellationToken);
         if (!fixedIsValid)
         {
             throw new ExternalServiceException($"The generated script still failed validation after one self-correction attempt: {fixedErrors}");
@@ -112,9 +118,13 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
     /// non-zero exit, a timeout, or unexpected output — callers should treat null as "the script
     /// broke" and fall back to regenerating it via <see cref="GenerateScriptAsync"/>.
     /// </summary>
-    public async Task<string?> CheckScriptVersionAsync(string script, string applicationName, string applicationIdentifier, CancellationToken cancellationToken)
+    public async Task<string?> CheckScriptVersionAsync(string script, string platform, string applicationName, string applicationIdentifier, CancellationToken cancellationToken)
     {
-        var tempFile = Path.Combine(Path.GetTempPath(), $"upgrade-check-{Guid.NewGuid():N}.sh");
+        // A PowerShell script runs here under pwsh, on this same Linux server — the prompt requires
+        // --update-version to make only HTTP calls precisely so a Windows application's version
+        // check needs no Windows host to run on. See the runtime image's pwsh install.
+        var language = ScriptLanguages.For(platform);
+        var tempFile = Path.Combine(Path.GetTempPath(), $"upgrade-check-{Guid.NewGuid():N}{language.FileExtension()}");
 
         try
         {
@@ -123,12 +133,22 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
 
             var startInfo = new ProcessStartInfo
             {
-                FileName = "bash",
+                FileName = language.Interpreter(),
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
+            if (language == ScriptLanguage.PowerShell)
+            {
+                // -NoProfile so a profile on the server can't inject output into the bare version
+                // string this is parsing; -File (rather than -Command) so the script's own
+                // `exit <code>` becomes pwsh's exit code, which is what the non-zero check below
+                // reads.
+                startInfo.ArgumentList.Add("-NoProfile");
+                startInfo.ArgumentList.Add("-NonInteractive");
+                startInfo.ArgumentList.Add("-File");
+            }
             startInfo.ArgumentList.Add(tempFile);
             startInfo.ArgumentList.Add("--appName");
             startInfo.ArgumentList.Add(applicationName);
@@ -588,9 +608,13 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
             ? string.Join(", ", request.KnownInstalledVersions)
             : "unknown";
 
+        var isWindows = request.Platform == PlatformBucket.Windows;
+
         var identifierLine = string.IsNullOrWhiteSpace(request.ApplicationIdentifier)
             ? ""
-            : $"\nApplication identifier (macOS bundle ID): {request.ApplicationIdentifier}";
+            : isWindows
+                ? $"\nApplication identifier (the application's key name under the Windows uninstall registry, e.g. an MSI product code or the vendor's own key): {request.ApplicationIdentifier}"
+                : $"\nApplication identifier (macOS bundle ID): {request.ApplicationIdentifier}";
 
         var hostingSection = string.IsNullOrWhiteSpace(hostingSiteContext)
             ? ""
@@ -604,8 +628,161 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
 
                 """;
 
+        // The two platforms differ in three places and nowhere else: what the model is told it's
+        // writing (bash vs PowerShell), how --update-version has to behave to still run on this
+        // Linux server, and what --update is allowed to do on the managed host. Everything around
+        // those — the CLI contract, the research instructions, the no-reliable-method sentinel, the
+        // "output only the script" rule — is deliberately shared, because the agent, the server-side
+        // version check, and the signing flow all treat both languages identically.
+        var platformIntro = isWindows
+            ? "a Windows application"
+            : "a macOS application";
+
+        var scriptIntro = isWindows
+            ? "Otherwise, write a single PowerShell script implementing this exact CLI contract:\n\n              script.ps1 --appName <name> --appId <id> --update-version\n              script.ps1 --appName <name> --appId <id> --update"
+            : "Otherwise, write a single bash script implementing this exact CLI contract:\n\n              script.sh --appName <name> --appId <bundle-id> --update-version\n              script.sh --appName <name> --appId <bundle-id> --update";
+
+        var updateVersionSection = isWindows
+            ? """
+              `--update-version` mode — this runs directly on a plain Linux server under PowerShell
+              (`pwsh`), NOT on a Windows machine, purely to check for a new release, so it MUST NOT use
+              any Windows-only capability (no registry access, no `Get-CimInstance`/WMI, no COM, no
+              `winget`, no `Get-Package`, no `[System.Windows.*]`) or touch anything on the filesystem:
+              - Determine the current latest stable released version using only `Invoke-RestMethod` /
+                `Invoke-WebRequest` and plain text processing. For a GitHub-hosted project, the simplest
+                reliable approach is `Invoke-WebRequest -Uri
+                'https://github.com/<owner>/<repo>/releases/latest' -MaximumRedirection 0
+                -SkipHttpErrorCheck` and reading the last segment of the `Location` response header,
+                which names the latest tag with no JSON parsing and no API rate limit at all — prefer
+                this kind of redirect trick over parsing a JSON API response. Use your own judgement
+                based on where this application is actually distributed.
+              - On success, print ONLY the bare version string to stdout (nothing else — no labels, no
+                extra lines) and exit 0. Use `[Console]::Out.WriteLine($version)` rather than
+                `Write-Host`, so nothing but the version can reach stdout.
+              - On failure to determine it, write an error to stderr (`[Console]::Error.WriteLine(...)`)
+                and exit non-zero. No stdout output.
+              - Must not modify anything, or depend on anything being installed — this mode only checks
+                and reports, from a plain Linux `pwsh` with outbound HTTPS available.
+              """
+            : """
+              `--update-version` mode — this runs directly on a plain Linux server, NOT on a Mac,
+              purely to check for a new release, so it MUST NOT use any macOS-only tool (no
+              `defaults`, `osascript`, `hdiutil`, `plutil`, `installer`, etc.) or touch anything on the
+              filesystem:
+              - Determine the current latest stable released version using only `curl` and plain text
+                processing (`grep`, `sed`, `cut`, `head`, etc. — assume no `jq`). For a GitHub-hosted
+                project, the simplest reliable approach is
+                `curl -fsSL -o /dev/null -w '%{redirect_url}' https://github.com/<owner>/<repo>/releases/latest`,
+                which returns a URL ending in the latest tag with no JSON parsing at all — prefer this
+                kind of redirect/text trick over parsing a JSON API response. Use your own judgement
+                based on where this application is actually distributed.
+              - On success, print ONLY the bare version string to stdout (nothing else — no labels, no
+                extra lines) and exit 0.
+              - On failure to determine it, print an error to stderr and exit non-zero. No stdout output.
+              - Must not modify anything, or depend on anything being installed or mounted — this mode
+                only checks and reports, from a plain Linux shell with curl available.
+              """;
+
+        var updateSection = isWindows
+            ? """
+              `--update` mode — this one DOES run on the managed Windows host itself (as SYSTEM, from a
+              service), so Windows tooling is fine here:
+              - Re-run the same latest-version check as `--update-version` internally.
+              - Determine the currently installed version by reading `DisplayVersion` from the
+                application's key under
+                `HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\<appId>` (also check
+                `HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\<appId>` for a
+                32-bit application on 64-bit Windows), and verify that key exists before touching
+                anything — treat a missing key as a fatal error (wrong app / not installed), not
+                something to silently ignore.
+              - If already at or above the latest version, print a message and exit 0 without
+                downloading or changing anything (idempotent).
+              - If the application is currently running, close it gracefully before replacing it —
+                already-authorized, so this can be automatic. Use `Get-Process -Name <exe>` then
+                `CloseMainWindow()`, poll for the process to actually exit for a bounded grace period
+                (e.g. up to 15s, checking every second), and only as a last-resort fallback after that
+                grace period use `Stop-Process -Force` if it's still running — never skip straight to a
+                hard kill.
+              - Download the current release into a directory made under `$env:TEMP` with a unique
+                name, removed in a `finally` block covering both success and failure. Prefer a stable
+                "latest" URL pattern (e.g. GitHub's `.../releases/latest/download/<asset-filename>`,
+                which resolves to whatever is current without needing the version number) over
+                constructing a per-version URL from the discovered version string, when the
+                distribution channel supports it.
+              - For an `.msi`: install via
+                `Start-Process msiexec.exe -ArgumentList '/i', $path, '/qn', '/norestart' -Wait -PassThru`
+                and check the returned `ExitCode` (0, 1641, and 3010 all mean success; 1641/3010 mean a
+                reboot is pending).
+              - For an `.exe` installer: use the vendor's own documented silent-install switch
+                (`/S`, `/silent`, `/quiet`, `/VERYSILENT /NORESTART` for Inno Setup, `-ms` for
+                NSIS-based vendors, etc. — research which one this application's installer actually
+                takes rather than guessing), via `Start-Process ... -Wait -PassThru`, and check its
+                `ExitCode`.
+              - For an `.msix`/`.appx`: install via `Add-AppxPackage`.
+              - For any other distribution form, use your best judgement for the equivalent
+                non-interactive Windows approach.
+              - End by re-reading `DisplayVersion` from the registry and verifying it now meets the
+                latest version determined above, and exit non-zero with a clear error on stderr if it
+                doesn't.
+              """
+            : """
+              `--update` mode — this one DOES run on the managed Mac itself, so macOS tools are fine here:
+              - Re-run the same latest-version check as `--update-version` internally.
+              - Determine the currently installed version (e.g. via `defaults read
+                /Applications/<appName>.app/Contents/Info.plist CFBundleShortVersionString`), and
+                verify the installed bundle's CFBundleIdentifier matches `--appId` before touching
+                anything — treat a mismatch as a fatal error (wrong app), not something to silently
+                ignore.
+              - If already at or above the latest version, print a message and exit 0 without
+                downloading or changing anything (idempotent).
+              - If the application is currently running, quit it gracefully before replacing it —
+                already-authorized, so this can be automatic. Use
+                `osascript -e "tell application \"<appName>\" to quit"`, then poll for the process to
+                actually exit for a bounded grace period (e.g. up to 15s, checking every second via
+                `pgrep -x`), and only as a last-resort fallback after that grace period use `pkill -x`
+                if it's still running — never skip straight to a hard kill.
+              - Download the current release into a directory made with `mktemp -d`, cleaned up via a
+                `trap` covering both success and failure. Prefer a stable "latest" URL pattern (e.g.
+                GitHub's `.../releases/latest/download/<asset-filename>`, which resolves to whatever
+                is current without needing the version number) over constructing a per-version URL
+                from the discovered version string, when the distribution channel supports it.
+              - For a .dmg: mount with `hdiutil attach -nobrowse -quiet`, copy the .app bundle into
+                /Applications (replacing any existing install), detach the volume, then remove the
+                quarantine attribute (`xattr -dr com.apple.quarantine "/Applications/<appName>.app"`)
+                since this is very likely a Developer-ID/unsigned distribution, not a Mac App Store one.
+              - For a .pkg: install via `installer -pkg <path> -target /`.
+              - For any other distribution form, use your best judgement for the equivalent
+                non-interactive macOS approach.
+              - End by verifying the installed version now meets the latest version determined above,
+                and exit non-zero with a clear error on stderr if it doesn't.
+              """;
+
+        var generalRequirements = isWindows
+            ? """
+              - Start with `Set-StrictMode -Version Latest` and `$ErrorActionPreference = 'Stop'`.
+              - Parse `--appName`, `--appId`, `--update-version`, and `--update` out of `$args`
+                yourself — PowerShell's own `param()` binding cannot express double-dashed names, and
+                this exact CLI shape is fixed by what invokes the script. `--appName` and `--appId` are
+                always both required, along with exactly one of `--update-version` or `--update`.
+              - No interactive prompts of any kind anywhere in the script — it always runs unattended,
+                as SYSTEM (for `--update`) or on a plain Linux `pwsh` (for `--update-version`). Never
+                use `Read-Host`, and always pass whatever silent/quiet/no-restart switches the tools
+                you call need.
+              - It must pass PSScriptAnalyzer at Warning severity — in particular, use approved
+                verb-noun names for any function you define, and don't leave a variable assigned but
+                never used.
+              """
+            : """
+              - Start with `#!/bin/bash` and `set -euo pipefail`.
+              - `--appName` and `--appId` are always both required, along with exactly one of
+                `--update-version` or `--update` (in either order).
+              - No interactive prompts of any kind anywhere in the script — it always runs unattended,
+                typically as root or an admin user (for `--update`) or on a plain Linux server (for
+                `--update-version`).
+              """;
+
         return $$"""
-            You are researching how a macOS application distributes and checks for updates, then
+            You are researching how {{platformIntro}} distributes and checks for updates, then
             writing a durable, reusable command-line tool that performs both jobs for a
             fleet-management system. It will be invoked repeatedly and unattended, indefinitely into
             the future — long after new versions of this application are released — so it must
@@ -628,67 +805,17 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
             If you cannot find a reliable way to check for or install updates to this application at
             all, respond with ONLY this exact line and nothing else: {{NoReliableMethodSentinel}}
 
-            Otherwise, write a single bash script implementing this exact CLI contract:
+            {{scriptIntro}}
 
-              script.sh --appName <name> --appId <bundle-id> --update-version
-              script.sh --appName <name> --appId <bundle-id> --update
+            On missing/invalid/conflicting arguments, print a one-line usage message to stderr and
+            exit non-zero — no other output.
 
-            `--appName` and `--appId` are always both required, along with exactly one of
-            `--update-version` or `--update` (in either order). On missing/invalid/conflicting
-            arguments, print a one-line usage message to stderr and exit non-zero — no other output.
+            {{updateVersionSection}}
 
-            `--update-version` mode — this runs directly on a plain Linux server, NOT on a Mac,
-            purely to check for a new release, so it MUST NOT use any macOS-only tool (no
-            `defaults`, `osascript`, `hdiutil`, `plutil`, `installer`, etc.) or touch anything on the
-            filesystem:
-            - Determine the current latest stable released version using only `curl` and plain text
-              processing (`grep`, `sed`, `cut`, `head`, etc. — assume no `jq`). For a GitHub-hosted
-              project, the simplest reliable approach is
-              `curl -fsSL -o /dev/null -w '%{redirect_url}' https://github.com/<owner>/<repo>/releases/latest`,
-              which returns a URL ending in the latest tag with no JSON parsing at all — prefer this
-              kind of redirect/text trick over parsing a JSON API response. Use your own judgement
-              based on where this application is actually distributed.
-            - On success, print ONLY the bare version string to stdout (nothing else — no labels, no
-              extra lines) and exit 0.
-            - On failure to determine it, print an error to stderr and exit non-zero. No stdout output.
-            - Must not modify anything, or depend on anything being installed or mounted — this mode
-              only checks and reports, from a plain Linux shell with curl available.
-
-            `--update` mode — this one DOES run on the managed Mac itself, so macOS tools are fine here:
-            - Re-run the same latest-version check as `--update-version` internally.
-            - Determine the currently installed version (e.g. via `defaults read
-              /Applications/<appName>.app/Contents/Info.plist CFBundleShortVersionString`), and
-              verify the installed bundle's CFBundleIdentifier matches `--appId` before touching
-              anything — treat a mismatch as a fatal error (wrong app), not something to silently
-              ignore.
-            - If already at or above the latest version, print a message and exit 0 without
-              downloading or changing anything (idempotent).
-            - If the application is currently running, quit it gracefully before replacing it —
-              already-authorized, so this can be automatic. Use
-              `osascript -e "tell application \"<appName>\" to quit"`, then poll for the process to
-              actually exit for a bounded grace period (e.g. up to 15s, checking every second via
-              `pgrep -x`), and only as a last-resort fallback after that grace period use `pkill -x`
-              if it's still running — never skip straight to a hard kill.
-            - Download the current release into a directory made with `mktemp -d`, cleaned up via a
-              `trap` covering both success and failure. Prefer a stable "latest" URL pattern (e.g.
-              GitHub's `.../releases/latest/download/<asset-filename>`, which resolves to whatever
-              is current without needing the version number) over constructing a per-version URL
-              from the discovered version string, when the distribution channel supports it.
-            - For a .dmg: mount with `hdiutil attach -nobrowse -quiet`, copy the .app bundle into
-              /Applications (replacing any existing install), detach the volume, then remove the
-              quarantine attribute (`xattr -dr com.apple.quarantine "/Applications/<appName>.app"`)
-              since this is very likely a Developer-ID/unsigned distribution, not a Mac App Store one.
-            - For a .pkg: install via `installer -pkg <path> -target /`.
-            - For any other distribution form, use your best judgement for the equivalent
-              non-interactive macOS approach.
-            - End by verifying the installed version now meets the latest version determined above,
-              and exit non-zero with a clear error on stderr if it doesn't.
+            {{updateSection}}
 
             General requirements:
-            - Start with `#!/bin/bash` and `set -euo pipefail`.
-            - No interactive prompts of any kind anywhere in the script — it always runs unattended,
-              typically as root or an admin user (for `--update`) or on a plain Linux server (for
-              `--update-version`).
+            {{generalRequirements}}
             - If you have any caveat about your confidence in this script (e.g. you lacked live web
               access, or found conflicting version numbers), say so in a `# WARNING: ...` comment
               near the top rather than in any separate response text — the script is the only thing
@@ -698,25 +825,33 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
             """;
     }
 
-    private static string BuildScriptFixPrompt(UpgradePathScriptGenerationRequest request, string script, string validationErrors) => $$"""
-        The bash script below, which you wrote as a reusable --update-version/--update tool for
-        "{{request.ApplicationName}}" on macOS, has issues found during validation. Fix every one
-        of them and return the complete corrected script — don't just patch around the symptom if
-        a finding points at a real bug (e.g. a typo'd variable name) or a missing part of the
-        required CLI contract (--appName, --appId, --update-version, --update). Remember that
-        --update-version must run correctly on a plain Linux server with only curl available — no
-        macOS-only tools in that mode.
+    private static string BuildScriptFixPrompt(UpgradePathScriptGenerationRequest request, string script, string validationErrors)
+    {
+        var isWindows = request.Platform == PlatformBucket.Windows;
+        var language = isWindows ? "PowerShell" : "bash";
+        var fence = isWindows ? "powershell" : "bash";
+        var updateVersionConstraint = isWindows
+            ? "Remember that --update-version must run correctly on a plain Linux server under `pwsh` with only outbound HTTPS available — no Windows-only capabilities (registry, WMI/CIM, COM, winget) in that mode."
+            : "Remember that --update-version must run correctly on a plain Linux server with only curl available — no macOS-only tools in that mode.";
 
-        Original script:
-        ```bash
-        {{script}}
-        ```
+        return $$"""
+            The {{language}} script below, which you wrote as a reusable --update-version/--update tool for
+            "{{request.ApplicationName}}" on {{request.Platform}}, has issues found during validation. Fix every one
+            of them and return the complete corrected script — don't just patch around the symptom if
+            a finding points at a real bug (e.g. a typo'd variable name) or a missing part of the
+            required CLI contract (--appName, --appId, --update-version, --update). {{updateVersionConstraint}}
 
-        Validation findings:
-        {{validationErrors}}
+            Original script:
+            ```{{fence}}
+            {{script}}
+            ```
 
-        Output ONLY the corrected, complete script — no explanation, no markdown code fences.
-        """;
+            Validation findings:
+            {{validationErrors}}
+
+            Output ONLY the corrected, complete script — no explanation, no markdown code fences.
+            """;
+    }
 
     /// <summary>Runs shellcheck against <paramref name="script"/> at warning severity and above —
     /// this is what caught a real bug (a typo'd variable name that would have failed every run
@@ -726,13 +861,25 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
     /// every generated script over a missing tool.</summary>
     private static readonly string[] RequiredCliContractTokens = { "--appName", "--appId", "--update-version", "--update" };
 
-    private static async Task<(bool IsValid, string? Errors)> ValidateScriptAsync(string script, CancellationToken cancellationToken)
+    private static async Task<(bool IsValid, string? Errors)> ValidateScriptAsync(string script, ScriptLanguage language, CancellationToken cancellationToken)
     {
+        // The CLI contract is language-independent — every script, hand-written or AI-authored,
+        // bash or PowerShell, is invoked the same way by both the server and the agent.
         var missingCliTokens = RequiredCliContractTokens.Where(token => !script.Contains(token, StringComparison.Ordinal)).ToList();
-        var unassignedNames = FindUnassignedVariableReferences(script);
-        var (shellcheckOk, shellcheckErrors) = await RunShellcheckAsync(script, cancellationToken);
 
-        if (missingCliTokens.Count == 0 && unassignedNames.Count == 0 && shellcheckOk)
+        // The typo'd-variable check is a bash-specific one: it exists to cover shellcheck's SC2154
+        // blind spot under `set -u`, and PowerShell has no equivalent failure mode (an unassigned
+        // variable is simply $null unless Set-StrictMode is on, and PSScriptAnalyzer's own
+        // PSUseDeclaredVarsMoreThanAssignments covers the analogous case).
+        var unassignedNames = language == ScriptLanguage.Bash
+            ? FindUnassignedVariableReferences(script)
+            : Array.Empty<string>();
+
+        var (analyzerOk, analyzerErrors) = language == ScriptLanguage.PowerShell
+            ? await RunScriptAnalyzerAsync(script, cancellationToken)
+            : await RunShellcheckAsync(script, cancellationToken);
+
+        if (missingCliTokens.Count == 0 && unassignedNames.Count == 0 && analyzerOk)
         {
             return (true, null);
         }
@@ -757,12 +904,102 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
                 ". Under `set -u` this makes the script fail immediately every time it reaches that reference.");
         }
 
-        if (!shellcheckOk && shellcheckErrors is not null)
+        if (!analyzerOk && analyzerErrors is not null)
         {
-            errorParts.Add("shellcheck output:\n" + shellcheckErrors);
+            errorParts.Add((language == ScriptLanguage.PowerShell ? "PSScriptAnalyzer output:\n" : "shellcheck output:\n") + analyzerErrors);
         }
 
         return (false, string.Join("\n\n", errorParts));
+    }
+
+    /// <summary>
+    /// The PowerShell counterpart to <see cref="RunShellcheckAsync"/>: parses the script (a syntax
+    /// error alone is disqualifying, and PSScriptAnalyzer reports one as a finding rather than
+    /// crashing) and runs PSScriptAnalyzer at Warning severity and above, matching shellcheck's own
+    /// severity floor — most real logic bugs are classified as warnings, not errors, by both tools.
+    /// Fails open the same way for the same reason: a missing <c>pwsh</c>/PSScriptAnalyzer must not
+    /// silently discard every generated Windows script.
+    /// </summary>
+    private static async Task<(bool IsValid, string? Errors)> RunScriptAnalyzerAsync(string script, CancellationToken cancellationToken)
+    {
+        var tempFile = Path.Combine(Path.GetTempPath(), $"upgrade-script-{Guid.NewGuid():N}.ps1");
+
+        try
+        {
+            await File.WriteAllTextAsync(tempFile, script, cancellationToken);
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = "pwsh",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            startInfo.ArgumentList.Add("-NoProfile");
+            startInfo.ArgumentList.Add("-NonInteractive");
+            startInfo.ArgumentList.Add("-Command");
+            // Written as one -Command expression rather than a script file so there's nothing extra
+            // to ship or keep in sync. Exits 1 with the findings on stdout when there are any, so
+            // the exit-code contract matches shellcheck's exactly. `-Severity Warning,Error` is what
+            // sets the floor. Three rules are excluded: PSAvoidUsingWriteHost, so a legitimate
+            // progress message in --update mode isn't treated as a defect; PSAvoidUsingInvokeExpression,
+            // which a vendor's own documented install invocation sometimes legitimately needs; and
+            // PSUseBOMForUnicodeEncodedFile, which fires on the *temp* file written here rather than
+            // on anything that ships — the agent is what decides that encoding, and it always writes
+            // a UTF-8 BOM precisely so Windows PowerShell 5.1 decodes a non-ASCII script correctly
+            // (see the Windows agent's upgrade.rs).
+            startInfo.ArgumentList.Add(
+                "$ErrorActionPreference='Stop'; " +
+                "$findings = Invoke-ScriptAnalyzer -Path $env:KINTSUGI_SCRIPT_PATH -Severity Warning,Error " +
+                "-ExcludeRule PSAvoidUsingWriteHost,PSAvoidUsingInvokeExpression,PSUseBOMForUnicodeEncodedFile; " +
+                "if ($findings) { $findings | Format-Table -AutoSize RuleName,Line,Message | Out-String -Width 200; exit 1 } " +
+                "else { exit 0 }");
+            // Passed by environment rather than interpolated into the -Command string: the path is
+            // ours, but interpolating a path into a PowerShell expression is exactly the habit that
+            // breaks the first time one contains a quote.
+            startInfo.Environment["KINTSUGI_SCRIPT_PATH"] = tempFile;
+
+            using var process = new Process { StartInfo = startInfo };
+            process.Start();
+
+            var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+            var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
+            await process.WaitForExitAsync(cancellationToken);
+            var stdout = await stdoutTask;
+            var stderr = await stderrTask;
+
+            if (process.ExitCode == 0)
+            {
+                return (true, null);
+            }
+
+            var errors = string.IsNullOrWhiteSpace(stdout) ? stderr : stdout;
+
+            // PSScriptAnalyzer not being installed surfaces as a CommandNotFoundException on
+            // stderr, not as a findings list — that's the fail-open case, not a bad script.
+            if (string.IsNullOrWhiteSpace(stdout) && errors.Contains("Invoke-ScriptAnalyzer", StringComparison.Ordinal))
+            {
+                return (true, null);
+            }
+
+            return (false, errors.Replace(tempFile, "the script", StringComparison.Ordinal));
+        }
+        catch (Exception ex) when (ex is Win32Exception or IOException)
+        {
+            return (true, null);
+        }
+        finally
+        {
+            try
+            {
+                File.Delete(tempFile);
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+        }
     }
 
     private static async Task<(bool IsValid, string? Errors)> RunShellcheckAsync(string script, CancellationToken cancellationToken)

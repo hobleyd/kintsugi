@@ -82,24 +82,24 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
 
     /// <summary>
     /// A package-manager-managed entry that reports its own <see cref="ApplicationEntry.AvailableVersion"/>
-    /// (currently: Homebrew, straight from its catalog) is authoritative — seed or refresh that
-    /// application's <see cref="UpgradePath"/> directly from it rather than waiting on a separate AI
-    /// research scan to (re-)discover the same information less reliably. Stored under the same
-    /// fixed <see cref="PlatformBucket.Generic"/> bucket and <see cref="UpgradeMethod.Script"/>
-    /// shape <c>ResearchApplicationUpgradePathCommandHandler</c> uses for Homebrew (never
-    /// the real per-host OS platform, and never <see cref="UpgradeMethod.PackageManagerCommand"/>)
-    /// — otherwise this row would never match the (application, "generic") key the scan planner
-    /// and the Applications page's per-row panel both look it up by, and an agent would never
-    /// recognize it as patchable (see the macOS agent's own <c>is_patchable</c>, which only trusts
-    /// a signed <see cref="UpgradeMethod.Script"/> row for a recognized package manager now).
+    /// (straight from that manager's catalog) is authoritative — seed or refresh that application's
+    /// <see cref="UpgradePath"/> directly from it rather than waiting on a separate AI research scan
+    /// to (re-)discover the same information less reliably. Stored under the same
+    /// <see cref="PlatformBucket.ForPackageManager"/> bucket and <see cref="UpgradeMethod.Script"/>
+    /// shape <c>ResearchApplicationUpgradePathCommandHandler</c> uses (never the real per-host OS
+    /// platform, and never <see cref="UpgradeMethod.PackageManagerCommand"/>) — otherwise this row
+    /// would never match the key the scan planner and the Applications page's per-row panel both
+    /// look it up by, and an agent would never recognize it as patchable (see the agents' own
+    /// <c>is_patchable</c>, which only trusts a signed <see cref="UpgradeMethod.Script"/> row).
+    /// An entry naming a manager this system doesn't recognize is left entirely alone here: there
+    /// is no script to write for it, and the scan is what resolves it to NotFound with a note.
     /// Leaves any existing <see cref="UpgradePath.ScriptSignature"/> untouched when one's already
-    /// set, since the script content for a given isSelfUpdate case never changes — an admin's prior
-    /// "Sign Script" review shouldn't be silently invalidated by the next routine inventory report.
-    /// A row with no signature yet (brand new, or never reviewed) inherits one automatically the
-    /// moment some other row's identical script content has already been signed (see
-    /// HomebrewUpgradeScript.Build) — a human still has to review and sign the very first Homebrew
-    /// script, but every other application sharing that exact content never needs its own separate
-    /// review.
+    /// set, since the script content for a given (manager, isSelfUpdate) case never changes — an
+    /// admin's prior "Sign Script" review shouldn't be silently invalidated by the next routine
+    /// inventory report. A row with no signature yet (brand new, or never reviewed) inherits one
+    /// automatically the moment some other row's identical script content has already been signed —
+    /// a human still has to review and sign the very first script per manager, but every other
+    /// application sharing that exact content never needs its own separate review.
     /// </summary>
     private async Task UpsertPackageManagerUpgradePathsAsync(IReadOnlyList<ApplicationEntry> applications, CancellationToken cancellationToken)
     {
@@ -112,28 +112,43 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
                 continue;
             }
 
-            // Retires a row this same method used to write directly under the host's real OS
-            // platform, as UpgradeMethod.PackageManagerCommand, before Homebrew moved to this fixed
-            // Generic/Script shape — left in place, it would keep winning GetSummariesAsync's
-            // per-host platform lookup (checked before its Generic fallback) and permanently shadow
-            // the row this method writes now, so the "not installed"/empty-script symptoms would
-            // survive this fix for any application that already has one.
-            var legacyRow = (await _upgradePathRepository.GetAllForApplicationAsync(entry.Name, cancellationToken))
-                .FirstOrDefault(p => p.Platform != PlatformBucket.Generic && p.Method == UpgradeMethod.PackageManagerCommand);
-            if (legacyRow is not null)
+            if (!PackageManagerCatalog.TryGet(entry.PackageManager, out var packageManager))
+            {
+                continue;
+            }
+
+            var platform = PlatformBucket.ForPackageManager(packageManager.Name);
+
+            // Retires rows from either superseded shape this same application may still carry: one
+            // written directly under the host's real OS platform as
+            // UpgradeMethod.PackageManagerCommand (before package-manager rows moved to a fixed
+            // Script shape), and one under the old shared "generic" bucket (before they moved to a
+            // per-manager bucket). Left in place, either would keep winning GetSummariesAsync's
+            // per-host platform lookup — checked before the package-manager fallback — and
+            // permanently shadow the row this method writes now.
+            var legacyRows = (await _upgradePathRepository.GetAllForApplicationAsync(entry.Name, cancellationToken))
+                .Where(p => p.Platform != platform
+                    && ((p.Platform != PlatformBucket.Generic && p.Method == UpgradeMethod.PackageManagerCommand)
+                        || p.Platform == PlatformBucket.Generic))
+                .ToList();
+            foreach (var legacyRow in legacyRows)
             {
                 _upgradePathRepository.Remove(legacyRow);
             }
 
-            var script = HomebrewUpgradeScript.Build(isSelfUpdate: false);
-            var existing = await _upgradePathRepository.GetAsync(entry.Name, PlatformBucket.Generic, cancellationToken);
+            var script = packageManager.BuildScript(false);
+            // winget and Chocolatey address a package by its id; Homebrew has none, so the package
+            // name stands in. Either way this is only ever handed straight back to the script as
+            // --appId — see the *UpgradeScript builders.
+            var applicationIdentifier = entry.ApplicationIdentifier ?? entry.Name;
+            var existing = await _upgradePathRepository.GetAsync(entry.Name, platform, cancellationToken);
 
             if (existing is null)
             {
                 var created = UpgradePath.Create(
-                    entry.Name, PlatformBucket.Generic, UpgradePathStatus.Found, entry.AvailableVersion,
+                    entry.Name, platform, UpgradePathStatus.Found, entry.AvailableVersion,
                     UpgradeMethod.Script, downloadUrl: null, command: null, instructions: null, sourceUrl: null, notes: null,
-                    script: script, applicationIdentifier: entry.Name);
+                    script: script, applicationIdentifier: applicationIdentifier);
 
                 var inheritedSignature = await _upgradePathRepository.FindExistingSignatureForScriptAsync(script, cancellationToken);
                 if (inheritedSignature is not null)
@@ -148,7 +163,7 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
                 existing.Update(
                     UpgradePathStatus.Found, entry.AvailableVersion, UpgradeMethod.Script,
                     downloadUrl: null, command: null, instructions: null, sourceUrl: null, notes: null,
-                    script: script, applicationIdentifier: entry.Name);
+                    script: script, applicationIdentifier: applicationIdentifier);
 
                 if (existing.ScriptSignature is null)
                 {

@@ -12,6 +12,8 @@ public record ApplicationVersionVariantDto(
     string? ParentApplicationName,
     string? OperatingSystem,
     string Version,
-    // The app bundle's CFBundleIdentifier, when this variant was sourced from a scanned macOS app
-    // bundle. Null for non-bundle sources (e.g. Homebrew) and for non-macOS platforms.
+    // Whatever stably names this application on its platform: a macOS app bundle's
+    // CFBundleIdentifier, a Windows application's uninstall-registry key name, or a winget /
+    // Chocolatey package id. Null when the source has no identifier separate from the name (e.g. a
+    // Homebrew formula).
     string? ApplicationIdentifier = null);

@@ -7,9 +7,10 @@
 
 <p class="subtitle">
     Installable kintsugi-agent packages, one per supported platform. An already-installed agent
-    checks the latest version here itself and applies it automatically at every check-in — see
-    <code>clients/macos-agent/src/self_update.rs</code> — so these downloads are mainly for a
-    brand-new install (see <code>packaging/install.sh</code>).
+    checks the latest version here itself and applies it automatically at every check-in — see each
+    agent's own <code>src/self_update.rs</code> — so these downloads are mainly for a brand-new
+    install (<code>packaging/install.sh</code> on macOS, <code>packaging\install.ps1</code> on
+    Windows).
 </p>
 
 @if (Model.Packages.Count == 0)
