@@ -11,7 +11,13 @@ and run signed upgrade scripts unattended. Upgrade paths for each application ar
 provider (Anthropic / OpenAI / Ollama / Goose) that authors the script the agent later executes:
 **bash for macOS and Linux, PowerShell for Windows**.
 
-This directory is **not** a git repository.
+This directory is a git repository; `origin` is `git@github.com:hobleyd/kintsugi.git`, and it is
+**public**. So no real deployment detail belongs in a tracked file — not just credentials but the
+server's own address. Secrets and TLS material stay in `.env` and `nginx/tls/`, both gitignored;
+every agent's `DEFAULT_API_BASE_URL` and `packaging/config.toml` ships the placeholder
+`kintsugi.example.com`, because a real fleet sets its address at install time via `config.toml` or
+`PATCHING_AGENT_API_BASE_URL` and never by editing that default. Keep the three agents' defaults
+identical — each one's comment claims it is in step with the others.
 
 ## Commands
 
