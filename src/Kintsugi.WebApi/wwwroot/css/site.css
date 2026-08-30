@@ -379,9 +379,12 @@ th.sortable.sort-desc .th-sort-label::after { content: '▼'; opacity: 1; color:
 }
 
 /* Settings pages that pair the form with reference material alongside it (see
-   Pages/Settings/Authentication.cshtml). The form panel keeps .settings-form's 480px cap, so
-   the aside takes the remaining width; wrapping rather than a breakpoint because nothing else
-   in this stylesheet uses media queries. */
+   Pages/Settings/Authentication.cshtml). Wrapping rather than a breakpoint because nothing else
+   in this stylesheet uses media queries — but flex wraps on the *bases* below, before any
+   shrinking, so those two numbers alone decide when the aside drops beneath the form. They sum
+   (plus the gap) to 616px, which against a 210px sidebar and .wrap's padding means the columns
+   stay side by side down to a viewport of about 875px. Keep them small for that reason: a
+   comfortable-looking basis here reads as "the instructions are at the bottom" on a laptop. */
 .settings-columns {
     display: flex;
     flex-wrap: wrap;
@@ -391,8 +394,12 @@ th.sortable.sort-desc .th-sort-label::after { content: '▼'; opacity: 1; color:
 
 /* :not() rather than relying on source order — the aside carries both classes, so equal
    specificity would leave which one wins to whichever rule is written last. */
-.settings-columns > .panel:not(.settings-aside) { flex: 0 1 auto; }
-.settings-columns > .settings-aside { flex: 1 1 22rem; min-width: 20rem; }
+.settings-columns > .panel:not(.settings-aside) { flex: 1 1 22rem; min-width: 0; max-width: 30rem; }
+.settings-columns > .settings-aside { flex: 1 1 15rem; min-width: 0; }
+
+/* The panel above owns the form's width here, so the two caps can't disagree; 30rem is the
+   same 480px .settings-form applies on its own elsewhere. */
+.settings-columns .settings-form { max-width: none; }
 
 .settings-aside { padding: 1.75rem; }
 .settings-aside h2 { margin: 0 0 0.75rem; font-size: 0.95rem; }
