@@ -1,0 +1,21 @@
+[Unit]
+Description=Kintsugi patching agent check-in schedule
+
+[Timer]
+# No OnCalendar yet on a fresh install: the first OnBootSec run is what assigns this host a
+# check-in minute (see src/checkin_schedule.rs) and rewrites this exact file to add one, then
+# reloads itself with systemd — after that, it fires once every hour at that minute. Deliberately
+# not a fixed default here, so a fresh fleet doesn't all start out sharing the same minute before
+# the agent gets a chance to spread them out.
+OnBootSec=2min
+
+# If the host was switched off at its assigned minute, run as soon as it next comes up rather than
+# skipping the hour entirely — the systemd equivalent of launchd running a missed job at wake.
+# Persistent= only applies to OnCalendar=, so it does nothing until the first run adds one; it is
+# here from the start so this file and the one checkin_schedule.rs regenerates say the same thing.
+Persistent=true
+
+Unit=kintsugi-agent.service
+
+[Install]
+WantedBy=timers.target

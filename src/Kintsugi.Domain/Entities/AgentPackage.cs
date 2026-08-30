@@ -4,9 +4,9 @@ using Kintsugi.Domain.Exceptions;
 namespace Kintsugi.Domain.Entities;
 
 /// <summary>
-/// One published build of the kintsugi-agent installer package for a given platform ("macos" or
-/// "windows") — what the Clients page offers for download, and what a running agent compares its
-/// own version against to decide whether to self-update (see
+/// One published build of the kintsugi-agent installer package for a given platform ("macos",
+/// "windows" or "linux") — what the Clients page offers for download, and what a running agent
+/// compares its own version against to decide whether to self-update (see
 /// <c>PublishAgentPackageCommandHandler</c> and each agent's own <c>self_update</c> module). Note
 /// this platform namespace is the agent build's, and is deliberately separate from
 /// <c>PlatformBucket</c>'s upgrade-path buckets.

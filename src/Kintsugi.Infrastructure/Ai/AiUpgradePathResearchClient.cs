@@ -608,13 +608,19 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
             ? string.Join(", ", request.KnownInstalledVersions)
             : "unknown";
 
-        var isWindows = request.Platform == PlatformBucket.Windows;
+        var target = TargetPlatformOf(request.Platform);
+        var isWindows = target == TargetPlatform.Windows;
 
         var identifierLine = string.IsNullOrWhiteSpace(request.ApplicationIdentifier)
             ? ""
-            : isWindows
-                ? $"\nApplication identifier (the application's key name under the Windows uninstall registry, e.g. an MSI product code or the vendor's own key): {request.ApplicationIdentifier}"
-                : $"\nApplication identifier (macOS bundle ID): {request.ApplicationIdentifier}";
+            : target switch
+            {
+                TargetPlatform.Windows =>
+                    $"\nApplication identifier (the application's key name under the Windows uninstall registry, e.g. an MSI product code or the vendor's own key): {request.ApplicationIdentifier}",
+                TargetPlatform.Linux =>
+                    $"\nApplication identifier (whatever the managed host reported for this application, e.g. a Flatpak application ID or a package name): {request.ApplicationIdentifier}",
+                _ => $"\nApplication identifier (macOS bundle ID): {request.ApplicationIdentifier}"
+            };
 
         var hostingSection = string.IsNullOrWhiteSpace(hostingSiteContext)
             ? ""
@@ -628,19 +634,28 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
 
                 """;
 
-        // The two platforms differ in three places and nowhere else: what the model is told it's
-        // writing (bash vs PowerShell), how --update-version has to behave to still run on this
+        // The platforms differ in three places and nowhere else: what the model is told it's
+        // writing (bash or PowerShell), how --update-version has to behave to still run on this
         // Linux server, and what --update is allowed to do on the managed host. Everything around
         // those — the CLI contract, the research instructions, the no-reliable-method sentinel, the
         // "output only the script" rule — is deliberately shared, because the agent, the server-side
-        // version check, and the signing flow all treat both languages identically.
-        var platformIntro = isWindows
-            ? "a Windows application"
-            : "a macOS application";
+        // version check, and the signing flow all treat every platform identically.
+        var platformIntro = target switch
+        {
+            TargetPlatform.Windows => "a Windows application",
+            TargetPlatform.Linux => "a Linux application",
+            _ => "a macOS application"
+        };
 
-        var scriptIntro = isWindows
-            ? "Otherwise, write a single PowerShell script implementing this exact CLI contract:\n\n              script.ps1 --appName <name> --appId <id> --update-version\n              script.ps1 --appName <name> --appId <id> --update"
-            : "Otherwise, write a single bash script implementing this exact CLI contract:\n\n              script.sh --appName <name> --appId <bundle-id> --update-version\n              script.sh --appName <name> --appId <bundle-id> --update";
+        var scriptIntro = target switch
+        {
+            TargetPlatform.Windows =>
+                "Otherwise, write a single PowerShell script implementing this exact CLI contract:\n\n              script.ps1 --appName <name> --appId <id> --update-version\n              script.ps1 --appName <name> --appId <id> --update",
+            TargetPlatform.Linux =>
+                "Otherwise, write a single bash script implementing this exact CLI contract:\n\n              script.sh --appName <name> --appId <id> --update-version\n              script.sh --appName <name> --appId <id> --update",
+            _ =>
+                "Otherwise, write a single bash script implementing this exact CLI contract:\n\n              script.sh --appName <name> --appId <bundle-id> --update-version\n              script.sh --appName <name> --appId <bundle-id> --update"
+        };
 
         var updateVersionSection = isWindows
             ? """
@@ -672,16 +687,54 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
               - Determine the current latest stable released version using only `curl` and plain text
                 processing (`grep`, `sed`, `cut`, `head`, etc. — assume no `jq`). For a GitHub-hosted
                 project, the simplest reliable approach is
-                `curl -fsSL -o /dev/null -w '%{redirect_url}' https://github.com/<owner>/<repo>/releases/latest`,
+                `curl -fsS -o /dev/null -w '%{redirect_url}' https://github.com/<owner>/<repo>/releases/latest`,
                 which returns a URL ending in the latest tag with no JSON parsing at all — prefer this
-                kind of redirect/text trick over parsing a JSON API response. Use your own judgement
-                based on where this application is actually distributed.
+                kind of redirect/text trick over parsing a JSON API response. Note the absence of
+                `-L`: `%{redirect_url}` reports the redirect curl did NOT follow, so adding `-L` makes
+                curl follow it and report an empty string instead. Use your own judgement based on
+                where this application is actually distributed.
               - On success, print ONLY the bare version string to stdout (nothing else — no labels, no
                 extra lines) and exit 0.
               - On failure to determine it, print an error to stderr and exit non-zero. No stdout output.
               - Must not modify anything, or depend on anything being installed or mounted — this mode
                 only checks and reports, from a plain Linux shell with curl available.
               """;
+
+        if (target == TargetPlatform.Linux)
+        {
+            // Linux is the one platform where this mode runs on the *same kind of system* it is
+            // checking for, which makes it the one platform where a plausible-looking script can be
+            // quietly, catastrophically wrong: `apt-cache policy` or `rpm -q` here would answer
+            // confidently about the API server's own packages, and that answer would then be stored
+            // as the latest version for every managed host. The macOS and Windows prompts get this
+            // for free — `defaults` and the registry simply don't exist here — so only this one has
+            // to say it out loud.
+            updateVersionSection = """
+                `--update-version` mode — this runs directly on the fleet-management API server, NOT on
+                the managed host, purely to check for a new release:
+                - CRITICAL: the API server is itself a Linux machine, so a command like `apt-cache
+                  policy`, `apt list --upgradable`, `dnf list`, `rpm -q`, `dpkg -l`, `snap info`, or
+                  `flatpak remote-info` WILL run here and WILL return an answer — the API server's own
+                  answer, about a completely different machine, possibly a different distribution
+                  entirely. Never use any of them, and never read anything under `/usr`, `/opt`,
+                  `/var/lib/dpkg`, `/var/lib/rpm` or `/etc` to determine a version. This mode must
+                  determine the latest version published *by the vendor*, from the network only.
+                - Determine the current latest stable released version using only `curl` and plain text
+                  processing (`grep`, `sed`, `cut`, `head`, etc. — assume no `jq`). For a GitHub-hosted
+                  project, the simplest reliable approach is
+                  `curl -fsS -o /dev/null -w '%{redirect_url}' https://github.com/<owner>/<repo>/releases/latest`,
+                  which returns a URL ending in the latest tag with no JSON parsing at all — prefer this
+                  kind of redirect/text trick over parsing a JSON API response. Note the absence of
+                  `-L`: `%{redirect_url}` reports the redirect curl did NOT follow, so adding `-L` makes
+                  curl follow it and report an empty string instead. Use your own judgement based on
+                  where this application is actually distributed.
+                - On success, print ONLY the bare version string to stdout (nothing else — no labels, no
+                  extra lines) and exit 0.
+                - On failure to determine it, print an error to stderr and exit non-zero. No stdout output.
+                - Must not modify anything, or depend on anything being installed — this mode only
+                  checks and reports, from a plain Linux shell with curl available.
+                """;
+        }
 
         var updateSection = isWindows
             ? """
@@ -757,6 +810,46 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
                 and exit non-zero with a clear error on stderr if it doesn't.
               """;
 
+        if (target == TargetPlatform.Linux)
+        {
+            updateSection = """
+                `--update` mode — this one DOES run on the managed Linux host itself (as root, from a
+                systemd service), so system tooling is fine here:
+                - Re-run the same latest-version check as `--update-version` internally.
+                - Determine the currently installed version from the application itself where you can
+                  (e.g. `<binary> --version`), and verify it really is the application `--appId` names
+                  before touching anything — treat a mismatch as a fatal error (wrong app), not
+                  something to silently ignore.
+                - If already at or above the latest version, print a message and exit 0 without
+                  downloading or changing anything (idempotent).
+                - Do NOT assume a distribution. Detect which package manager this host actually has —
+                  `command -v apt-get`, `dnf`, `zypper`, `pacman`, `apk` — and branch on it, rather
+                  than writing a script that only works on Debian derivatives. A script that assumes
+                  `apt-get` is one of the most common ways this goes wrong.
+                - Prefer the distribution's own package manager when the application is genuinely
+                  packaged for it, since that is what will keep working. Otherwise use whatever the
+                  vendor actually ships: a `.deb`/`.rpm` downloaded and installed with
+                  `apt-get install -y ./<file>` / `dnf install -y ./<file>`, a tarball unpacked under
+                  `/opt`, or an AppImage placed somewhere on the PATH.
+                - Never run anything interactively. Export `DEBIAN_FRONTEND=noninteractive`, and pass
+                  `-y`/`--non-interactive`/`--noconfirm` as the detected manager requires. A script
+                  that stops at a debconf prompt will hang until it is killed, mid-transaction.
+                - Download into a directory made with `mktemp -d`, cleaned up via a `trap` covering
+                  both success and failure. Prefer a stable "latest" URL pattern (e.g. GitHub's
+                  `.../releases/latest/download/<asset-filename>`, which resolves to whatever is
+                  current without needing the version number) over constructing a per-version URL from
+                  the discovered version string, when the distribution channel supports it.
+                - If the application is currently running, stop it gracefully before replacing it —
+                  already-authorized, so this can be automatic. Send `TERM` (via `systemctl stop` for
+                  something that runs as a unit, or `pkill -x`), poll for it to actually exit for a
+                  bounded grace period (e.g. up to 15s, checking every second with `pgrep -x`), and
+                  only as a last-resort fallback after that use `pkill -9 -x` — never skip straight to
+                  a hard kill.
+                - End by verifying the installed version now meets the latest version determined above,
+                  and exit non-zero with a clear error on stderr if it doesn't.
+                """;
+        }
+
         var generalRequirements = isWindows
             ? """
               - Start with `Set-StrictMode -Version Latest` and `$ErrorActionPreference = 'Stop'`.
@@ -780,6 +873,20 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
                 typically as root or an admin user (for `--update`) or on a plain Linux server (for
                 `--update-version`).
               """;
+
+        if (target == TargetPlatform.Linux)
+        {
+            generalRequirements = """
+                - Start with `#!/bin/bash` and `set -euo pipefail`.
+                - `--appName` and `--appId` are always both required, along with exactly one of
+                  `--update-version` or `--update` (in either order).
+                - No interactive prompts of any kind anywhere in the script — it always runs unattended,
+                  as root from a systemd service (for `--update`) or on the API server (for
+                  `--update-version`).
+                - It must pass shellcheck cleanly — in particular, quote every expansion, and don't
+                  leave a variable assigned but never used.
+                """;
+        }
 
         return $$"""
             You are researching how {{platformIntro}} distributes and checks for updates, then
@@ -825,14 +932,44 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
             """;
     }
 
+    /// <summary>
+    /// Which of the three managed platforms a prompt is being written for. Anything that isn't
+    /// recognizably Windows or Linux — including <see cref="PlatformBucket.Generic"/>, the bucket an
+    /// unidentifiable operating system string lands in — is treated as macOS, which is what this
+    /// prompt builder did for every non-Windows platform before Linux existed as a separate case.
+    /// </summary>
+    private enum TargetPlatform
+    {
+        MacOs,
+        Windows,
+        Linux
+    }
+
+    private static TargetPlatform TargetPlatformOf(string platform) => platform switch
+    {
+        PlatformBucket.Windows => TargetPlatform.Windows,
+        PlatformBucket.Linux => TargetPlatform.Linux,
+        _ => TargetPlatform.MacOs
+    };
+
     private static string BuildScriptFixPrompt(UpgradePathScriptGenerationRequest request, string script, string validationErrors)
     {
-        var isWindows = request.Platform == PlatformBucket.Windows;
+        // Kept in step with BuildScriptGenerationPrompt on purpose: this is the *same* script being
+        // repaired, so telling the model something different about where --update-version runs than
+        // it was told when writing it is how a repair pass turns a warning into a real bug.
+        var target = TargetPlatformOf(request.Platform);
+        var isWindows = target == TargetPlatform.Windows;
         var language = isWindows ? "PowerShell" : "bash";
         var fence = isWindows ? "powershell" : "bash";
-        var updateVersionConstraint = isWindows
-            ? "Remember that --update-version must run correctly on a plain Linux server under `pwsh` with only outbound HTTPS available — no Windows-only capabilities (registry, WMI/CIM, COM, winget) in that mode."
-            : "Remember that --update-version must run correctly on a plain Linux server with only curl available — no macOS-only tools in that mode.";
+        var updateVersionConstraint = target switch
+        {
+            TargetPlatform.Windows =>
+                "Remember that --update-version must run correctly on a plain Linux server under `pwsh` with only outbound HTTPS available — no Windows-only capabilities (registry, WMI/CIM, COM, winget) in that mode.",
+            TargetPlatform.Linux =>
+                "Remember that --update-version runs on the fleet-management API server, not on the managed host — and that the API server is itself a Linux machine, so `apt-cache`/`dnf`/`rpm`/`dpkg`/`snap`/`flatpak` would answer about the *server* rather than failing. That mode must determine the vendor's latest published version over the network with curl, and read nothing from the local filesystem.",
+            _ =>
+                "Remember that --update-version must run correctly on a plain Linux server with only curl available — no macOS-only tools in that mode."
+        };
 
         return $$"""
             The {{language}} script below, which you wrote as a reusable --update-version/--update tool for

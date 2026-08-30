@@ -1,0 +1,26 @@
+[Unit]
+Description=Kintsugi patching agent check-in
+# Registration, enrollment and the upgrade-path fetch all need the network to be genuinely up,
+# not merely configured — hence -online rather than plain network.target.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/kintsugi-agent
+
+# On a host with nobody logged in, this same invocation also runs the patch cycle (see
+# main::patch_unattended_if_nobody_is_logged_in), and a full distribution upgrade on a machine
+# that has been switched off for months genuinely can run for hours. systemd's default 90-second
+# start timeout would kill it partway through a dpkg transaction, which is the single worst moment
+# to be killed.
+TimeoutStartSec=infinity
+
+# Deliberately unsandboxed: this service installs operating system packages, so every
+# Protect*/ReadOnlyPaths hardening option would have to be punched through for exactly the paths
+# that matter. The security boundary here is that only root can write the request queue's
+# *contents* and that nothing crossing it is executable — see src/queue.rs — not filesystem
+# confinement of the thing doing the installing.
+
+# No [Install] section: this unit is started by kintsugi-agent.timer and by
+# kintsugi-agent-queue.path, never enabled on its own.

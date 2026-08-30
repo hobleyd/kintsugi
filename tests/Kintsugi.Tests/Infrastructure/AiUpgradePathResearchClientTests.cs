@@ -230,6 +230,68 @@ public class AiUpgradePathResearchClientTests
     }
 
     [Fact]
+    public void BuildDefaultPrompt_ForLinux_AsksForBash_AndForbidsAskingTheApiServersOwnPackageManager()
+    {
+        var client = CreateClient(new QueueingHandler());
+
+        var prompt = client.BuildDefaultPrompt(new UpgradePathScriptGenerationRequest("Firefox", PlatformBucket.Linux, Array.Empty<string>()));
+
+        Assert.Contains("a Linux application", prompt);
+        Assert.Contains("bash script", prompt);
+        Assert.DoesNotContain("PowerShell", prompt);
+
+        // The trap that only exists on this platform. --update-version runs on the API server,
+        // which is itself a Linux machine, so `apt-cache policy` there does not fail — it answers
+        // confidently about the wrong host, and that answer becomes LatestVersion for the whole
+        // fleet. macOS and Windows get this for free because their host-local tools simply aren't
+        // present on the server.
+        Assert.Contains("runs directly on the fleet-management API server", prompt);
+        Assert.Contains("apt-cache", prompt);
+        Assert.Contains("Never use any of them", prompt);
+    }
+
+    [Fact]
+    public void BuildDefaultPrompt_ForLinux_TellsTheUpdateModeToDetectThePackageManagerRatherThanAssumeApt()
+    {
+        var client = CreateClient(new QueueingHandler());
+
+        var prompt = client.BuildDefaultPrompt(new UpgradePathScriptGenerationRequest("Firefox", PlatformBucket.Linux, Array.Empty<string>()));
+
+        Assert.Contains("Do NOT assume a distribution", prompt);
+        Assert.Contains("zypper", prompt);
+        Assert.Contains("DEBIAN_FRONTEND=noninteractive", prompt);
+    }
+
+    [Fact]
+    public void BuildDefaultPrompt_ForLinux_DescribesTheIdentifierAsTheReportedOne_NotAMacBundleId()
+    {
+        var client = CreateClient(new QueueingHandler());
+
+        var prompt = client.BuildDefaultPrompt(
+            new UpgradePathScriptGenerationRequest("Firefox", PlatformBucket.Linux, Array.Empty<string>(), "org.mozilla.firefox"));
+
+        Assert.Contains("org.mozilla.firefox", prompt);
+        Assert.Contains("Flatpak application ID", prompt);
+        Assert.DoesNotContain("macOS bundle ID", prompt);
+    }
+
+    /// <summary>
+    /// An unrecognizable operating system string lands in <see cref="PlatformBucket.Generic"/>, and
+    /// that bucket has always been prompted for as macOS. Adding a third platform must not have
+    /// quietly changed which one it falls back to.
+    /// </summary>
+    [Fact]
+    public void BuildDefaultPrompt_ForTheGenericBucket_StillPromptsAsMacOs()
+    {
+        var client = CreateClient(new QueueingHandler());
+
+        var prompt = client.BuildDefaultPrompt(new UpgradePathScriptGenerationRequest("Firefox", PlatformBucket.Generic, Array.Empty<string>()));
+
+        Assert.Contains("a macOS application", prompt);
+        Assert.Contains("`#!/bin/bash`", prompt);
+    }
+
+    [Fact]
     public void BuildDefaultPrompt_IncludesTheApplicationIdentifier_WhenProvided()
     {
         var client = CreateClient(new QueueingHandler());

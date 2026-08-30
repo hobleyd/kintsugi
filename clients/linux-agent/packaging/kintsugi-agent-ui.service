@@ -1,0 +1,29 @@
+[Unit]
+Description=Kintsugi patching agent (per-user)
+
+# Installed into /etc/systemd/user and enabled with `systemctl --global enable`, so it runs inside
+# each logged-in user's own systemd manager — as them, never as root — which is what lets it show
+# dialogs and notifications directly.
+#
+# Ordered against graphical-session.target rather than default.target on purpose. Everything this
+# process does needs a display, and by the time that target is reached the desktop has imported
+# DISPLAY/WAYLAND_DISPLAY into the user manager's environment; started any earlier it would
+# inherit neither and exit straight away (see main::has_a_display). PartOf= means it also stops
+# cleanly when the graphical session ends.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=/usr/local/bin/kintsugi-agent --agent
+
+# Unlike the root service, this owns the patching schedule for a desktop and needs to notice a due
+# time (or a delay elapsing, including across suspend/resume) promptly rather than once a day, so
+# it stays running continuously.
+#
+# on-failure, not always: this process exits 0 on purpose when there is no display to use, and
+# restarting it forever in that case would just be a loop.
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=graphical-session.target

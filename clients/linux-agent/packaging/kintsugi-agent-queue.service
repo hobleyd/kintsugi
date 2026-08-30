@@ -1,0 +1,14 @@
+[Unit]
+Description=Kintsugi patching agent privileged request queue
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/kintsugi-agent --process-queue
+
+# An application patch requested from the desktop runs here, and can take as long as the download
+# and install take — see the matching note in kintsugi-agent.service.
+TimeoutStartSec=infinity
+
+# No [Install] section: started only by kintsugi-agent-queue.path.

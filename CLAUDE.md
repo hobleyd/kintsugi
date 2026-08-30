@@ -5,13 +5,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 Kintsugi is an enterprise patch-management system: an ASP.NET Core 8 backend (`Kintsugi.sln`, Clean
-Architecture) plus two Rust agents — `clients/macos-agent/` and `clients/windows-agent/` — that
-enroll themselves into the fleet, report their installed applications, and run signed upgrade
-scripts unattended. Upgrade paths for each application are researched by an AI provider (Anthropic /
-OpenAI / Ollama / Goose) that authors the script the agent later executes: **bash for macOS,
-PowerShell for Windows**.
+Architecture) plus three Rust agents — `clients/macos-agent/`, `clients/windows-agent/` and
+`clients/linux-agent/` — that enroll themselves into the fleet, report their installed applications,
+and run signed upgrade scripts unattended. Upgrade paths for each application are researched by an AI
+provider (Anthropic / OpenAI / Ollama / Goose) that authors the script the agent later executes:
+**bash for macOS and Linux, PowerShell for Windows**.
 
-This directory is **not** a git repository.
+This directory is a git repository; `origin` is `git@github.com:hobleyd/kintsugi.git`, and it is
+**public**. So no real deployment detail belongs in a tracked file — not just credentials but the
+server's own address. Secrets and TLS material stay in `.env` and `nginx/tls/`, both gitignored;
+every agent's `DEFAULT_API_BASE_URL` and `packaging/config.toml` ships the placeholder
+`kintsugi.example.com`, because a real fleet sets its address at install time via `config.toml` or
+`PATCHING_AGENT_API_BASE_URL` and never by editing that default. Keep the three agents' defaults
+identical — each one's comment claims it is in step with the others.
 
 ## Commands
 
@@ -39,6 +45,11 @@ cd clients/macos-agent && cargo test load_or_assign_persists_a_fresh_minute_when
 # Windows agent — same shape, but it only builds on Windows (winreg, windows-sys, windows-service)
 cd clients/windows-agent && cargo build --release
 cd clients/windows-agent && cargo test
+
+# Linux agent — same shape again. Builds and tests natively on Linux; from macOS, run it in a
+# container (see below), which is a real Linux build rather than a cross-compile.
+cd clients/linux-agent && cargo build --release
+cd clients/linux-agent && cargo test
 ```
 
 There is no `IDesignTimeDbContextFactory`, so `dotnet ef` resolves the connection string from
@@ -51,8 +62,10 @@ the `db` service; both only exist inside the container. Run via `docker compose`
 `docker compose build` does not build the tests either — the Dockerfile copies only `src/`.
 
 Releasing an agent: bump `version` in that agent's `Cargo.toml`, then run its own publish script —
-`packaging/publish-release.sh` (macOS) or `packaging/publish-release.ps1` (Windows), both of which
-build, tar, and POST to `/api/agent-packages`.
+`packaging/publish-release.sh` (macOS and Linux) or `packaging/publish-release.ps1` (Windows), all of
+which build, tar, and POST to `/api/agent-packages`. The Linux one must be run on the *oldest* glibc
+in the fleet (or a container of it): a binary linked against a newer glibc will not start on an older
+host, and nothing in the publish path checks that.
 
 **Working on the Windows agent from a non-Windows machine.** It can't be built natively, but it can
 be fully type-checked *and its unit tests actually run*, via Docker + mingw + Wine:
@@ -68,6 +81,35 @@ where `<image>` is `rust:1-slim` plus `gcc-mingw-w64-x86-64` and `wine`, with
 `ring`'s build script compiles C and the MSVC headers can't be shipped; both exercise the same
 `#[cfg(windows)]` code and the same `windows-sys` bindings. This is worth the setup — it is what
 caught the `winget list` parser silently reporting zero applications.
+
+**Working on the Linux agent from a non-Linux machine.** Far easier, because there is no
+cross-compilation involved at all — a Linux container *is* the target:
+
+```bash
+docker run --rm -v "$PWD/clients/linux-agent":/w -w /w rust:1-slim cargo test
+```
+
+It links no C library and no GUI toolkit (see the `ksni` note in its `Cargo.toml`), so the stock
+image needs nothing added. Every output-parsing function — `flatpak list`, `snap list`, the DMI
+serial screening, `apt-get --just-print upgrade` and the four other package managers' listings —
+takes a `&str` and has tests against captured real output, for exactly the reason the Windows
+`winget list` parser does.
+
+**Verifying a server-written upgrade script actually works.** `dotnet test` only asserts the shape
+of the text; it never runs it. The scripts' `--update-version` mode is a few lines of `curl` against
+a public catalog, so running it the way `CheckScriptVersionAsync` does costs seconds and is the only
+thing that catches a script that is syntactically perfect and answers nothing:
+
+```bash
+docker run --rm -v "$PWD/scripts":/w debian:12-slim \
+    sh -c 'apt-get update -qq && apt-get install -y -qq curl && bash /w/flatpak.sh --appName Firefox --appId org.mozilla.firefox --update-version'
+```
+
+This is what caught `curl -fsSL -o /dev/null -w '%{redirect_url}'` returning an empty string — `-L`
+makes curl *follow* the redirect, so the variable reporting the un-followed redirect is empty. That
+one had shipped in Homebrew's own self-update row and in the prompt text recommending the pattern to
+the AI; nothing surfaced it, because the failure is a null `LatestVersion`, which is indistinguishable
+from "no update available".
 
 ## Architecture
 
@@ -101,7 +143,8 @@ shape when adding another. Update-check re-runs each resolved script's own `--up
 and makes no AI call.
 
 **Every upgrade script is one of two languages, decided by its platform bucket.** `ScriptLanguages.For`
-maps a bucket to bash or PowerShell, and that one function governs three things that must never
+maps a bucket to bash (macOS, Linux, Homebrew, Flatpak, Snap) or PowerShell (Windows, winget,
+Chocolatey), and that one function governs three things that must never
 disagree: which prompt `BuildScriptGenerationPrompt` writes, which validator checks the result
 (`shellcheck` vs `Invoke-ScriptAnalyzer`), and which interpreter `CheckScriptVersionAsync` runs it
 under (`bash` vs `pwsh`). That's why the runtime image installs all four; removing any of them
@@ -113,7 +156,14 @@ false, which means **nothing on that platform ever patches**.
 host.** This split is the whole reason a durable script is generated at all — checking for a new
 release costs a subprocess, not an AI call. So `--update-version` may only make HTTP calls (no
 `defaults`/`hdiutil` on macOS, no registry/WMI/COM/winget on Windows), while `--update` is free to
-use whatever the platform provides. Both prompts say so explicitly; keep them saying it.
+use whatever the platform provides. All three prompts say so explicitly; keep them saying it.
+
+Linux is the dangerous one here, and its prompt says so at length. On the other two platforms a
+host-local version check simply *fails* on the API server — `defaults` and the registry aren't there.
+On Linux the API server is the same kind of machine as the managed host, so `apt-cache policy`,
+`rpm -q`, `snap info` and friends all run happily and return the *server's* answer about a
+completely different machine. That answer is then stored as `LatestVersion` for every host sharing
+the row. Nothing errors.
 
 **Fresh deploys redirect everything.** With no `AuthenticationSettings` row saved, all non-`/api`,
 non-`/swagger`, non-`/health` traffic redirects to `/settings/authentication`. The OIDC provider is
@@ -122,9 +172,10 @@ configured at runtime from the database (`DynamicOpenIdConnectOptionsConfigurato
 ## Platform buckets, and why package managers get their own
 
 `PlatformBucket` keys an `upgrade_paths` row. An AI-researched row lives under an *OS* bucket
-(`macOS`, `Windows`); a package-manager-managed row lives under its *manager's* bucket
-(`pm:Homebrew`, `pm:winget`, `pm:Chocolatey` — see `PlatformBucket.ForPackageManager`), because what
-a `brew upgrade` row actually depends on is the manager, not the OS.
+(`macOS`, `Windows`, `Linux`); a package-manager-managed row lives under its *manager's* bucket
+(`pm:Homebrew`, `pm:winget`, `pm:Chocolatey`, `pm:Flatpak`, `pm:Snap` — see
+`PlatformBucket.ForPackageManager`), because what a `brew upgrade` row actually depends on is the
+manager, not the OS.
 
 That used to be one shared `generic` bucket, which was safe only while Homebrew was the sole package
 manager: `UpgradePathRepository`'s lookup falls back to it for *any* host, so a Windows host with an
@@ -138,25 +189,64 @@ Adding a package manager means one entry in `PackageManagerCatalog` plus a `*Upg
 The catalog is what both `ResearchApplicationUpgradePathCommandHandler` and
 `RegisterApplicationsCommandHandler` recognize managers by, so they can't drift apart.
 
+**There is a hard entry requirement for that catalog, and it is not "an agent can drive it".** A
+manager belongs there only if its catalog can be queried *over HTTP from the API server*, because
+that is where `--update-version` runs and because one row per (application, manager) is shared by the
+whole fleet. Homebrew, winget, Chocolatey, Flathub and the Snap Store each publish one global
+catalog and satisfy both. **apt, dnf, zypper and pacman satisfy neither** — "the latest version of
+curl" depends on which repositories *that* host has configured, and one `pm:APT` row would have
+Debian 12 and Ubuntu 24.04 overwriting each other's answer forever. So they are deliberately absent,
+and the Linux agent reports what they manage as *OS updates* instead: `apt`/`dnf` is to Linux what
+`softwareupdate` is to macOS — it patches the operating system and everything the vendor ships with
+it. That is why the Linux inventory lists only Flatpak and Snap applications and never dpkg/rpm
+packages, and it is not a gap. See its `os_update` and `main::collect_installed_applications`.
+
 Every `*UpgradeScript.Build` must return **byte-identical content for every application** — the
 name and id are read from `--appName`/`--appId` at runtime, never baked in. That is what lets one
 human "Sign Script" review cover every application a manager handles, via
 `FindExistingSignatureForScriptAsync`.
 
-## The two agents
+## The three agents
 
 They are deliberately the same program in different clothes: same modules, same names, same
 ordering, same comments where the reasoning carries over. Read the macOS one first — it's the
-original — then the Windows one for what the platform forced to differ. The differences that matter:
+original — then the others for what each platform forced to differ. The differences that matter:
 
-| | macOS | Windows |
-|---|---|---|
-| Privileged half | root LaunchDaemon, re-invoked by launchd | resident service (`windows-service`) |
-| Per-user half | LaunchAgent | logon-triggered task for `BUILTIN\Users` |
-| Check-in schedule | rewrites its own plist, reloads launchd via a detached helper | computes its next wake in-process |
-| Inventory | `/Applications` bundles + Homebrew | uninstall registry (3 views) + winget + Chocolatey |
-| OS updates | `softwareupdate` | Windows Update Agent COM API, via PowerShell |
-| Host identity | hardware serial, always present | SMBIOS serial, **often a placeholder** — see below |
+| | macOS | Windows | Linux |
+|---|---|---|---|
+| Privileged half | root LaunchDaemon, re-invoked by launchd | resident service (`windows-service`) | systemd oneshot on a `.timer` |
+| Per-user half | LaunchAgent | logon-triggered task for `BUILTIN\Users` | systemd user unit, `graphical-session.target` |
+| Check-in schedule | rewrites its own plist, reloads launchd via a detached helper | computes its next wake in-process | rewrites its own `.timer`, `daemon-reload` |
+| Privilege handoff | queue, OS updates only | queue, everything | queue, everything |
+| Inventory | `/Applications` bundles + Homebrew | uninstall registry (3 views) + winget + Chocolatey | Flatpak + Snap (not dpkg/rpm — see above) |
+| OS updates | `softwareupdate` | Windows Update Agent COM API, via PowerShell | apt / dnf / yum / zypper / pacman / apk |
+| Host identity | hardware serial, always present | SMBIOS serial, **often a placeholder** | DMI serial, **often a placeholder** |
+| Nobody logged in | nothing patches | nothing patches | root service patches unattended — see below |
+
+**Linux borrows its architecture from Windows, not macOS, and for the same forcing reason.** Every
+upgrade it can perform (`apt-get`, `dnf`, `flatpak update --system`, `snap refresh`) requires root,
+so patching lives in the root service and the per-user process holds no identity and makes no
+authenticated call — it decides *when*, and asks. macOS is the odd one out precisely because
+Homebrew *refuses* to run as root and installs into a user-writable prefix. The queue directory is
+`root:root 1733` (a drop-box: anyone may write, only root may read or list), which is the Linux
+spelling of the macOS queue's `root:admin 0770` and needs no group — "local administrators" is
+`sudo` on Debian, `wheel` on Red Hat, and neither elsewhere.
+
+**Only the Linux agent patches with nobody logged in, and it has to.** Both other agents put the
+patching schedule in the per-user process, which costs nothing when every managed host is somebody's
+desktop. Most of a Linux fleet is servers with no graphical session at all, so the same design would
+mean the majority of hosts silently never patched. The per-user process writes a heartbeat into the
+queue directory (`queue::record_heartbeat`); when the root service's hourly check-in finds none
+recent, it runs the cycle itself with the confirm/delay/warning steps dropped rather than faked —
+there is nobody to ask. The per-user process exits immediately when it has no `DISPLAY`, so an SSH
+login can't suppress a server's own patching by leaving a heartbeat behind.
+
+**Two root entry points mean an explicit lock.** launchd and the Windows SCM both give mutual
+exclusion for free (one instance per job; one resident service). systemd guarantees that per *unit*,
+and the Linux agent has two — `kintsugi-agent.service` on the timer and `kintsugi-agent-queue.service`
+on a `.path` watch — so `lock.rs` takes an advisory `flock` both of them hold. Without it a
+queue-triggered patch can land inside an unattended cycle and two `apt-get` runs deadlock on the
+dpkg lock with no useful error.
 
 **The Windows tray process holds no identity and makes no network call.** On macOS the per-user
 process talks to the server directly and runs patches itself (Homebrew refuses to run as root). On
@@ -168,19 +258,23 @@ carries anything executable.** An app-patch request names an application; the se
 re-fetches that application's upgrade path from the server and verifies its signature before running
 anything. The worst a forged request can do is start an already-approved upgrade early.
 
-**Windows serial numbers are frequently placeholders.** `Win32_BIOS.SerialNumber` ships as "To Be
-Filled By O.E.M.", "Default string", "0", and so on. The serial *is* this host's identity — it
-becomes the certificate CN, which `[RequireAgentIdentity]` compares against every request body — so
-two hosts sharing one would share a host record, a certificate, and each other's data.
-`system_info::serial_number` therefore screens against a placeholder list, falls back to the
-Windows `MachineGuid`, and **refuses to enroll** rather than inventing a value. macOS has no
-equivalent failure mode.
+**Windows and Linux serial numbers are frequently placeholders.** `Win32_BIOS.SerialNumber` and
+`/sys/class/dmi/id/product_serial` read the same SMBIOS field and inherit the same junk from board
+vendors: "To Be Filled By O.E.M.", "Default string", "0", "Not Specified" (which is what every guest
+of a bare `qemu-system-x86_64` reports). The serial *is* this host's identity — it becomes the
+certificate CN, which `[RequireAgentIdentity]` compares against every request body — so two hosts
+sharing one would share a host record, a certificate, and each other's data.
+`system_info::serial_number` in both agents therefore screens against a placeholder list, falls back
+to a per-installation id (the Windows `MachineGuid`, systemd's `/etc/machine-id`), and **refuses to
+enroll** rather than inventing a value. macOS has no equivalent failure mode.
 
-**Replacing a running binary differs.** macOS stages next to the target and renames over it (atomic,
-and Unix will unlink an open file). Windows locks a running image, so `self_update` renames the
-*old* binary aside — which Windows does allow — copies the new one into the freed path, and deletes
-the displaced copy at next service start. It restores the old one if the copy fails; leaving the
-path empty would break the agent permanently.
+**Replacing a running binary differs.** macOS and Linux stage next to the target and rename over it
+(atomic, and Unix will unlink an open file). Windows locks a running image, so `self_update` renames
+the *old* binary aside — which Windows does allow — copies the new one into the freed path, and
+deletes the displaced copy at next service start. It restores the old one if the copy fails; leaving
+the path empty would break the agent permanently. Linux also has nothing to restart on the root
+side: it is a oneshot that is about to exit, and the next timer firing execs whatever is at the path
+by then — only the long-running per-user units get restarted.
 
 ## Couplings nothing enforces
 
@@ -196,15 +290,21 @@ path empty would break the agent permanently.
   the current `AGENT_ENROLLMENT_TOKEN` into `config.toml` on every download, so rotation never
   staleness-breaks a published package. `AgentPackagesController.Download` skips that rewrite for a
   cert-bearing agent, because rewriting would change the bytes and break the publish-time checksum.
-- The agent-package platform namespace (`"macos"`, `"windows"`) is *not* `PlatformBucket`'s
-  namespace (`"macOS"`, `"Windows"`, `"pm:..."`). They name different things; don't unify them.
+- The agent-package platform namespace (`"macos"`, `"windows"`, `"linux"`) is *not*
+  `PlatformBucket`'s namespace (`"macOS"`, `"Windows"`, `"Linux"`, `"pm:..."`). They name different
+  things; don't unify them.
 - `PackageManagerCatalog`'s names are the strings agents report in `InstalledApp.package_manager`.
   A rename on either side silently stops an entire manager's applications resolving.
+- A package-manager row is only patchable if the *agent* reported an `applicationIdentifier` for that
+  installed application — `is_patchable` requires one for any `Script` row, and it comes from the
+  `InstalledApplication`, not from the `UpgradePath` (which always has one, falling back to the
+  name). The Windows and Linux agents set it for every managed package; the macOS agent leaves it
+  unset for Homebrew formulae/casks, which is why those rows do not currently patch.
 - Volumes that must survive a redeploy: `dataprotection-keys` (or every session is signed out),
   `agent-ca-private` / `agent-ca-public` (or the whole fleet must re-enroll), `agent-packages`,
   `db-data`.
 - Rust request/response structs mirror C# command/DTO shapes by hand with explicit `serde(rename)`
-  — changing a command's JSON shape means changing the matching struct in **both** agents.
+  — changing a command's JSON shape means changing the matching struct in **all three** agents.
 - Windows PowerShell 5.1 decodes a BOM-less `.ps1` using the system ANSI code page, not UTF-8. The
   Windows agent writes every script with a UTF-8 BOM for exactly that reason, and the
   server-written ones are kept ASCII-only as well.

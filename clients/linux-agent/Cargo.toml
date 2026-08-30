@@ -1,0 +1,60 @@
+[package]
+name = "kintsugi-agent"
+version = "0.5.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Background agent that registers this Linux host with the patching system's host inventory."
+
+[[bin]]
+name = "kintsugi-agent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+gethostname = "0.5"
+libc = "0.2"
+# rustls, not native-tls, for the third distinct reason across the three agents. The macOS agent
+# picked it to dodge a Security-framework bug and the Windows agent to keep its private key out of
+# the Windows certificate store; here the pressure is portability. native-tls on Linux means
+# OpenSSL, whose ABI this agent would then be pinned to — a binary linked against the OpenSSL 3.x
+# on a Debian 12 build host will not start on a RHEL 8 or Ubuntu 20.04 target, and a fleet agent
+# that has to be rebuilt per distro release is not one artifact, it is a matrix. rustls links
+# nothing. "-native-roots" keeps server-certificate trust on the system store (/etc/ssl/certs,
+# read at runtime, not linked), which is where an enterprise's own internal CA is deployed.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
+# Referenced directly (not just pulled in transitively via reqwest) so main.rs can install its
+# process-wide default crypto provider once at startup — see the call in main().
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+base64 = "0.22"
+# This agent's own mutual-TLS identity: generates its client keypair/CSR locally at enrollment
+# (rcgen — the private key never leaves this machine) and verifies the server's signature over
+# every Script/Command it's handed before ever executing one (p256) — see identity.rs.
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
+# Verifying a downloaded self-update package's checksum. The macOS agent shells out to `shasum`,
+# which is part of the base system there; on Linux the equivalent (`sha256sum`, coreutils) is
+# almost always present but "almost" is doing real work in that sentence — a minimal container
+# image or a busybox userland may not have it, and a self-update that silently stops working on
+# some hosts is exactly the failure this agent must not have. Hashing in-process removes the
+# question, the same call the Windows agent made about `certutil`.
+sha2 = "0.10"
+
+# The notification-area icon. Not `tray-icon` (what the macOS agent uses): its Linux backend links
+# GTK 3 and libayatana-appindicator, which would make this single binary refuse to *start* on any
+# host without those shared objects installed — i.e. every server in the fleet, where the root
+# half of this agent is exactly the half that must always run. `ksni` speaks the same
+# StatusNotifierItem D-Bus protocol those libraries implement, but in pure Rust over `zbus`, so
+# there is nothing to link and nothing to install: on a desktop the icon appears, and on a
+# headless server the session bus simply isn't there and `spawn()` returns an error this agent
+# treats as non-fatal (see tray_menu::run).
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

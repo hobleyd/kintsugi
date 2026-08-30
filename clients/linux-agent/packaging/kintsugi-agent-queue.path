@@ -1,0 +1,18 @@
+[Unit]
+Description=Watch for kintsugi-agent privileged requests
+Documentation=man:systemd.path(5)
+
+[Path]
+# The per-user agent has no privileges and no network identity of its own, so it asks for
+# everything privileged by dropping a request file here — see src/queue.rs. This is the direct
+# equivalent of the macOS agent's LaunchDaemon `WatchPaths`, and like it, it is inotify-driven
+# rather than polled: a request is picked up within a moment of being written.
+#
+# Every request file name ends in ".request" (".plan.request", ".app-patch.request",
+# ".os-update.request"); the heartbeat and result files deliberately do not, so neither triggers
+# this. See RequestKind::extension.
+PathExistsGlob=/var/lib/kintsugi-agent/queue/*.request
+Unit=kintsugi-agent-queue.service
+
+[Install]
+WantedBy=paths.target

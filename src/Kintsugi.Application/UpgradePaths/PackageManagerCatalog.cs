@@ -9,25 +9,44 @@ namespace Kintsugi.Application.UpgradePaths;
 /// <c>ResearchApplicationUpgradePathCommandHandler.ApplyPackageManagerCommandAsync</c>.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Recognition is by name, matched case-insensitively against what an agent reports in
 /// <c>InstalledApp.package_manager</c> — "Homebrew" from the macOS agent's <c>scan_homebrew</c>,
-/// "winget"/"Chocolatey" from the Windows agent's <c>scan_winget</c>/<c>scan_chocolatey</c>. The
-/// same names are what <see cref="PlatformBucket.ForPackageManager"/> keys each manager's upgrade
-/// rows by, so a name reported with different casing by two hosts must not produce two rows —
-/// hence <see cref="Canonicalize"/>.
+/// "winget"/"Chocolatey" from the Windows agent's <c>scan_winget</c>/<c>scan_chocolatey</c>,
+/// "Flatpak"/"Snap" from the Linux agent's <c>scan_flatpak</c>/<c>scan_snap</c>. The same names are
+/// what <see cref="PlatformBucket.ForPackageManager"/> keys each manager's upgrade rows by, so a
+/// name reported with different casing by two hosts must not produce two rows — hence
+/// <see cref="Canonicalize"/>.
+/// </para>
+/// <para>
+/// There is a hard entry requirement for this catalog, and it is not "the agent can drive it".
+/// A manager belongs here only if its catalog can be queried <em>over HTTP from the API server</em>,
+/// because that is where a script's <c>--update-version</c> mode runs (see
+/// <c>IUpgradePathResearchClient.CheckScriptVersionAsync</c>) and because one row per (application,
+/// manager) is shared by the whole fleet. Homebrew, winget, Chocolatey, Flathub and the Snap Store
+/// all publish one global catalog and satisfy both. A distribution's own package manager satisfies
+/// neither — "the latest version of curl" depends on which repositories <em>that</em> host has
+/// configured, and asking on the API server would confidently return the API server's answer — so
+/// apt/dnf/zypper/pacman are deliberately absent, and the Linux agent reports what they manage as
+/// OS updates rather than as applications. See its <c>os_update</c> module.
+/// </para>
 /// </remarks>
 public static class PackageManagerCatalog
 {
     public const string Homebrew = "Homebrew";
     public const string Winget = "winget";
     public const string Chocolatey = "Chocolatey";
+    public const string Flatpak = "Flatpak";
+    public const string Snap = "Snap";
 
     private static readonly IReadOnlyDictionary<string, RecognizedPackageManager> ByName =
         new Dictionary<string, RecognizedPackageManager>(StringComparer.OrdinalIgnoreCase)
         {
             [Homebrew] = new(Homebrew, ScriptLanguage.Bash, HomebrewUpgradeScript.Build),
             [Winget] = new(Winget, ScriptLanguage.PowerShell, WingetUpgradeScript.Build),
-            [Chocolatey] = new(Chocolatey, ScriptLanguage.PowerShell, ChocolateyUpgradeScript.Build)
+            [Chocolatey] = new(Chocolatey, ScriptLanguage.PowerShell, ChocolateyUpgradeScript.Build),
+            [Flatpak] = new(Flatpak, ScriptLanguage.Bash, FlatpakUpgradeScript.Build),
+            [Snap] = new(Snap, ScriptLanguage.Bash, SnapUpgradeScript.Build)
         };
 
     public static bool TryGet(string? name, out RecognizedPackageManager manager)
