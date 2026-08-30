@@ -42,10 +42,50 @@ fn run_osascript(script: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// How many application names the dialog lists before summarising the rest. A host that has been
+/// offline for a while can legitimately have dozens of pending updates, and an unbounded list
+/// would grow the dialog off the bottom of the screen — the count in the opening sentence still
+/// states the whole truth. Kept identical in the Windows and Linux agents' dialogs.
+const MAX_LISTED_APPS: usize = 10;
+
+/// Composes the dialog body. Split out from the subprocess call so the wording — which is the
+/// part that has to stay true to what `patch_cycle` actually found — can be tested directly.
+///
+/// The application names are listed under the opening sentence rather than only counted: "3
+/// application updates are ready" doesn't tell someone deciding whether to delay whether the
+/// thing they have open right now is about to be restarted.
+fn confirmation_message(delay_label: &str, delays_remaining: u32, app_names: &[String], os_update_available: bool) -> String {
+    let what = match (app_names.len(), os_update_available) {
+        (0, true) => "A macOS update is".to_string(),
+        (n, false) => format!("{n} application update{} {}", if n == 1 { "" } else { "s" }, if n == 1 { "is" } else { "are" }),
+        (n, true) => format!("{n} application update{} and a macOS update are", if n == 1 { "" } else { "s" }),
+    };
+
+    let mut message = format!(
+        "{what} ready to install. This may restart some applications, and could require a \
+         reboot.\n"
+    );
+
+    if !app_names.is_empty() {
+        message.push('\n');
+        for name in app_names.iter().take(MAX_LISTED_APPS) {
+            message.push_str(&format!("  \u{2022} {name}\n"));
+        }
+        if app_names.len() > MAX_LISTED_APPS {
+            message.push_str(&format!("  \u{2026} and {} more\n", app_names.len() - MAX_LISTED_APPS));
+        }
+    }
+
+    message.push_str(&format!(
+        "\nYou can delay this up to {delays_remaining} more time(s), {delay_label} at a time."
+    ));
+    message
+}
+
 /// Shows the confirm-or-delay dialog. When `delays_remaining` is zero, no delay option is
 /// offered at all — the caller is expected to show `acknowledge` instead in that case, since
 /// there's nothing left to choose between. Only ever called once the caller has already
-/// confirmed there's real work — `app_count`/`os_update_available` describe what that is, so the
+/// confirmed there's real work — `app_names`/`os_update_available` describe what that is, so the
 /// dialog says something concrete rather than a generic "patches are ready".
 ///
 /// `timeout_seconds` bounds how long the dialog stays up before AppleScript dismisses it on its
@@ -55,21 +95,12 @@ fn run_osascript(script: &str) -> Result<String> {
 pub fn confirm_patch(
     delay_label: &str,
     delays_remaining: u32,
-    app_count: usize,
+    app_names: &[String],
     os_update_available: bool,
     timeout_seconds: u64,
 ) -> Result<ConfirmChoice> {
     let delay_button_label = format!("{DELAY_BUTTON} {delay_label} ({delays_remaining} left)");
-
-    let what = match (app_count, os_update_available) {
-        (0, true) => "A macOS update is".to_string(),
-        (n, false) => format!("{n} application update{} {}", if n == 1 { "" } else { "s" }, if n == 1 { "is" } else { "are" }),
-        (n, true) => format!("{n} application update{} and a macOS update are", if n == 1 { "" } else { "s" }),
-    };
-    let message = format!(
-        "{what} ready to install. This may restart some applications, and could require a \
-         reboot.\n\nYou can delay this up to {delays_remaining} more time(s), {delay_label} at a time."
-    );
+    let message = confirmation_message(delay_label, delays_remaining, app_names, os_update_available);
 
     crate::logging::info(&format!("showing patch confirmation dialog ({delays_remaining} delay(s) available)"));
 
@@ -181,6 +212,59 @@ mod tests {
     fn parse_confirm_result_with_no_giving_up_clause() {
         let result = "button returned:Patch Now";
         assert_eq!(parse_confirm_result(result, DELAY_LABEL), ConfirmChoice::PatchNow);
+    }
+
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn confirmation_message_lists_the_affected_applications() {
+        let message = confirmation_message("1 hour(s)", 3, &names(&["Firefox", "Slack"]), false);
+
+        assert!(message.contains("2 application updates are ready"), "{message}");
+        assert!(message.contains("\n  \u{2022} Firefox\n  \u{2022} Slack\n"), "{message}");
+    }
+
+    /// A host that has been offline for a while can have dozens pending; the dialog has to stay
+    /// on screen, so past the cap the rest are counted rather than named.
+    #[test]
+    fn confirmation_message_summarises_the_tail_of_a_long_list() {
+        let all: Vec<String> = (1..=14).map(|n| format!("App {n}")).collect();
+        let message = confirmation_message("1 hour(s)", 3, &all, false);
+
+        assert!(message.contains("  \u{2022} App 10\n"), "{message}");
+        assert!(!message.contains("App 11"), "{message}");
+        assert!(message.contains("  \u{2026} and 4 more"), "{message}");
+    }
+
+    /// The OS-only case has no applications to list, and must read exactly as it did before the
+    /// list existed — no bullet block, and no extra blank line where one would have gone.
+    #[test]
+    fn confirmation_message_for_an_os_update_alone_carries_no_list() {
+        let message = confirmation_message("1 hour(s)", 3, &[], true);
+
+        assert_eq!(
+            message,
+            "A macOS update is ready to install. This may restart some applications, and could \
+             require a reboot.\n\nYou can delay this up to 3 more time(s), 1 hour(s) at a time."
+        );
+    }
+
+    #[test]
+    fn confirmation_message_states_the_remaining_delay_budget() {
+        let message = confirmation_message("2 day(s)", 4, &names(&["Firefox"]), false);
+
+        assert!(message.contains("1 application update is ready"), "{message}");
+        assert!(message.contains("up to 4 more time(s), 2 day(s) at a time"), "{message}");
+    }
+
+    #[test]
+    fn confirmation_message_describes_applications_and_an_os_update_together() {
+        let message = confirmation_message("1 hour(s)", 3, &names(&["Firefox", "Slack", "Zoom"]), true);
+
+        assert!(message.contains("3 application updates and a macOS update are ready"), "{message}");
+        assert!(message.contains("  \u{2022} Zoom"), "{message}");
     }
 
     #[test]

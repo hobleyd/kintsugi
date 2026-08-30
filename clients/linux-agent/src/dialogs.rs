@@ -52,25 +52,50 @@ fn detect_dialog_tool() -> Option<DialogTool> {
         .or_else(|| find_binary("kdialog").map(DialogTool::KDialog))
 }
 
+/// How many application names the dialog lists before summarising the rest. A host that has been
+/// offline for a while can legitimately have dozens of pending updates, and an unbounded list
+/// would grow the dialog off the bottom of the screen — the count in the opening sentence still
+/// states the whole truth. Kept identical in the macOS and Windows agents' dialogs.
+const MAX_LISTED_APPS: usize = 10;
+
 /// Composes the dialog body. Split out from the subprocess call so the wording — which is the
 /// part that has to stay true to what `patch_cycle` actually found — can be tested directly.
-fn confirmation_message(delay_label: &str, delays_remaining: u32, app_count: usize, os_update_available: bool) -> String {
-    let what = match (app_count, os_update_available) {
+///
+/// The application names are listed under the opening sentence rather than only counted: "3
+/// application updates are ready" doesn't tell someone deciding whether to delay whether the
+/// thing they have open right now is about to be restarted.
+fn confirmation_message(delay_label: &str, delays_remaining: u32, app_names: &[String], os_update_available: bool) -> String {
+    let what = match (app_names.len(), os_update_available) {
         (0, true) => "A system update is".to_string(),
         (n, false) => format!("{n} application update{} {}", if n == 1 { "" } else { "s" }, if n == 1 { "is" } else { "are" }),
         (n, true) => format!("{n} application update{} and a system update are", if n == 1 { "" } else { "s" }),
     };
 
-    format!(
+    let mut message = format!(
         "{what} ready to install. This may restart some applications, and could require a \
-         reboot.\n\nYou can delay this up to {delays_remaining} more time(s), {delay_label} at a time."
-    )
+         reboot.\n"
+    );
+
+    if !app_names.is_empty() {
+        message.push('\n');
+        for name in app_names.iter().take(MAX_LISTED_APPS) {
+            message.push_str(&format!("  \u{2022} {name}\n"));
+        }
+        if app_names.len() > MAX_LISTED_APPS {
+            message.push_str(&format!("  \u{2026} and {} more\n", app_names.len() - MAX_LISTED_APPS));
+        }
+    }
+
+    message.push_str(&format!(
+        "\nYou can delay this up to {delays_remaining} more time(s), {delay_label} at a time."
+    ));
+    message
 }
 
 /// Shows the confirm-or-delay dialog. When `delays_remaining` is zero, no delay option is
 /// offered at all — the caller is expected to show `acknowledge` instead in that case, since
 /// there's nothing left to choose between. Only ever called once the caller has already
-/// confirmed there's real work — `app_count`/`os_update_available` describe what that is, so the
+/// confirmed there's real work — `app_names`/`os_update_available` describe what that is, so the
 /// dialog says something concrete rather than a generic "patches are ready".
 ///
 /// `timeout_seconds` bounds how long the dialog stays up before it dismisses itself
@@ -80,13 +105,13 @@ fn confirmation_message(delay_label: &str, delays_remaining: u32, app_count: usi
 pub fn confirm_patch(
     delay_label: &str,
     delays_remaining: u32,
-    app_count: usize,
+    app_names: &[String],
     os_update_available: bool,
     timeout_seconds: u64,
 ) -> Result<ConfirmChoice> {
     let tool = detect_dialog_tool().context("no dialog program (zenity or kdialog) is installed")?;
     let delay_button_label = format!("{DELAY_BUTTON} {delay_label} ({delays_remaining} left)");
-    let message = confirmation_message(delay_label, delays_remaining, app_count, os_update_available);
+    let message = confirmation_message(delay_label, delays_remaining, app_names, os_update_available);
 
     crate::logging::info(&format!("showing patch confirmation dialog ({delays_remaining} delay(s) available)"));
 
@@ -99,6 +124,14 @@ pub fn confirm_patch(
             path,
             &[
                 "--question",
+                // The message now carries application names, which come from the backend and so
+                // can contain anything a package manager reported. zenity parses `--text` as
+                // Pango markup by default, and a name with a bare `&` in it makes that parse
+                // fail — zenity then exits non-zero, which `interpret_exit_status` reads as a
+                // decline, so the host would silently delay forever and never show a dialog at
+                // all. kdialog's path needs no equivalent: Qt only treats text as rich when it
+                // looks like markup, and these names don't.
+                "--no-markup",
                 &format!("--title={TITLE}"),
                 &format!("--text={message}"),
                 &format!("--ok-label={PATCH_NOW_BUTTON}"),
@@ -151,8 +184,45 @@ fn interpret_exit_status(status: Option<i32>) -> ConfirmChoice {
     }
 }
 
+/// Whether a child needs `LC_ALL` forced to a UTF-8 locale, given what this process inherited.
+///
+/// GLib decodes a program's arguments using the locale's charset, and under the C locale zenity
+/// rejects *any* non-ASCII argument outright — it exits 255, which `interpret_exit_status` reads
+/// as a decline, so the host would silently delay forever and never show a dialog again. That is
+/// not hypothetical: the message now lists application names, which come from whatever Flatpak
+/// and Snap reported, and it draws them with a bullet. This is the same class of environment gap
+/// as `find_binary` not consulting `PATH` — a systemd user unit inherits systemd's environment,
+/// where nothing has set `LANG` unless the session manager did.
+///
+/// A locale that is already UTF-8 is left alone, so a user's own `de_DE.UTF-8` survives; only a
+/// locale that cannot represent the text is replaced. `LC_ALL` is what gets set, because it is
+/// what overrides an inherited non-UTF-8 `LANG`.
+fn needs_utf8_locale_override(lc_all: Option<&str>, lang: Option<&str>) -> bool {
+    let is_utf8 = |value: &str| {
+        let value = value.to_ascii_lowercase().replace('-', "");
+        value.contains("utf8")
+    };
+
+    match (lc_all, lang) {
+        (Some(lc_all), _) if !lc_all.is_empty() => !is_utf8(lc_all),
+        (_, Some(lang)) if !lang.is_empty() => !is_utf8(lang),
+        _ => true,
+    }
+}
+
+/// Builds a command for a dialog program, with the locale sorted out — see
+/// `needs_utf8_locale_override`, which is the whole reason this exists rather than
+/// `Command::new`.
+fn dialog_command(program: &Path) -> Command {
+    let mut command = Command::new(program);
+    if needs_utf8_locale_override(std::env::var("LC_ALL").ok().as_deref(), std::env::var("LANG").ok().as_deref()) {
+        command.env("LC_ALL", "C.UTF-8");
+    }
+    command
+}
+
 fn run_for_status(path: &Path, args: &[&str]) -> Result<Option<i32>> {
-    let output = Command::new(path)
+    let output = dialog_command(path)
         .args(args)
         .output()
         .with_context(|| format!("failed to run {}", path.display()))?;
@@ -162,7 +232,8 @@ fn run_for_status(path: &Path, args: &[&str]) -> Result<Option<i32>> {
 fn run_with_timeout(path: &Path, args: &[&str], timeout_seconds: u64) -> Result<Option<i32>> {
     let timeout = find_binary("timeout").context("coreutils' `timeout` is required to bound a kdialog prompt")?;
 
-    let output = Command::new(timeout)
+    // The locale has to be set on `timeout`, since that is the process that execs kdialog.
+    let output = dialog_command(&timeout)
         .arg(timeout_seconds.to_string())
         .arg(path)
         .args(args)
@@ -207,7 +278,9 @@ pub fn notify(title: &str, message: &str) {
     crate::logging::info(&format!("notification: {title} — {message}"));
 
     if let Some(notify_send) = find_binary("notify-send") {
-        match Command::new(&notify_send).args(["--app-name", TITLE, title, message]).output() {
+        // `dialog_command` for the locale, not for a dialog: notify-send is GLib-based too, and
+        // `progress_bar`'s block characters are non-ASCII on every single notification.
+        match dialog_command(&notify_send).args(["--app-name", TITLE, title, message]).output() {
             Ok(output) if output.status.success() => return,
             Ok(output) => crate::logging::warn(&format!(
                 "notify-send exited with {}: {}",
@@ -220,7 +293,7 @@ pub fn notify(title: &str, message: &str) {
 
     if let Some(DialogTool::Zenity(zenity)) = detect_dialog_tool() {
         let text = format!("{title}\n{message}");
-        if let Err(err) = Command::new(zenity).args(["--notification", &format!("--text={text}")]).output() {
+        if let Err(err) = dialog_command(&zenity).args(["--notification", &format!("--text={text}")]).output() {
             crate::logging::warn(&format!("could not show notification: {err}"));
         }
     }
@@ -265,9 +338,39 @@ mod tests {
         assert_eq!(interpret_exit_status(None), ConfirmChoice::Delay);
     }
 
+    /// The C locale is what a systemd user unit inherits when nothing has set `LANG`, and it is
+    /// the case that breaks zenity on any non-ASCII character.
+    #[test]
+    fn needs_utf8_locale_override_when_nothing_sets_a_locale_at_all() {
+        assert!(needs_utf8_locale_override(None, None));
+        assert!(needs_utf8_locale_override(Some(""), Some("")));
+        assert!(needs_utf8_locale_override(None, Some("C")));
+        assert!(needs_utf8_locale_override(None, Some("en_AU.ISO-8859-1")));
+    }
+
+    /// A desktop session that already has a UTF-8 locale keeps it — overriding would change the
+    /// language a user deliberately chose, and there is nothing to fix.
+    #[test]
+    fn needs_no_override_when_the_inherited_locale_is_already_utf8() {
+        assert!(!needs_utf8_locale_override(None, Some("de_DE.UTF-8")));
+        assert!(!needs_utf8_locale_override(None, Some("en_AU.utf8")));
+        assert!(!needs_utf8_locale_override(Some("C.UTF-8"), Some("C")));
+    }
+
+    /// `LC_ALL` overrides `LANG` for the child, so a non-UTF-8 `LC_ALL` has to be replaced even
+    /// when `LANG` looks fine.
+    #[test]
+    fn needs_override_when_lc_all_is_not_utf8_despite_a_utf8_lang() {
+        assert!(needs_utf8_locale_override(Some("C"), Some("de_DE.UTF-8")));
+    }
+
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
     #[test]
     fn confirmation_message_describes_applications_only() {
-        let message = confirmation_message("1 hour(s)", 3, 2, false);
+        let message = confirmation_message("1 hour(s)", 3, &names(&["Firefox", "Slack"]), false);
 
         assert!(message.contains("2 application updates are ready"), "{message}");
         assert!(!message.contains("system update"), "{message}");
@@ -275,22 +378,56 @@ mod tests {
 
     #[test]
     fn confirmation_message_uses_the_singular_for_one_application() {
-        assert!(confirmation_message("1 hour(s)", 3, 1, false).contains("1 application update is ready"));
+        assert!(confirmation_message("1 hour(s)", 3, &names(&["Firefox"]), false).contains("1 application update is ready"));
     }
 
     #[test]
     fn confirmation_message_describes_an_os_update_on_its_own() {
-        assert!(confirmation_message("1 hour(s)", 3, 0, true).contains("A system update is ready"));
+        assert!(confirmation_message("1 hour(s)", 3, &[], true).contains("A system update is ready"));
     }
 
     #[test]
     fn confirmation_message_describes_both_together() {
-        assert!(confirmation_message("1 hour(s)", 3, 3, true).contains("3 application updates and a system update are ready"));
+        let message = confirmation_message("1 hour(s)", 3, &names(&["Firefox", "Slack", "Zoom"]), true);
+
+        assert!(message.contains("3 application updates and a system update are ready"), "{message}");
     }
 
     #[test]
     fn confirmation_message_states_the_remaining_delay_budget() {
-        assert!(confirmation_message("2 day(s)", 4, 1, false).contains("up to 4 more time(s), 2 day(s) at a time"));
+        assert!(confirmation_message("2 day(s)", 4, &names(&["Firefox"]), false).contains("up to 4 more time(s), 2 day(s) at a time"));
+    }
+
+    #[test]
+    fn confirmation_message_lists_the_affected_applications() {
+        let message = confirmation_message("1 hour(s)", 3, &names(&["Firefox", "Slack"]), false);
+
+        assert!(message.contains("\n  \u{2022} Firefox\n  \u{2022} Slack\n"), "{message}");
+    }
+
+    /// A host that has been offline for a while can have dozens pending; the dialog has to stay
+    /// on screen, so past the cap the rest are counted rather than named.
+    #[test]
+    fn confirmation_message_summarises_the_tail_of_a_long_list() {
+        let all: Vec<String> = (1..=14).map(|n| format!("App {n}")).collect();
+        let message = confirmation_message("1 hour(s)", 3, &all, false);
+
+        assert!(message.contains("  \u{2022} App 10\n"), "{message}");
+        assert!(!message.contains("App 11"), "{message}");
+        assert!(message.contains("  \u{2026} and 4 more"), "{message}");
+    }
+
+    /// The OS-only case has no applications to list, and must read exactly as it did before the
+    /// list existed — no bullet block, and no extra blank line where one would have gone.
+    #[test]
+    fn confirmation_message_for_an_os_update_alone_carries_no_list() {
+        let message = confirmation_message("1 hour(s)", 3, &[], true);
+
+        assert_eq!(
+            message,
+            "A system update is ready to install. This may restart some applications, and could \
+             require a reboot.\n\nYou can delay this up to 3 more time(s), 1 hour(s) at a time."
+        );
     }
 
     #[test]
