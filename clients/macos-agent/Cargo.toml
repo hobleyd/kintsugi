@@ -1,0 +1,58 @@
+[package]
+name = "kintsugi-agent"
+version = "0.5.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Background agent that registers this Mac with the patching system's host inventory."
+
+[[bin]]
+name = "kintsugi-agent"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+gethostname = "0.5"
+libc = "0.2"
+# rustls, not native-tls: native-tls's macOS backend hands this agent's client certificate/key to
+# the system Security framework's SecItemImport, which — independent of anything about our own
+# key/cert being malformed — has a long history of rejecting PKCS#8 EC keys it should accept
+# ("Unknown format in import"), including rcgen's own output. rustls parses PEM entirely in Rust
+# (rustls-pki-types), sidestepping SecItemImport altogether. "-native-roots" keeps the same
+# server-certificate trust source native-tls used (the OS trust store via Security framework) —
+# only how *our own* client identity gets parsed changes.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
+# Referenced directly (not just pulled in transitively via reqwest) so main.rs can install its
+# process-wide default crypto provider once at startup — see the call in main().
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+base64 = "0.22"
+# This agent's own mutual-TLS identity: generates its client keypair/CSR locally at enrollment
+# (rcgen — the private key never leaves this machine) and verifies the server's signature over
+# every Script/Command it's handed before ever executing one (p256) — see identity.rs.
+rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
+tray-icon = "0.24"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# Drives the menu bar and progress window directly via AppKit instead of through a windowing
+# crate like winit: every published tray-icon version (>=0.19) pins objc2 ^0.6, while winit 0.30
+# (the last stable release) pins objc2 ^0.5 — having both in the dependency tree links two copies
+# of libobjc.A.dylib into the same binary, which dyld refuses to load at all ("duplicate linked
+# dylib"). Talking to AppKit ourselves, at the same objc2 version tray-icon already uses, avoids
+# the conflict entirely rather than working around it.
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication", "NSRunningApplication",
+    "NSWindow", "NSView", "NSControl", "NSTextField", "NSProgressIndicator", "NSGraphics",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSGeometry"] }
+dispatch = "0.2"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

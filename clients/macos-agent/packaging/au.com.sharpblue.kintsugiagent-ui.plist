@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>au.com.sharpblue.kintsugiagent-ui</string>
+
+    <!-- Placed in /Library/LaunchAgents (not LaunchDaemons): launchd loads this automatically
+         into every logged-in user's own session, which is what lets it show dialogs and
+         notifications directly — no UserName key, and deliberately never runs as root. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/kintsugi-agent</string>
+        <string>--agent</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Unlike the root daemon, this owns the patching schedule and needs to notice a due time
+         (or a delay elapsing, including across sleep/wake) promptly rather than once a day, so it
+         stays running continuously and launchd restarts it if it ever exits. -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- This plist is shared by every logged-in user, so it can't point at a per-user path —
+         the process writes its own durable, per-user log once it gets far enough to do so (see
+         ~/Library/Application Support/kintsugi-agent/agent.log). These /tmp paths exist only as
+         a safety net to still catch anything that goes wrong before that point (e.g. it can't
+         resolve its own home directory) — on a single-admin-user Mac the collision risk of
+         sharing one file across users is negligible next to the value of not losing that class
+         of failure entirely. -->
+    <key>StandardOutPath</key>
+    <string>/tmp/kintsugi-agent-ui.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/kintsugi-agent-ui.err.log</string>
+</dict>
+</plist>

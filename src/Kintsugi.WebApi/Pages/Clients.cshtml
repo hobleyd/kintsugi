@@ -1,0 +1,67 @@
+@page "/clients"
+@model Kintsugi.WebApi.Pages.ClientsModel
+@{
+    ViewData["Title"] = "Clients";
+    ViewData["ActiveNav"] = "clients";
+}
+
+<p class="subtitle">
+    Installable kintsugi-agent packages, one per supported platform. An already-installed agent
+    checks the latest version here itself and applies it automatically at every check-in — see
+    <code>clients/macos-agent/src/self_update.rs</code> — so these downloads are mainly for a
+    brand-new install (see <code>packaging/install.sh</code>).
+</p>
+
+@if (Model.Packages.Count == 0)
+{
+    <div class="panel">
+        <p class="empty">No client packages have been published yet.</p>
+    </div>
+}
+else
+{
+    <div class="panel table-panel">
+        <table>
+            <thead>
+                <tr>
+                    <th>Platform</th>
+                    <th>Version</th>
+                    <th>Size</th>
+                    <th>Published</th>
+                    <th>Notes</th>
+                    <th class="actions">Download</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var package in Model.Packages)
+                {
+                    <tr>
+                        <td>@package.Platform</td>
+                        <td>@package.Version</td>
+                        <td class="muted-text">@FormatFileSize(package.FileSizeBytes)</td>
+                        <td class="muted-text"><time data-utc="@package.PublishedUtc.ToString("o")">@package.PublishedUtc.ToString("yyyy-MM-dd HH:mm") UTC</time></td>
+                        <td class="muted-text">@(package.ReleaseNotes ?? "—")</td>
+                        <td class="actions">
+                            <a class="btn-secondary" href="/api/agent-packages/@package.Platform/download">Download</a>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@functions {
+    static string FormatFileSize(long bytes)
+    {
+        double size = bytes;
+        string[] units = { "B", "KB", "MB", "GB" };
+        var unitIndex = 0;
+        while (size >= 1024 && unitIndex < units.Length - 1)
+        {
+            size /= 1024;
+            unitIndex++;
+        }
+        return $"{size:0.#} {units[unitIndex]}";
+    }
+}

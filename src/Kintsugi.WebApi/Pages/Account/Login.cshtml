@@ -1,0 +1,39 @@
+@page "/account/login"
+@model Kintsugi.WebApi.Pages.Account.LoginModel
+@{
+    Layout = null;
+}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sign in — Kintsugi</title>
+    <link rel="icon" href="~/favicon.ico" sizes="any">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="~/css/site.css" />
+</head>
+<body>
+    <div class="login-page">
+        <div class="login-card panel">
+            <img src="~/img/logo-nav.png" alt="" class="brand-logo">
+            <h1>Kintsugi</h1>
+
+            @if (!Model.IsConfigured)
+            {
+                <p class="subtitle">Sign-in isn't configured yet.</p>
+                <p class="hint">An administrator needs to set up an identity provider on the Authentication settings page before anyone can sign in.</p>
+            }
+            else
+            {
+                <p class="subtitle">Sign in to continue.</p>
+                <a class="btn-primary login-btn" href="/account/login?handler=Challenge&returnUrl=@Uri.EscapeDataString(Model.ReturnUrl ?? "/hosts")">
+                    Continue with @Model.ProviderDisplayName
+                </a>
+            }
+        </div>
+    </div>
+</body>
+</html>

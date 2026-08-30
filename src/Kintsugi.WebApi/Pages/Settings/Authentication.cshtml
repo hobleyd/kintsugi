@@ -1,0 +1,108 @@
+@page "/settings/authentication"
+@model Kintsugi.WebApi.Pages.Settings.AuthenticationModel
+@using Kintsugi.Domain.Enums
+@{
+    ViewData["Title"] = "Authentication";
+    ViewData["ActiveNav"] = "settings.authentication";
+}
+
+<p class="subtitle">Require sign-in through Google Workspace, Microsoft Entra, or another OAuth2/OIDC provider (Auth0, Okta, Clerk, etc.) before anyone can use this site.</p>
+
+@if (!Model.ModelState.IsValid)
+{
+    <div class="alert alert-error">
+        <ul>
+            @foreach (var error in Model.ModelState.Values.SelectMany(v => v.Errors))
+            {
+                <li>@error.ErrorMessage</li>
+            }
+        </ul>
+    </div>
+}
+
+@if (Model.SaveSucceeded)
+{
+    <div class="alert alert-success">Settings saved.</div>
+}
+
+<div class="alert alert-info">
+    Register this callback URL with your identity provider: <code>@Model.CallbackUrl</code>
+</div>
+
+<div class="panel">
+    <form method="post" class="settings-form">
+        <div class="field">
+            <label for="provider">Provider</label>
+            <select id="provider" asp-for="Input.Provider">
+                <option value="@AuthProvider.GoogleWorkspace">Google Workspace</option>
+                <option value="@AuthProvider.MicrosoftEntra">Microsoft Entra</option>
+                <option value="@AuthProvider.GenericOidc">Generic OAuth2 / OIDC (Auth0, Okta, etc.)</option>
+                <option value="@AuthProvider.Clerk">Clerk</option>
+            </select>
+        </div>
+
+        <div class="field">
+            <label for="clientId">Client ID</label>
+            <input type="text" id="clientId" asp-for="Input.ClientId" autocomplete="off" />
+        </div>
+
+        <div class="field">
+            <label for="clientSecret">Client Secret</label>
+            <input type="password" id="clientSecret" asp-for="Input.ClientSecret" autocomplete="off"
+                   placeholder="@(Model.HasClientSecret ? "•••••••••••• (leave blank to keep current secret)" : "")" />
+            @if (Model.HasClientSecret)
+            {
+                <p class="hint">A client secret is already configured. Leave blank to keep it.</p>
+            }
+        </div>
+
+        <div class="field" data-provider-field="entra">
+            <label for="tenantId">Tenant ID</label>
+            <input type="text" id="tenantId" asp-for="Input.TenantId" autocomplete="off" placeholder="e.g. contoso.onmicrosoft.com or a GUID" />
+            <p class="hint" data-provider-field="entra">Your Microsoft Entra directory (tenant) ID.</p>
+        </div>
+
+        <div class="field" data-provider-field="oidc">
+            <label for="authority">Authority (issuer URL)</label>
+            <input type="text" id="authority" asp-for="Input.Authority" autocomplete="off" placeholder="https://your-tenant.us.auth0.com" />
+            <p class="hint" data-provider-field="oidc">The base issuer URL your provider publishes discovery metadata under (<code>/.well-known/openid-configuration</code>).</p>
+        </div>
+
+        <div class="field" data-provider-field="google">
+            <label for="hostedDomain">Restrict to Workspace domain (optional)</label>
+            <input type="text" id="hostedDomain" asp-for="Input.HostedDomain" autocomplete="off" placeholder="e.g. example.com" />
+            <p class="hint" data-provider-field="google">Leave blank to allow sign-in from any Google account. Set this to only allow accounts in your Google Workspace domain.</p>
+        </div>
+
+        <div class="field field-inline">
+            <input type="checkbox" id="isEnabled" asp-for="Input.IsEnabled" />
+            <label for="isEnabled">Require sign-in to access this site</label>
+        </div>
+        <p class="hint">Make sure the provider above is fully configured and working before enabling this — there is no other way back into the site once it's on except signing in.</p>
+
+        <button type="submit" class="btn-primary">Save Settings</button>
+    </form>
+</div>
+
+<script>
+    (function () {
+        var providerSelect = document.getElementById('provider');
+        var entraFields = document.querySelectorAll('[data-provider-field="entra"]');
+        var oidcFields = document.querySelectorAll('[data-provider-field="oidc"]');
+        var googleFields = document.querySelectorAll('[data-provider-field="google"]');
+
+        function toggle(elements, show) {
+            elements.forEach(function (el) { el.style.display = show ? '' : 'none'; });
+        }
+
+        function sync() {
+            var provider = providerSelect.value;
+            toggle(entraFields, provider === 'MicrosoftEntra');
+            toggle(oidcFields, provider === 'GenericOidc' || provider === 'Clerk');
+            toggle(googleFields, provider === 'GoogleWorkspace');
+        }
+
+        providerSelect.addEventListener('change', sync);
+        sync();
+    })();
+</script>

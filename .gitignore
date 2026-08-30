@@ -1,0 +1,42 @@
+# ---- Build output ----
+bin/
+obj/
+TestResults/
+.dotnet-home/
+
+# Rust agent build output (see also clients/macos-agent/.gitignore)
+target/
+
+# Release artifacts produced by clients/macos-agent/packaging/publish-release.sh —
+# rebuild with cargo-zigbuild rather than committing them.
+dist/
+
+# ---- IDE / editor ----
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# ---- macOS ----
+.DS_Store
+._*
+
+# ---- Secrets & credential material — never committed ----
+# Real values live in .env; .env.example is the committed template.
+.env
+.env.local
+.env.*.local
+
+# TLS private key material.
+nginx/tls/
+*.pem
+*.key
+*.pfx
+*.p12
+*.crt
+secrets/
+
+# ---- Local tooling state ----
+.claude/scheduled_tasks.lock
+.claude/settings.local.json

@@ -1,0 +1,8 @@
+**/bin/
+**/obj/
+**/.vs/
+**/.vscode/
+.dotnet-home/
+.git/
+nginx/
+*.md

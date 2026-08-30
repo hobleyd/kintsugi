@@ -1,0 +1,19 @@
+# kintsugi-agent configuration.
+# Installed at /Library/Application Support/kintsugi-agent/config.toml
+#
+# Change api_base_url once the backend has a stable production address,
+# then run: sudo launchctl kickstart -k system/au.com.sharpblue.kintsugiagent
+# (no rebuild needed).
+api_base_url = "https://kintsugi.example.com:8443"
+
+# One-time secret this agent presents to enroll its mutual-TLS identity (see identity.rs) —
+# without it, every request to the server beyond enrollment itself is rejected. Get the current
+# value from whoever manages the server's .env (AGENT_ENROLLMENT_TOKEN). Only needed until
+# enrollment succeeds once (look for "enrolled agent identity" in daemon.log); safe to leave here
+# afterward, or blank it out — it's never used again unless this host's identity is wiped and it
+# needs to re-enroll from scratch.
+enrollment_token = ""
+
+# Whether and how often patching actually runs is controlled centrally in Settings > Patching
+# Policy on the server, not here — see au.com.sharpblue.kintsugiagent-ui.plist for the per-user
+# process that reads it and drives the confirm/delay/patch flow.

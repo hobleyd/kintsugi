@@ -1,0 +1,6 @@
+@Kintsugi.WebApi_HostAddress = http://localhost:5288
+
+GET {{Kintsugi.WebApi_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

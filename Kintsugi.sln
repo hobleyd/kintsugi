@@ -1,0 +1,57 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{36A98154-D8B8-42F0-8E19-EC7B09D58AA5}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kintsugi.Domain", "src\Kintsugi.Domain\Kintsugi.Domain.csproj", "{BF64017D-E452-4184-AEDB-CD949491D898}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kintsugi.Application", "src\Kintsugi.Application\Kintsugi.Application.csproj", "{57309D99-A2B3-4BBA-BA5E-FB6B34CE0582}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kintsugi.Infrastructure", "src\Kintsugi.Infrastructure\Kintsugi.Infrastructure.csproj", "{E2B70A00-E21C-4FB0-B807-CDC56F8FA5BF}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kintsugi.WebApi", "src\Kintsugi.WebApi\Kintsugi.WebApi.csproj", "{4AE802E4-667B-4D80-B048-BF2A28743458}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{DD4F0445-E35B-49C6-93CB-5CE83C693B03}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Kintsugi.Tests", "tests\Kintsugi.Tests\Kintsugi.Tests.csproj", "{B9015481-EDBF-47EF-BF0D-1B407056C44E}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{BF64017D-E452-4184-AEDB-CD949491D898}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BF64017D-E452-4184-AEDB-CD949491D898}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BF64017D-E452-4184-AEDB-CD949491D898}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BF64017D-E452-4184-AEDB-CD949491D898}.Release|Any CPU.Build.0 = Release|Any CPU
+		{57309D99-A2B3-4BBA-BA5E-FB6B34CE0582}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{57309D99-A2B3-4BBA-BA5E-FB6B34CE0582}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{57309D99-A2B3-4BBA-BA5E-FB6B34CE0582}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{57309D99-A2B3-4BBA-BA5E-FB6B34CE0582}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E2B70A00-E21C-4FB0-B807-CDC56F8FA5BF}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E2B70A00-E21C-4FB0-B807-CDC56F8FA5BF}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E2B70A00-E21C-4FB0-B807-CDC56F8FA5BF}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E2B70A00-E21C-4FB0-B807-CDC56F8FA5BF}.Release|Any CPU.Build.0 = Release|Any CPU
+		{4AE802E4-667B-4D80-B048-BF2A28743458}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4AE802E4-667B-4D80-B048-BF2A28743458}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4AE802E4-667B-4D80-B048-BF2A28743458}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4AE802E4-667B-4D80-B048-BF2A28743458}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B9015481-EDBF-47EF-BF0D-1B407056C44E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B9015481-EDBF-47EF-BF0D-1B407056C44E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B9015481-EDBF-47EF-BF0D-1B407056C44E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B9015481-EDBF-47EF-BF0D-1B407056C44E}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{BF64017D-E452-4184-AEDB-CD949491D898} = {36A98154-D8B8-42F0-8E19-EC7B09D58AA5}
+		{57309D99-A2B3-4BBA-BA5E-FB6B34CE0582} = {36A98154-D8B8-42F0-8E19-EC7B09D58AA5}
+		{E2B70A00-E21C-4FB0-B807-CDC56F8FA5BF} = {36A98154-D8B8-42F0-8E19-EC7B09D58AA5}
+		{4AE802E4-667B-4D80-B048-BF2A28743458} = {36A98154-D8B8-42F0-8E19-EC7B09D58AA5}
+		{B9015481-EDBF-47EF-BF0D-1B407056C44E} = {DD4F0445-E35B-49C6-93CB-5CE83C693B03}
+	EndGlobalSection
+EndGlobal

@@ -1,0 +1,115 @@
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: kintsugi-nginx
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-8080}:80"
+      - "${WEB_TLS_PORT:-8443}:443"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      # The server's own TLS certificate/key (proves the server's identity to agent and browser
+      # alike) — a real cert copied in locally, deliberately not baked into any image or tracked
+      # in source control. See .gitignore.
+      - ./nginx/tls:/etc/nginx/tls:ro
+      # The agent fleet's own CA public certificate — written by the api service (CaService), read
+      # here to verify each agent's client certificate. Only the public half; the CA's private
+      # signing key lives in agent-ca-private, which nginx never mounts.
+      - agent-ca-public:/etc/nginx/agent-ca:ro
+    networks:
+      - net-web
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/nginx-health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: src/Kintsugi.WebApi/Dockerfile
+    container_name: kintsugi-api
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
+      ConnectionStrings__Database: Host=db;Port=5432;Database=${POSTGRES_DB:-kintsugi};Username=${POSTGRES_USER:-kintsugi_app};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      OLLAMA_WEB_API_KEY: ${OLLAMA_WEB_API_KEY:-}
+      GITHUB_API_TOKEN: ${GITHUB_API_TOKEN:-}
+      GOOSE_SERVE_SECRET_KEY: ${GOOSE_SERVE_SECRET_KEY:-}
+      # The one secret a brand-new agent needs to enroll (register its own generated keypair and
+      # get back a client certificate) — see HostEnrollmentController. Not needed again after
+      # that, so rotating it doesn't affect already-enrolled agents. Required: an agent can't
+      # enroll at all without it configured.
+      AGENT_ENROLLMENT_TOKEN: ${AGENT_ENROLLMENT_TOKEN:?AGENT_ENROLLMENT_TOKEN must be set}
+    volumes:
+      # CaService's persistent home for the agent fleet's CA keypair (generated on first run if
+      # missing). agent-ca-private holds both ca.crt and ca.key; only the api service ever mounts
+      # it. agent-ca-public gets a copy of just ca.crt, written alongside, for nginx to verify
+      # agent client certificates against.
+      - agent-ca-private:/data/agent-ca-private
+      - agent-ca-public:/data/agent-ca-public
+      # Published kintsugi-agent installer packages (see AgentPackageFileStorage) — the Clients
+      # page's downloads and what an agent's own auto-update pulls from. A separate volume from
+      # the CA ones above so a published build survives an image rebuild/redeploy the same way.
+      - agent-packages:/data/agent-packages
+      # ASP.NET Core Data Protection keys, which encrypt the browser sign-in cookie — without a
+      # persistent home for these, every redeploy/restart would silently sign everyone out.
+      - dataprotection-keys:/data/dataprotection-keys
+    # No ports published to the host: the API is reachable only from nginx,
+    # over the internal net-web network. net-web (not internal) also gives it the outbound
+    # reachability it needs to reach an external `goose serve` endpoint when AiAgentSettings.
+    # Provider is GooseCli — see GooseAcpConnection.cs.
+    networks:
+      - net-web
+      - net-data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  db:
+    image: postgres:16-alpine
+    container_name: kintsugi-db
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-kintsugi}
+      POSTGRES_USER: ${POSTGRES_USER:-kintsugi_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    # No ports published to the host and no net-web membership: the database
+    # is reachable only from the API, over the internal, egress-less
+    # net-data network.
+    networks:
+      - net-data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-kintsugi_app} -d ${POSTGRES_DB:-kintsugi}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+networks:
+  # web tier: browser/client <-> nginx <-> api
+  net-web:
+    driver: bridge
+  # data tier: api <-> db only. internal:true means containers on this
+  # network have no route to the outside world, isolating postgres even
+  # from egress, let alone ingress from nginx or the host.
+  net-data:
+    driver: bridge
+    internal: true
+
+volumes:
+  db-data:
+  agent-ca-private:
+  agent-ca-public:
+  agent-packages:
+  dataprotection-keys:

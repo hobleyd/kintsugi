@@ -1,0 +1,66 @@
+@page "/settings/patching-policy"
+@model Kintsugi.WebApi.Pages.Settings.PatchingPolicyModel
+@using Kintsugi.Domain.Enums
+@{
+    ViewData["Title"] = "Patching Policy";
+    ViewData["ActiveNav"] = "settings.patching-policy";
+}
+
+<p class="subtitle">
+    How often the kintsugi-agent should check for and apply patches, and — when installing one
+    needs an application restart or a host reboot — how long that can be deferred and how many
+    times before it must go through regardless.
+</p>
+
+@if (!Model.ModelState.IsValid)
+{
+    <div class="alert alert-error">
+        <ul>
+            @foreach (var error in Model.ModelState.Values.SelectMany(v => v.Errors))
+            {
+                <li>@error.ErrorMessage</li>
+            }
+        </ul>
+    </div>
+}
+
+@if (Model.SaveSucceeded)
+{
+    <div class="alert alert-success">Patching policy saved.</div>
+}
+
+<div class="panel">
+    <form method="post" class="settings-form">
+        <div class="field">
+            <label for="intervalValue">Patch every</label>
+            <div class="value-unit-row">
+                <input type="number" id="intervalValue" asp-for="Input.IntervalValue" min="1" step="1" />
+                <select id="intervalUnit" asp-for="Input.IntervalUnit">
+                    <option value="@PatchingTimeUnit.Hours">Hours</option>
+                    <option value="@PatchingTimeUnit.Days">Days</option>
+                </select>
+            </div>
+            <p class="hint">How often the agent should check for and apply patches.</p>
+        </div>
+
+        <div class="field">
+            <label for="delayValue">Delay length</label>
+            <div class="value-unit-row">
+                <input type="number" id="delayValue" asp-for="Input.DelayValue" min="1" step="1" />
+                <select id="delayUnit" asp-for="Input.DelayUnit">
+                    <option value="@PatchingTimeUnit.Hours">Hours</option>
+                    <option value="@PatchingTimeUnit.Days">Days</option>
+                </select>
+            </div>
+            <p class="hint">How long a single deferral lasts, when a required restart or reboot is postponed.</p>
+        </div>
+
+        <div class="field">
+            <label for="maxDelayCount">Maximum number of delays</label>
+            <input type="number" id="maxDelayCount" asp-for="Input.MaxDelayCount" min="0" step="1" style="max-width: 8rem;" />
+            <p class="hint">How many times a required restart or reboot can be postponed before the agent must force it through. Zero means it can never be deferred.</p>
+        </div>
+
+        <button type="submit" class="btn-primary">Save Policy</button>
+    </form>
+</div>

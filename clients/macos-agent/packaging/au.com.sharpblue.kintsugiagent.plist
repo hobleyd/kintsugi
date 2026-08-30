@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>au.com.sharpblue.kintsugiagent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/kintsugi-agent</string>
+    </array>
+
+    <!-- Register immediately when the daemon is loaded (i.e. on every boot). -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- No StartCalendarInterval yet on a fresh install: this very first RunAtLoad run is what
+         assigns this host a check-in minute (see src/checkin_schedule.rs) and rewrites this exact
+         file to add one, then reloads itself with launchd — after that, it fires once every hour
+         at that minute. Deliberately not a fixed default here, so a fresh fleet doesn't all start
+         out sharing the same minute before the daemon gets a chance to spread them out. -->
+
+    <!-- Also run on demand whenever the per-user kintsugi-agent (kintsugiagent-ui, which never
+         runs as root) drops a request here for the one privileged step it can't do itself:
+         installing a macOS software update. See os_update::process_queue. -->
+    <key>WatchPaths</key>
+    <array>
+        <string>/Library/Application Support/kintsugi-agent/queue</string>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/kintsugi-agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/kintsugi-agent.err.log</string>
+
+    <key>UserName</key>
+    <string>root</string>
+
+    <!-- Each run is a short-lived process; don't restart on exit. -->
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>
