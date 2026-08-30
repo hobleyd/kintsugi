@@ -69,7 +69,7 @@ pub fn run(handler: &mut impl RequestHandler, policy: &PatchingPolicy, state: &m
         return;
     }
 
-    match confirm_or_delay(policy, state, work.apps.len(), work.os_update_available, report) {
+    match confirm_or_delay(policy, state, &work.app_names(), work.os_update_available, report) {
         Ok(false) => return, // delayed — nothing more to do until the new due time arrives
         Ok(true) => {}
         Err(err) => {
@@ -193,7 +193,7 @@ fn execute(
 fn confirm_or_delay(
     policy: &PatchingPolicy,
     state: &mut ScheduleState,
-    app_count: usize,
+    app_names: &[String],
     os_update_available: bool,
     report: &StatusReporter,
 ) -> anyhow::Result<bool> {
@@ -208,7 +208,7 @@ fn confirm_or_delay(
     let choice = dialogs::confirm_patch(
         &policy.delay_label(),
         state.delays_remaining(policy),
-        app_count,
+        app_names,
         os_update_available,
         policy.delay_seconds(),
     )?;
