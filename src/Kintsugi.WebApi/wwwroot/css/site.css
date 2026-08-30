@@ -554,7 +554,11 @@ label {
 
 .login-card {
     width: 100%;
-    max-width: 380px;
+    /* 460px, not the 380px this started at, because the button below reads "Continue with
+       <provider>" and three of the four provider names overflowed 380px and wrapped. The
+       sign-on one wrapped worst: browsers break after a hyphen, so "single sign-on" split
+       as "SIGN-" / "ON". See the width note on .login-btn. */
+    max-width: 460px;
     padding: 2.5rem;
     display: flex;
     flex-direction: column;
@@ -575,10 +579,16 @@ label {
     margin: 0 0 0.25rem;
 }
 
+/* Full width rather than sized to its text, so the four provider names give the same button
+   rather than four different ones — and so the longest of them ("Continue with Google
+   Workspace", 350px) has the card's whole 380px of content to sit on one line. This also
+   overrides .btn-primary's align-self: flex-start, which the centred card does not want. */
 .login-btn {
     margin-top: 1rem;
     text-decoration: none;
     display: inline-block;
+    width: 100%;
+    text-align: center;
 }
 
 input[type="text"],
