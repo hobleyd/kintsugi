@@ -184,8 +184,8 @@ path empty would break the agent permanently.
 
 ## Couplings nothing enforces
 
-- nginx's `default.conf` hardcodes the HTTPS redirect port `8443` and `server_name
-  kintsugi.example.com`; nginx config gets no environment substitution, so `8443` must be kept
+- nginx's `default.conf` hardcodes the HTTPS redirect port `8443` (both server blocks match any
+  host — `server_name _`); nginx config gets no environment substitution, so `8443` must be kept
   in sync with `WEB_TLS_PORT` in `.env` by hand.
 - The installer tarball's top-level entry names are load-bearing: `self_update.rs` extracts
   `kintsugi-agent` / `kintsugi-agent.exe` by name out of the same archive a human downloads for a
