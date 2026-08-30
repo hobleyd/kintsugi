@@ -1,0 +1,21 @@
+@*
+    Applies the visitor's saved colour theme before the first paint. The theme is a
+    per-browser preference with no server-side record, so it can only be read here, inline
+    in <head> — a deferred script would let a light-mode visitor flash the dark default.
+
+    Rendered by both _Layout.cshtml and Account/Login.cshtml (which sets `Layout = null` and
+    so carries its own <head>). The matching :root[data-theme="light"] block and the toggle
+    that writes this key live in wwwroot/css/site.css and _Layout.cshtml respectively.
+*@
+<script>
+    (function () {
+        try {
+            var saved = localStorage.getItem('kintsugi-theme');
+            if (saved === 'light' || saved === 'dark') {
+                document.documentElement.setAttribute('data-theme', saved);
+            }
+        } catch (e) {
+            // Storage blocked (private mode, hardened settings): keep the dark default.
+        }
+    })();
+</script>

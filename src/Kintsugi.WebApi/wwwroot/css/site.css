@@ -1,19 +1,106 @@
 :root {
     color-scheme: dark;
+
+    /* Hues are held as bare "r, g, b" triplets so every tint, hairline and glow in this
+       sheet can be built with rgba(var(--x-rgb), <alpha>) — that is what lets the light
+       theme below re-colour the whole surface by overriding a handful of declarations. */
+    --accent-rgb: 0, 229, 255;
+    --accent-soft-rgb: 125, 249, 255;
+    --pink-rgb: 255, 43, 214;
+    --green-rgb: 57, 255, 136;
+    --red-rgb: 255, 47, 91;
+    --amber-rgb: 255, 183, 3;
+    --muted-rgb: 95, 137, 163;
+
     --bg: #050810;
     --bg2: #0a0f1e;
     --neon: #00e5ff;
     --neon-soft: #7df9ff;
     --neon-dim: #0891b2;
-    --neon-glow: rgba(0, 229, 255, 0.55);
+    --neon-glow: rgba(var(--accent-rgb), 0.55);
     --pink: #ff2bd6;
     --green: #39ff88;
     --red: #ff2f5b;
     --amber: #ffb703;
     --text: #d9f8ff;
     --muted: #5f89a3;
-    --border: rgba(0, 229, 255, 0.28);
+    --border: rgba(var(--accent-rgb), 0.28);
     --panel: rgba(6, 12, 24, 0.82);
+    --backdrop: rgba(2, 4, 10, 0.75);
+    --wash-top: rgba(var(--accent-rgb), 0.18);
+    --wash-bottom: rgba(var(--pink-rgb), 0.10);
+
+    /* Glows are named rather than written inline because they do not survive the theme
+       swap: a blurred halo of a *dark* accent on a near-white page reads as a smudge, so
+       the light theme replaces each of these with `none` or a flat shadow/focus ring. */
+    --glow-heading: 0 0 6px var(--neon-glow), 0 0 22px rgba(var(--accent-rgb), 0.35);
+    --glow-text: 0 0 8px var(--neon-glow);
+    --glow-nav-active: 0 0 12px var(--neon-glow), inset 0 0 12px rgba(var(--accent-rgb), 0.08);
+    --glow-accent-sm: 0 0 8px rgba(var(--accent-rgb), 0.25);
+    --glow-accent: 0 0 8px var(--neon-glow);
+    --glow-accent-lg: 0 0 10px var(--neon-glow);
+    --glow-focus: 0 0 10px var(--neon-glow);
+    --glow-panel: 0 0 0 1px rgba(var(--accent-rgb), 0.05), 0 0 30px rgba(var(--accent-rgb), 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.02);
+    --glow-modal: 0 0 0 1px rgba(var(--accent-rgb), 0.05), 0 0 40px rgba(var(--accent-rgb), 0.12);
+    --glow-btn: 0 0 14px var(--neon-glow);
+    --glow-btn-hover: 0 0 22px var(--neon-glow), 0 0 6px var(--neon);
+    --glow-green: 0 0 8px rgba(var(--green-rgb), 0.35);
+    --glow-red: 0 0 8px rgba(var(--red-rgb), 0.35);
+    --glow-red-strong: 0 0 10px rgba(var(--red-rgb), 0.45);
+    --glow-amber: 0 0 8px rgba(var(--amber-rgb), 0.3);
+    --glow-amber-strong: 0 0 14px rgba(var(--amber-rgb), 0.5);
+    --glow-pink: 0 0 8px rgba(var(--pink-rgb), 0.3);
+}
+
+/* Light theme. Set by the bootstrap script in Pages/Shared/_ThemeHead.cshtml from the
+   localStorage key the sidebar toggle in Pages/Shared/_Layout.cshtml writes; with nothing
+   stored the site stays on the dark default above. */
+:root[data-theme="light"] {
+    color-scheme: light;
+
+    --accent-rgb: 14, 116, 144;
+    --accent-soft-rgb: 12, 90, 112;
+    --pink-rgb: 162, 28, 175;
+    --green-rgb: 21, 128, 61;
+    --red-rgb: 185, 28, 28;
+    --amber-rgb: 180, 83, 9;
+    --muted-rgb: 90, 118, 132;
+
+    --bg: #f4f7fa;
+    --bg2: #ffffff;
+    --neon: #0e7490;
+    --neon-soft: #0c5a70;
+    --neon-dim: #3b8ba3;
+    --neon-glow: rgba(var(--accent-rgb), 0.25);
+    --pink: #a21caf;
+    --green: #15803d;
+    --red: #b91c1c;
+    --amber: #b45309;
+    --text: #10222b;
+    --muted: #5a7684;
+    --border: rgba(var(--accent-rgb), 0.22);
+    --panel: rgba(255, 255, 255, 0.9);
+    --backdrop: rgba(15, 23, 42, 0.45);
+    --wash-top: rgba(var(--accent-rgb), 0.06);
+    --wash-bottom: rgba(var(--pink-rgb), 0.04);
+
+    --glow-heading: none;
+    --glow-text: none;
+    --glow-nav-active: inset 0 0 0 1px rgba(var(--accent-rgb), 0.35);
+    --glow-accent-sm: none;
+    --glow-accent: none;
+    --glow-accent-lg: none;
+    --glow-focus: 0 0 0 3px rgba(var(--accent-rgb), 0.18);
+    --glow-panel: 0 1px 2px rgba(15, 23, 42, 0.05), 0 6px 18px rgba(15, 23, 42, 0.06);
+    --glow-modal: 0 12px 40px rgba(15, 23, 42, 0.22);
+    --glow-btn: 0 1px 2px rgba(15, 23, 42, 0.12);
+    --glow-btn-hover: 0 2px 8px rgba(var(--accent-rgb), 0.35);
+    --glow-green: none;
+    --glow-red: none;
+    --glow-red-strong: none;
+    --glow-amber: none;
+    --glow-amber-strong: none;
+    --glow-pink: none;
 }
 
 * { box-sizing: border-box; }
@@ -27,8 +114,8 @@ body {
     background-image:
         linear-gradient(var(--bg2) 1px, transparent 1px),
         linear-gradient(90deg, var(--bg2) 1px, transparent 1px),
-        radial-gradient(ellipse at 50% -10%, rgba(0, 229, 255, 0.18), transparent 55%),
-        radial-gradient(ellipse at 100% 100%, rgba(255, 43, 214, 0.10), transparent 45%);
+        radial-gradient(ellipse at 50% -10%, var(--wash-top), transparent 55%),
+        radial-gradient(ellipse at 100% 100%, var(--wash-bottom), transparent 45%);
     background-size: 42px 42px, 42px 42px, 100% 100%, 100% 100%;
     background-attachment: fixed;
 }
@@ -48,6 +135,9 @@ body {
     position: sticky;
     top: 0;
     height: 100vh;
+    /* The brand logo plus the full nav, subnav and footer runs to roughly 660px; short
+       viewports would otherwise clip the log-out button off the bottom with no way back. */
+    overflow-y: auto;
     padding: 0 1.1rem 2rem;
     border-right: 1px solid var(--border);
     background: var(--panel);
@@ -76,7 +166,7 @@ body {
     text-transform: uppercase;
     text-align: center;
     color: var(--neon);
-    text-shadow: 0 0 6px var(--neon-glow), 0 0 22px rgba(0, 229, 255, 0.35);
+    text-shadow: var(--glow-heading);
 }
 
 .sidebar a {
@@ -97,8 +187,8 @@ body {
 .sidebar a[aria-current="page"] {
     color: var(--neon);
     border-color: var(--neon);
-    box-shadow: 0 0 12px var(--neon-glow), inset 0 0 12px rgba(0, 229, 255, 0.08);
-    text-shadow: 0 0 8px var(--neon-glow);
+    box-shadow: var(--glow-nav-active);
+    text-shadow: var(--glow-text);
 }
 
 .sidebar-subnav {
@@ -128,8 +218,8 @@ body {
 .sidebar-subnav-link[aria-current="page"] {
     color: var(--neon);
     border-color: var(--border);
-    box-shadow: 0 0 8px rgba(0, 229, 255, 0.25);
-    text-shadow: 0 0 6px var(--neon-glow);
+    box-shadow: var(--glow-accent-sm);
+    text-shadow: var(--glow-text);
 }
 
 .wrap {
@@ -146,7 +236,7 @@ h1 {
     text-transform: uppercase;
     margin: 0 0 0.4rem;
     color: var(--neon);
-    text-shadow: 0 0 6px var(--neon-glow), 0 0 22px rgba(0, 229, 255, 0.35);
+    text-shadow: var(--glow-heading);
 }
 
 p.subtitle {
@@ -160,7 +250,7 @@ p.subtitle {
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 6px;
-    box-shadow: 0 0 0 1px rgba(0, 229, 255, 0.05), 0 0 30px rgba(0, 229, 255, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.02);
+    box-shadow: var(--glow-panel);
     overflow: hidden;
     backdrop-filter: blur(6px);
 }
@@ -173,7 +263,7 @@ table { width: 100%; border-collapse: collapse; }
 th, td {
     text-align: left;
     padding: 0.85rem 1.1rem;
-    border-bottom: 1px solid rgba(0, 229, 255, 0.12);
+    border-bottom: 1px solid rgba(var(--accent-rgb), 0.12);
 }
 
 th {
@@ -182,14 +272,14 @@ th {
     text-transform: uppercase;
     letter-spacing: 0.1em;
     color: var(--neon-dim);
-    background: rgba(0, 229, 255, 0.05);
+    background: rgba(var(--accent-rgb), 0.05);
     border-bottom: 1px solid var(--border);
 }
 
 th.count, td.count { text-align: right; }
 
 tbody tr { transition: background 0.15s ease; }
-tbody tr:hover { background: rgba(0, 229, 255, 0.06); }
+tbody tr:hover { background: rgba(var(--accent-rgb), 0.06); }
 tbody tr:last-child td { border-bottom: none; }
 
 code {
@@ -211,10 +301,10 @@ code {
     text-transform: uppercase;
     border: 1px solid currentColor;
 }
-.status-online { color: var(--green); background: rgba(57, 255, 136, 0.08); box-shadow: 0 0 8px rgba(57, 255, 136, 0.35); }
-.status-offline { color: var(--red); background: rgba(255, 47, 91, 0.08); box-shadow: 0 0 8px rgba(255, 47, 91, 0.35); }
-.status-unknown { color: var(--muted); background: rgba(95, 137, 163, 0.08); }
-.status-decommissioned { color: var(--amber); background: rgba(255, 183, 3, 0.08); box-shadow: 0 0 8px rgba(255, 183, 3, 0.3); }
+.status-online { color: var(--green); background: rgba(var(--green-rgb), 0.08); box-shadow: var(--glow-green); }
+.status-offline { color: var(--red); background: rgba(var(--red-rgb), 0.08); box-shadow: var(--glow-red); }
+.status-unknown { color: var(--muted); background: rgba(var(--muted-rgb), 0.08); }
+.status-decommissioned { color: var(--amber); background: rgba(var(--amber-rgb), 0.08); box-shadow: var(--glow-amber); }
 
 tr.child-row td:first-child {
     padding-left: 2.5rem;
@@ -236,19 +326,19 @@ tr.child-row .count-badge { opacity: 0.75; }
     font-size: 0.75rem;
     font-weight: 600;
     color: var(--neon);
-    background: rgba(0, 229, 255, 0.08);
+    background: rgba(var(--accent-rgb), 0.08);
     border: 1px solid var(--border);
-    box-shadow: 0 0 8px rgba(0, 229, 255, 0.25);
+    box-shadow: var(--glow-accent-sm);
 }
 
 .count-badge-alert {
     color: var(--amber);
-    background: rgba(255, 183, 3, 0.08);
-    box-shadow: 0 0 8px rgba(255, 183, 3, 0.3);
+    background: rgba(var(--amber-rgb), 0.08);
+    box-shadow: var(--glow-amber);
 }
 
 a.count-badge-link { text-decoration: none; cursor: pointer; }
-a.count-badge-link:hover { box-shadow: 0 0 14px rgba(255, 183, 3, 0.5); }
+a.count-badge-link:hover { box-shadow: var(--glow-amber-strong); }
 
 .table-toolbar {
     display: flex;
@@ -258,7 +348,7 @@ a.count-badge-link:hover { box-shadow: 0 0 14px rgba(255, 183, 3, 0.5); }
     flex-wrap: wrap;
     padding: 0.9rem 1.1rem;
     border-bottom: 1px solid var(--border);
-    background: rgba(0, 229, 255, 0.03);
+    background: rgba(var(--accent-rgb), 0.03);
 }
 
 th.sortable { user-select: none; }
@@ -307,7 +397,10 @@ label {
     color: var(--text);
 }
 
-.sidebar-account {
+/* Holds the theme toggle and the signed-in account block against the foot of the sidebar.
+   Only this wrapper carries `margin-top: auto`: a column flex container splits its free
+   space between *every* auto margin, so a second one would strand the toggle mid-column. */
+.sidebar-footer {
     margin-top: auto;
     padding-top: 1rem;
     border-top: 1px solid var(--border);
@@ -315,6 +408,54 @@ label {
     flex-direction: column;
     gap: 0.5rem;
 }
+
+.sidebar-account {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.sidebar-theme-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-family: 'Orbitron', sans-serif;
+    font-size: 0.62rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    text-align: left;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 0.5rem 0.8rem;
+    cursor: pointer;
+    width: 100%;
+    transition: all 0.15s ease;
+}
+
+.sidebar-theme-toggle:hover {
+    color: var(--neon);
+    border-color: var(--neon);
+    box-shadow: var(--glow-accent-sm);
+}
+
+.sidebar-theme-toggle svg {
+    width: 0.95rem;
+    height: 0.95rem;
+    flex-shrink: 0;
+}
+
+/* Each theme renders the affordance for the *other* one, and CSS — not JavaScript — picks
+   which. The toggle in Pages/Shared/_Layout.cshtml therefore reads correctly from first
+   paint, before the click handler at the foot of that file has run. */
+.theme-icon-moon,
+.theme-label-dark,
+:root[data-theme="light"] .theme-icon-sun,
+:root[data-theme="light"] .theme-label-light { display: none; }
+
+:root[data-theme="light"] .theme-icon-moon { display: block; }
+:root[data-theme="light"] .theme-label-dark { display: inline; }
 
 .sidebar-account-name {
     font-size: 0.78rem;
@@ -341,7 +482,7 @@ label {
 .sidebar-account-logout:hover {
     color: var(--neon);
     border-color: var(--neon);
-    box-shadow: 0 0 8px rgba(0, 229, 255, 0.25);
+    box-shadow: var(--glow-accent-sm);
 }
 
 .login-page {
@@ -388,7 +529,7 @@ select {
     font-family: 'Share Tech Mono', 'Courier New', monospace;
     font-size: 0.9rem;
     color: var(--text);
-    background: rgba(0, 229, 255, 0.04);
+    background: rgba(var(--accent-rgb), 0.04);
     border: 1px solid var(--border);
     border-radius: 3px;
     padding: 0.6rem 0.75rem;
@@ -401,7 +542,7 @@ input[type="password"]:focus,
 input[type="number"]:focus,
 select:focus {
     border-color: var(--neon);
-    box-shadow: 0 0 10px var(--neon-glow);
+    box-shadow: var(--glow-focus);
 }
 
 input[type="text"]::placeholder,
@@ -438,11 +579,11 @@ input[type="checkbox"] {
     border-radius: 3px;
     padding: 0.65rem 1.4rem;
     cursor: pointer;
-    box-shadow: 0 0 14px var(--neon-glow);
+    box-shadow: var(--glow-btn);
     transition: all 0.15s ease;
 }
 
-.btn-primary:hover { box-shadow: 0 0 22px var(--neon-glow), 0 0 6px var(--neon); }
+.btn-primary:hover { box-shadow: var(--glow-btn-hover); }
 
 .model-select-row { display: flex; gap: 0.6rem; }
 .model-select-row select { flex: 1; }
@@ -462,7 +603,7 @@ input[type="checkbox"] {
     transition: all 0.15s ease;
 }
 
-.btn-secondary:hover:not(:disabled) { color: var(--neon); border-color: var(--neon); box-shadow: 0 0 10px var(--neon-glow); }
+.btn-secondary:hover:not(:disabled) { color: var(--neon); border-color: var(--neon); box-shadow: var(--glow-accent-lg); }
 .btn-secondary:disabled { cursor: default; opacity: 0.5; }
 
 .alert {
@@ -472,9 +613,9 @@ input[type="checkbox"] {
     font-size: 0.9rem;
 }
 .alert ul { margin: 0; padding-left: 1.2rem; }
-.alert-success { color: var(--green); border: 1px solid var(--green); background: rgba(57, 255, 136, 0.08); }
-.alert-error { color: var(--red); border: 1px solid var(--red); background: rgba(255, 47, 91, 0.08); }
-.alert-info { color: var(--neon-soft); border: 1px solid var(--neon-dim); background: rgba(0, 229, 255, 0.06); }
+.alert-success { color: var(--green); border: 1px solid var(--green); background: rgba(var(--green-rgb), 0.08); }
+.alert-error { color: var(--red); border: 1px solid var(--red); background: rgba(var(--red-rgb), 0.08); }
+.alert-info { color: var(--neon-soft); border: 1px solid var(--neon-dim); background: rgba(var(--accent-rgb), 0.06); }
 
 h2 {
     font-family: 'Orbitron', sans-serif;
@@ -497,11 +638,11 @@ h2 {
 .section-header .btn-primary { flex-shrink: 0; }
 .section-header .button-row { display: flex; gap: 0.75rem; flex-shrink: 0; }
 
-.status-update-available { color: var(--amber); background: rgba(255, 183, 3, 0.08); box-shadow: 0 0 8px rgba(255, 183, 3, 0.3); }
-.status-up-to-date { color: var(--green); background: rgba(57, 255, 136, 0.08); box-shadow: 0 0 8px rgba(57, 255, 136, 0.35); }
-.status-check-failed { color: var(--red); background: rgba(255, 47, 91, 0.08); box-shadow: 0 0 8px rgba(255, 47, 91, 0.35); }
-.status-not-found { color: var(--pink); background: rgba(255, 43, 214, 0.08); box-shadow: 0 0 8px rgba(255, 43, 214, 0.3); }
-.status-review-sign { color: var(--neon); background: rgba(0, 229, 255, 0.08); box-shadow: 0 0 8px var(--neon-glow); }
+.status-update-available { color: var(--amber); background: rgba(var(--amber-rgb), 0.08); box-shadow: var(--glow-amber); }
+.status-up-to-date { color: var(--green); background: rgba(var(--green-rgb), 0.08); box-shadow: var(--glow-green); }
+.status-check-failed { color: var(--red); background: rgba(var(--red-rgb), 0.08); box-shadow: var(--glow-red); }
+.status-not-found { color: var(--pink); background: rgba(var(--pink-rgb), 0.08); box-shadow: var(--glow-pink); }
+.status-review-sign { color: var(--neon); background: rgba(var(--accent-rgb), 0.08); box-shadow: var(--glow-accent); }
 
 .muted-text { color: var(--muted); font-size: 0.85em; }
 
@@ -509,7 +650,7 @@ h2 {
 .scan-progress-bar {
     height: 6px;
     border-radius: 3px;
-    background: rgba(0, 229, 255, 0.08);
+    background: rgba(var(--accent-rgb), 0.08);
     border: 1px solid var(--border);
     overflow: hidden;
     margin-bottom: 0.5rem;
@@ -518,7 +659,7 @@ h2 {
     height: 100%;
     width: 0%;
     background: var(--neon);
-    box-shadow: 0 0 8px var(--neon-glow);
+    box-shadow: var(--glow-accent);
     transition: width 0.3s ease;
 }
 
@@ -533,14 +674,14 @@ h2 {
     font: inherit;
     cursor: pointer;
     text-decoration: underline;
-    text-decoration-color: rgba(125, 249, 255, 0.35);
+    text-decoration-color: rgba(var(--accent-soft-rgb), 0.35);
 }
 .link-btn:hover { color: var(--neon); text-decoration-color: var(--neon); }
 
 .script-modal-backdrop {
     position: fixed;
     inset: 0;
-    background: rgba(2, 4, 10, 0.75);
+    background: var(--backdrop);
     z-index: 100;
     align-items: center;
     justify-content: center;
@@ -554,7 +695,7 @@ h2 {
     background: var(--bg2);
     border: 1px solid var(--border);
     border-radius: 6px;
-    box-shadow: 0 0 0 1px rgba(0, 229, 255, 0.05), 0 0 40px rgba(0, 229, 255, 0.12);
+    box-shadow: var(--glow-modal);
 }
 .script-modal-header {
     display: flex;
@@ -610,16 +751,16 @@ th.actions, td.actions { text-align: center; width: 1%; white-space: nowrap; }
     transition: all 0.15s ease;
 }
 .icon-btn svg { width: 1rem; height: 1rem; }
-.icon-btn:hover:not(:disabled) { color: var(--neon); border-color: var(--neon); box-shadow: 0 0 10px var(--neon-glow); }
+.icon-btn:hover:not(:disabled) { color: var(--neon); border-color: var(--neon); box-shadow: var(--glow-accent-lg); }
 .icon-btn:disabled { cursor: default; opacity: 0.6; }
 
-.icon-btn-danger:hover:not(:disabled) { color: var(--red); border-color: var(--red); box-shadow: 0 0 10px rgba(255, 47, 91, 0.45); }
+.icon-btn-danger:hover:not(:disabled) { color: var(--red); border-color: var(--red); box-shadow: var(--glow-red-strong); }
 
 .instructions-toggle-btn svg { transition: transform 0.15s ease; }
-.instructions-toggle-btn.expanded { color: var(--neon); border-color: var(--neon); box-shadow: 0 0 10px var(--neon-glow); }
+.instructions-toggle-btn.expanded { color: var(--neon); border-color: var(--neon); box-shadow: var(--glow-accent-lg); }
 .instructions-toggle-btn.expanded svg { transform: rotate(180deg); }
 
-tr.instructions-row { background: rgba(0, 229, 255, 0.03); }
+tr.instructions-row { background: rgba(var(--accent-rgb), 0.03); }
 tr.instructions-row td { padding: 1rem 1.25rem; }
 
 .instructions-panel { display: block; width: 100%; }
@@ -636,7 +777,7 @@ tr.instructions-row td { padding: 1rem 1.25rem; }
     cursor: col-resize;
 }
 .instructions-resizer:hover,
-.instructions-resizer:active { background: var(--neon); box-shadow: 0 0 8px var(--neon-glow); }
+.instructions-resizer:active { background: var(--neon); box-shadow: var(--glow-accent); }
 
 .instructions-label {
     display: block;
@@ -657,7 +798,7 @@ tr.instructions-row td { padding: 1rem 1.25rem; }
     font-size: 0.82rem;
     line-height: 1.4;
     color: var(--text);
-    background: rgba(0, 229, 255, 0.04);
+    background: rgba(var(--accent-rgb), 0.04);
     border: 1px solid var(--border);
     border-radius: 3px;
     padding: 0.65rem 0.8rem;
@@ -665,7 +806,7 @@ tr.instructions-row td { padding: 1rem 1.25rem; }
     transition: all 0.15s ease;
 }
 .instructions-textarea:focus,
-.instructions-output-textarea:focus { border-color: var(--neon); box-shadow: 0 0 10px var(--neon-glow); }
+.instructions-output-textarea:focus { border-color: var(--neon); box-shadow: var(--glow-focus); }
 .instructions-textarea:disabled { opacity: 0.6; }
 .instructions-output-textarea::placeholder { color: var(--muted); }
 
