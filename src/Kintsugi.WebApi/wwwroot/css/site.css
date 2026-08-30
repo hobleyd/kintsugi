@@ -130,7 +130,13 @@ body {
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
-    width: 210px;
+    /* 240px, not the 210px this started at, because the subnav has to fit "Authentication" —
+       14 characters of Orbitron at 0.62rem with 0.1em tracking, which is the widest label the
+       nav has and overflowed its box by 25px. The rest of the width came off the subnav's
+       decorative indent below rather than off the type scale, and the ~14px left over is
+       deliberate slack: this is a webfont, and the fallback only has to render a little wider
+       on one platform for the label to start overflowing again. */
+    width: 240px;
     flex-shrink: 0;
     position: sticky;
     top: 0;
@@ -195,8 +201,10 @@ body {
     display: flex;
     flex-direction: column;
     gap: 0.3rem;
-    margin-left: 0.9rem;
-    padding-left: 0.75rem;
+    /* The indent still reads as a level of hierarchy at this size, and every pixel taken off it
+       is a pixel the longest label gets back — see the width note on .sidebar. */
+    margin-left: 0.5rem;
+    padding-left: 0.6rem;
     border-left: 1px solid var(--border);
 }
 
@@ -207,7 +215,7 @@ body {
     text-transform: uppercase;
     text-decoration: none;
     color: var(--muted);
-    padding: 0.5rem 0.8rem;
+    padding: 0.5rem 0.7rem;
     border: 1px solid transparent;
     border-radius: 3px;
     background: transparent;
@@ -382,8 +390,8 @@ th.sortable.sort-desc .th-sort-label::after { content: '▼'; opacity: 1; color:
    Pages/Settings/Authentication.cshtml). Wrapping rather than a breakpoint because nothing else
    in this stylesheet uses media queries — but flex wraps on the *bases* below, before any
    shrinking, so those two numbers alone decide when the aside drops beneath the form. They sum
-   (plus the gap) to 616px, which against a 210px sidebar and .wrap's padding means the columns
-   stay side by side down to a viewport of about 875px. Keep them small for that reason: a
+   (plus the gap) to 616px, which against the 240px sidebar and .wrap's padding means the columns
+   stay side by side down to a viewport of about 904px. Keep them small for that reason: a
    comfortable-looking basis here reads as "the instructions are at the bottom" on a laptop. */
 .settings-columns {
     display: flex;
