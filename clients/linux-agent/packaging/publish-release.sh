@@ -24,10 +24,21 @@
 # binary only runs on a glibc at least as new as the one it was linked against. Build on the
 # *oldest* distribution you support (or in a container of it) — this script does not pick a target
 # for you.
+#
+# CI builds the binary itself — a universal one on macOS, a static musl one on Linux, neither of
+# which a plain `cargo build --release` on the build host produces — and has no route to anyone's
+# server. So both halves of this script are separable: --binary packages an already-built binary
+# instead of building one, and --output-dir writes the tarball to a directory and stops before
+# publishing. The tar invocation below stays the single owner of the archive's top-level entry
+# names either way, because those names are what self_update.rs extracts by — reimplementing the
+# `tar` call in a workflow file would let the two drift apart silently. See
+# .github/workflows/release-clients.yml.
 set -euo pipefail
 
 API_BASE_URL="${AGENT_API_BASE_URL:-https://kintsugi.example.com:8443}"
 RELEASE_NOTES=""
+PREBUILT_BINARY=""
+OUTPUT_DIR=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --api-base-url)
@@ -38,6 +49,16 @@ while [[ $# -gt 0 ]]; do
         --release-notes)
             [[ $# -ge 2 ]] || { echo "--release-notes requires a value" >&2; exit 1; }
             RELEASE_NOTES="$2"
+            shift 2
+            ;;
+        --binary)
+            [[ $# -ge 2 ]] || { echo "--binary requires a value" >&2; exit 1; }
+            PREBUILT_BINARY="$2"
+            shift 2
+            ;;
+        --output-dir)
+            [[ $# -ge 2 ]] || { echo "--output-dir requires a value" >&2; exit 1; }
+            OUTPUT_DIR="$2"
             shift 2
             ;;
         *)
@@ -56,10 +77,14 @@ if [[ -z "$VERSION" ]]; then
     exit 1
 fi
 
-echo "Building kintsugi-agent v${VERSION} (release)..."
-(cd "$PROJECT_DIR" && cargo build --release)
-
-BUILT_BIN="$PROJECT_DIR/target/release/kintsugi-agent"
+if [[ -n "$PREBUILT_BINARY" ]]; then
+    echo "Packaging kintsugi-agent v${VERSION} from ${PREBUILT_BINARY}..."
+    BUILT_BIN="$PREBUILT_BINARY"
+else
+    echo "Building kintsugi-agent v${VERSION} (release)..."
+    (cd "$PROJECT_DIR" && cargo build --release)
+    BUILT_BIN="$PROJECT_DIR/target/release/kintsugi-agent"
+fi
 [[ -f "$BUILT_BIN" ]] || { echo "Expected build output not found at $BUILT_BIN" >&2; exit 1; }
 
 WORK_DIR="$(mktemp -d)"
@@ -87,6 +112,15 @@ tar -czf "$ARCHIVE_PATH" -C "$WORK_DIR" \
     kintsugi-agent-queue.service kintsugi-agent-queue.path \
     kintsugi-agent-ui.service \
     install.sh uninstall.sh
+
+# --output-dir stops here: the archive is the deliverable, and there is no server to send it to.
+# The trap above wipes WORK_DIR on exit, so it has to be copied out before that happens.
+if [[ -n "$OUTPUT_DIR" ]]; then
+    mkdir -p "$OUTPUT_DIR"
+    cp "$ARCHIVE_PATH" "$OUTPUT_DIR/$ARCHIVE_NAME"
+    echo "Wrote ${OUTPUT_DIR%/}/${ARCHIVE_NAME}"
+    exit 0
+fi
 
 echo "Publishing ${ARCHIVE_NAME} to ${API_BASE_URL}..."
 RESPONSE="$(curl -sS -w '\n%{http_code}' \

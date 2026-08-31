@@ -1,0 +1,264 @@
+# Tests on every push to main and every pull request; on a push to main that passes, a client
+# build for each of the three platforms is published as a GitHub Release.
+#
+# Tests and releases live in one workflow rather than two on purpose: `needs:` only reaches jobs
+# in the same workflow, and the alternative (a second workflow triggered by `workflow_run`) would
+# either run the agent test suites twice on the expensive macOS/Windows runners or release without
+# having run them at all. The release jobs are gated on the *whole* test matrix, not just their own
+# platform's leg, because the three agents are deliberately kept in step with each other (see
+# CLAUDE.md) — a Windows parser regression is a reason not to ship a new macOS build too.
+#
+# What CI does *not* do is POST anything to a Kintsugi server: it has no route to one, and the
+# server's address is deployment detail that must not appear in a tracked file. The releases here
+# carry a placeholder `api_base_url`, and the server pulls them down and rewrites it to its own
+# address at import time — see the Clients page's "Refresh clients" button and
+# ImportAgentPackagesFromSourceCommandHandler.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend-tests:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 8.0.x, not `latest`: every csproj targets net8.0 and dotnet-ef is pinned to 8.0.10 with
+      # rollForward disabled (see .config/dotnet-tools.json), so a newer SDK alone will not do.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build
+        run: dotnet build Kintsugi.sln --configuration Release
+
+      # The test project isn't in the API's Docker image (its Dockerfile copies only src/), so this
+      # builds from source directly rather than going through docker compose.
+      - name: Test
+        run: dotnet test tests/Kintsugi.Tests/Kintsugi.Tests.csproj --configuration Release --no-build
+
+  agent-tests:
+    name: ${{ matrix.agent }} tests
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      # Each agent's failure is worth seeing on its own — a Windows-only regression shouldn't hide
+      # whether Linux is also broken.
+      fail-fast: false
+      matrix:
+        include:
+          - agent: macos-agent
+            runner: macos-latest
+          - agent: windows-agent
+            runner: windows-latest
+          - agent: linux-agent
+            runner: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The Windows agent builds natively here, so none of the mingw/Wine cross-compilation setup
+      # CLAUDE.md describes is needed — that's a workaround for developing it from a Mac.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            clients/${{ matrix.agent }}/target
+          key: ${{ runner.os }}-cargo-${{ matrix.agent }}-${{ hashFiles(format('clients/{0}/Cargo.lock', matrix.agent), format('clients/{0}/Cargo.toml', matrix.agent)) }}
+          restore-keys: ${{ runner.os }}-cargo-${{ matrix.agent }}-
+
+      - name: Test
+        working-directory: clients/${{ matrix.agent }}
+        run: cargo test --locked
+
+  # Which agents actually need a release. The server rejects re-publishing different bytes under a
+  # (platform, version) pair that's already out, and `gh release create` fails outright on an
+  # existing tag — so without this check every push to main after a release would fail the job
+  # rather than no-op. Bumping an agent's Cargo.toml version is what makes it release again.
+  plan-release:
+    name: Plan release
+    needs: [backend-tests, agent-tests]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      macos-version: ${{ steps.plan.outputs.macos-version }}
+      macos-needed: ${{ steps.plan.outputs.macos-needed }}
+      windows-version: ${{ steps.plan.outputs.windows-version }}
+      windows-needed: ${{ steps.plan.outputs.windows-needed }}
+      linux-version: ${{ steps.plan.outputs.linux-version }}
+      linux-needed: ${{ steps.plan.outputs.linux-needed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for platform in macos windows linux; do
+              version="$(grep -m1 '^version' "clients/${platform}-agent/Cargo.toml" | sed -E 's/version *= *"([^"]+)"/\1/')"
+              [[ -n "$version" ]] || { echo "Could not read the ${platform} agent version" >&2; exit 1; }
+
+              if gh release view "${platform}-agent-v${version}" >/dev/null 2>&1; then
+                  needed=false
+                  echo "${platform}-agent v${version} is already released; skipping."
+              else
+                  needed=true
+                  echo "${platform}-agent v${version} is not released yet."
+              fi
+
+              {
+                  echo "${platform}-version=${version}"
+                  echo "${platform}-needed=${needed}"
+              } >> "$GITHUB_OUTPUT"
+          done
+
+  release-macos:
+    name: Release macOS agent
+    needs: plan-release
+    if: needs.plan-release.outputs.macos-needed == 'true'
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # A universal binary, so one published package runs natively on both Apple Silicon and Intel
+      # Macs. The Clients page holds exactly one "macos" package, so a single-architecture build
+      # would silently exclude half a mixed fleet.
+      - name: Build universal binary
+        working-directory: clients/macos-agent
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          mkdir -p target/universal
+          lipo -create -output target/universal/kintsugi-agent \
+              target/aarch64-apple-darwin/release/kintsugi-agent \
+              target/x86_64-apple-darwin/release/kintsugi-agent
+          lipo -info target/universal/kintsugi-agent
+
+      # Packaged by the agent's own publish script rather than a `tar` call written here: the
+      # archive's top-level entry names are load-bearing (self_update.rs extracts "kintsugi-agent"
+      # by name), and duplicating the invocation is how the two drift apart.
+      - name: Package
+        run: |
+          clients/macos-agent/packaging/publish-release.sh \
+              --binary "$PWD/clients/macos-agent/target/universal/kintsugi-agent" \
+              --output-dir "$PWD/dist"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan-release.outputs.macos-version }}
+        run: |
+          gh release create "macos-agent-v${VERSION}" dist/*.tar.gz \
+              --title "macOS agent v${VERSION}" \
+              --notes "Universal (arm64 + x86_64) kintsugi-agent build for macOS, from ${GITHUB_SHA}."
+
+  release-windows:
+    name: Release Windows agent
+    needs: plan-release
+    if: needs.plan-release.outputs.windows-needed == 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        working-directory: clients/windows-agent
+        run: cargo build --release --locked
+
+      # tar.exe (used by the publish script) has shipped in Windows since 10 1803, so the archive
+      # is a real gzip-tar here just as it is on the other two platforms — which matters because
+      # AgentPackageArchiveRewriter reads gzip-tar specifically.
+      - name: Package
+        shell: pwsh
+        run: |
+          .\clients\windows-agent\packaging\publish-release.ps1 `
+              -Binary "$PWD\clients\windows-agent\target\release\kintsugi-agent.exe" `
+              -OutputDir "$PWD\dist"
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan-release.outputs.windows-version }}
+        run: |
+          gh release create "windows-agent-v${VERSION}" dist/*.tar.gz \
+              --title "Windows agent v${VERSION}" \
+              --notes "kintsugi-agent build for Windows (x86_64), from ${GITHUB_SHA}."
+
+  release-linux:
+    name: Release Linux agent
+    needs: plan-release
+    if: needs.plan-release.outputs.linux-needed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Statically linked against musl, not the runner's glibc. A glibc binary only starts on a
+      # glibc at least as new as the one it was linked against, and this runner's is far newer than
+      # most of a Linux fleet — CLAUDE.md flags exactly this, and notes nothing in the publish path
+      # checks it. musl removes the floor rather than lowering it, which is possible here only
+      # because the agent links no C library of its own: rustls links nothing and ksni speaks
+      # StatusNotifierItem over zbus in pure Rust instead of linking GTK (see its Cargo.toml).
+      - name: Build static musl binary
+        working-directory: clients/linux-agent
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --locked --target x86_64-unknown-linux-musl
+
+      # A dynamically linked binary here would still run on this runner and fail only out in the
+      # fleet, on the oldest host, months later — so it is asserted at build time instead.
+      - name: Assert the binary is static
+        working-directory: clients/linux-agent
+        run: |
+          set -euo pipefail
+          description="$(file target/x86_64-unknown-linux-musl/release/kintsugi-agent)"
+          echo "$description"
+          # Asserted as the absence of "dynamically linked" rather than the presence of
+          # "statically linked": this target produces a position-independent static executable,
+          # which file(1) labels "static-pie linked" instead — so the positive test would fail on
+          # a binary that is in fact exactly what's wanted.
+          if grep -q 'dynamically linked' <<<"$description"; then
+              echo "The Linux agent binary is dynamically linked — it would fail to start on a distribution with an older libc." >&2
+              exit 1
+          fi
+
+      - name: Package
+        run: |
+          clients/linux-agent/packaging/publish-release.sh \
+              --binary "$PWD/clients/linux-agent/target/x86_64-unknown-linux-musl/release/kintsugi-agent" \
+              --output-dir "$PWD/dist"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan-release.outputs.linux-version }}
+        run: |
+          gh release create "linux-agent-v${VERSION}" dist/*.tar.gz \
+              --title "Linux agent v${VERSION}" \
+              --notes "Statically linked (musl, x86_64) kintsugi-agent build for Linux, from ${GITHUB_SHA}."

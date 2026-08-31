@@ -1,17 +1,86 @@
 @page "/clients"
 @model Kintsugi.WebApi.Pages.ClientsModel
+@using Kintsugi.Application.AgentPackages.Commands.ImportAgentPackagesFromSource
 @{
     ViewData["Title"] = "Clients";
     ViewData["ActiveNav"] = "clients";
 }
 
-<p class="subtitle">
-    Installable kintsugi-agent packages, one per supported platform. An already-installed agent
-    checks the latest version here itself and applies it automatically at every check-in — see each
-    agent's own <code>src/self_update.rs</code> — so these downloads are mainly for a brand-new
-    install (<code>packaging/install.sh</code> on macOS and Linux, <code>packaging\install.ps1</code>
-    on Windows).
-</p>
+<div class="section-header">
+    <div>
+        <h2>Agent Packages</h2>
+        <p class="hint">
+            Installable kintsugi-agent packages, one per supported platform. An already-installed
+            agent checks the latest version here itself and applies it automatically at every
+            check-in — see each agent's own <code>src/self_update.rs</code> — so these downloads are
+            mainly for a brand-new install (<code>packaging/install.sh</code> on macOS and Linux,
+            <code>packaging\install.ps1</code> on Windows).
+        </p>
+        <p class="hint">
+            Builds come from <code>@Model.SourceStatus.SourceDescription</code>, where CI publishes
+            one release per agent per version. "Refresh clients" downloads what's newer there and
+            republishes it here with <code>api_base_url</code> set to
+            <code>@Model.AgentApiBaseUrl</code> — the address this page was reached on — so a
+            downloaded package needs no editing before it is installed. If that address isn't the
+            one your agents should call home on, whatever is in front of this server isn't
+            forwarding the browser's host.
+        </p>
+    </div>
+    <div class="button-row">
+        <form method="post" asp-page-handler="Refresh">
+            <button type="submit" class="btn-primary">Refresh clients</button>
+        </form>
+    </div>
+</div>
+
+@if (Model.RefreshError is not null)
+{
+    <div class="alert alert-error">Could not refresh from @Model.SourceStatus.SourceDescription: @Model.RefreshError</div>
+}
+
+@if (Model.ImportResults.Count > 0)
+{
+    var imported = Model.ImportResults.Where(r => r.Outcome == AgentPackageImportOutcome.Imported).ToList();
+    var failed = Model.ImportResults.Where(r => r.Outcome == AgentPackageImportOutcome.Failed).ToList();
+
+    if (imported.Count > 0)
+    {
+        <div class="alert alert-success">
+            Imported @string.Join(", ", imported.Select(r => $"{r.Platform} v{r.Version}")).
+        </div>
+    }
+
+    @* Reported separately rather than folded into one message: a refresh imports what it can, so
+       "two of three worked" has to read as two successes and one failure, not as a single
+       ambiguous outcome. *@
+    @foreach (var failure in failed)
+    {
+        <div class="alert alert-error">Could not import @failure.Platform v@failure.Version: @failure.Message</div>
+    }
+
+    @if (imported.Count == 0 && failed.Count == 0)
+    {
+        <div class="alert alert-info">Every platform is already up to date with @Model.SourceStatus.SourceDescription.</div>
+    }
+}
+else if (Model.SourceStatus.UnavailableReason is not null)
+{
+    @* The packages already published here are installable whether or not GitHub is reachable, so
+       this is a note beside a working page rather than an error in place of one. *@
+    <div class="alert alert-info">
+        Could not check @Model.SourceStatus.SourceDescription for new versions: @Model.SourceStatus.UnavailableReason
+    </div>
+}
+else if (Model.SourceStatus.HasNewVersions)
+{
+    <div class="alert alert-info">
+        Newer builds are available:
+        @string.Join(", ", Model.SourceStatus.Platforms
+            .Where(p => p.IsNewer)
+            .Select(p => $"{p.Platform} v{p.AvailableVersion}" + (p.PublishedVersion is null ? " (nothing published yet)" : $" (published: v{p.PublishedVersion})"))).
+        Use "Refresh clients" to publish them here.
+    </div>
+}
 
 @if (Model.Packages.Count == 0)
 {
@@ -27,6 +96,7 @@ else
                 <tr>
                     <th>Platform</th>
                     <th>Version</th>
+                    <th>Available</th>
                     <th>Size</th>
                     <th>Published</th>
                     <th>Notes</th>
@@ -36,9 +106,25 @@ else
             <tbody>
                 @foreach (var package in Model.Packages)
                 {
+                    var source = Model.SourceStatus.Platforms
+                        .FirstOrDefault(p => string.Equals(p.Platform, package.Platform, StringComparison.OrdinalIgnoreCase));
                     <tr>
                         <td>@package.Platform</td>
                         <td>@package.Version</td>
+                        <td>
+                            @if (source is null)
+                            {
+                                <span class="muted-text">—</span>
+                            }
+                            else if (source.IsNewer)
+                            {
+                                <span class="status status-update-available">v@source.AvailableVersion</span>
+                            }
+                            else
+                            {
+                                <span class="status status-up-to-date">Up to date</span>
+                            }
+                        </td>
                         <td class="muted-text">@FormatFileSize(package.FileSizeBytes)</td>
                         <td class="muted-text"><time data-utc="@package.PublishedUtc.ToString("o")">@package.PublishedUtc.ToString("yyyy-MM-dd HH:mm") UTC</time></td>
                         <td class="muted-text">@(package.ReleaseNotes ?? "—")</td>

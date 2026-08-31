@@ -29,11 +29,23 @@
 
 .EXAMPLE
     .\publish-release.ps1 -ApiBaseUrl 'https://kintsugi.example.com:8443' -ReleaseNotes 'Fixes the winget listing parser'
+
+.EXAMPLE
+    .\publish-release.ps1 -OutputDir dist
+
+    CI has no route to anyone's server, so the two halves of this script are separable: -Binary
+    packages an already-built binary instead of running cargo, and -OutputDir writes the tarball to
+    a directory and stops before publishing. The tar invocation below stays the single owner of the
+    archive's top-level entry names either way, because those names are what self_update.rs
+    extracts by — reimplementing the tar call in a workflow file would let the two drift apart
+    silently. See .github/workflows/release-clients.yml.
 #>
 [CmdletBinding()]
 param(
     [string] $ApiBaseUrl = $(if ($env:AGENT_API_BASE_URL) { $env:AGENT_API_BASE_URL } else { 'https://kintsugi.example.com:8443' }),
-    [string] $ReleaseNotes = ''
+    [string] $ReleaseNotes = '',
+    [string] $Binary = '',
+    [string] $OutputDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -47,16 +59,21 @@ if (-not $versionLine) {
 }
 $Version = $versionLine.Matches[0].Groups[1].Value
 
-Write-Host "Building kintsugi-agent v$Version (release)..."
-Push-Location $ProjectDir
-try {
-    & cargo build --release
-    if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
-} finally {
-    Pop-Location
-}
+if ($Binary) {
+    Write-Host "Packaging kintsugi-agent v$Version from $Binary..."
+    $BuiltBinary = $Binary
+} else {
+    Write-Host "Building kintsugi-agent v$Version (release)..."
+    Push-Location $ProjectDir
+    try {
+        & cargo build --release
+        if ($LASTEXITCODE -ne 0) { throw "cargo build failed with exit code $LASTEXITCODE" }
+    } finally {
+        Pop-Location
+    }
 
-$BuiltBinary = Join-Path $ProjectDir 'target\release\kintsugi-agent.exe'
+    $BuiltBinary = Join-Path $ProjectDir 'target\release\kintsugi-agent.exe'
+}
 if (-not (Test-Path -LiteralPath $BuiltBinary)) {
     throw "Expected build output not found at $BuiltBinary"
 }
@@ -78,6 +95,16 @@ try {
     # self_update.rs's extraction expect, rather than being nested under a temp-directory path.
     & tar.exe -czf $ArchivePath -C $WorkDir kintsugi-agent.exe config.toml install.ps1 uninstall.ps1
     if ($LASTEXITCODE -ne 0) { throw "tar failed with exit code $LASTEXITCODE" }
+
+    # -OutputDir stops here: the archive is the deliverable, and there is no server to send it to.
+    # The finally block below wipes $WorkDir, so it has to be copied out before that happens.
+    if ($OutputDir) {
+        New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
+        $Destination = Join-Path $OutputDir $ArchiveName
+        Copy-Item -LiteralPath $ArchivePath -Destination $Destination -Force
+        Write-Host "Wrote $Destination"
+        return
+    }
 
     Write-Host "Publishing $ArchiveName to $ApiBaseUrl..."
 
