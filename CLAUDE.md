@@ -182,9 +182,19 @@ to a Kintsugi server — it has no route to one, and a server's address is deplo
 must never be committed — so the released archives carry the `kintsugi.example.com` placeholder and
 the direction is reversed. The Clients page checks the repository's releases on every load and
 "Refresh clients" downloads what's newer, rewrites `api_base_url` to this server's own address, and
-republishes it locally (`ImportAgentPackagesFromSourceCommandHandler`). That address is derived
-from the request, which is safe *only* because nginx's plain-HTTP listener serves nothing but a 301
-to the TLS one — a request that reached the page came in over the scheme and port agents also use.
+republishes it locally (`ImportAgentPackagesFromSourceCommandHandler`). That address comes from
+`AGENT_API_BASE_URL`, falling back to the address the page was reached on when it is unset.
+
+**The fallback is a guess, and the admin UI's address is frequently the wrong answer.** nginx is
+what verifies the agent's client certificate, so anything terminating TLS in front of it — a
+gateway, a load balancer, a CDN — ends the mutual-TLS handshake at itself and cannot pass the
+certificate on. `AGENT_API_BASE_URL` must name **nginx's own address and `WEB_TLS_PORT`**. Getting
+it wrong fails in the quietest way the system has: `/api/host/enroll` is deliberately outside
+nginx's client-certificate regex, so the agent enrolls, looks installed, and then 403s on every
+authenticated route forever. That is not hypothetical — it shipped, from an earlier version of this
+page that derived the address unconditionally and argued it was safe because the plain-HTTP
+listener only 301s to the TLS one. That argument covers the scheme and the port and misses the
+front door. The page now says out loud when it is falling back.
 
 That rewrite happens at **import**, not download, and the two rewrites `IAgentPackageArchiveRewriter`
 performs are deliberately split that way: `api_base_url` is baked into the stored bytes so the
