@@ -172,7 +172,7 @@ fn report_removed(client: &reqwest::blocking::Client, config: &Config, serial_nu
                 ));
             }
             Err(err) => {
-                logging::warn(&format!("attempt {attempt}/{REPORT_ATTEMPTS} to confirm removal failed: {err}"));
+                logging::warn(&format!("attempt {attempt}/{REPORT_ATTEMPTS} to confirm removal failed: {err:#}"));
             }
         }
 

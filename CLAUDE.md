@@ -339,6 +339,14 @@ by then — only the long-running per-user units get restarted.
   the current `AGENT_ENROLLMENT_TOKEN` into `config.toml` on every download, so rotation never
   staleness-breaks a published package. `AgentPackagesController.Download` skips that rewrite for a
   cert-bearing agent, because rewriting would change the bytes and break the publish-time checksum.
+- nginx's own server certificate (`nginx/tls/fullchain.pem`) is what every agent validates, via
+  `rustls-tls-native-roots` — i.e. against the *host OS* trust store, with no way to pin or except
+  anything. A self-signed certificate there is rejected at the handshake, so the whole fleet stops
+  checking in at once and the agent log calls it a connection failure. Two consequences: the file
+  must hold a publicly-trusted chain (leaf **plus** intermediates — nothing downstream completes it
+  now), and if a proxy in front used to own renewal, it no longer does. Whoever renews has to copy
+  the new pair to this host and reload nginx, on a cadence shorter than the certificate's life, or
+  the fleet goes dark on expiry day with no warning and a symptom that reads like a network outage.
 - CI's release tags (`<platform>-agent-v<version>`) are parsed by `GitHubAgentPackageSourceClient`
   to work out which platform and version a release is. Renaming a tag on either side silently stops
   that platform ever being found again — a refresh just reports nothing new.

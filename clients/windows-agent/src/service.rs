@@ -324,7 +324,14 @@ pub fn post_with_retry<T: Serialize, R: serde::de::DeserializeOwned>(client: &re
                 anyhow::bail!("request rejected (HTTP {status}): {body}");
             }
             Err(err) => {
-                logging::warn(&format!("attempt {attempt}/{MAX_ATTEMPTS} to {url} failed: {err}"));
+                // {err:#}, not {err}: anyhow's plain Display prints only the outermost
+                // message, and reqwest's outermost message for any connection failure is the
+                // bare "error sending request for url (...)" — identical whether the host is
+                // unreachable, the TLS handshake was rejected, or DNS failed. The cause chain is
+                // where "invalid peer certificate: UnknownIssuer" lives, and without it a server
+                // presenting an untrusted certificate is indistinguishable in this log from a
+                // network outage. That cost real time to diagnose once; don't drop the `#`.
+                logging::warn(&format!("attempt {attempt}/{MAX_ATTEMPTS} to {url} failed: {err:#}"));
                 last_error = Some(err);
             }
         }
