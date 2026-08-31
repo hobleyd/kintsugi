@@ -61,11 +61,23 @@ There is no `IDesignTimeDbContextFactory`, so `dotnet ef` resolves the connectio
 the `db` service; both only exist inside the container. Run via `docker compose`.
 `docker compose build` does not build the tests either — the Dockerfile copies only `src/`.
 
-Releasing an agent: bump `version` in that agent's `Cargo.toml`, then run its own publish script —
-`packaging/publish-release.sh` (macOS and Linux) or `packaging/publish-release.ps1` (Windows), all of
-which build, tar, and POST to `/api/agent-packages`. The Linux one must be run on the *oldest* glibc
-in the fleet (or a container of it): a binary linked against a newer glibc will not start on an older
-host, and nothing in the publish path checks that.
+Releasing an agent: bump `version` in that agent's `Cargo.toml` and merge to `main`. CI
+(`.github/workflows/ci.yml`) runs every test suite, then builds and tags a GitHub Release per agent
+whose version isn't already released — `macos-agent-v0.5.0` and so on, one `.tar.gz` asset each.
+It never POSTs to a server; the server pulls, via the Clients page's "Refresh clients" (below).
+
+Each publish script still works by hand and is still the only place the archive's layout is
+defined; CI calls the same script with `--binary`/`--output-dir` (`-Binary`/`-OutputDir` on
+Windows) so the `tar` invocation is never duplicated in YAML. Run one directly and it builds and
+POSTs to `/api/agent-packages` as before. The Linux one must then be run on the *oldest* glibc in
+the fleet (or a container of it): a binary linked against a newer glibc will not start on an older
+host, and nothing in the publish path checks that. **CI sidesteps that entirely** by targeting
+`x86_64-unknown-linux-musl` — statically linked, so there is no libc floor at all, which is only
+possible because the agent links no C library of its own (rustls links nothing; `ksni` speaks
+StatusNotifierItem over zbus rather than linking GTK). It asserts the result is not dynamically
+linked rather than trusting the target name. macOS gets a `lipo`'d universal binary for the same
+reason there is one package per platform: an arm64-only build would silently exclude every Intel
+Mac in the fleet.
 
 **Working on the Windows agent from a non-Windows machine.** It can't be built natively, but it can
 be fully type-checked *and its unit tests actually run*, via Docker + mingw + Wine:
@@ -164,6 +176,25 @@ On Linux the API server is the same kind of machine as the managed host, so `apt
 `rpm -q`, `snap info` and friends all run happily and return the *server's* answer about a
 completely different machine. That answer is then stored as `LatestVersion` for every host sharing
 the row. Nothing errors.
+
+**Client builds come off GitHub, and the server configures them on the way in.** CI cannot publish
+to a Kintsugi server — it has no route to one, and a server's address is deployment detail that
+must never be committed — so the released archives carry the `kintsugi.example.com` placeholder and
+the direction is reversed. The Clients page checks the repository's releases on every load and
+"Refresh clients" downloads what's newer, rewrites `api_base_url` to this server's own address, and
+republishes it locally (`ImportAgentPackagesFromSourceCommandHandler`). That address is derived
+from the request, which is safe *only* because nginx's plain-HTTP listener serves nothing but a 301
+to the TLS one — a request that reached the page came in over the scheme and port agents also use.
+
+That rewrite happens at **import**, not download, and the two rewrites `IAgentPackageArchiveRewriter`
+performs are deliberately split that way: `api_base_url` is baked into the stored bytes so the
+checksum signed over them already describes this server and an enrolled agent's byte-identical
+self-update download still verifies, while `enrollment_token` is substituted per download because it
+rotates far more often than a build does. Refresh is a **Razor Page handler, not an API route** —
+`location ^~ /api/agent-packages` is a prefix match with no client certificate required and
+`Program.cs` exempts all of `/api` from the sign-in gate, so an API route would be triggerable by
+anyone who can reach the server. This is the rare case where `nginx/default.conf` correctly needs
+no edit.
 
 **Fresh deploys redirect everything.** With no `AuthenticationSettings` row saved, all non-`/api`,
 non-`/swagger`, non-`/health` traffic redirects to `/settings/authentication`. The OIDC provider is
@@ -290,6 +321,9 @@ by then — only the long-running per-user units get restarted.
   the current `AGENT_ENROLLMENT_TOKEN` into `config.toml` on every download, so rotation never
   staleness-breaks a published package. `AgentPackagesController.Download` skips that rewrite for a
   cert-bearing agent, because rewriting would change the bytes and break the publish-time checksum.
+- CI's release tags (`<platform>-agent-v<version>`) are parsed by `GitHubAgentPackageSourceClient`
+  to work out which platform and version a release is. Renaming a tag on either side silently stops
+  that platform ever being found again — a refresh just reports nothing new.
 - The agent-package platform namespace (`"macos"`, `"windows"`, `"linux"`) is *not*
   `PlatformBucket`'s namespace (`"macOS"`, `"Windows"`, `"Linux"`, `"pm:..."`). They name different
   things; don't unify them.

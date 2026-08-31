@@ -40,6 +40,9 @@ services:
       ConnectionStrings__Database: Host=db;Port=5432;Database=${POSTGRES_DB:-kintsugi};Username=${POSTGRES_USER:-kintsugi_app};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       OLLAMA_WEB_API_KEY: ${OLLAMA_WEB_API_KEY:-}
       GITHUB_API_TOKEN: ${GITHUB_API_TOKEN:-}
+      # Optional override for where the Clients page pulls agent builds from; defaults to
+      # this project's own public repository. See GitHubAgentPackageSourceClient.
+      AGENT_PACKAGE_GITHUB_REPO: ${AGENT_PACKAGE_GITHUB_REPO:-}
       GOOSE_SERVE_SECRET_KEY: ${GOOSE_SERVE_SECRET_KEY:-}
       # The one secret a brand-new agent needs to enroll (register its own generated keypair and
       # get back a client certificate) — see HostEnrollmentController. Not needed again after
