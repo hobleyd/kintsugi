@@ -342,11 +342,24 @@ by then — only the long-running per-user units get restarted.
 - nginx's own server certificate (`nginx/tls/fullchain.pem`) is what every agent validates, via
   `rustls-tls-native-roots` — i.e. against the *host OS* trust store, with no way to pin or except
   anything. A self-signed certificate there is rejected at the handshake, so the whole fleet stops
-  checking in at once and the agent log calls it a connection failure. Two consequences: the file
-  must hold a publicly-trusted chain (leaf **plus** intermediates — nothing downstream completes it
-  now), and if a proxy in front used to own renewal, it no longer does. Whoever renews has to copy
-  the new pair to this host and reload nginx, on a cadence shorter than the certificate's life, or
-  the fleet goes dark on expiry day with no warning and a symptom that reads like a network outage.
+  checking in at once. Two consequences: the file must hold a publicly-trusted chain, and if a proxy
+  in front used to own renewal, it no longer does — whoever renews has to copy the new pair to this
+  host and reload nginx, or the fleet goes dark on expiry day.
+- **That chain must be complete, and `curl` will not tell you whether it is.** rustls does no AIA
+  chasing: if `fullchain.pem` omits an intermediate, rustls cannot fetch the missing link and fails
+  with `invalid peer certificate: UnknownIssuer`, while curl and browsers succeed because their
+  bundles are newer or they go and fetch it. This has already bitten once — a `fullchain.pem`
+  truncated to leaf + `Let's Encrypt YR1` terminated at `ISRG Root YR`, which is not in the macOS
+  system trust store; the cross-signed `Root YR` (issued by `ISRG Root X1`, which *is*) was the
+  third cert and had been dropped. Verify with the store the agent actually uses, not with curl:
+
+  ```bash
+  # count what the server sends — a truncated chain is the common failure
+  echo Q | openssl s_client -connect <host>:443 -servername <host> -showcerts 2>/dev/null \
+      | grep -c 'BEGIN CERTIFICATE'
+  # and confirm the agent itself is happy, which is the only test that counts
+  grep 'UnknownIssuer' <that platform's agent log>
+  ```
 - CI's release tags (`<platform>-agent-v<version>`) are parsed by `GitHubAgentPackageSourceClient`
   to work out which platform and version a release is. Renaming a tag on either side silently stops
   that platform ever being found again — a refresh just reports nothing new.
