@@ -1,0 +1,75 @@
+# An SNI router for the *edge* host, so agents can reach this system's nginx over mutual TLS when
+# something else already owns port 443 there.
+#
+# THIS IS NOT THIS PROJECT'S nginx. It does not go in the nginx container docker-compose.yml starts
+# — that one is `nginx/default.conf`. This is a separate nginx (or the `stream` half of an existing
+# one) running on whatever host currently terminates TLS for the site, in front of that terminator.
+# Copy it, replace the two placeholder names, and leave this file as the documented reference.
+#
+# WHY THIS IS EVER NEEDED. nginx/default.conf verifies each agent's client certificate itself
+# (`ssl_verify_client optional`, `$ssl_client_verify`). A mutual-TLS handshake can only be verified
+# by the endpoint that terminates it, so *any* HTTP-layer reverse proxy in front — Apache, Caddy,
+# Cloudflare's edge, a CDN — ends the handshake at itself and has nothing to forward. The agent's
+# certificate does not arrive, and every route in that exact-match agent regex answers 403.
+#
+# It fails in the quietest way this system has: /api/host/enroll sits outside that regex on purpose,
+# so an agent pointed at a terminating front door enrolls, reports itself installed, and only then
+# 403s on everything authenticated. Nothing at install time says so.
+#
+# A `stream` server with `ssl_preread` reads the SNI hostname off the ClientHello *without*
+# terminating anything, so the agent hostname's bytes are handed to this project's nginx untouched
+# and every other hostname carries on to the existing terminator exactly as before.
+#
+# THREE THINGS MUST ALL BE TRUE, and each fails silently on its own:
+#
+#   1. The agent hostname must resolve straight to this host. Behind a proxying CDN it must be set
+#      to DNS-only — Cloudflare's orange cloud terminates TLS at its edge, and its own mTLS feature
+#      validates against a Cloudflare-managed CA and forwards the result in a header, which is not
+#      what $ssl_client_verify reads.
+#   2. This project's nginx must serve a certificate valid for the agent hostname. It is reached by
+#      SNI now, not just by IP.
+#   3. The existing terminator must move off 443 to $EXISTING_TERMINATOR_PORT below.
+#
+# CLIENT IP. Once this owns 443, the terminator behind it sees this router's address rather than the
+# connecting one. Behind a CDN that was already true — it saw the CDN's edge, and recovered the real
+# client from a forwarded header — so if it is configured that way (Apache's mod_remoteip with
+# RemoteIPHeader, or equivalent) nothing changes. If instead it allow-lists the CDN's address ranges
+# by raw remote address, that check will start failing and needs the PROXY protocol wired through
+# both ends, which is deliberately not done here: it would also have to be enabled on this project's
+# nginx listener, and that would break every deployment where nginx *is* the front door.
+
+stream {
+    # Agents get the passthrough; everything else — the admin UI included — carries on to whatever
+    # terminates TLS today. Defaulting to the existing terminator, rather than to the agent
+    # upstream, is what keeps a hostname nobody has thought about from being handed raw to a server
+    # that would answer it with this system's admin UI.
+    map $ssl_preread_server_name $kintsugi_upstream {
+        agents.kintsugi.example.com  kintsugi_agent_tls;
+        default                      existing_terminator;
+    }
+
+    # This project's nginx, on the host port docker-compose.yml publishes (WEB_TLS_PORT).
+    upstream kintsugi_agent_tls {
+        server 127.0.0.1:8443;
+    }
+
+    # Whatever owned 443 before this file existed, moved to a port of its own.
+    upstream existing_terminator {
+        server 127.0.0.1:4443;
+    }
+
+    server {
+        listen 443;
+        listen [::]:443;
+
+        # Reads the ClientHello's SNI and nothing else — no certificate is presented here and no
+        # session is terminated, which is the entire point.
+        ssl_preread on;
+        proxy_pass $kintsugi_upstream;
+
+        # An agent check-in is short, but the self-update download over this same connection is a
+        # few MB, and the default 10m proxy_timeout would cut a slow link off mid-package.
+        proxy_timeout 5m;
+        proxy_connect_timeout 5s;
+    }
+}
