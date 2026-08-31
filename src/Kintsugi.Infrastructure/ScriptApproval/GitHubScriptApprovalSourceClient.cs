@@ -250,7 +250,10 @@ public class GitHubScriptApprovalSourceClient : IScriptApprovalSourceClient
                 continue;
             }
 
-            using var reader = new StreamReader(entry.DataStream, Encoding.UTF8);
+            // leaveOpen, because disposing a tar entry's DataStream (a SubReadStream) leaves TarReader
+            // unable to advance to the next entry — it throws ObjectDisposedException on the very
+            // next GetNextEntry rather than simply returning what it has.
+            using var reader = new StreamReader(entry.DataStream, Encoding.UTF8, leaveOpen: true);
             files[path] = reader.ReadToEnd();
         }
 

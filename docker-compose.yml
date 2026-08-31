@@ -43,6 +43,14 @@ services:
       # Optional override for where the Clients page pulls agent builds from; defaults to
       # this project's own public repository. See GitHubAgentPackageSourceClient.
       AGENT_PACKAGE_GITHUB_REPO: ${AGENT_PACKAGE_GITHUB_REPO:-}
+      # Where the Upgrade Scripts page publishes and reads human-approved upgrade scripts.
+      # SCRIPT_APPROVAL_GITHUB_REPO is an optional override defaulting to this project's own public
+      # repository; the token needs contents:write and pull_requests:write on whatever it names, and
+      # is deliberately separate from GITHUB_API_TOKEN so the AI research and agent-package clients
+      # never gain write scope. Blank means signing approves a script locally and raises no pull
+      # request — reading the approved corpus needs no credential. See ScriptApprovalRepository.
+      SCRIPT_APPROVAL_GITHUB_REPO: ${SCRIPT_APPROVAL_GITHUB_REPO:-}
+      SCRIPT_APPROVAL_GITHUB_TOKEN: ${SCRIPT_APPROVAL_GITHUB_TOKEN:-}
       GOOSE_SERVE_SECRET_KEY: ${GOOSE_SERVE_SECRET_KEY:-}
       # The one secret a brand-new agent needs to enroll (register its own generated keypair and
       # get back a client certificate) — see HostEnrollmentController. Not needed again after
