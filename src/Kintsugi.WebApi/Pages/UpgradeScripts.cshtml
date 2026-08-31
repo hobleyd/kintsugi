@@ -105,6 +105,16 @@ else if (Model.Adopted is not null)
 </div>
 
 <h3>Local scripts</h3>
+@if (Model.Overview.AwaitingReview > 0)
+{
+    @* The only number on this page representing work outstanding: until a human signs these, no
+       agent will run them, so an application with an unsigned script does not patch at all. *@
+    <div class="alert alert-info">
+        @Model.Overview.AwaitingReview script(s) are waiting for review. Until one is signed no agent
+        will run it, so those applications are not patching. Review and sign them on the
+        <a href="/applications">Applications</a> page.
+    </div>
+}
 @if (Model.Overview.LocalScripts.Count == 0)
 {
     <div class="panel">
