@@ -168,6 +168,60 @@ starts **unsigned** — a human must sign it via `POST /api/upgrade-paths/sign-s
 verifies against the signing pubkey it pinned at enrollment before executing anything. Do not make
 generation sign automatically.
 
+**Not every `/api` route is an agent route, and the two auth mechanisms leave a gap between them.**
+nginx requires a client certificate on an *exact-match* regex, so nothing under
+`/api/upgrade-paths/...` ever matches it — deliberately, since those routes are driven by the admin
+UI's JavaScript and a browser has no agent certificate. `Program.cs` then exempts the whole of
+`/api` from the sign-in gate, on the reasoning that agents authenticate with mutual TLS rather than
+cookies. Each decision is right alone; together they leave a browser-driven route with **no
+authentication of any kind**. That shipped: `save` (accepts an arbitrary script) and `sign-script`
+(has the server sign it) were both callable by anyone who could reach the server, which is the whole
+path from arbitrary text to content every agent runs as root. Both now carry
+`[RequireAdminSession]`, which mirrors `Program.cs`'s own gate semantics rather than inventing a
+second shape that could drift from it. **Adding a browser-driven route that changes what agents
+execute means adding that attribute** — nothing else will stop it being anonymous. The remaining
+sub-routes (`scan`, `refresh`, `prompt`, the status polls, `report-version`) are still open; they
+cost AI calls and leak inventory rather than granting execution, and are worth closing but were left
+out of that change to keep it reviewable.
+
+**Script approval is shared through a GitHub repository, and the default branch is the trust root.**
+Signing a script is effective locally at once — the human at the console reviewed it — and *also*
+opens a pull request against `SCRIPT_APPROVAL_GITHUB_REPO` carrying the script, its metadata and the
+signature (`GitHubScriptApprovalPublisher`). The pull request is a **record and a distribution
+channel, not a gate**: it is raised after `SaveChangesAsync`, and every failure mode is reported
+rather than thrown, because a GitHub outage must not stop a reviewed script from patching the fleet
+it was reviewed for. The layout is content-addressed —
+`approved-scripts/<sha256>/{script.sh|script.ps1, metadata.json, signatures/<fingerprint>.json}` —
+because a package-manager script is byte-identical for every application that manager handles, so
+one review covers all of them (the same reason `FindExistingSignatureForScriptAsync` matches on
+content), and because one signature *file per signer* means two servers approving the same bytes
+never touch the same path and so never conflict. `.gitattributes` exempts `approved-scripts/**` from
+`text=auto eol=lf`: normalizing a PowerShell script's CRLF would change its hash and invalidate
+every signature over it.
+
+**A remote signature is never served to an agent — the importing server re-signs.** Each agent pins
+exactly one signing key at enrollment: its own server's. So the Upgrade Scripts page's "Refresh
+scripts" verifies the upstream signature and then signs the same bytes with the **local** key. That
+is why this feature needed no change to any of the three agents. Two halves, split on whether
+content arrives: *blessing* a local script whose bytes are already approved upstream is automatic
+and safe to be (nothing new arrives — it is `SignUpgradePathScriptCommandHandler`'s sibling-row
+propagation extended across servers), while *adopting* content this server does not have is a
+per-row button a human presses, with the signer's fingerprint beside it.
+
+**Be precise about what verifying an approval proves.** The signer's public key travels in the same
+repository as the script it vouches for, so anyone able to write there can edit a script, mint a
+fresh keypair, and produce an entry that verifies perfectly. Verification establishes that an entry
+is internally consistent and names its signer — *not* that the signer was authorized. Authorization
+is the repository's branch protection on the default branch, and nothing else. The one genuinely
+verified case is a fingerprint equal to `GetPublicKeyFingerprint()`: a signature this server made,
+against a key that never left its private volume. Do not write comments or UI copy that upgrade this
+to "verified"; the page says so plainly and should keep doing so. The consequence worth holding onto:
+**a merge to that repository is enough to offer new executable content to every server that
+refreshes**, which is why adoption is not automatic, why adoption refuses a row that already carries
+a signature (agents may be running it), and why `ScriptLanguages.For` must agree on both sides — a
+genuinely-signed `#!/bin/bash` script reaching a PowerShell host is exactly the failure the shared
+`generic` bucket used to permit.
+
 **Razor Pages are not API clients.** `Pages/*.cshtml.cs` inject `ISender` and dispatch the same
 MediatR handlers the controllers do.
 
@@ -389,6 +443,18 @@ by then — only the long-running per-user units get restarted.
 - The agent-package platform namespace (`"macos"`, `"windows"`, `"linux"`) is *not*
   `PlatformBucket`'s namespace (`"macOS"`, `"Windows"`, `"Linux"`, `"pm:..."`). They name different
   things; don't unify them.
+- `SCRIPT_APPROVAL_GITHUB_TOKEN` is deliberately *not* `GITHUB_API_TOKEN`. The latter exists only to
+  lift GitHub's anonymous rate limit and is handed to the AI research client and the agent-package
+  source client as well, so reusing it would silently give both of them `contents:write` and
+  `pull_requests:write` on the approval repository. Unset means signing approves locally and raises
+  no pull request — the Upgrade Scripts page says so, because the absence of an audit trail is
+  otherwise only discoverable by looking for pull requests that were never opened.
+- `ApprovedScriptCorpus` is the *only* description of the approval repository's layout, and both ends
+  of the round trip go through it — the publisher writing an entry and the reader parsing one. A path
+  or field changed on one side only means an approval that publishes fine and imports as nothing.
+- GitHub's `/tarball/{ref}` nests everything under a `{owner}-{repo}-{shortsha}/` directory.
+  `ReadArchiveFiles` strips that first segment; without it nothing matches `approved-scripts/` and
+  the result is indistinguishable from an empty corpus.
 - `PackageManagerCatalog`'s names are the strings agents report in `InstalledApp.package_manager`.
   A rename on either side silently stops an entire manager's applications resolving.
 - A package-manager row is only patchable if the *agent* reported an `applicationIdentifier` for that

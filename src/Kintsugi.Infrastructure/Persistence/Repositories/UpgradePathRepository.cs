@@ -47,6 +47,13 @@ public class UpgradePathRepository : IUpgradePathRepository
             .Select(p => p.ScriptSignature)
             .FirstOrDefaultAsync(cancellationToken);
 
+    public async Task<IReadOnlyList<UpgradePath>> GetRowsWithoutScriptSignatureAsync(CancellationToken cancellationToken) =>
+        await _context.UpgradePaths
+            .Where(p => p.ScriptSignature == null)
+            .OrderBy(p => p.ApplicationName)
+            .ThenBy(p => p.Platform)
+            .ToListAsync(cancellationToken);
+
     public async Task<IReadOnlyList<UpgradePath>> GetUnsignedRowsWithScriptAsync(string script, CancellationToken cancellationToken) =>
         await _context.UpgradePaths
             .Where(p => p.Script == script && p.ScriptSignature == null)

@@ -9,5 +9,13 @@ namespace Kintsugi.Application.UpgradePaths.Commands.SignUpgradePathScript;
 /// <c>ResearchApplicationUpgradePathCommandHandler</c> and <c>SaveUpgradePathCommandHandler</c>).
 /// Backs the "Sign Script" action on the Applications page's per-row panel, which only appears
 /// once a script is present and unsigned.
+///
+/// Signing is effective immediately: the human at the console reviewed it, so agents may run it from
+/// the next check-in. The approval is *also* published to the shared approval repository as a pull
+/// request (see <c>IScriptApprovalPublisher</c>), which is what records the decision durably and lets
+/// another server adopt it — a record of the approval, not a gate on it.
 /// </summary>
-public record SignUpgradePathScriptCommand(string ApplicationName, string Platform) : IRequest<UpgradePathResultDto>;
+/// <param name="SignedBy">Who reviewed it, from the authenticated session — recorded in the published
+/// approval entry. Null when the site is running with authentication disabled.</param>
+public record SignUpgradePathScriptCommand(string ApplicationName, string Platform, string? SignedBy = null)
+    : IRequest<UpgradePathResultDto>;

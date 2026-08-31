@@ -7,10 +7,9 @@ public interface IUpgradePathRepository
 {
     Task<UpgradePath?> GetAsync(string applicationName, string platform, CancellationToken cancellationToken);
 
-    /// <summary>Looks up the upgrade path whose generated script is served as
-    /// "{applicationIdentifier}.sh" — see the `/api/upgrade-paths/scripts/{appId}` endpoint. First
-    /// match if more than one row somehow shares an identifier; that shouldn't normally happen
-    /// since a bundle identifier is specific to one application.</summary>
+    /// <summary>Looks up the upgrade path recorded against one application identifier. First match if
+    /// more than one row somehow shares an identifier; that shouldn't normally happen since a bundle
+    /// identifier is specific to one application.</summary>
     Task<UpgradePath?> GetByApplicationIdentifierAsync(string applicationIdentifier, CancellationToken cancellationToken);
 
     Task AddAsync(UpgradePath upgradePath, CancellationToken cancellationToken);
@@ -37,6 +36,12 @@ public interface IUpgradePathRepository
     /// (see <c>SignUpgradePathScriptCommandHandler</c>), instead of leaving them to self-heal only
     /// the next time each one happens to get rescanned or re-registered.</summary>
     Task<IReadOnlyList<UpgradePath>> GetUnsignedRowsWithScriptAsync(string script, CancellationToken cancellationToken);
+
+    /// <summary>Every row that carries no human-approved script signature yet — either because no
+    /// script has been resolved for it at all, or because one has and nobody has reviewed it. These
+    /// are what the Upgrade Scripts page offers approved content for, and the only rows adoption is
+    /// ever allowed to touch (see <c>UpgradePath.AdoptApprovedScript</c>).</summary>
+    Task<IReadOnlyList<UpgradePath>> GetRowsWithoutScriptSignatureAsync(CancellationToken cancellationToken);
 
     /// <summary>Every installed (host, application) pairing joined with its known upgrade path, if
     /// any has been researched, scoped to one host. Intended for the kintsugi-agent's own use —
