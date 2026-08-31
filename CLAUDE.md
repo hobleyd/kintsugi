@@ -150,6 +150,18 @@ un-gated until `nginx/default.conf` is edited too** — nothing in the C# will t
 `/api/host/enroll` is deliberately outside the regex (an unenrolled agent has no cert yet), as are
 the browser-driven `/api/upgrade-paths/...` sub-routes.
 
+**Only the macOS per-user process holds the agent identity, and that constrains its file mode.**
+It reads the same `identity/` directory the root daemon writes, so the directory is `root:admin
+0770` and the key `0640` — `admin` because that is the logged-in administrator's group, and the
+per-user process is not root (Homebrew refusing to run as root is the whole reason macOS differs;
+the Windows and Linux per-user halves hold no identity and go through their queue instead).
+`install.sh` sets that ownership, and `identity.rs`'s `enroll` now sets it again on every
+enrollment, because macOS gives a new file its *directory's* group rather than the creating
+process's. Without that second call, deleting `identity/` to recover from a regenerated CA — the
+documented remedy — recreates it under root's own `wheel`, and the per-user process can never read
+its own key again. It fails half-visibly: the root daemon is fine, the host keeps registering, and
+only the per-user half stops, presenting no certificate at all and drawing a 403.
+
 **Two separate key hierarchies, kept apart on purpose.** `CaService` mints agent identities;
 `ArtifactSigningService` signs script/command *content*. An AI-generated or hand-pasted script
 starts **unsigned** — a human must sign it via `POST /api/upgrade-paths/sign-script`, and the agent
