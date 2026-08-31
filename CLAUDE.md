@@ -196,6 +196,14 @@ page that derived the address unconditionally and argued it was safe because the
 listener only 301s to the TLS one. That argument covers the scheme and the port and misses the
 front door. The page now says out loud when it is falling back.
 
+A deployment where something else already owns 443 therefore needs agents routed to nginx *without*
+that hop terminating them, which is what `nginx/edge-sni-router.conf.example` documents: an
+`ssl_preread` stream server that reads the SNI hostname off the ClientHello and hands the agent
+hostname's bytes through untouched. It is the only shape that works, because a mutual-TLS handshake
+can only be verified by whatever terminates it. Note the CDN case specifically — a proxying CDN's
+own mTLS feature validates against *its* CA and forwards the verdict in a header, which is not what
+`$ssl_client_verify` reads, so the agent hostname has to bypass the CDN's proxy entirely.
+
 That rewrite happens at **import**, not download, and the two rewrites `IAgentPackageArchiveRewriter`
 performs are deliberately split that way: `api_base_url` is baked into the stored bytes so the
 checksum signed over them already describes this server and an enrolled agent's byte-identical
