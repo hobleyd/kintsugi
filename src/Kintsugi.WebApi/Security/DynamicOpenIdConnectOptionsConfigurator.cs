@@ -34,13 +34,21 @@ public class DynamicOpenIdConnectOptionsConfigurator : IConfigureNamedOptions<Op
 
         // OpenIdConnectHandler is a remote *request handler* scheme, so ASP.NET Core initializes
         // it on every request (not just /signin-oidc) to ask whether this request is its callback
-        // — see AuthenticationMiddleware. That initialization throws immediately if Authority,
-        // MetadataAddress, Configuration, and ConfigurationManager are all unset, which they are
-        // before anything has ever been saved on the Authentication settings page. Set a
-        // resolvable placeholder up front so the app doesn't crash on every request pre-setup;
-        // it's harmless since nothing can trigger an actual challenge until settings exist, and is
-        // overwritten below once they do.
+        // — see AuthenticationMiddleware. That initialization runs OpenIdConnectOptions.Validate,
+        // which throws if Authority/MetadataAddress/Configuration/ConfigurationManager are all
+        // unset *and* separately if ClientId is unset — which is what they are before anything has
+        // ever been saved on the Authentication settings page. Both need a placeholder up front,
+        // or the app 500s on every request pre-setup, including /health and the redirect to
+        // /settings/authentication that is the only way to configure it: a fresh deploy that
+        // cannot be set up at all.
+        //
+        // Harmless because neither value can reach a provider. Only a challenge would send them,
+        // and with no settings saved the fresh-deploy redirect in Program.cs answers every
+        // non-/api route — Account/Login's Challenge handler included — with /settings/authentication
+        // before the handler runs. Verified by requesting that handler on an empty database: it
+        // redirects to the settings page rather than to an identity provider.
         options.Authority = "https://accounts.google.com";
+        options.ClientId = "kintsugi-unconfigured";
         options.CallbackPath = "/signin-oidc";
         options.SignedOutCallbackPath = "/signout-callback-oidc";
         options.ResponseType = OpenIdConnectResponseType.Code;
@@ -61,7 +69,18 @@ public class DynamicOpenIdConnectOptionsConfigurator : IConfigureNamedOptions<Op
 
         options.ClientId = settings.ClientId;
         options.ClientSecret = settings.ClientSecret;
-        options.Authority = settings.ResolveAuthority();
+
+        // ResolveAuthority returns null for a row whose provider needs a TenantId or Authority and
+        // has neither — which the validator and AuthenticationSettings.Apply both refuse to save,
+        // but a row written before those rules, or edited in the database, can still look like.
+        // Assigning that null would clear the placeholder above and crash every request in the
+        // same way, so keep the placeholder instead: sign-in is broken either way, but the
+        // settings page stays reachable to fix it.
+        var authority = settings.ResolveAuthority();
+        if (!string.IsNullOrWhiteSpace(authority))
+        {
+            options.Authority = authority;
+        }
 
         options.Scope.Clear();
         options.Scope.Add("openid");
