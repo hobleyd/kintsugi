@@ -12,7 +12,6 @@ using Kintsugi.Application.UpgradePaths.Queries.GetUpdateCheckStatus;
 using Kintsugi.Application.UpgradePaths.Queries.GetUpgradePathPrompt;
 using Kintsugi.Application.UpgradePaths.Queries.GetUpgradePathRefreshStatus;
 using Kintsugi.Application.UpgradePaths.Queries.GetUpgradePathScanStatus;
-using Kintsugi.Application.UpgradePaths.Queries.GetUpgradePathScript;
 using Kintsugi.Application.UpgradePaths.Queries.GetUpgradePathSummaries;
 using Kintsugi.Application.UpgradePaths.Queries.GetUpgradeStatuses;
 using Kintsugi.Domain.Enums;
@@ -169,27 +168,6 @@ public class UpgradePathsController : ControllerBase
             // site is deliberately running with authentication disabled.
             new SignUpgradePathScriptCommand(request.ApplicationName, request.Platform, SignedBy: User.Identity?.Name),
             cancellationToken));
-
-    /// <summary>
-    /// Serves the generated script for the application with this bundle identifier, as a real
-    /// named file — "{appId}.sh" — rather than only reachable embedded inside a
-    /// <see cref="UpgradeStatusDto"/>. 404 when no script has been generated for that identifier
-    /// (not researched yet, not found by research, or not on a platform script generation covers).
-    /// </summary>
-    [HttpGet("scripts/{appId}.sh")]
-    [Produces("application/x-sh")]
-    [ProducesResponseType(StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> GetScript(string appId, CancellationToken cancellationToken)
-    {
-        var script = await _sender.Send(new GetUpgradePathScriptQuery(appId), cancellationToken);
-        if (script is null)
-        {
-            return NotFound();
-        }
-
-        return File(System.Text.Encoding.UTF8.GetBytes(script), "application/x-sh", $"{appId}.sh");
-    }
 
     /// <summary>
     /// Records a version an agent discovered by running its already-generated upgrade script's own

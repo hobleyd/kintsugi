@@ -141,6 +141,49 @@ public class UpgradePath : BaseEntity
         ScriptSignature = scriptSignature;
     }
 
+    /// <summary>
+    /// Takes on a script another server's reviewer already approved, and this server's own signature
+    /// over it — the "adopt" half of the Upgrade Scripts page (see
+    /// <c>AdoptApprovedScriptCommandHandler</c>). Re-signed locally rather than carrying the original
+    /// signature across, because every agent pins exactly one signing key at enrollment: its own
+    /// server's. A remote signature would be genuine and still refused by every agent that saw it.
+    /// </summary>
+    /// <remarks>
+    /// Refuses outright once <see cref="ScriptSignature"/> is set. A row that already carries a valid
+    /// signature is one agents may be executing right now, and replacing its content out from under
+    /// them — with content from a repository, on a schedule nobody watched — is the one thing
+    /// adoption must never do. Re-approving such a row is a deliberate act that goes back through
+    /// <c>SignUpgradePathScriptCommand</c> and a human.
+    /// </remarks>
+    public void AdoptApprovedScript(string script, string scriptSignature, string? applicationIdentifier)
+    {
+        if (string.IsNullOrWhiteSpace(script))
+        {
+            throw new DomainException("An approved script cannot be empty.");
+        }
+
+        if (ScriptSignature is not null)
+        {
+            throw new DomainException(
+                $"'{ApplicationName}' on '{Platform}' already has an approved script; adopting another would replace "
+                + "content agents may already be running. Review and sign a replacement instead.");
+        }
+
+        Script = script;
+        ScriptSignature = scriptSignature;
+        Status = UpgradePathStatus.Found;
+        Method = UpgradeMethod.Script;
+        if (!string.IsNullOrWhiteSpace(applicationIdentifier) && string.IsNullOrWhiteSpace(ApplicationIdentifier))
+        {
+            // Only filled in when this row hasn't got one. A local identifier came from an agent
+            // actually reporting that installation, which is better evidence than the approving
+            // server's note of what it happened to be reviewing.
+            ApplicationIdentifier = applicationIdentifier;
+        }
+        CheckedUtc = DateTimeOffset.UtcNow;
+        MarkUpdated();
+    }
+
     private void Apply(
         string applicationName,
         string platform,
