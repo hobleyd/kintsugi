@@ -724,6 +724,10 @@ h2 {
    two headers (Clients, Applications) is several paragraphs squeezed into a third of the page. */
 .section-header > div:first-child { flex: 1 1 auto; min-width: 0; }
 .section-header .hint { margin: 0; }
+/* margin: 0 above is what keeps the hint's baseline aligned with the h2 it follows, so the gap
+   between consecutive paragraphs has to come back separately — the Clients header runs to two
+   and they otherwise butt together as one block of text. */
+.section-header .hint + .hint { margin-top: 0.6rem; }
 .section-header .btn-primary { flex-shrink: 0; }
 .section-header .button-row { display: flex; gap: 0.75rem; flex-shrink: 0; }
 
