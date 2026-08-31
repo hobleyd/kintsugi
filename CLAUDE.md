@@ -129,6 +129,17 @@ Layering is conventional (`Domain` ← `Application` ← `Infrastructure` ← `W
 command/query handlers, each feature folder holding a `Command`/`Handler`/`Validator` triad;
 FluentValidation runs via `ValidationBehaviour`. What follows is the part no single file explains.
 
+**A rejected agent certificate never reaches the 403.** `ssl_verify_client optional` means "verify
+it if one is offered", not "tolerate a bad one" — a presented certificate that fails to verify
+raises nginx's 495 during request processing, *before* any `location` is matched, so the agent
+block's `$ssl_client_verify != SUCCESS` test only ever sees `NONE`. Unremapped, 495 goes out as a
+bare 400 and the agent reports only "request rejected (HTTP 400 Bad Request)". `default.conf` now
+remaps 495/496 to distinct messages, because the two causes need completely different fixes: no
+certificate means an unenrolled agent or a TLS-terminating proxy in front eating it, while a
+rejected one almost always means the fleet CA was regenerated under an already-enrolled agent.
+Do not "fix" a rejected certificate by switching to `optional_no_ca` — verification against the
+fleet CA is the entire security property.
+
 **Agent authentication is two layers, and adding a route needs both.** nginx requires a client
 certificate signed by the fleet CA on an *exact-match* regex —
 `^/api/(host|applications|patching-policy|upgrade-paths|patch-results|os-patch-results|host-removed)$`
