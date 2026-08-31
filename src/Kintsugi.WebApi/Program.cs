@@ -2,6 +2,7 @@ using HealthChecks.NpgSql;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.OpenApi.Models;
 using Kintsugi.Application;
@@ -13,6 +14,25 @@ using Kintsugi.WebApi.Security;
 using Kintsugi.WebApi.UpgradePathScanning;
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Everything this app says its own address is — the OIDC redirect_uri and post_logout_redirect_uri
+// sent to the identity provider, and the callback URLs shown on the Authentication settings page —
+// is built from Request.Scheme and Request.Host. Behind a proxy those are the proxy's, not the
+// browser's, and a wrong redirect_uri is rejected by the provider outright rather than degrading:
+// sign-in simply fails. So trust the forwarded pair, which nginx sends (see nginx/default.conf,
+// which preserves an outer proxy's values rather than overwriting them with its own).
+//
+// KnownNetworks/KnownProxies are cleared rather than enumerated because the only peer that can
+// reach this app is nginx, over the internal net-web network, on an address Docker assigns and
+// changes. That is safe *because* the API publishes no ports (see docker-compose.yml) — nothing
+// off that network can open a connection here to forge these headers. Publishing a port would
+// invalidate that reasoning, and nothing here would notice.
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto | ForwardedHeaders.XForwardedHost;
+    options.KnownNetworks.Clear();
+    options.KnownProxies.Clear();
+});
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
@@ -91,6 +111,11 @@ builder.Services.AddHealthChecks()
 var app = builder.Build();
 
 await ApplyMigrationsAsync(app);
+
+// Before anything that reads the scheme or host — which is the redirect to
+// /settings/authentication below, the OIDC handler in UseAuthentication, and every page that
+// renders a URL of its own.
+app.UseForwardedHeaders();
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
 

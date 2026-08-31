@@ -434,6 +434,20 @@ th.sortable.sort-desc .th-sort-label::after { content: '▼'; opacity: 1; color:
        short tokens like `profile` should not be split when they already fit the line. */
     overflow-wrap: anywhere;
 }
+/* The callback URLs, as a label/value pair each. Long enough that the label has to sit on its
+   own line rather than beside the value. */
+.settings-aside .url-list { margin: 0 0 0.75rem; }
+.settings-aside .url-list dt {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 0.62rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--neon-dim);
+    margin-bottom: 0.2rem;
+}
+.settings-aside .url-list dd { margin: 0 0 0.6rem; font-size: 0.85rem; }
+.settings-aside .url-list dd:last-child { margin-bottom: 0; }
+
 .settings-aside a { color: var(--neon); }
 .settings-aside .hint { margin-top: 1rem; }
 
