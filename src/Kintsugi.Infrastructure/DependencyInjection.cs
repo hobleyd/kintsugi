@@ -44,6 +44,7 @@ public static class DependencyInjection
         services.AddSingleton<ICaService, CaService>();
         services.AddSingleton<IArtifactSigningService, ArtifactSigningService>();
         services.AddSingleton<IAgentEnrollmentOptions, AgentEnrollmentOptions>();
+        services.AddSingleton<IAgentApiOptions, AgentApiOptions>();
         services.AddSingleton<ICheckInLoadBalancer, CheckInLoadBalancer>();
 
         return services;

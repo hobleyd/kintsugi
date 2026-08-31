@@ -5,16 +5,19 @@ using Kintsugi.Application.AgentPackages;
 using Kintsugi.Application.AgentPackages.Commands.ImportAgentPackagesFromSource;
 using Kintsugi.Application.AgentPackages.Queries.GetAgentPackages;
 using Kintsugi.Application.AgentPackages.Queries.GetAgentPackageSourceStatus;
+using Kintsugi.Application.Common.Interfaces;
 
 namespace Kintsugi.WebApi.Pages;
 
 public class ClientsModel : PageModel
 {
     private readonly ISender _sender;
+    private readonly IAgentApiOptions _agentApiOptions;
 
-    public ClientsModel(ISender sender)
+    public ClientsModel(ISender sender, IAgentApiOptions agentApiOptions)
     {
         _sender = sender;
+        _agentApiOptions = agentApiOptions;
     }
 
     public IReadOnlyList<AgentPackageDto> Packages { get; private set; } = Array.Empty<AgentPackageDto>();
@@ -37,15 +40,26 @@ public class ClientsModel : PageModel
     /// The address baked into each imported package's bundled <c>config.toml</c>, and shown on the
     /// page so a wrong one is visible here rather than only as an agent that never checks in.
     ///
-    /// Built from the address this page was reached on — the forwarded pair nginx sends, so it is
-    /// the browser's address and not the container's (see <c>Program.cs</c>'s
-    /// <c>UseForwardedHeaders</c>, and the same reasoning behind the OIDC callback URLs on the
-    /// Authentication settings page). That is a safe source for an address agents must reach over
-    /// mutual TLS because nginx's plain-HTTP listener serves nothing but a 301 to the TLS one:
-    /// there is no way to have reached this page over a scheme or port a client certificate
-    /// couldn't be presented on.
+    /// <c>AGENT_API_BASE_URL</c> when it is set, and otherwise the address this page was reached
+    /// on. The configured value has to win, because the browser's address is regularly *not* an
+    /// address an agent can authenticate against: nginx is what verifies the client certificate,
+    /// so anything terminating TLS in front of it — a gateway, a load balancer, a CDN — ends the
+    /// mutual-TLS handshake at itself and cannot pass the certificate on. An earlier version of
+    /// this page derived the address unconditionally and argued it was safe because nginx's
+    /// plain-HTTP listener only ever 301s to the TLS one; that reasoning covers the scheme and the
+    /// port and misses the front door entirely, and it shipped agents pointed at a gateway that
+    /// enrolled fine and then 403'd on every authenticated route.
     /// </summary>
-    public string AgentApiBaseUrl => $"{Request.Scheme}://{Request.Host}";
+    public string AgentApiBaseUrl => _agentApiOptions.AgentApiBaseUrl ?? RequestBaseUrl;
+
+    /// <summary>True when no <c>AGENT_API_BASE_URL</c> is configured and the address above is a
+    /// guess from this request — which the page says out loud, because the guess being wrong is
+    /// otherwise invisible until an agent has been installed and silently reports nothing.</summary>
+    public bool AgentApiBaseUrlIsDerived => _agentApiOptions.AgentApiBaseUrl is null;
+
+    /// <summary>The address this page was reached on — the forwarded pair nginx sends, so the
+    /// browser's and not the container's (see <c>Program.cs</c>'s <c>UseForwardedHeaders</c>).</summary>
+    public string RequestBaseUrl => $"{Request.Scheme}://{Request.Host}";
 
     public async Task OnGetAsync(CancellationToken cancellationToken)
     {

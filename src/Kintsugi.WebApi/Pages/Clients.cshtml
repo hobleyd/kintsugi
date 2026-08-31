@@ -20,10 +20,8 @@
             Builds come from <code>@Model.SourceStatus.SourceDescription</code>, where CI publishes
             one release per agent per version. "Refresh clients" downloads what's newer there and
             republishes it here with <code>api_base_url</code> set to
-            <code>@Model.AgentApiBaseUrl</code> — the address this page was reached on — so a
-            downloaded package needs no editing before it is installed. If that address isn't the
-            one your agents should call home on, whatever is in front of this server isn't
-            forwarding the browser's host.
+            <code>@Model.AgentApiBaseUrl</code>, so a downloaded package needs no editing before it
+            is installed.
         </p>
     </div>
     <div class="button-row">
@@ -32,6 +30,24 @@
         </form>
     </div>
 </div>
+
+@if (Model.AgentApiBaseUrlIsDerived)
+{
+    @* Loud rather than quiet, because getting this wrong fails in the worst possible way: the
+       agent enrolls (/api/host/enroll is deliberately outside nginx's client-certificate regex),
+       looks installed, and then 403s on every authenticated route forever. Whatever verifies the
+       certificate is nginx itself, so any TLS-terminating hop in front of it — a gateway, a load
+       balancer, a CDN — ends the handshake at itself and the admin UI's own address is the wrong
+       answer. *@
+    <div class="alert alert-info">
+        <code>AGENT_API_BASE_URL</code> isn't set, so imported packages will be pointed at
+        <code>@Model.RequestBaseUrl</code> — the address this page was reached on. That is only
+        right if your agents reach <em>nginx itself</em> there. If anything terminates TLS in front
+        of it, the agent's client certificate never arrives, and every agent-only route answers
+        403 after an enrollment that appeared to succeed. Set <code>AGENT_API_BASE_URL</code> in
+        <code>.env</code> to nginx's own address and port, then refresh.
+    </div>
+}
 
 @if (Model.RefreshError is not null)
 {

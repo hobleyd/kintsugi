@@ -49,6 +49,11 @@ services:
       # that, so rotating it doesn't affect already-enrolled agents. Required: an agent can't
       # enroll at all without it configured.
       AGENT_ENROLLMENT_TOKEN: ${AGENT_ENROLLMENT_TOKEN:?AGENT_ENROLLMENT_TOKEN must be set}
+      # The address baked into packages the Clients page imports — nginx's own address and port,
+      # which is not the admin UI's whenever something terminates TLS in front of nginx. Optional;
+      # blank means the page falls back to the address it was reached on and says so. See
+      # IAgentApiOptions.
+      AGENT_API_BASE_URL: ${AGENT_API_BASE_URL:-}
     volumes:
       # CaService's persistent home for the agent fleet's CA keypair (generated on first run if
       # missing). agent-ca-private holds both ca.crt and ca.key; only the api service ever mounts
