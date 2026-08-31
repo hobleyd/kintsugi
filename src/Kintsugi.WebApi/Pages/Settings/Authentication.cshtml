@@ -25,10 +25,6 @@
     <div class="alert alert-success">Settings saved.</div>
 }
 
-<div class="alert alert-info">
-    Register this callback URL with your identity provider: <code>@Model.CallbackUrl</code>
-</div>
-
 <div class="settings-columns">
     <div class="panel">
         <form method="post" class="settings-form">
@@ -98,13 +94,25 @@
             Whichever provider you use, register this site as a <strong>confidential web application</strong>
             — the sign-in uses the authorization code flow and always sends a client secret, so an app
             registered as a single-page or native/mobile client will be rejected by the provider. It
-            requests the <code>openid</code>, <code>profile</code> and <code>email</code> scopes, and its
-            redirect URI is the callback URL shown above.
+            requests the <code>openid</code>, <code>profile</code> and <code>email</code> scopes.
         </p>
+        <p>Register both of these URLs with the provider:</p>
+        <dl class="url-list">
+            <dt>Redirect URI</dt>
+            <dd><code>@Model.CallbackUrl</code></dd>
+            <dt>Post-sign-out redirect URI</dt>
+            <dd><code>@Model.SignOutCallbackUrl</code></dd>
+        </dl>
         <p>
-            Logging out signs out of the provider as well, so register
-            <code>@Model.SignOutCallbackUrl</code> too — as a second redirect URI, or in whatever field
-            the provider calls its post-sign-out redirect. Without it, logging out fails at the provider.
+            The second is not optional: logging out signs out of the provider too, so without it
+            the provider rejects the sign-out. Most providers take it as a second entry in the
+            same redirect-URI list.
+        </p>
+        <p class="hint">
+            Both are built from the address this page was reached on. If they do not match what is
+            in your browser's address bar, a proxy in front of this site is not passing the
+            original host through (<code>X-Forwarded-Host</code>) — fix that first, because
+            sign-in will fail at the provider whatever you register here.
         </p>
 
         <div data-provider-help="GoogleWorkspace">
@@ -112,7 +120,7 @@
             <ol>
                 <li>In the Google Cloud console, open <strong>APIs &amp; Services → Credentials</strong> and choose <strong>Create credentials → OAuth client ID</strong>.</li>
                 <li>Set the application type to <strong>Web application</strong>.</li>
-                <li>Add the callback URL above under <strong>Authorised redirect URIs</strong>.</li>
+                <li>Add the redirect URI above under <strong>Authorised redirect URIs</strong>.</li>
                 <li>Copy the generated client ID and client secret into the form.</li>
                 <li>Optionally set <strong>Restrict to Workspace domain</strong> to your Workspace domain.</li>
             </ol>
@@ -130,7 +138,7 @@
             <h3>Microsoft Entra</h3>
             <ol>
                 <li>In the Entra admin center, open <strong>App registrations → New registration</strong>.</li>
-                <li>Under <strong>Redirect URI</strong>, choose the <strong>Web</strong> platform and enter the callback URL above.</li>
+                <li>Under <strong>Redirect URI</strong>, choose the <strong>Web</strong> platform and enter the redirect URI above.</li>
                 <li>Under <strong>Certificates &amp; secrets</strong>, add a new client secret and copy its <strong>Value</strong> (not its ID) into the form.</li>
                 <li>Copy the <strong>Application (client) ID</strong> from the app's Overview page into <strong>Client ID</strong>.</li>
                 <li>Copy the <strong>Directory (tenant) ID</strong> from the same page into <strong>Tenant ID</strong>.</li>
@@ -146,7 +154,7 @@
             <h3>Generic OAuth2 / OIDC</h3>
             <ol>
                 <li>Create an application of the provider's confidential web type — a <strong>Regular Web Application</strong> in Auth0, a <strong>Web Application</strong> in Okta.</li>
-                <li>Add the callback URL above to its allowed callback / redirect URIs.</li>
+                <li>Add the redirect URI above to its allowed callback / redirect URIs.</li>
                 <li>Allow the <strong>authorization code</strong> grant, and the <code>openid</code>, <code>profile</code> and <code>email</code> scopes.</li>
                 <li>Copy its client ID and client secret into the form.</li>
                 <li>Enter the provider's base issuer URL as the <strong>Authority</strong>.</li>
@@ -164,7 +172,7 @@
             <h3>Clerk</h3>
             <ol>
                 <li>In the Clerk dashboard, create an <strong>OAuth application</strong> for this site.</li>
-                <li>Add the callback URL above as its redirect URI.</li>
+                <li>Add the redirect URI above as its redirect URI.</li>
                 <li>Grant it the <code>openid</code>, <code>profile</code> and <code>email</code> scopes.</li>
                 <li>Copy its client ID and client secret into the form.</li>
                 <li>Enter the instance's issuer URL — the Frontend API URL shown in the dashboard, or your custom Clerk domain if you have set one — as the <strong>Authority</strong>.</li>
