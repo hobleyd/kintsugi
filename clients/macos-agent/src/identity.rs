@@ -100,6 +100,11 @@ pub fn enroll(client: &reqwest::blocking::Client, config: &Config, serial_number
     let private_key_pem = key_pair.serialize_pem();
 
     fs::create_dir_all(dir).with_context(|| format!("could not create identity directory {}", dir.display()))?;
+    // Before the files below are written, not after: macOS gives a new file the *directory's*
+    // group rather than the creating process's (BSD semantics, unlike Linux), so putting the
+    // directory in `admin` here is what makes every file written into it readable by the per-user
+    // --agent process.
+    grant_admin_group_access(dir);
     fs::write(dir.join(CERT_FILE), &parsed.certificate_pem).context("failed to save agent certificate")?;
     fs::write(dir.join(KEY_FILE), &private_key_pem).context("failed to save agent private key")?;
     fs::write(dir.join(CA_FILE), &parsed.ca_certificate_pem).context("failed to save CA certificate")?;
@@ -167,6 +172,62 @@ pub fn load_or_enroll(config: &Config, serial_number: &str) -> Option<AgentIdent
 }
 
 #[cfg(unix)]
+/// Puts the identity directory in the `admin` group with 0770 — the same ownership
+/// packaging/install.sh gives it on a fresh install.
+///
+/// Doing it here as well, rather than trusting install.sh to have done it, is what makes a
+/// *re*-enrollment self-healing. Deleting this directory is the documented way to recover from a
+/// regenerated fleet CA, and until this existed the recovery quietly half-worked: `create_dir_all`
+/// running as root recreates the directory under root's own primary group (`wheel`), every file
+/// written into it inherits `wheel`, and the per-user --agent process — which runs as the
+/// logged-in administrator, and is in `admin`, not `wheel` — can no longer read the private key.
+///
+/// The half that still works is what makes it nasty. The root daemon is unaffected, so the host
+/// goes on registering and checking in and the install looks healthy; only the per-user half dies,
+/// and it dies as a 403 from nginx, because an identity it cannot load means it presents no client
+/// certificate at all rather than reporting that it failed to read one.
+///
+/// macOS is the only agent this applies to: the Windows and Linux per-user processes hold no
+/// identity and make no authenticated call (they go through the queue instead). Homebrew refusing
+/// to run as root is why this one is different — see each agent's own queue module.
+///
+/// Best-effort, like `restrict_key_permissions`: on a correctly installed host install.sh has
+/// already set this, and failing to enroll over a `chown` that only matters to the per-user half
+/// would be the worse trade.
+fn grant_admin_group_access(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    if let Some(admin_gid) = admin_group_id() {
+        // uid unchanged (u32::MAX is chown(2)'s "leave it alone"), because this already runs as
+        // root and the owner is exactly right.
+        let _ = std::os::unix::fs::chown(dir, None, Some(admin_gid));
+    }
+
+    if let Ok(metadata) = fs::metadata(dir) {
+        let mut permissions = metadata.permissions();
+        // Group needs execute as well as read to traverse into the directory at all; nothing
+        // outside root and admin has any business here, hence no world bits.
+        permissions.set_mode(0o770);
+        let _ = fs::set_permissions(dir, permissions);
+    }
+}
+
+/// The numeric gid of the `admin` group, looked up rather than hardcoded to 80 — the value is
+/// stable across every macOS release to date, but a wrong gid here would hand this host's private
+/// key to whichever group happened to hold that number.
+fn admin_group_id() -> Option<u32> {
+    // SAFETY: getgrnam() returns either a valid pointer into a thread-local static buffer (read
+    // immediately, before any other libc call in this thread could invalidate it) or null. The
+    // name is a literal with an explicit NUL, so it is a valid C string.
+    unsafe {
+        let group = libc::getgrnam(b"admin\0".as_ptr() as *const libc::c_char);
+        if group.is_null() {
+            return None;
+        }
+        Some((*group).gr_gid)
+    }
+}
+
 fn restrict_key_permissions(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     if let Ok(metadata) = fs::metadata(path) {
@@ -211,6 +272,32 @@ mod tests {
     /// exercise signature verification.
     fn test_signing_key(seed: u8) -> SigningKey {
         SigningKey::from_bytes(&[seed; 32].into()).expect("32 fixed bytes is always a valid P-256 scalar for this seed")
+    }
+
+    #[test]
+    fn admin_group_id_resolves_to_the_group_install_sh_uses() {
+        // 80 on every macOS release to date. Asserted rather than hardcoded in the lookup itself
+        // because getting this wrong does not fail loudly — it silently hands this host's private
+        // key to whichever group holds that gid, and the only visible symptom would be the
+        // per-user process working exactly as before.
+        assert_eq!(super::admin_group_id(), Some(80));
+    }
+
+    #[test]
+    fn admin_group_is_a_group_the_logged_in_user_is_actually_in() {
+        // The whole point of the admin group here is that the per-user --agent process can read
+        // the identity. If a future macOS moved administrators out of `admin`, this pins the
+        // assumption rather than letting re-enrollment quietly lock that process out again.
+        let gid = super::admin_group_id().expect("admin group should exist on macOS");
+        let groups = std::process::Command::new("id").arg("-G").output().expect("id -G should run");
+        let member_of: Vec<u32> = String::from_utf8_lossy(&groups.stdout)
+            .split_whitespace()
+            .filter_map(|g| g.parse().ok())
+            .collect();
+        assert!(
+            member_of.contains(&gid) || member_of.contains(&0),
+            "the user running these tests is in neither admin nor root: {member_of:?}"
+        );
     }
 
     fn identity_with_public_key(signing_key: &SigningKey) -> AgentIdentity {
