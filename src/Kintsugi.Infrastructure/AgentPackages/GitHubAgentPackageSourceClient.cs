@@ -132,9 +132,12 @@ public class GitHubAgentPackageSourceClient : IAgentPackageSourceClient
 
             // GitHub returns newest-created first, but "created most recently" and "highest
             // version" are not the same thing once a patch is backported or a release is re-cut,
-            // and the version is what everything downstream keys on.
+            // and the version is what everything downstream keys on. IsHigherThan, not IsNewer:
+            // only a provably higher version displaces the incumbent, so two versions that can't
+            // be ordered against each other (a pre-release tag beside its final release) fall back
+            // to GitHub's newest-created-first order instead of to whichever was listed second.
             if (!newestPerPlatform.TryGetValue(release.Platform, out var incumbent)
-                || AgentPackageVersion.IsNewer(release.Version, incumbent.Version))
+                || AgentPackageVersion.IsHigherThan(release.Version, incumbent.Version))
             {
                 newestPerPlatform[release.Platform] = release;
             }

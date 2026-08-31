@@ -46,4 +46,19 @@ public class AgentPackageVersionTests
     [Fact]
     public void IsNewer_IgnoresSurroundingWhitespace() =>
         Assert.False(AgentPackageVersion.IsNewer(" 0.5.0 ", "0.5.0"));
+
+    [Fact]
+    public void IsHigherThan_OnlySaysYesWhenItCanActuallyTell()
+    {
+        // The selection question, as opposed to IsNewer's "is there something different upstream
+        // worth showing?". Two versions that can't be ordered must answer no in both directions,
+        // or the winner depends on which was compared against which.
+        Assert.True(AgentPackageVersion.IsHigherThan("0.6.0", "0.5.0"));
+        Assert.True(AgentPackageVersion.IsHigherThan("0.10.0", "0.9.0"));
+        Assert.False(AgentPackageVersion.IsHigherThan("0.5.0", "0.5.0"));
+        Assert.False(AgentPackageVersion.IsHigherThan("0.5.0", "0.6.0"));
+
+        Assert.False(AgentPackageVersion.IsHigherThan("0.5.0", "0.5.0-rc1"));
+        Assert.False(AgentPackageVersion.IsHigherThan("0.5.0-rc1", "0.5.0"));
+    }
 }

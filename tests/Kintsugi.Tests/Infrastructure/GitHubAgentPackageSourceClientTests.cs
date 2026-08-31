@@ -78,6 +78,26 @@ public class GitHubAgentPackageSourceClientTests
         Assert.Equal("0.10.0", release.Version);
     }
 
+    [Theory]
+    [InlineData("macos-agent-v0.5.0", "macos-agent-v0.5.0-rc1")]
+    [InlineData("macos-agent-v0.5.0-rc1", "macos-agent-v0.5.0")]
+    public void ParseLatestReleases_UnorderableVersions_PickTheSameOneWhicheverOrderTheyreListedIn(
+        string firstTag, string secondTag)
+    {
+        // "0.5.0" and "0.5.0-rc1" can't be ordered against each other, and the permissive
+        // "different means newer" rule would answer yes in both directions — so whichever GitHub
+        // listed second would win, and the selected build would depend on listing order rather
+        // than on the versions. Selection uses IsHigherThan, which falls back to GitHub's
+        // newest-created-first order instead.
+        var json = Listing(
+            Release(firstTag, "kintsugi-agent-macos.tar.gz"),
+            Release(secondTag, "kintsugi-agent-macos.tar.gz"));
+
+        var release = Assert.Single(GitHubAgentPackageSourceClient.ParseLatestReleases(json));
+
+        Assert.Equal(firstTag, $"macos-agent-v{release.Version}");
+    }
+
     [Fact]
     public void ParseLatestReleases_SkipsDrafts()
     {
