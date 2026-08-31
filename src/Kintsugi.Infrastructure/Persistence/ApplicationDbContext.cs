@@ -19,6 +19,7 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
     public DbSet<PatchingPolicySettings> PatchingPolicySettings => Set<PatchingPolicySettings>();
     public DbSet<AgentPackage> AgentPackages => Set<AgentPackage>();
     public DbSet<AuthenticationSettings> AuthenticationSettings => Set<AuthenticationSettings>();
+    public DbSet<ApprovedScript> ApprovedScripts => Set<ApprovedScript>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

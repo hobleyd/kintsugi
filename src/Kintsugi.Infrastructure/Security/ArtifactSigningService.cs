@@ -3,6 +3,7 @@ using System.Text;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Kintsugi.Application.Common.Interfaces;
+using Kintsugi.Application.ScriptApproval;
 
 namespace Kintsugi.Infrastructure.Security;
 
@@ -34,6 +35,8 @@ public class ArtifactSigningService : IArtifactSigningService
     private string PublicKeyPath => Path.Combine(_publicDirectory, "artifact-signing.pub");
 
     public string GetPublicKeyPem() => LoadOrCreateKey().ExportSubjectPublicKeyInfoPem();
+
+    public string GetPublicKeyFingerprint() => ScriptSignerFingerprint.For(GetPublicKeyPem());
 
     public string? Sign(string? content)
     {

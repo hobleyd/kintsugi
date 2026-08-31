@@ -12,3 +12,11 @@
 # Generated / vendored: keep out of language stats and diff noise.
 Cargo.lock linguist-generated=true
 src/Kintsugi.Infrastructure/Persistence/Migrations/** linguist-generated=true
+
+# Human-approved upgrade scripts are content-addressed: the directory name is the SHA-256 of the
+# script's bytes, and a signature is checked against those exact bytes (see ApprovedScriptCorpus).
+# The `* text=auto eol=lf` rule above would rewrite a PowerShell script's CRLF line endings on
+# commit, changing the hash and invalidating every signature over it — so nothing under here is
+# eligible for line-ending conversion. `-text` also stops any contributor's core.autocrlf from
+# touching it on checkout, which is the same corruption arriving from the other direction.
+approved-scripts/** -text

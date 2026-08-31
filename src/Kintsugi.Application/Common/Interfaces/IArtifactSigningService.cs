@@ -14,6 +14,15 @@ public interface IArtifactSigningService
     /// <c>EnrollAgentCommandHandler</c>) for it to pin and verify every future signature against.</summary>
     string GetPublicKeyPem();
 
+    /// <summary>
+    /// <c>sha256:&lt;hex&gt;</c> over <see cref="GetPublicKeyPem"/>'s SubjectPublicKeyInfo DER —
+    /// this server's identity as a script signer in the shared approval repository (see
+    /// <c>ApprovedScriptCorpus</c>), and the one fingerprint whose signatures a server can regard as
+    /// genuinely verified rather than merely self-consistent, since the key behind it never left the
+    /// api-only private volume.
+    /// </summary>
+    string GetPublicKeyFingerprint();
+
     /// <summary>Base64 ECDSA-SHA256 signature over <paramref name="content"/>'s UTF-8 bytes, or
     /// null when <paramref name="content"/> itself is null/empty — there's nothing to sign, and no
     /// signature to check against an absent field.</summary>

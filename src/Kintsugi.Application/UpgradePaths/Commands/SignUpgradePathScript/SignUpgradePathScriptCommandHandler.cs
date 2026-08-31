@@ -1,6 +1,7 @@
 using MediatR;
 using Kintsugi.Application.Common.Exceptions;
 using Kintsugi.Application.Common.Interfaces;
+using Kintsugi.Application.ScriptApproval;
 using Kintsugi.Domain.Exceptions;
 
 namespace Kintsugi.Application.UpgradePaths.Commands.SignUpgradePathScript;
@@ -10,15 +11,17 @@ public class SignUpgradePathScriptCommandHandler : IRequestHandler<SignUpgradePa
     private readonly IUpgradePathRepository _upgradePathRepository;
     private readonly IArtifactSigningService _artifactSigningService;
     private readonly IUpgradePathResearchClient _researchClient;
+    private readonly IScriptApprovalPublisher _approvalPublisher;
     private readonly IUnitOfWork _unitOfWork;
 
     public SignUpgradePathScriptCommandHandler(
         IUpgradePathRepository upgradePathRepository, IArtifactSigningService artifactSigningService,
-        IUpgradePathResearchClient researchClient, IUnitOfWork unitOfWork)
+        IUpgradePathResearchClient researchClient, IScriptApprovalPublisher approvalPublisher, IUnitOfWork unitOfWork)
     {
         _upgradePathRepository = upgradePathRepository;
         _artifactSigningService = artifactSigningService;
         _researchClient = researchClient;
+        _approvalPublisher = approvalPublisher;
         _unitOfWork = unitOfWork;
     }
 
@@ -63,9 +66,33 @@ public class SignUpgradePathScriptCommandHandler : IRequestHandler<SignUpgradePa
 
         await _unitOfWork.SaveChangesAsync(cancellationToken);
 
+        // Published *after* the save, deliberately. The approval repository is a record of decisions
+        // this server has already made, so the local signature must be durable before anything is
+        // proposed — the reverse order could open a pull request for an approval that a failed save
+        // then threw away, and a merged record of an approval nobody made is worse than a missing one.
+        // PublishAsync reports its own failures rather than throwing, so nothing here can undo the
+        // signing that already succeeded.
+        var approval = await _approvalPublisher.PublishAsync(
+            new ScriptApprovalSubmission(
+                ScriptContentHash.Of(existing.Script),
+                existing.Platform,
+                ScriptLanguages.For(existing.Platform),
+                existing.Script,
+                existing.ApplicationName,
+                existing.ApplicationIdentifier,
+                _artifactSigningService.GetPublicKeyFingerprint(),
+                _artifactSigningService.GetPublicKeyPem(),
+                signature,
+                request.SignedBy,
+                DateTimeOffset.UtcNow),
+            cancellationToken);
+
         return new UpgradePathResultDto(
             existing.ApplicationName, existing.Platform, existing.Status, existing.LatestVersion, existing.Method,
             existing.DownloadUrl, existing.Command, existing.Instructions, existing.SourceUrl, existing.Notes, existing.CheckedUtc, existing.Script,
-            existing.ScriptSignature is not null);
+            existing.ScriptSignature is not null,
+            approval.Outcome,
+            approval.PullRequestUrl,
+            approval.Message);
     }
 }

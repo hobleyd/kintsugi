@@ -128,8 +128,13 @@ public class UpgradePathsController : ControllerBase
     /// Backs the "Save Script" action on the Applications page's per-row panel — the same JSON shape
     /// shown there for an already-resolved path, or returned by <see cref="Refresh"/>, can be
     /// pasted back in here to persist it as-is.
+    ///
+    /// Requires a signed-in administrator (see <see cref="RequireAdminSessionAttribute"/>) — this
+    /// accepts arbitrary script content, and paired with <see cref="SignScript"/> it is the whole
+    /// path from "anything" to "content every agent in the fleet runs as root".
     /// </summary>
     [HttpPost("save")]
+    [RequireAdminSession]
     [ProducesResponseType(typeof(UpgradePathResultDto), StatusCodes.Status200OK)]
     public async Task<ActionResult<UpgradePathResultDto>> Save([FromBody] SaveUpgradePathRequest request, CancellationToken cancellationToken) =>
         Ok(await _sender.Send(new SaveUpgradePathCommand(
@@ -141,13 +146,29 @@ public class UpgradePathsController : ControllerBase
     /// a human has reviewed it. Backs the "Sign Script" action on the Applications page's per-row
     /// panel — script signing never happens automatically (see <see cref="Refresh"/> and
     /// <see cref="Save"/>), only here, once a person has looked at the result.
+    ///
+    /// Also publishes the approval to the shared approval repository as a pull request, so the
+    /// decision is recorded durably and other servers can adopt it (see
+    /// <c>IScriptApprovalPublisher</c>). That is best-effort: a publication failure is reported in the
+    /// response, not raised, because the local approval is already valid.
+    ///
+    /// Requires a signed-in administrator (see <see cref="RequireAdminSessionAttribute"/>). Without
+    /// that, this route — the single point at which a human's review is recorded — was callable by
+    /// anyone who could reach the server.
     /// </summary>
     [HttpPost("sign-script")]
+    [RequireAdminSession]
     [ProducesResponseType(typeof(UpgradePathResultDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<UpgradePathResultDto>> SignScript([FromBody] SignUpgradePathScriptRequest request, CancellationToken cancellationToken) =>
-        Ok(await _sender.Send(new SignUpgradePathScriptCommand(request.ApplicationName, request.Platform), cancellationToken));
+        Ok(await _sender.Send(
+            // The reviewer's own name, recorded in the approval entry and shown in the pull request —
+            // "a human reviewed this" is only an audit trail if it says which human. Null when the
+            // site is deliberately running with authentication disabled.
+            new SignUpgradePathScriptCommand(request.ApplicationName, request.Platform, SignedBy: User.Identity?.Name),
+            cancellationToken));
 
     /// <summary>
     /// Serves the generated script for the application with this bundle identifier, as a real
