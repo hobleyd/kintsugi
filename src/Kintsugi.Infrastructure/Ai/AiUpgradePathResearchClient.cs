@@ -38,14 +38,16 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
 
     private readonly HttpClient _httpClient;
     private readonly IConfiguration _configuration;
+    private readonly IGitHubSettingsProvider _gitHubSettingsProvider;
     private readonly IGooseCliClient _gooseCliClient;
     private readonly ILogger<AiUpgradePathResearchClient> _logger;
 
-    public AiUpgradePathResearchClient(HttpClient httpClient, IConfiguration configuration, IGooseCliClient gooseCliClient, ILogger<AiUpgradePathResearchClient> logger)
+    public AiUpgradePathResearchClient(HttpClient httpClient, IConfiguration configuration, IGitHubSettingsProvider gitHubSettingsProvider, IGooseCliClient gooseCliClient, ILogger<AiUpgradePathResearchClient> logger)
     {
         _httpClient = httpClient;
         _httpClient.Timeout = TimeSpan.FromSeconds(300);
         _configuration = configuration;
+        _gitHubSettingsProvider = gitHubSettingsProvider;
         _gooseCliClient = gooseCliClient;
         _logger = logger;
     }
@@ -545,7 +547,10 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
             httpRequest.Headers.UserAgent.ParseAdd("kintsugi-patching-system");
             httpRequest.Headers.Accept.ParseAdd("application/vnd.github+json");
 
-            var token = _configuration["GITHUB_API_TOKEN"];
+            // From the GitHub settings page, read per call rather than captured — see GitHubSettings.
+            // The read-only token, never the script-approval one: this client has no business
+            // holding a credential that can write to the approval repository.
+            var token = (await _gitHubSettingsProvider.GetAsync(cancellationToken)).ApiToken;
             if (!string.IsNullOrWhiteSpace(token))
             {
                 httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);

@@ -7,20 +7,20 @@ namespace Kintsugi.Application.ScriptApproval.Queries.GetApprovedScripts;
 public class GetUpgradeScriptsOverviewQueryHandler : IRequestHandler<GetUpgradeScriptsOverviewQuery, UpgradeScriptsOverviewDto>
 {
     private readonly IScriptApprovalSourceClient _sourceClient;
-    private readonly IScriptApprovalPublisher _publisher;
+    private readonly IGitHubSettingsProvider _gitHubSettings;
     private readonly IApprovedScriptRepository _approvedScripts;
     private readonly IUpgradePathRepository _upgradePaths;
     private readonly IArtifactSigningService _artifactSigningService;
 
     public GetUpgradeScriptsOverviewQueryHandler(
         IScriptApprovalSourceClient sourceClient,
-        IScriptApprovalPublisher publisher,
+        IGitHubSettingsProvider gitHubSettings,
         IApprovedScriptRepository approvedScripts,
         IUpgradePathRepository upgradePaths,
         IArtifactSigningService artifactSigningService)
     {
         _sourceClient = sourceClient;
-        _publisher = publisher;
+        _gitHubSettings = gitHubSettings;
         _approvedScripts = approvedScripts;
         _upgradePaths = upgradePaths;
         _artifactSigningService = artifactSigningService;
@@ -33,6 +33,10 @@ public class GetUpgradeScriptsOverviewQueryHandler : IRequestHandler<GetUpgradeS
         // rest of the page still renders, with the already-imported corpus and the local scripts
         // intact. Same contract the Clients page relies on.
         var status = await _sourceClient.GetStatusAsync(cancellationToken);
+        // Whether an approval can be published is configuration, not something to ask the publisher:
+        // it no longer exposes a synchronous property, because a settings-page value must not be
+        // captured at construction. See GitHubSettings.
+        var gitHub = await _gitHubSettings.GetAsync(cancellationToken);
         var thisServer = _artifactSigningService.GetPublicKeyFingerprint();
 
         var approved = await _approvedScripts.GetAllAsync(cancellationToken);
@@ -102,7 +106,7 @@ public class GetUpgradeScriptsOverviewQueryHandler : IRequestHandler<GetUpgradeS
             status.DefaultBranch,
             status.HeadCommitSha,
             status.UnavailableReason,
-            _publisher.IsEnabled,
+            gitHub.CanPublishScriptApprovals,
             thisServer,
             approved
                 .Select(a => new ApprovedScriptDto(

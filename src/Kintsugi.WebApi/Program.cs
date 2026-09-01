@@ -111,6 +111,7 @@ builder.Services.AddHealthChecks()
 var app = builder.Build();
 
 await ApplyMigrationsAsync(app);
+await SeedGitHubSettingsFromEnvironmentAsync(app);
 
 // Before anything that reads the scheme or host — which is the redirect to
 // /settings/authentication below, the OIDC handler in UseAuthentication, and every page that
@@ -199,4 +200,57 @@ static async Task ApplyMigrationsAsync(WebApplication app)
             await Task.Delay(TimeSpan.FromSeconds(3));
         }
     }
+}
+
+/// <summary>
+/// Moves GitHub configuration out of the environment and into the database, once.
+/// </summary>
+/// <remarks>
+/// These four values used to be read from the environment on every request. They are now edited on
+/// the GitHub settings page, and the database is the only source of truth — but a deployment that
+/// upgrades into this change already has them in its <c>.env</c>, and losing them silently would
+/// stop agent-package refresh and script approval with no indication why. So on a server that has no
+/// settings row yet, whatever the environment holds is written into one and logged; from then on the
+/// environment is ignored entirely and the <c>.env</c> entries can be deleted.
+///
+/// Deliberately not a fallback. A row existing — even an empty one saved from the page — means the
+/// environment is never consulted again, so there is never a moment where an administrator clears a
+/// value on the page and an old environment variable quietly puts it back.
+/// </remarks>
+static async Task SeedGitHubSettingsFromEnvironmentAsync(WebApplication app)
+{
+    using var scope = app.Services.CreateScope();
+    var repository = scope.ServiceProvider.GetRequiredService<IGitHubSettingsRepository>();
+    var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+
+    if (await repository.GetAsync(CancellationToken.None) is not null)
+    {
+        return;
+    }
+
+    var configuration = scope.ServiceProvider.GetRequiredService<IConfiguration>();
+    var apiToken = configuration["GITHUB_API_TOKEN"];
+    var agentPackageRepository = configuration["AGENT_PACKAGE_GITHUB_REPO"];
+    var scriptApprovalRepository = configuration["SCRIPT_APPROVAL_GITHUB_REPO"];
+    var scriptApprovalToken = configuration["SCRIPT_APPROVAL_GITHUB_TOKEN"];
+
+    if (new[] { apiToken, agentPackageRepository, scriptApprovalRepository, scriptApprovalToken }.All(string.IsNullOrWhiteSpace))
+    {
+        // A fresh deploy with nothing configured either way. No row is written, so the settings page
+        // opens on defaults rather than on a row of blanks — and the seed stays armed in case this
+        // server is later handed an environment to migrate.
+        return;
+    }
+
+    var unitOfWork = scope.ServiceProvider.GetRequiredService<IUnitOfWork>();
+    await repository.AddAsync(
+        Kintsugi.Domain.Entities.GitHubSettings.Create(
+            apiToken, agentPackageRepository, scriptApprovalRepository, scriptApprovalToken),
+        CancellationToken.None);
+    await unitOfWork.SaveChangesAsync(CancellationToken.None);
+
+    logger.LogInformation(
+        "Seeded GitHub settings from environment variables. They are now managed on the GitHub settings page, "
+        + "and GITHUB_API_TOKEN / AGENT_PACKAGE_GITHUB_REPO / SCRIPT_APPROVAL_GITHUB_REPO / "
+        + "SCRIPT_APPROVAL_GITHUB_TOKEN can be removed from this deployment's .env.");
 }

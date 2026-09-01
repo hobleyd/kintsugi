@@ -64,13 +64,13 @@ public record ScriptApprovalPublishResult(
 /// </remarks>
 public interface IScriptApprovalPublisher
 {
-    /// <summary>The repository approvals are published to, for display. Present even when
-    /// publication is disabled, so the page can say what it would publish to.</summary>
-    string RepositoryDescription { get; }
-
-    /// <summary>True when a write token is configured. False means every call reports
-    /// <see cref="ScriptApprovalPublishOutcome.Disabled"/>.</summary>
-    bool IsEnabled { get; }
-
+    /// <summary>Reports <see cref="ScriptApprovalPublishOutcome.Disabled"/> when no write token is
+    /// configured on the GitHub settings page.</summary>
     Task<ScriptApprovalPublishResult> PublishAsync(ScriptApprovalSubmission submission, CancellationToken cancellationToken);
 }
+
+// Which repository this publishes to, and whether it can publish at all, deliberately are not
+// properties here. They are configuration, not behaviour, and they are now editable at runtime — a
+// synchronous property would have to have captured them at construction, which is exactly the bug
+// moving these settings into the database introduced. Callers that need to display them read
+// IGitHubSettingsProvider, which is where every other consumer gets them too.

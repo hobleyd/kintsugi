@@ -20,6 +20,7 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
     public DbSet<AgentPackage> AgentPackages => Set<AgentPackage>();
     public DbSet<AuthenticationSettings> AuthenticationSettings => Set<AuthenticationSettings>();
     public DbSet<ApprovedScript> ApprovedScripts => Set<ApprovedScript>();
+    public DbSet<GitHubSettings> GitHubSettings => Set<GitHubSettings>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

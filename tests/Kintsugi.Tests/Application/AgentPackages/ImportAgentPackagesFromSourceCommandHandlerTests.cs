@@ -19,7 +19,6 @@ public class ImportAgentPackagesFromSourceCommandHandlerTests
 
     public ImportAgentPackagesFromSourceCommandHandlerTests()
     {
-        _sourceClient.SetupGet(c => c.SourceDescription).Returns("hobleyd/kintsugi");
         _sourceClient.Setup(c => c.DownloadAsync(It.IsAny<AgentPackageSourceRelease>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(() => new MemoryStream(new byte[] { 1, 2, 3 }));
         _archiveRewriter.Setup(r => r.WithApiBaseUrl(It.IsAny<Stream>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))

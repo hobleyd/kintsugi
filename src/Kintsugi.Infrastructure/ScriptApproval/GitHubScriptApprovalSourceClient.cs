@@ -2,7 +2,7 @@ using System.Formats.Tar;
 using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
-using Microsoft.Extensions.Configuration;
+using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Application.ScriptApproval;
 using Kintsugi.Application.UpgradePaths;
 
@@ -15,53 +15,56 @@ namespace Kintsugi.Infrastructure.ScriptApproval;
 public class GitHubScriptApprovalSourceClient : IScriptApprovalSourceClient
 {
     private readonly HttpClient _httpClient;
-    private readonly string _repository;
+    private readonly IGitHubSettingsProvider _settingsProvider;
 
-    /// <summary>Remembered after the first call. A repository's default branch effectively never
-    /// changes, and caching it turns every page load after the first into one request instead of
-    /// two — this runs on every render of the Upgrade Scripts page.</summary>
-    private string? _defaultBranch;
-
-    public GitHubScriptApprovalSourceClient(HttpClient httpClient, IConfiguration configuration)
+    public GitHubScriptApprovalSourceClient(HttpClient httpClient, IGitHubSettingsProvider settingsProvider)
     {
         _httpClient = httpClient;
-        _repository = ScriptApprovalRepository.Resolve(configuration);
-        ScriptApprovalGitHubHeaders.Apply(_httpClient, configuration[ScriptApprovalRepository.TokenConfigurationKey]);
+        _settingsProvider = settingsProvider;
+        ScriptApprovalGitHubHeaders.ApplyStaticHeaders(_httpClient);
     }
-
-    public string RepositoryDescription => _repository;
 
     public async Task<ScriptApprovalSourceStatus> GetStatusAsync(CancellationToken cancellationToken)
     {
+        // Read per call, never captured in the constructor: which repository this is and which token
+        // reaches it are both editable on the GitHub settings page, so a captured value would ignore
+        // every edit until the next restart. See GitHubSettings.
+        var settings = await _settingsProvider.GetAsync(cancellationToken);
+        var repository = settings.ScriptApprovalRepository;
+
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(ScriptApprovalGitHubHeaders.MetadataTimeout);
 
+        string? branch = null;
         try
         {
-            var branch = _defaultBranch ??= await GetDefaultBranchAsync(timeout.Token);
-            var head = await GetHeadShaAsync(branch, timeout.Token);
-            return new ScriptApprovalSourceStatus(_repository, branch, head, UnavailableReason: null);
+            branch = await GetDefaultBranchAsync(repository, settings.ApiToken, timeout.Token);
+            var head = await GetHeadShaAsync(repository, branch, settings.ApiToken, timeout.Token);
+            return new ScriptApprovalSourceStatus(repository, branch, head, UnavailableReason: null);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
             return new ScriptApprovalSourceStatus(
-                _repository, _defaultBranch, HeadCommitSha: null,
-                $"Reading {_repository} took longer than {ScriptApprovalGitHubHeaders.MetadataTimeout.TotalSeconds:0} seconds.");
+                repository, branch, HeadCommitSha: null,
+                $"Reading {repository} took longer than {ScriptApprovalGitHubHeaders.MetadataTimeout.TotalSeconds:0} seconds.");
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             // Never thrown onwards: the page renders this reason in place of the upstream state, the
             // same way the Clients page reports an unreachable release listing.
-            return new ScriptApprovalSourceStatus(_repository, _defaultBranch, HeadCommitSha: null, ex.Message);
+            return new ScriptApprovalSourceStatus(repository, branch, HeadCommitSha: null, ex.Message);
         }
     }
 
     public async Task<ApprovedScriptCorpusReadResult> GetCorpusAsync(string commitish, CancellationToken cancellationToken)
     {
+        var settings = await _settingsProvider.GetAsync(cancellationToken);
+
         // No MetadataTimeout here — unlike the status check this is an explicit button press, and the
         // archive is the whole repository rather than one JSON document.
-        using var response = await _httpClient.GetAsync(
-            $"https://api.github.com/repos/{_repository}/tarball/{commitish}", cancellationToken);
+        using var request = ScriptApprovalGitHubHeaders.Request(
+            HttpMethod.Get, $"https://api.github.com/repos/{settings.ScriptApprovalRepository}/tarball/{commitish}", settings.ApiToken);
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
         response.EnsureSuccessStatusCode();
 
         // Buffered: TarReader over a GZipStream reads forward only, but the archive is a handful of
@@ -73,9 +76,10 @@ public class GitHubScriptApprovalSourceClient : IScriptApprovalSourceClient
         return ReadCorpus(buffered);
     }
 
-    private async Task<string> GetDefaultBranchAsync(CancellationToken cancellationToken)
+    private async Task<string> GetDefaultBranchAsync(string repository, string? token, CancellationToken cancellationToken)
     {
-        using var response = await _httpClient.GetAsync($"https://api.github.com/repos/{_repository}", cancellationToken);
+        using var request = ScriptApprovalGitHubHeaders.Request(HttpMethod.Get, $"https://api.github.com/repos/{repository}", token);
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
         response.EnsureSuccessStatusCode();
 
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
@@ -84,10 +88,11 @@ public class GitHubScriptApprovalSourceClient : IScriptApprovalSourceClient
             : "main";
     }
 
-    private async Task<string?> GetHeadShaAsync(string branch, CancellationToken cancellationToken)
+    private async Task<string?> GetHeadShaAsync(string repository, string branch, string? token, CancellationToken cancellationToken)
     {
-        using var response = await _httpClient.GetAsync(
-            $"https://api.github.com/repos/{_repository}/commits/{branch}", cancellationToken);
+        using var request = ScriptApprovalGitHubHeaders.Request(
+            HttpMethod.Get, $"https://api.github.com/repos/{repository}/commits/{branch}", token);
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
         response.EnsureSuccessStatusCode();
 
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));

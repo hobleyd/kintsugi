@@ -2,8 +2,8 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Application.ScriptApproval;
 using Kintsugi.Application.UpgradePaths;
 
@@ -25,41 +25,44 @@ namespace Kintsugi.Infrastructure.ScriptApproval;
 /// </remarks>
 public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
 {
-    private readonly HttpClient _httpClient;
-    private readonly ILogger<GitHubScriptApprovalPublisher> _logger;
-    private readonly string _repository;
-    private readonly string? _token;
-
-    public GitHubScriptApprovalPublisher(
-        HttpClient httpClient, IConfiguration configuration, ILogger<GitHubScriptApprovalPublisher> logger)
+    /// <summary>Which repository this call is writing to and with what credential. Threaded through
+    /// every step of one publish rather than held on the instance, so a settings-page edit lands on
+    /// the next publish instead of the next restart — see <c>GitHubSettings</c>.</summary>
+    private record GitHubTarget(string Repository, string Token)
     {
-        _httpClient = httpClient;
-        _logger = logger;
-        _repository = ScriptApprovalRepository.Resolve(configuration);
-        _token = ScriptApprovalRepository.ResolveToken(configuration);
-        ScriptApprovalGitHubHeaders.Apply(_httpClient, _token);
+        public string Owner => Repository.Split('/')[0];
     }
 
-    public string RepositoryDescription => _repository;
+    private readonly HttpClient _httpClient;
+    private readonly ILogger<GitHubScriptApprovalPublisher> _logger;
+    private readonly IGitHubSettingsProvider _settingsProvider;
 
-    public bool IsEnabled => _token is not null;
-
-    private string Owner => _repository.Split('/')[0];
+    public GitHubScriptApprovalPublisher(
+        HttpClient httpClient, IGitHubSettingsProvider settingsProvider, ILogger<GitHubScriptApprovalPublisher> logger)
+    {
+        _httpClient = httpClient;
+        _settingsProvider = settingsProvider;
+        _logger = logger;
+        ScriptApprovalGitHubHeaders.ApplyStaticHeaders(_httpClient);
+    }
 
     public async Task<ScriptApprovalPublishResult> PublishAsync(
         ScriptApprovalSubmission submission, CancellationToken cancellationToken)
     {
-        if (!IsEnabled)
+        var settings = await _settingsProvider.GetAsync(cancellationToken);
+        if (settings.ScriptApprovalToken is null)
         {
             return new ScriptApprovalPublishResult(
                 ScriptApprovalPublishOutcome.Disabled,
-                Message: $"No {ScriptApprovalRepository.TokenConfigurationKey} is configured, so this approval was "
-                    + $"recorded on this server only and not proposed to {_repository}.");
+                Message: "No script-approval token is configured on the GitHub settings page, so this approval was "
+                    + $"recorded on this server only and not proposed to {settings.ScriptApprovalRepository}.");
         }
+
+        var target = new GitHubTarget(settings.ScriptApprovalRepository, settings.ScriptApprovalToken);
 
         try
         {
-            return await PublishCoreAsync(submission, cancellationToken);
+            return await PublishCoreAsync(target, submission, cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -68,44 +71,44 @@ public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
             // patching the fleet it was reviewed for — that is what "the pull request is a record,
             // not a gate" means in practice.
             _logger.LogWarning(ex, "Failed to publish the approval of {Application} to {Repository}.",
-                submission.ApplicationName, _repository);
+                submission.ApplicationName, target.Repository);
             return new ScriptApprovalPublishResult(ScriptApprovalPublishOutcome.Failed, Message: ex.Message);
         }
     }
 
     private async Task<ScriptApprovalPublishResult> PublishCoreAsync(
-        ScriptApprovalSubmission submission, CancellationToken cancellationToken)
+        GitHubTarget target, ScriptApprovalSubmission submission, CancellationToken cancellationToken)
     {
-        var defaultBranch = await GetDefaultBranchAsync(cancellationToken);
+        var defaultBranch = await GetDefaultBranchAsync(target, cancellationToken);
         var files = BuildFiles(submission);
         var signaturePath = ApprovedScriptCorpus.SignaturePath(submission.Sha256, submission.SignerFingerprint);
 
         // Already merged: this signer has vouched for these exact bytes on the trust root, so there
         // is nothing left to propose.
-        var existingSignature = await GetFileAsync(signaturePath, defaultBranch, cancellationToken);
+        var existingSignature = await GetFileAsync(target, signaturePath, defaultBranch, cancellationToken);
         if (existingSignature is not null && existingSignature.Content == files[signaturePath])
         {
             return new ScriptApprovalPublishResult(
                 ScriptApprovalPublishOutcome.AlreadyApproved,
-                Message: $"{_repository} already carries this signature on {defaultBranch}.");
+                Message: $"{target.Repository} already carries this signature on {defaultBranch}.");
         }
 
         var branch = BranchNameFor(submission);
 
         // Already proposed: reuse the open pull request rather than opening a second one that would
         // say the same thing.
-        var openPullRequest = await FindOpenPullRequestAsync(branch, cancellationToken);
+        var openPullRequest = await FindOpenPullRequestAsync(target, branch, cancellationToken);
         if (openPullRequest is not null)
         {
             return new ScriptApprovalPublishResult(ScriptApprovalPublishOutcome.PullRequestAlreadyOpen, openPullRequest);
         }
 
-        await EnsureBranchAsync(branch, defaultBranch, cancellationToken);
+        await EnsureBranchAsync(target, branch, defaultBranch, cancellationToken);
 
         var wrote = false;
         foreach (var (path, content) in files)
         {
-            wrote |= await PutFileAsync(path, content, branch, submission, cancellationToken);
+            wrote |= await PutFileAsync(target, path, content, branch, submission, cancellationToken);
         }
 
         if (!wrote)
@@ -115,10 +118,10 @@ public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
             // new one would have nothing to show, so say so rather than failing.
             return new ScriptApprovalPublishResult(
                 ScriptApprovalPublishOutcome.AlreadyApproved,
-                Message: $"Branch {branch} in {_repository} already carries this approval unchanged.");
+                Message: $"Branch {branch} in {target.Repository} already carries this approval unchanged.");
         }
 
-        var url = await OpenPullRequestAsync(branch, defaultBranch, submission, cancellationToken);
+        var url = await OpenPullRequestAsync(target, branch, defaultBranch, submission, cancellationToken);
         return new ScriptApprovalPublishResult(ScriptApprovalPublishOutcome.PullRequestOpened, url);
     }
 
@@ -161,10 +164,10 @@ public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
     private static string BranchNameFor(ScriptApprovalSubmission submission) =>
         $"script-approval/{submission.Sha256[..12]}-{ScriptSignerFingerprint.Bare(submission.SignerFingerprint)[..12]}";
 
-    private async Task<string> GetDefaultBranchAsync(CancellationToken cancellationToken)
+    private async Task<string> GetDefaultBranchAsync(GitHubTarget target, CancellationToken cancellationToken)
     {
-        using var response = await _httpClient.GetAsync($"https://api.github.com/repos/{_repository}", cancellationToken);
-        await EnsureSuccessAsync(response, $"read {_repository}", cancellationToken);
+        using var response = await SendAsync(target, HttpMethod.Get, $"https://api.github.com/repos/{target.Repository}", cancellationToken);
+        await EnsureSuccessAsync(response, $"read {target.Repository}", cancellationToken);
 
         using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
         return document.RootElement.TryGetProperty("default_branch", out var branch) && branch.ValueKind == JsonValueKind.String
@@ -177,10 +180,11 @@ public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
     /// <summary>One file's current blob sha and decoded text on <paramref name="reference"/>, or null
     /// when it isn't there. The sha is what a later write has to quote to update it rather than
     /// being rejected as a conflicting create.</summary>
-    private async Task<ExistingFile?> GetFileAsync(string path, string reference, CancellationToken cancellationToken)
+    private async Task<ExistingFile?> GetFileAsync(GitHubTarget target, string path, string reference, CancellationToken cancellationToken)
     {
-        using var response = await _httpClient.GetAsync(
-            $"https://api.github.com/repos/{_repository}/contents/{path}?ref={Uri.EscapeDataString(reference)}",
+        using var response = await SendAsync(
+            target, HttpMethod.Get,
+            $"https://api.github.com/repos/{target.Repository}/contents/{path}?ref={Uri.EscapeDataString(reference)}",
             cancellationToken);
 
         if (response.StatusCode == HttpStatusCode.NotFound)
@@ -207,10 +211,11 @@ public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
         return new ExistingFile(sha.GetString()!, content);
     }
 
-    private async Task<string?> FindOpenPullRequestAsync(string branch, CancellationToken cancellationToken)
+    private async Task<string?> FindOpenPullRequestAsync(GitHubTarget target, string branch, CancellationToken cancellationToken)
     {
-        using var response = await _httpClient.GetAsync(
-            $"https://api.github.com/repos/{_repository}/pulls?state=open&head={Uri.EscapeDataString($"{Owner}:{branch}")}",
+        using var response = await SendAsync(
+            target, HttpMethod.Get,
+            $"https://api.github.com/repos/{target.Repository}/pulls?state=open&head={Uri.EscapeDataString($"{target.Owner}:{branch}")}",
             cancellationToken);
         await EnsureSuccessAsync(response, "list open pull requests", cancellationToken);
 
@@ -231,10 +236,10 @@ public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
         return null;
     }
 
-    private async Task EnsureBranchAsync(string branch, string baseBranch, CancellationToken cancellationToken)
+    private async Task EnsureBranchAsync(GitHubTarget target, string branch, string baseBranch, CancellationToken cancellationToken)
     {
-        using var existing = await _httpClient.GetAsync(
-            $"https://api.github.com/repos/{_repository}/git/ref/heads/{branch}", cancellationToken);
+        using var existing = await SendAsync(
+            target, HttpMethod.Get, $"https://api.github.com/repos/{target.Repository}/git/ref/heads/{branch}", cancellationToken);
         if (existing.IsSuccessStatusCode)
         {
             // Left where it is rather than reset to the base branch: whatever is on it was written by
@@ -243,15 +248,15 @@ public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
             return;
         }
 
-        using var baseRef = await _httpClient.GetAsync(
-            $"https://api.github.com/repos/{_repository}/git/ref/heads/{baseBranch}", cancellationToken);
+        using var baseRef = await SendAsync(
+            target, HttpMethod.Get, $"https://api.github.com/repos/{target.Repository}/git/ref/heads/{baseBranch}", cancellationToken);
         await EnsureSuccessAsync(baseRef, $"read the {baseBranch} ref", cancellationToken);
 
         using var document = JsonDocument.Parse(await baseRef.Content.ReadAsStringAsync(cancellationToken));
         var sha = document.RootElement.GetProperty("object").GetProperty("sha").GetString()!;
 
-        using var created = await _httpClient.PostAsJsonAsync(
-            $"https://api.github.com/repos/{_repository}/git/refs",
+        using var created = await SendJsonAsync(
+            target, HttpMethod.Post, $"https://api.github.com/repos/{target.Repository}/git/refs",
             new { @ref = $"refs/heads/{branch}", sha },
             cancellationToken);
         await EnsureSuccessAsync(created, $"create branch {branch}", cancellationToken);
@@ -261,16 +266,16 @@ public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
     /// anything actually changed, which is how the caller knows whether a pull request would have
     /// anything to show.</summary>
     private async Task<bool> PutFileAsync(
-        string path, string content, string branch, ScriptApprovalSubmission submission, CancellationToken cancellationToken)
+        GitHubTarget target, string path, string content, string branch, ScriptApprovalSubmission submission, CancellationToken cancellationToken)
     {
-        var existing = await GetFileAsync(path, branch, cancellationToken);
+        var existing = await GetFileAsync(target, path, branch, cancellationToken);
         if (existing is not null && existing.Content == content)
         {
             return false;
         }
 
-        using var response = await _httpClient.PutAsJsonAsync(
-            $"https://api.github.com/repos/{_repository}/contents/{path}",
+        using var response = await SendJsonAsync(
+            target, HttpMethod.Put, $"https://api.github.com/repos/{target.Repository}/contents/{path}",
             new
             {
                 message = $"Approve {submission.ApplicationName} upgrade script for {submission.PlatformBucket}",
@@ -284,10 +289,10 @@ public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
     }
 
     private async Task<string?> OpenPullRequestAsync(
-        string branch, string baseBranch, ScriptApprovalSubmission submission, CancellationToken cancellationToken)
+        GitHubTarget target, string branch, string baseBranch, ScriptApprovalSubmission submission, CancellationToken cancellationToken)
     {
-        using var response = await _httpClient.PostAsJsonAsync(
-            $"https://api.github.com/repos/{_repository}/pulls",
+        using var response = await SendJsonAsync(
+            target, HttpMethod.Post, $"https://api.github.com/repos/{target.Repository}/pulls",
             new
             {
                 title = $"Approve {submission.ApplicationName} upgrade script ({submission.PlatformBucket})",
@@ -324,6 +329,23 @@ public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
             + "its own artifact-signing key, and have its agents run it. Review the script itself, not "
             + "only the metadata.");
         return builder.ToString();
+    }
+
+    /// <summary>Every call carries the token on the request itself rather than on the client's
+    /// DefaultRequestHeaders: a typed HttpClient instance outlives one publish, and pinning an
+    /// Authorization header to it would keep using whatever token was current the first time.</summary>
+    private Task<HttpResponseMessage> SendAsync(GitHubTarget target, HttpMethod method, string url, CancellationToken cancellationToken)
+    {
+        using var request = ScriptApprovalGitHubHeaders.Request(method, url, target.Token);
+        return _httpClient.SendAsync(request, cancellationToken);
+    }
+
+    private Task<HttpResponseMessage> SendJsonAsync<T>(
+        GitHubTarget target, HttpMethod method, string url, T body, CancellationToken cancellationToken)
+    {
+        using var request = ScriptApprovalGitHubHeaders.Request(method, url, target.Token);
+        request.Content = JsonContent.Create(body);
+        return _httpClient.SendAsync(request, cancellationToken);
     }
 
     /// <summary>GitHub's error bodies carry the actual reason (a missing scope, a protected branch, a

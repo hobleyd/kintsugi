@@ -12,13 +12,12 @@ public class GetAgentPackageSourceStatusQueryHandlerTests
 
     public GetAgentPackageSourceStatusQueryHandlerTests()
     {
-        _sourceClient.SetupGet(c => c.SourceDescription).Returns("hobleyd/kintsugi");
         _repository.Setup(r => r.GetLatestPerPlatformAsync(It.IsAny<CancellationToken>()))
             .ReturnsAsync(Array.Empty<AgentPackage>());
     }
 
     private GetAgentPackageSourceStatusQueryHandler CreateHandler() =>
-        new(_sourceClient.Object, _repository.Object);
+        new(_sourceClient.Object, _repository.Object, FakeGitHubSettings.Provider());
 
     private void SourceHas(params (string Platform, string Version)[] releases) =>
         _sourceClient.Setup(c => c.GetLatestReleasesAsync(It.IsAny<CancellationToken>()))

@@ -315,6 +315,31 @@ rotates far more often than a build does. Refresh is a **Razor Page handler, not
 anyone who can reach the server. This is the rare case where `nginx/default.conf` correctly needs
 no edit.
 
+**GitHub configuration is database-backed, and nothing may capture it.** The four values that used
+to be environment variables (`GITHUB_API_TOKEN`, `AGENT_PACKAGE_GITHUB_REPO`,
+`SCRIPT_APPROVAL_GITHUB_REPO`, `SCRIPT_APPROVAL_GITHUB_TOKEN`) now live in `github_settings` and are
+edited at Settings > GitHub. The environment is read **exactly once**, by
+`SeedGitHubSettingsFromEnvironmentAsync` at startup, and only on a server with no row yet — that
+carries an existing deployment across without re-entering anything, and the `.env` entries can then
+be deleted. A row existing, even one saved with everything blank, means the environment is never
+consulted again; it is a seed, not a fallback, so clearing a value on the page can never be quietly
+undone by a stale variable.
+
+The consequence is the part worth remembering: **a value can now change while the process is
+running.** Every GitHub client used to read `IConfiguration` in its constructor and pin the token
+onto `HttpClient.DefaultRequestHeaders` there, which would ignore every later edit until a restart.
+They all read `IGitHubSettingsProvider` per call instead, and attach the token to the individual
+request — a typed `HttpClient` instance outlives one call, so a header pinned to it carries whichever
+token was current the first time. For the same reason the client interfaces no longer expose
+`SourceDescription` / `RepositoryDescription` / `IsEnabled`: those were synchronous properties over
+configuration, which is precisely what cannot be captured. Callers that need to display them read the
+provider, which is also where the `hobleyd/kintsugi` default is resolved — at read time, so the
+default lives in one place rather than being written into every row.
+
+**The settings subnav is alphabetical by label.** AI Agent, Authentication, GitHub, Patching Policy.
+It is a lookup rather than a workflow, so there is no other order a reader could predict; keep it
+that way when adding one.
+
 **Fresh deploys redirect everything.** With no `AuthenticationSettings` row saved, all non-`/api`,
 non-`/swagger`, non-`/health` traffic redirects to `/settings/authentication`. The OIDC provider is
 configured at runtime from the database (`DynamicOpenIdConnectOptionsConfigurator`), not at startup.
@@ -467,7 +492,7 @@ by then — only the long-running per-user units get restarted.
 - The agent-package platform namespace (`"macos"`, `"windows"`, `"linux"`) is *not*
   `PlatformBucket`'s namespace (`"macOS"`, `"Windows"`, `"Linux"`, `"pm:..."`). They name different
   things; don't unify them.
-- `SCRIPT_APPROVAL_GITHUB_TOKEN` is deliberately *not* `GITHUB_API_TOKEN`. The latter exists only to
+- The script-approval token is deliberately *not* the read-only API token. The latter exists only to
   lift GitHub's anonymous rate limit and is handed to the AI research client and the agent-package
   source client as well, so reusing it would silently give both of them `contents:write` and
   `pull_requests:write` on the approval repository. Unset means signing approves locally and raises
