@@ -7,11 +7,20 @@ using Kintsugi.Application.AiSettings.Queries.GetGooseCliStatus;
 using Kintsugi.Application.AiSettings.Queries.GetOllamaModels;
 using Kintsugi.Application.Common.Interfaces;
 
+using Kintsugi.WebApi.Filters;
+
 namespace Kintsugi.WebApi.Controllers;
 
 [ApiController]
 [Route("api/ai-settings")]
 [Produces("application/json")]
+// Applied to the class rather than each action: every route here is driven by the Settings pages'
+// JavaScript and none of them is an agent route, so the safe posture is the default and a route
+// added later inherits it. Nothing else would have stopped it being anonymous — nginx's
+// client-certificate regex is an exact match that never covers /api/ai-settings, and Program.cs
+// exempts all of /api from the sign-in gate. Repointing the AI provider is a configuration change
+// that decides which endpoint every generated upgrade script comes from.
+[RequireAdminSession]
 public class AiSettingsController : ControllerBase
 {
     private readonly ISender _sender;

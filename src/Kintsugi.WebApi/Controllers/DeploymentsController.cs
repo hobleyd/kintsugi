@@ -4,10 +4,15 @@ using Kintsugi.Application.Deployments;
 using Kintsugi.Application.Deployments.Commands.ScheduleDeployment;
 using Kintsugi.Application.Deployments.Queries.GetDeployments;
 
+using Kintsugi.WebApi.Filters;
+
 namespace Kintsugi.WebApi.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
+// Class-level for the same reason as AiSettingsController: nothing here is an agent route, so a
+// route added later should inherit the gate rather than quietly arrive anonymous.
+[RequireAdminSession]
 [Produces("application/json")]
 public class DeploymentsController : ControllerBase
 {

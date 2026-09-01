@@ -1,7 +1,6 @@
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
 using Kintsugi.Application.PatchingPolicy;
-using Kintsugi.Application.PatchingPolicy.Commands.UpdatePatchingPolicySettings;
 using Kintsugi.Application.PatchingPolicy.Queries.GetPatchingPolicySettings;
 
 namespace Kintsugi.WebApi.Controllers;
@@ -30,10 +29,20 @@ public class PatchingPolicyController : ControllerBase
     public async Task<ActionResult<PatchingPolicySettingsDto>> Get(CancellationToken cancellationToken) =>
         Ok(await _sender.Send(new GetPatchingPolicySettingsQuery(), cancellationToken));
 
-    /// <summary>Creates or updates the patching policy.</summary>
-    [HttpPut]
-    [ProducesResponseType(typeof(PatchingPolicySettingsDto), StatusCodes.Status200OK)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    public async Task<ActionResult<PatchingPolicySettingsDto>> Update(UpdatePatchingPolicySettingsCommand command, CancellationToken cancellationToken) =>
-        Ok(await _sender.Send(command, cancellationToken));
 }
+
+// There is deliberately no PUT here, and it is worth saying why so one doesn't come back.
+//
+// This path is inside nginx's exact-match agent regex, so a valid fleet client certificate is
+// required to reach it — which sounds like protection and is the opposite. The GET is right to be
+// there: it is the route all three agents poll (see each agent's policy.rs). A PUT on the same path
+// inherits the same admission rule, and it carried no [RequireAgentIdentity] and no admin gate, so
+// **any enrolled agent could rewrite the fleet-wide patching policy** — deferral limits, maintenance
+// windows, whether patching is enabled at all — for every other host. Meanwhile a browser could not
+// reach it, because a browser has no agent certificate.
+//
+// Nothing legitimate used it: the Settings page dispatches UpdatePatchingPolicySettingsCommand
+// through ISender like every other Razor page, and no agent ever issued anything but a GET.
+//
+// A write route for this belongs on a path *outside* that regex, carrying [RequireAdminSession] —
+// or, better, stays where it already is: the page handler.

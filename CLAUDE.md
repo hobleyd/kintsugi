@@ -178,11 +178,35 @@ authentication of any kind**. That shipped: `save` (accepts an arbitrary script)
 (has the server sign it) were both callable by anyone who could reach the server, which is the whole
 path from arbitrary text to content every agent runs as root. Both now carry
 `[RequireAdminSession]`, which mirrors `Program.cs`'s own gate semantics rather than inventing a
-second shape that could drift from it. **Adding a browser-driven route that changes what agents
-execute means adding that attribute** — nothing else will stop it being anonymous. The remaining
-sub-routes (`scan`, `refresh`, `prompt`, the status polls, `report-version`) are still open; they
-cost AI calls and leak inventory rather than granting execution, and are worth closing but were left
-out of that change to keep it reviewable.
+second shape that could drift from it. **Adding a browser-driven route means adding that
+attribute** — nothing else will stop it being anonymous, and excluding a route from nginx's regex
+does not make it browser-only, it makes it certless.
+
+Every anonymous route is now closed. `AiSettingsController`, `DeploymentsController` and
+`PatchesController` carry the attribute **on the class**, because nothing on them is an agent route
+and the recurring failure is a route added later inheriting no gate; `HostsController` and
+`UpgradePathsController` are mixed, so theirs is per-action. Two routes were removed rather than
+gated, because neither could be secured as it stood:
+
+- `POST /api/upgrade-paths/report-version` set `LatestVersion` fleet-wide for any (application,
+  platform), which drives `updateAvailable`, which drives the agent's `is_patchable` — so anyone
+  could suppress patching across the fleet by posting the installed version as the latest one. It
+  could not take `[RequireAgentIdentity]`, because its body carried no serial number for the filter
+  to compare `X-Agent-Cert-Cn` against, and no agent called it. It is redundant besides: the
+  update-check coordinator already re-runs each script's own `--update-version` on the server. If it
+  returns it needs a `serialNumber`, the attribute, and an entry in nginx's regex.
+- `PUT /api/patching-policy` was *not* anonymous — it sits inside nginx's exact-match regex, so a
+  client certificate was required. That was the problem: it carried no `[RequireAgentIdentity]` and
+  no admin gate, so **any enrolled agent could rewrite the fleet-wide patching policy**, while a
+  browser could not reach it at all. Nothing legitimate called it — the Settings page dispatches
+  `UpdatePatchingPolicySettingsCommand` through `ISender`, and all three agents only ever `GET` this
+  path (`policy.rs`). The `GET` stays; it is what agents poll.
+
+Still anonymous by design, and correctly so: `POST /api/host/enroll` (an unenrolled agent has no
+certificate; the enrollment token is what protects it) and everything under `/api/agent-packages`
+(a self-updating agent has to see what is published before proving anything, and the download is
+protected by a signed checksum instead). `/swagger` is also exempt from the sign-in gate, so the
+route listing is readable anonymously — disclosure only, but worth knowing.
 
 **Script approval is shared through a GitHub repository, and the default branch is the trust root.**
 Signing a script is effective locally at once — the human at the console reviewed it — and *also*
