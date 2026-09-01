@@ -4,10 +4,14 @@ using Kintsugi.Application.Patches;
 using Kintsugi.Application.Patches.Commands.CreatePatch;
 using Kintsugi.Application.Patches.Queries.GetPatches;
 
+using Kintsugi.WebApi.Filters;
+
 namespace Kintsugi.WebApi.Controllers;
 
 [ApiController]
 [Route("api/[controller]")]
+// Class-level for the same reason as AiSettingsController — no agent route here.
+[RequireAdminSession]
 [Produces("application/json")]
 public class PatchesController : ControllerBase
 {

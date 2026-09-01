@@ -25,13 +25,17 @@ public class HostsController : ControllerBase
     }
 
     /// <summary>Lists all managed hosts.</summary>
+    // Admin-gated: the whole fleet inventory.
     [HttpGet]
+    [RequireAdminSession]
     [ProducesResponseType(typeof(IReadOnlyList<HostDto>), StatusCodes.Status200OK)]
     public async Task<ActionResult<IReadOnlyList<HostDto>>> GetAll(CancellationToken cancellationToken) =>
         Ok(await _sender.Send(new GetHostsQuery(), cancellationToken));
 
     /// <summary>Gets a single host by id.</summary>
+    // Admin-gated: one host's full detail.
     [HttpGet("{id:guid}")]
+    [RequireAdminSession]
     [ProducesResponseType(typeof(HostDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<HostDto>> GetById(Guid id, CancellationToken cancellationToken)
@@ -103,7 +107,11 @@ public class HostsController : ControllerBase
     /// soft-deleted, not gone, until that agent confirms it actually did so — see
     /// <see cref="ConfirmRemoval"/>.
     /// </summary>
+    // Admin-gated, and the most important one on this controller: destructive, browser-initiated,
+    // and "hosts" being plural means it never matched nginx's agent regex, so it was reachable by
+    // anyone who could reach the server.
     [HttpDelete("{id:guid}")]
+    [RequireAdminSession]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> RequestRemoval(Guid id, CancellationToken cancellationToken)

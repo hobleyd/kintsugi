@@ -2,7 +2,6 @@ using MediatR;
 using Microsoft.AspNetCore.Mvc;
 using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Application.UpgradePaths;
-using Kintsugi.Application.UpgradePaths.Commands.ReportDiscoveredVersion;
 using Kintsugi.Application.UpgradePaths.Commands.SaveUpgradePath;
 using Kintsugi.Application.UpgradePaths.Commands.SignUpgradePathScript;
 using Kintsugi.Application.UpgradePaths.Commands.StartUpdateCheck;
@@ -47,7 +46,9 @@ public class UpgradePathsController : ControllerBase
     /// Lists every researched (application, platform) upgrade path fleet-wide, with host counts
     /// aggregated in rather than listed one row per host. Backs the Applications page's table.
     /// </summary>
+    // Admin-gated: a fleet-wide inventory of every researched application.
     [HttpGet("summary")]
+    [RequireAdminSession]
     [ProducesResponseType(typeof(IReadOnlyList<UpgradePathSummaryDto>), StatusCodes.Status200OK)]
     public async Task<ActionResult<IReadOnlyList<UpgradePathSummaryDto>>> GetSummary(CancellationToken cancellationToken) =>
         Ok(await _sender.Send(new GetUpgradePathSummariesQuery(), cancellationToken));
@@ -61,13 +62,17 @@ public class UpgradePathsController : ControllerBase
     /// one is already running reports <c>started: false</c> rather than queuing a duplicate. Does
     /// not touch anything already resolved via a script — see <see cref="StartUpdateCheck"/> for that.
     /// </summary>
+    // Admin-gated: starts AI research across the fleet, which costs real money per call.
     [HttpPost("scan")]
+    [RequireAdminSession]
     [ProducesResponseType(typeof(StartUpgradePathScanResult), StatusCodes.Status202Accepted)]
     public async Task<ActionResult<StartUpgradePathScanResult>> StartScan(CancellationToken cancellationToken) =>
         Accepted(await _sender.Send(new StartUpgradePathScanCommand(), cancellationToken));
 
     /// <summary>Live progress of the current (or most recently completed) scan.</summary>
+    // Admin-gated with the action it reports on.
     [HttpGet("scan-status")]
+    [RequireAdminSession]
     [ProducesResponseType(typeof(UpgradePathScanStatusDto), StatusCodes.Status200OK)]
     public async Task<ActionResult<UpgradePathScanStatusDto>> GetScanStatus(CancellationToken cancellationToken) =>
         Ok(await _sender.Send(new GetUpgradePathScanStatusQuery(), cancellationToken));
@@ -79,13 +84,17 @@ public class UpgradePathsController : ControllerBase
     /// button; a second call while one is already running reports <c>started: false</c> rather
     /// than queuing a duplicate.
     /// </summary>
+    // Admin-gated: spawns an interpreter per resolved script.
     [HttpPost("check-updates")]
+    [RequireAdminSession]
     [ProducesResponseType(typeof(StartUpdateCheckResult), StatusCodes.Status202Accepted)]
     public async Task<ActionResult<StartUpdateCheckResult>> StartUpdateCheck(CancellationToken cancellationToken) =>
         Accepted(await _sender.Send(new StartUpdateCheckCommand(), cancellationToken));
 
     /// <summary>Live progress of the current (or most recently completed) "Check for Updates" run.</summary>
+    // Admin-gated with the action it reports on.
     [HttpGet("check-updates-status")]
+    [RequireAdminSession]
     [ProducesResponseType(typeof(UpdateCheckStatusDto), StatusCodes.Status200OK)]
     public async Task<ActionResult<UpdateCheckStatusDto>> GetUpdateCheckStatus(CancellationToken cancellationToken) =>
         Ok(await _sender.Send(new GetUpdateCheckStatusQuery(), cancellationToken));
@@ -100,14 +109,18 @@ public class UpgradePathsController : ControllerBase
     /// on the Applications page — <see cref="RefreshUpgradePathRequest.Instructions"/> carries the
     /// (possibly hand-edited) prompt shown there.
     /// </summary>
+    // Admin-gated: starts an AI research call, and carries a caller-supplied prompt.
     [HttpPost("refresh")]
+    [RequireAdminSession]
     [ProducesResponseType(typeof(StartUpgradePathRefreshResult), StatusCodes.Status202Accepted)]
     public async Task<ActionResult<StartUpgradePathRefreshResult>> Refresh([FromBody] RefreshUpgradePathRequest request, CancellationToken cancellationToken) =>
         Accepted(await _sender.Send(new StartUpgradePathRefreshCommand(request.ApplicationName, request.Platform, request.Instructions), cancellationToken));
 
     /// <summary>Live progress of one application's background refresh (or its most recently
     /// completed result), polled by the Applications page after starting one via <see cref="Refresh"/>.</summary>
+    // Admin-gated with the action it reports on.
     [HttpGet("refresh-status")]
+    [RequireAdminSession]
     [ProducesResponseType(typeof(UpgradePathRefreshStatusDto), StatusCodes.Status200OK)]
     public async Task<ActionResult<UpgradePathRefreshStatusDto>> GetRefreshStatus([FromQuery] string applicationName, CancellationToken cancellationToken) =>
         Ok(await _sender.Send(new GetUpgradePathRefreshStatusQuery(applicationName), cancellationToken));
@@ -117,7 +130,9 @@ public class UpgradePathsController : ControllerBase
     /// running it — backs the Applications page's per-row instructions panel, letting a user
     /// review or hand-edit it before triggering <see cref="Refresh"/>.
     /// </summary>
+    // Admin-gated: discloses the research prompt and the applications it names.
     [HttpGet("prompt")]
+    [RequireAdminSession]
     [ProducesResponseType(typeof(UpgradePathPromptDto), StatusCodes.Status200OK)]
     public async Task<ActionResult<UpgradePathPromptDto>> GetPrompt([FromQuery] string applicationName, [FromQuery] string? platform, CancellationToken cancellationToken) =>
         Ok(await _sender.Send(new GetUpgradePathPromptQuery(applicationName, platform), cancellationToken));
@@ -168,27 +183,11 @@ public class UpgradePathsController : ControllerBase
             // site is deliberately running with authentication disabled.
             new SignUpgradePathScriptCommand(request.ApplicationName, request.Platform, SignedBy: User.Identity?.Name),
             cancellationToken));
-
-    /// <summary>
-    /// Records a version an agent discovered by running its already-generated upgrade script's own
-    /// `--update-version` mode locally — no AI call involved. This is what lets an upgrade path's
-    /// known latest version stay current indefinitely once a script exists, instead of only ever
-    /// updating via an expensive fresh AI research run.
-    /// </summary>
-    [HttpPost("report-version")]
-    [ProducesResponseType(StatusCodes.Status204NoContent)]
-    public async Task<IActionResult> ReportVersion([FromBody] ReportDiscoveredVersionRequest request, CancellationToken cancellationToken)
-    {
-        await _sender.Send(new ReportDiscoveredVersionCommand(request.ApplicationName, request.Platform, request.LatestVersion), cancellationToken);
-        return NoContent();
-    }
 }
 
 public record RefreshUpgradePathRequest(string ApplicationName, string? Platform, string? Instructions = null);
 
 public record SignUpgradePathScriptRequest(string ApplicationName, string Platform);
-
-public record ReportDiscoveredVersionRequest(string ApplicationName, string Platform, string? LatestVersion);
 
 public record SaveUpgradePathRequest(
     string ApplicationName,
