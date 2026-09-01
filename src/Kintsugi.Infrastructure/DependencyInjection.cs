@@ -35,6 +35,10 @@ public static class DependencyInjection
         services.AddScoped<IPatchingPolicySettingsRepository, PatchingPolicySettingsRepository>();
         services.AddScoped<IAgentPackageRepository, AgentPackageRepository>();
         services.AddScoped<IApprovedScriptRepository, ApprovedScriptRepository>();
+        services.AddScoped<IGitHubSettingsRepository, GitHubSettingsRepository>();
+        // Scoped, and read per call by every GitHub client — see GitHubSettings for why none of them
+        // may capture these values in a constructor any more.
+        services.AddScoped<IGitHubSettingsProvider, GitHubSettingsProvider>();
         services.AddScoped<IAuthenticationSettingsRepository, AuthenticationSettingsRepository>();
         services.AddSingleton<IAgentPackageStorage, AgentPackageFileStorage>();
         services.AddSingleton<IAgentPackageArchiveRewriter, AgentPackageArchiveRewriter>();

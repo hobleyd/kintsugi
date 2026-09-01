@@ -31,9 +31,12 @@
             <a href="/clients" aria-current="@(activeNav == "clients" ? "page" : null)">Clients</a>
             <a href="/settings/ai-agent" aria-current="@(inSettings ? "page" : null)">Settings</a>
             <div class="sidebar-subnav">
+                @* Alphabetical by label. Keep it that way when adding one — the list is a lookup,
+                   not a workflow, so there is no order to it that a reader could otherwise predict. *@
                 <a class="sidebar-subnav-link" href="/settings/ai-agent" aria-current="@(activeNav == "settings.ai-agent" ? "page" : null)">AI Agent</a>
-                <a class="sidebar-subnav-link" href="/settings/patching-policy" aria-current="@(activeNav == "settings.patching-policy" ? "page" : null)">Patching Policy</a>
                 <a class="sidebar-subnav-link" href="/settings/authentication" aria-current="@(activeNav == "settings.authentication" ? "page" : null)">Authentication</a>
+                <a class="sidebar-subnav-link" href="/settings/github" aria-current="@(activeNav == "settings.github" ? "page" : null)">GitHub</a>
+                <a class="sidebar-subnav-link" href="/settings/patching-policy" aria-current="@(activeNav == "settings.patching-policy" ? "page" : null)">Patching Policy</a>
             </div>
             <div class="sidebar-footer">
                 @* Labels and icons are swapped by CSS on :root[data-theme], not here, so the

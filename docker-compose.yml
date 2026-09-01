@@ -39,6 +39,11 @@ services:
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
       ConnectionStrings__Database: Host=db;Port=5432;Database=${POSTGRES_DB:-kintsugi};Username=${POSTGRES_USER:-kintsugi_app};Password=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       OLLAMA_WEB_API_KEY: ${OLLAMA_WEB_API_KEY:-}
+      # These four are LEGACY: GitHub configuration now lives on the GitHub settings page and is
+      # stored in the database. They are read once, on a server with no saved settings, to seed that
+      # row so an existing deployment survives the upgrade — see Program.cs's
+      # SeedGitHubSettingsFromEnvironmentAsync — and are ignored entirely afterwards. Left plumbed in
+      # so that migration works; safe to remove once the settings page shows what you expect.
       GITHUB_API_TOKEN: ${GITHUB_API_TOKEN:-}
       # Optional override for where the Clients page pulls agent builds from; defaults to
       # this project's own public repository. See GitHubAgentPackageSourceClient.

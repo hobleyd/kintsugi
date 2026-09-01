@@ -69,6 +69,7 @@ public class AiUpgradePathResearchClientTests
     private static AiUpgradePathResearchClient CreateClient(HttpMessageHandler handler) => new(
         new HttpClient(handler),
         new ConfigurationBuilder().Build(),
+        FakeGitHubSettings.Provider(),
         Mock.Of<IGooseCliClient>(),
         NullLogger<AiUpgradePathResearchClient>.Instance);
 

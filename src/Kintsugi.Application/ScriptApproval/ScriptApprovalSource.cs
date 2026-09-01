@@ -41,8 +41,6 @@ public record ApprovedScriptCorpusReadResult(
 /// </summary>
 public interface IScriptApprovalSourceClient
 {
-    string RepositoryDescription { get; }
-
     /// <summary>Cheap enough to run on every page load: a request for the default branch's head
     /// commit, on a short leash, with the branch name itself remembered after the first call.</summary>
     Task<ScriptApprovalSourceStatus> GetStatusAsync(CancellationToken cancellationToken);

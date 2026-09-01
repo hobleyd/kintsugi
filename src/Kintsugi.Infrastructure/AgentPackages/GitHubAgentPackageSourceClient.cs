@@ -1,9 +1,8 @@
-using System.Net.Http.Headers;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using Microsoft.Extensions.Configuration;
 using Kintsugi.Application.AgentPackages;
 using Kintsugi.Application.Common.Interfaces;
+using Kintsugi.Infrastructure.ScriptApproval;
 
 namespace Kintsugi.Infrastructure.AgentPackages;
 
@@ -14,12 +13,6 @@ namespace Kintsugi.Infrastructure.AgentPackages;
 /// </summary>
 public class GitHubAgentPackageSourceClient : IAgentPackageSourceClient
 {
-    /// <summary>Which repository to pull builds from. Overridable so a fork, or an internal mirror
-    /// of this project, can be the upstream instead — the default is this project's own public
-    /// repository, which is already named in CLAUDE.md and is not deployment detail.</summary>
-    public const string RepositoryConfigurationKey = "AGENT_PACKAGE_GITHUB_REPO";
-    private const string DefaultRepository = "hobleyd/kintsugi";
-
     /// <summary>The tag shape <c>ci.yml</c> creates. Both halves are load-bearing: the platform
     /// is the agent-package namespace ("macos"/"windows"/"linux" — not <c>PlatformBucket</c>'s),
     /// and the version is what a published <c>AgentPackage</c> is keyed by, so renaming a tag on
@@ -35,42 +28,35 @@ public class GitHubAgentPackageSourceClient : IAgentPackageSourceClient
     private static readonly TimeSpan MetadataTimeout = TimeSpan.FromSeconds(10);
 
     private readonly HttpClient _httpClient;
-    private readonly string _repository;
+    private readonly IGitHubSettingsProvider _settingsProvider;
 
-    public GitHubAgentPackageSourceClient(HttpClient httpClient, IConfiguration configuration)
+    public GitHubAgentPackageSourceClient(HttpClient httpClient, IGitHubSettingsProvider settingsProvider)
     {
         _httpClient = httpClient;
-
-        var configured = configuration[RepositoryConfigurationKey];
-        _repository = string.IsNullOrWhiteSpace(configured) ? DefaultRepository : configured.Trim().Trim('/');
-
-        // GitHub rejects an API request with no User-Agent outright, with a 403 that says nothing
-        // about the real cause.
-        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Kintsugi-Server");
-        _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
-
-        // The same optional token the upgrade-path research path uses (see
-        // AiUpgradePathResearchClient) — no scopes needed for a public repository, only a higher
-        // rate limit than the 60 requests/hour an unauthenticated caller gets.
-        var token = configuration["GITHUB_API_TOKEN"];
-        if (!string.IsNullOrWhiteSpace(token))
-        {
-            _httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token.Trim());
-        }
+        _settingsProvider = settingsProvider;
+        ScriptApprovalGitHubHeaders.ApplyStaticHeaders(_httpClient);
     }
-
-    public string SourceDescription => _repository;
 
     public async Task<IReadOnlyList<AgentPackageSourceRelease>> GetLatestReleasesAsync(CancellationToken cancellationToken)
     {
+        // Read per call, not captured in the constructor: both the repository and the token are
+        // editable on the GitHub settings page now, so a captured value would ignore every edit
+        // until the next restart. See GitHubSettings.
+        var settings = await _settingsProvider.GetAsync(cancellationToken);
+
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(MetadataTimeout);
 
         string json;
         try
         {
-            using var response = await _httpClient.GetAsync(
-                $"https://api.github.com/repos/{_repository}/releases?per_page=100", timeout.Token);
+            // The token here is the read-only one — no scopes needed against a public repository,
+            // only a higher rate limit than the 60 requests/hour an anonymous caller gets. It is
+            // deliberately not the script-approval token, which can write.
+            using var request = ScriptApprovalGitHubHeaders.Request(
+                HttpMethod.Get, $"https://api.github.com/repos/{settings.AgentPackageRepository}/releases?per_page=100",
+                settings.ApiToken);
+            using var response = await _httpClient.SendAsync(request, timeout.Token);
             response.EnsureSuccessStatusCode();
             json = await response.Content.ReadAsStringAsync(timeout.Token);
         }
@@ -80,7 +66,7 @@ public class GitHubAgentPackageSourceClient : IAgentPackageSourceClient
             // rather than a cancellation because the caller treats cancellation as "the request
             // went away" and lets it propagate, which would take the page down with it.
             throw new TimeoutException(
-                $"Listing releases from {_repository} took longer than {MetadataTimeout.TotalSeconds:0} seconds.");
+                $"Listing releases from {settings.AgentPackageRepository} took longer than {MetadataTimeout.TotalSeconds:0} seconds.");
         }
 
         return ParseLatestReleases(json);
@@ -88,7 +74,10 @@ public class GitHubAgentPackageSourceClient : IAgentPackageSourceClient
 
     public async Task<Stream> DownloadAsync(AgentPackageSourceRelease release, CancellationToken cancellationToken)
     {
-        using var response = await _httpClient.GetAsync(release.DownloadUrl, cancellationToken);
+        var settings = await _settingsProvider.GetAsync(cancellationToken);
+
+        using var request = ScriptApprovalGitHubHeaders.Request(HttpMethod.Get, release.DownloadUrl, settings.ApiToken);
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
         response.EnsureSuccessStatusCode();
 
         // Buffered rather than handed back as the live response stream: the archive rewriter reads

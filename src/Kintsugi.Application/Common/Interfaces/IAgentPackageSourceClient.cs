@@ -11,10 +11,6 @@ namespace Kintsugi.Application.Common.Interfaces;
 /// </summary>
 public interface IAgentPackageSourceClient
 {
-    /// <summary>Where builds are being pulled from, for display on the Clients page — e.g.
-    /// <c>hobleyd/kintsugi</c>. Shown so a misconfigured <c>AGENT_PACKAGE_GITHUB_REPO</c> is
-    /// visible on the page rather than only as an empty listing.</summary>
-    string SourceDescription { get; }
 
     /// <summary>The newest release available for each platform, at most one per platform. A
     /// platform with no release at all is simply absent rather than an error — nothing has been

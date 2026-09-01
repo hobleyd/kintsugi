@@ -8,19 +8,27 @@ public class GetAgentPackageSourceStatusQueryHandler
 {
     private readonly IAgentPackageSourceClient _sourceClient;
     private readonly IAgentPackageRepository _repository;
+    private readonly IGitHubSettingsProvider _gitHubSettings;
 
     public GetAgentPackageSourceStatusQueryHandler(
         IAgentPackageSourceClient sourceClient,
-        IAgentPackageRepository repository)
+        IAgentPackageRepository repository,
+        IGitHubSettingsProvider gitHubSettings)
     {
         _sourceClient = sourceClient;
         _repository = repository;
+        _gitHubSettings = gitHubSettings;
     }
 
     public async Task<AgentPackageSourceStatusDto> Handle(
         GetAgentPackageSourceStatusQuery request,
         CancellationToken cancellationToken)
     {
+        // Which repository builds come from is configuration, so it is read here rather than asked
+        // of the client — the client no longer exposes it, precisely because a settings-page value
+        // must not be captured anywhere.
+        var settings = await _gitHubSettings.GetAsync(cancellationToken);
+
         IReadOnlyList<AgentPackageSourceRelease> releases;
         try
         {
@@ -33,7 +41,7 @@ public class GetAgentPackageSourceStatusQueryHandler
             // reported on the page and nothing more. Throwing would take the downloads down with
             // it, which is exactly backwards. The reason travels as data rather than to a log
             // nobody reads: it is shown on the page beside the still-working downloads.
-            return new AgentPackageSourceStatusDto(_sourceClient.SourceDescription, Array.Empty<AgentPackageSourceStatusRow>(), ex.Message);
+            return new AgentPackageSourceStatusDto(settings.AgentPackageRepository, Array.Empty<AgentPackageSourceStatusRow>(), ex.Message);
         }
 
         var published = await _repository.GetLatestPerPlatformAsync(cancellationToken);
@@ -52,6 +60,6 @@ public class GetAgentPackageSourceStatusQueryHandler
             .OrderBy(row => row.Platform, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        return new AgentPackageSourceStatusDto(_sourceClient.SourceDescription, rows, UnavailableReason: null);
+        return new AgentPackageSourceStatusDto(settings.AgentPackageRepository, rows, UnavailableReason: null);
     }
 }

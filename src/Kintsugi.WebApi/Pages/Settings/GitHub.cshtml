@@ -1,0 +1,117 @@
+@page "/settings/github"
+@model Kintsugi.WebApi.Pages.Settings.GitHubModel
+@{
+    ViewData["Title"] = "GitHub";
+    ViewData["ActiveNav"] = "settings.github";
+}
+
+<p class="subtitle">
+    Which GitHub repositories this server reads agent builds and script approvals from, and the
+    credentials it uses for each. These used to live in <code>.env</code>; if this deployment had them
+    there, they were read once at startup to fill this page in and those entries can now be deleted.
+</p>
+
+@if (!Model.ModelState.IsValid)
+{
+    <div class="alert alert-error">
+        <ul>
+            @foreach (var error in Model.ModelState.Values.SelectMany(v => v.Errors))
+            {
+                <li>@error.ErrorMessage</li>
+            }
+        </ul>
+    </div>
+}
+
+@if (Model.SaveSucceeded)
+{
+    <div class="alert alert-success">GitHub settings saved.</div>
+}
+
+<div class="panel">
+    <form method="post" class="settings-form">
+        <h3>Agent builds</h3>
+        <div class="field">
+            <label for="agentPackageRepository">Agent package repository</label>
+            <input type="text" id="agentPackageRepository" asp-for="Input.AgentPackageRepository"
+                   placeholder="owner/name" autocomplete="off" spellcheck="false" />
+            <p class="hint">
+                Where the <a href="/clients">Clients</a> page pulls kintsugi-agent builds from — its CI
+                publishes one release per agent per version. Leave blank for the default.
+                @if (Model.Settings.IsAgentPackageRepositoryDefault)
+                {
+                    <text>Currently using the default.</text>
+                }
+            </p>
+        </div>
+
+        <h3>Script approvals</h3>
+        <div class="field">
+            <label for="scriptApprovalRepository">Script approval repository</label>
+            <input type="text" id="scriptApprovalRepository" asp-for="Input.ScriptApprovalRepository"
+                   placeholder="owner/name" autocomplete="off" spellcheck="false" />
+            <p class="hint">
+                Where human-approved upgrade scripts are published and read back — see
+                <a href="/upgrade-scripts">Upgrade Scripts</a>. Leave blank for the default.
+                @if (Model.Settings.IsScriptApprovalRepositoryDefault)
+                {
+                    <text>Currently using the default.</text>
+                }
+            </p>
+        </div>
+
+        @* Said here rather than only in CLAUDE.md, because it is the thing an operator is most
+           likely to get wrong: this repository's default branch is what decides whose merges can
+           offer executable content to this server. *@
+        <div class="alert alert-info">
+            This repository's default branch is the trust root for script approval: anyone who can
+            merge there can offer a script that this server's agents may end up running. Protect it
+            with required reviewers, and point this at a repository you control — approving anything
+            needs write access to whatever it names.
+        </div>
+
+        <h3>Credentials</h3>
+        <div class="field">
+            <label for="apiToken">Read-only API token</label>
+            <input type="password" id="apiToken" asp-for="Input.ApiToken" autocomplete="new-password"
+                   placeholder="@(Model.Settings.HasApiToken ? "Stored — leave blank to keep it" : "Optional")" />
+            <p class="hint">
+                Lifts GitHub's anonymous rate limit for upgrade-path research and for listing agent
+                builds. Needs no scopes at all against a public repository, and is optional — without
+                it those reads are limited to 60 requests an hour.
+            </p>
+            @if (Model.Settings.HasApiToken)
+            {
+                <div class="field field-inline">
+                    <input type="checkbox" id="clearApiToken" asp-for="Input.ClearApiToken" />
+                    <label for="clearApiToken">Remove the stored token</label>
+                </div>
+            }
+        </div>
+
+        <div class="field">
+            <label for="scriptApprovalToken">Script approval token</label>
+            <input type="password" id="scriptApprovalToken" asp-for="Input.ScriptApprovalToken" autocomplete="new-password"
+                   placeholder="@(Model.Settings.HasScriptApprovalToken ? "Stored — leave blank to keep it" : "Optional")" />
+            <p class="hint">
+                Needs <code>contents:write</code> and <code>pull_requests:write</code> on the script
+                approval repository. Kept separate from the read-only token above on purpose: that one
+                is handed to the AI research client and the agent-build reader as well, and neither
+                has any business holding a credential that can write.
+                Without this, signing a script still approves it on this server and its agents still
+                run it, but no pull request is raised and no other server can pick the approval up.
+            </p>
+            @if (Model.Settings.HasScriptApprovalToken)
+            {
+                <div class="field field-inline">
+                    <input type="checkbox" id="clearScriptApprovalToken" asp-for="Input.ClearScriptApprovalToken" />
+                    <label for="clearScriptApprovalToken">Remove the stored token</label>
+                </div>
+            }
+        </div>
+
+        <div class="button-row">
+            <button type="submit" class="btn-primary">Save</button>
+        </div>
+    </form>
+</div>
