@@ -399,14 +399,28 @@ name and id are read from `--appName`/`--appId` at runtime, never baked in. That
 human "Sign Script" review cover every application a manager handles, via
 `FindExistingSignatureForScriptAsync`.
 
-**Editing one of those bodies re-opens every review of it, and that is the safe outcome.**
-`RegisterApplicationsCommandHandler` rewrites `Script` from the builder on every routine inventory
-report, so `UpgradePath.Apply` drops `ScriptSignature` whenever the content it is replacing actually
-differs (same for `Command`/`CommandSignature`). Without that, an edited body would leave every
-already-signed row carrying a signature over the *previous* text: "signed" on the Upgrade Scripts
-page, refused by every agent, and nothing on screen to say why that manager's applications all
-stopped patching. So expect a script-body change to need **one** human re-sign per (manager,
-isSelfUpdate) case — every other row inherits it through `FindExistingSignatureForScriptAsync`.
+**A signed script is never rewritten by a deployment, and editing one of those bodies changes
+nothing until a human says so.** `RegisterApplicationsCommandHandler` used to rewrite `Script` from
+the builder on every routine inventory report, under the belief that "the script content for a given
+(manager, isSelfUpdate) case never changes". It changes whenever one of those bodies is edited — so
+what that actually meant was that a background report could swap the content of a signed row,
+content the fleet's agents may be executing right now, on the strength of a deployment nobody was
+watching. It is exactly what `UpgradePath.AdoptApprovedScript` refuses to do, and a report has less
+business doing it than a human pressing Adopt. Now a row that carries a `ScriptSignature` keeps its
+script exactly as reviewed and only `LatestVersion` moves; an *unsigned* row is still written from
+the builder, which is how a fixed script reaches rows nobody has approved yet.
+
+Two things follow. `UpgradePath.Apply` drops `ScriptSignature` whenever the content it is replacing
+actually differs (same for `Command`/`CommandSignature`) — the invariant that a signature never
+outlives its bytes, which now only ever fires on a deliberate act (a force-refresh, a pasted script,
+`TakeServerWrittenScript`) rather than in the background. And because nothing takes the newer script
+by itself, the Upgrade Scripts page has to say one exists: `PackageManagerCatalog.CurrentScriptFor`
+gives the query handler the script this build would write, `LocalScriptDto.NewerServerScriptAvailable`
+flags a row that differs, and `TakeServerWrittenScriptCommand` replaces one — **unsigned**, so the
+new text reaches no host until someone has read it, and one "Sign Script" then covers every row
+holding those bytes via `FindExistingSignatureForScriptAsync`. Do not make that automatic on the
+grounds that the server trusts its own generated content: the review is the only thing standing
+between an edited builder body and root execution on every host.
 
 ## The three agents
 

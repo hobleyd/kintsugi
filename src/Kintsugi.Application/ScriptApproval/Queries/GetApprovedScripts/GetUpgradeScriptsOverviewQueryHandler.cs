@@ -56,7 +56,16 @@ public class GetUpgradeScriptsOverviewQueryHandler : IRequestHandler<GetUpgradeS
             .Select(r =>
             {
                 var hash = localHashes[(r.ApplicationName, r.Platform)];
-                return new LocalScriptDto(r.ApplicationName, r.Platform, hash, r.ScriptSignature is not null, approvedHashes.Contains(hash));
+
+                // Compared against what this build writes, not against a version number: these
+                // scripts carry none, and the content is the only thing a signature covers. Null for
+                // an AI-researched row, which has no server-written counterpart to differ from.
+                var current = PackageManagerCatalog.CurrentScriptFor(r.ApplicationName, r.Platform);
+                var newerServerScript = current is not null && !string.Equals(r.Script, current, StringComparison.Ordinal);
+
+                return new LocalScriptDto(
+                    r.ApplicationName, r.Platform, hash, r.ScriptSignature is not null, approvedHashes.Contains(hash),
+                    newerServerScript);
             })
             .OrderBy(s => s.Signed)
             .ThenBy(s => s.ApplicationName, StringComparer.OrdinalIgnoreCase)
