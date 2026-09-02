@@ -400,12 +400,34 @@ original — then the others for what each platform forced to differ. The differ
 
 **Linux borrows its architecture from Windows, not macOS, and for the same forcing reason.** Every
 upgrade it can perform (`apt-get`, `dnf`, `flatpak update --system`, `snap refresh`) requires root,
-so patching lives in the root service and the per-user process holds no identity and makes no
-authenticated call — it decides *when*, and asks. macOS is the odd one out precisely because
+so patching lives in the root service and the per-user process holds no identity and makes **no
+network call at all** — it decides *when*, and asks. macOS is the odd one out precisely because
 Homebrew *refuses* to run as root and installs into a user-writable prefix. The queue directory is
 `root:root 1733` (a drop-box: anyone may write, only root may read or list), which is the Linux
 spelling of the macOS queue's `root:admin 0770` and needs no group — "local administrators" is
 `sudo` on Debian, `wheel` on Red Hat, and neither elsewhere.
+
+**"No network call at all" includes the patching policy, and 0.5.0 got that wrong.**
+`/api/patching-policy` sits inside nginx's client-certificate regex, so there is no such thing as
+fetching it without an identity — but the Linux per-user process tried, under a comment asserting
+the route was ungated. Every Linux host with a graphical session therefore 403'd once a minute
+forever while the root service, having deferred to that process, patched nothing; the host went on
+reporting healthy check-ins the whole time, and the symptom only appears on day two because a
+freshly enrolled host isn't due until then. The fix is the Windows arrangement, which had it right:
+the root service fetches the policy on **every** check-in — before registration, and regardless of
+whether it then defers — and writes `/var/lib/kintsugi-agent/policy.json` `0644`; the per-user
+process only ever `policy::load_cached`es it. Keep `fetch` private to the root side on both
+platforms, and don't reintroduce a per-user fetch of anything.
+
+**The state directory is `0711`, and `0700` silently kills the drop-box.** A queue at `1733` is
+unreachable if nothing outside root can *traverse* its parent, so no user can write a request or a
+heartbeat — and because the per-user process cannot list the directory either, `is_dir` on the
+queue fails exactly as it would if the agent were not installed, which is what 0.5.0's warning
+wrongly claimed. `0711` is traverse-only: root is still the only one who can list the directory or
+read `identity/` (still `0700`, and deliberately). `install.sh` sets it, and
+`config::repair_directory_modes` re-asserts both modes on every root check-in — required, not
+belt-and-braces, because `self_update` replaces the binary and never re-runs the installer, so
+hosts already in the field have no other repair path.
 
 **Only the Linux agent patches with nobody logged in, and it has to.** Both other agents put the
 patching schedule in the per-user process, which costs nothing when every managed host is somebody's

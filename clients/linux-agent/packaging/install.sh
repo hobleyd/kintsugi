@@ -108,15 +108,24 @@ elif ! grep -q '^enrollment_token = "[^"]' "$CONFIG_DEST" 2>/dev/null; then
 fi
 
 # Mutable state the root service owns: the enrolled identity, the request queue, the daemon log,
-# the check-in schedule, and staged scripts. Root-only at the top level; the queue below is the one
-# deliberate exception.
+# the check-in schedule, the shared policy cache, and staged scripts.
+#
+# 0711, not 0700: traverse-only. Root remains the only one who can *list* this directory or read
+# the identity inside it, but an unprivileged user must be able to walk *through* it to reach the
+# queue below and the policy cache beside it. 0.5.0 used 0700 here, which made the queue's own 1733
+# meaningless — no execute bit for others means the traversal fails whatever mode the drop-box
+# itself carries, so no user could write a patch request or a heartbeat, and the per-user agent
+# reported it as the root service not being installed. See src/config.rs's STATE_DIR_MODE, which
+# re-asserts this on every check-in for hosts already installed from a 0.5.0 tarball.
 echo "Creating state directory at ${STATE_DIR}..."
-install -d -o root -g root -m 700 "$STATE_DIR"
+install -d -o root -g root -m 711 "$STATE_DIR"
 
 # This host's mutual-TLS identity (certificate, private key, pinned CA and artifact-signing public
 # key — see src/identity.rs). Tighter than the macOS agent's equivalent, which has to stay
 # group-readable because its per-user process makes authenticated requests directly; here that
-# process makes none, so nothing outside root ever needs to read this.
+# process makes none — it reads the policy from the cache the root service writes and asks that
+# service for everything else over the queue — so nothing outside root ever needs to read this.
+# Left at 0700 deliberately, and src/config.rs's repair pass never touches it.
 echo "Creating identity directory at ${IDENTITY_DIR}..."
 install -d -o root -g root -m 700 "$IDENTITY_DIR"
 

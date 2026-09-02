@@ -37,10 +37,6 @@ use system_info::InstalledApp;
 /// suspended — see `ScheduleState::is_due`) is noticed promptly rather than up to a day late.
 const AGENT_POLL_INTERVAL: Duration = Duration::from_secs(60);
 
-/// How long a cached patching policy is trusted before the `--agent` loop bothers re-fetching it
-/// — the policy changes rarely, so there's no need to hit the server every poll tick.
-const POLICY_REFRESH_INTERVAL: u64 = 60 * 60;
-
 /// systemd retries this unit on its own schedule (an hourly timer plus `OnBootSec`); this bounded
 /// retry only exists to ride out the short window at boot where the network isn't up yet.
 const MAX_ATTEMPTS: u32 = 5;
@@ -151,6 +147,12 @@ fn run_daemon() -> Result<()> {
         return Ok(());
     };
 
+    // Before anything else that depends on them: re-assert the two directory modes the privilege
+    // handoff rests on. `self_update` replaces the binary and never re-runs the installer, so a
+    // host that received the wrong modes from packaging/install.sh would otherwise keep them
+    // forever — see `config::repair_directory_modes`.
+    config::repair_directory_modes();
+
     let checkin_schedule_path = config::checkin_schedule_path();
     let checkin_minute = checkin_schedule::load_or_assign(&checkin_schedule_path);
 
@@ -187,6 +189,14 @@ fn run_daemon() -> Result<()> {
     let client = identity::build_client(Duration::from_secs(15), agent_identity.as_ref())
         .context("failed to build HTTP client")?;
 
+    // Deliberately before the registration below, and unconditional: this write is the *only* way
+    // the per-user process ever obtains a patching policy (see `config::policy_cache_path`), so
+    // anything that could fail between here and there — a registration that 4xxs, an inventory the
+    // server rejects — would starve that process of a schedule for as long as the failure lasted,
+    // while the host went on reporting healthy check-ins. Cheap enough to be unconditional: one
+    // GET per hourly invocation.
+    let patching_policy = policy::refresh(&client, &config, &config::policy_cache_path());
+
     let host_request = RegisterHostRequest {
         hostname,
         serial_number: serial_number.clone(),
@@ -215,7 +225,7 @@ fn run_daemon() -> Result<()> {
     let _: serde_json::Value = post_with_retry(&client, &config.register_applications_url(), &applications_request)
         .context("failed to register installed applications")?;
 
-    patch_unattended_if_nobody_is_logged_in(&client, &config, &serial_number, agent_identity.as_ref());
+    patch_unattended_if_nobody_is_logged_in(&client, &config, &serial_number, agent_identity.as_ref(), patching_policy.as_ref());
 
     // Last, and only after everything above has already succeeded: check whether a newer build of
     // this agent itself has been published, and install it in place if so — see `self_update`.
@@ -244,10 +254,19 @@ fn patch_unattended_if_nobody_is_logged_in(
     config: &Config,
     serial_number: &str,
     agent_identity: Option<&AgentIdentity>,
+    policy: Option<&policy::PatchingPolicy>,
 ) {
     let queue_dir = config::queue_dir();
-    if queue::ui_agent_is_live(&queue_dir, queue::HEARTBEAT_MAX_AGE) {
-        logging::info("a per-user agent is running on this host; leaving the patching schedule to it");
+    // Named rather than merely noted: deferring is the one decision here that can leave a host
+    // permanently unpatched, and it is not an error, so nothing else in the log marks it. Saying
+    // *which* session is holding the schedule and *how stale* its claim is turns "nothing
+    // happened" into something an administrator can check against `systemctl --user status`.
+    if let Some(heartbeat) = queue::live_ui_agent(&queue_dir, queue::HEARTBEAT_MAX_AGE) {
+        logging::info(&format!(
+            "a per-user agent is running on this host (uid {}, last heartbeat {}s ago); leaving the patching schedule to it",
+            heartbeat.uid,
+            heartbeat.age.as_secs()
+        ));
         return;
     }
 
@@ -256,19 +275,20 @@ fn patch_unattended_if_nobody_is_logged_in(
         return;
     };
 
-    // The root service keeps its own policy cache and schedule state, separate from any user's —
-    // they describe different things (this host, versus one person's session) and must not
-    // interfere.
-    let policy_cache_path = config::state_dir().join("policy.json");
-    let Some(policy) = policy::load_or_fetch(client, config, &policy_cache_path) else {
+    // Fetched by the caller, before registration, because the same file is what the per-user
+    // process reads — see `run_daemon`. `None` here means neither this check-in's fetch nor any
+    // cached copy produced one.
+    let Some(policy) = policy else {
         logging::warn("skipping the unattended patch cycle: no patching policy is available yet");
         return;
     };
 
-    let mut state = ScheduleState::load_or_default(&config::state_dir().join("schedule.json"), &policy);
+    // The schedule state stays the root service's own, separate from any user's: they describe
+    // different things (this host, versus one person's session) and must not interfere.
+    let mut state = ScheduleState::load_or_default(&config::state_dir().join("schedule.json"), policy);
     let mut handler = ServiceHandler::new(client, config, serial_number, identity);
 
-    patch_cycle::run_unattended(&mut handler, &policy, &mut state);
+    patch_cycle::run_unattended(&mut handler, policy, &mut state);
 }
 
 /// The queue-draining service's job (`kintsugi-agent-queue.service`, triggered by
@@ -414,6 +434,10 @@ impl RequestHandler for QueueClient {
 /// confirm/delay/patch flow once it's due, plus the notification-area icon (progress / next due /
 /// Patch Now).
 ///
+/// Like the Windows tray process and unlike the macOS one, it holds no mutual-TLS identity and
+/// makes **no network call at all**: it reads the policy out of the cache the root service writes,
+/// and asks that service for the work list and for each patch over the queue. See `queue` for why.
+///
 /// Splits into two threads for the same reason the macOS agent does, though not under the same
 /// duress: there, any UI *must* live on the main thread and be driven by a Cocoa event loop. Here
 /// nothing imposes that — but the scheduler still needs to block on queue round-trips, 5-minute
@@ -447,30 +471,34 @@ fn run_ui_agent() -> Result<()> {
 
     let queue_dir = config::queue_dir();
     if !queue_dir.is_dir() {
+        // Not necessarily missing — far more often unreachable. `is_dir` cannot distinguish the
+        // two from here: the queue is a drop-box inside a state directory this process is not
+        // allowed to *list*, so a parent without its execute bit fails the traversal and reports
+        // exactly as an absent directory would. 0.5.0 shipped with that parent at `0700` and this
+        // warning claiming the service wasn't installed, on hosts where it was installed and
+        // checking in fine. See `config::repair_directory_modes`, which is what now fixes it.
         logging::warn(&format!(
-            "the request queue directory {} does not exist — the root service is not installed, so nothing can be patched from here",
+            "the request queue directory {} is not reachable (missing, or a parent directory that cannot be traversed) — nothing can be patched from here until the root service's next check-in repairs it",
             queue_dir.display()
         ));
     }
 
-    let policy_cache_path = state_dir.join("policy.json");
+    let policy_cache_path = config::policy_cache_path();
     let schedule_state_path = state_dir.join("schedule.json");
 
-    // Unlike the macOS agent, which fetches the policy itself over mutual TLS, this process has no
-    // identity and no network access of its own. The policy is not privileged information and the
-    // route serving it is not one of the certificate-gated ones (see nginx/default.conf), so it is
-    // fetched here directly rather than adding a fourth request kind that would carry nothing
-    // secret in either direction.
-    let client = identity::build_client(Duration::from_secs(30), None).context("failed to build HTTP client")?;
-
     // Block (retrying) until a policy is available at all — nothing meaningful can be scheduled
-    // without one, and this only ever happens once, at first-ever startup with no cache and no
-    // network yet (e.g. very early in a login).
+    // without one. This process cannot fetch one itself: it holds no mutual-TLS identity (see
+    // `config::identity_dir`) and `/api/patching-policy` is inside nginx's client-certificate
+    // regex, so the only thing an attempt from here can produce is a 403. The root service fetches
+    // it on every check-in and this side reads what landed — the Windows agent's arrangement
+    // exactly, and for the identical reason. So the wait covers first-ever startup *and* the
+    // ordinary case of logging in before the root service's first check-in has finished.
     let current_policy = loop {
-        if let Some(policy) = policy::load_or_fetch(&client, &config, &policy_cache_path) {
+        if let Some(policy) = policy::load_cached(&policy_cache_path) {
             break policy;
         }
-        // Recorded even while waiting: a host whose per-user agent is up but still fetching its
+        logging::info("waiting for the kintsugi-agent service to publish the patching policy");
+        // Recorded even while waiting: a host whose per-user agent is up but hasn't yet seen its
         // first policy is emphatically not a host the root service should start patching behind
         // its back.
         queue::record_heartbeat(&queue_dir);
@@ -482,9 +510,7 @@ fn run_ui_agent() -> Result<()> {
     let (patch_now_tx, patch_now_rx) = mpsc::channel();
     let report: Box<StatusReporter> = Box::new(tray_menu::report_status);
 
-    std::thread::spawn(move || {
-        run_scheduler(client, config, current_policy, state, queue_dir, policy_cache_path, patch_now_rx, report)
-    });
+    std::thread::spawn(move || run_scheduler(current_policy, state, queue_dir, policy_cache_path, patch_now_rx, report));
 
     // Blocks for the rest of the process's life — this call never returns normally.
     tray_menu::run(patch_now_tx)
@@ -494,10 +520,7 @@ fn run_ui_agent() -> Result<()> {
 /// thread. Reports its state to the notification area via `report` at every meaningful
 /// transition, and treats a "Patch Now" click the same as a naturally due cycle except it skips
 /// the confirm/delay step entirely (see `patch_cycle::run_now`).
-#[allow(clippy::too_many_arguments)]
 fn run_scheduler(
-    client: reqwest::blocking::Client,
-    config: Config,
     mut current_policy: policy::PatchingPolicy,
     mut state: ScheduleState,
     queue_dir: std::path::PathBuf,
@@ -516,10 +539,11 @@ fn run_scheduler(
         // can't let it lapse.
         queue::record_heartbeat(&queue_dir);
 
-        if policy::is_stale(&current_policy, POLICY_REFRESH_INTERVAL) {
-            if let Some(refreshed) = policy::load_or_fetch(&client, &config, &policy_cache_path) {
-                current_policy = refreshed;
-            }
+        // Re-read rather than re-fetch: the root service refreshes this file on its own schedule
+        // (see `run_daemon`), so picking up a policy change here is a local file read, not a
+        // network call this process could not make anyway.
+        if let Some(refreshed) = policy::load_cached(&policy_cache_path) {
+            current_policy = refreshed;
         }
 
         // Waits on the channel rather than sleeping and polling it once per iteration — a
