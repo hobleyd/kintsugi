@@ -11,7 +11,7 @@
 # What CI does *not* do is POST anything to a Kintsugi server: it has no route to one, and the
 # server's address is deployment detail that must not appear in a tracked file. The releases here
 # carry a placeholder `api_base_url`, and the server pulls them down and rewrites it to its own
-# address at import time — see the Clients page's "Refresh clients" button and
+# address at import time — see the Clients screen's "Refresh clients" button and
 # ImportAgentPackagesFromSourceCommandHandler.
 name: CI
 
@@ -49,6 +49,43 @@ jobs:
       # builds from source directly rather than going through docker compose.
       - name: Test
         run: dotnet test tests/Kintsugi.Tests/Kintsugi.Tests.csproj --configuration Release --no-build
+
+  web-tests:
+    name: Admin UI tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pinned to match FLUTTER_VERSION in nginx/Dockerfile, which is what actually compiles the
+      # bundle that ships. Testing against a different SDK than the one the image uses would let a
+      # green run hide a build failure that only appears at `docker compose build`.
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.0'
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        working-directory: web
+        run: flutter pub get
+
+      # `--fatal-infos`, because analysis_options.yaml turns unused imports and unused locals into
+      # errors and the rest of the rules are there to be kept to. The suite is clean today; letting
+      # infos accumulate is how it stops being.
+      - name: Analyze
+        working-directory: web
+        run: flutter analyze --fatal-infos
+
+      - name: Test
+        working-directory: web
+        run: flutter test
+
+      # Compiling is its own check: `flutter test` runs against the VM, so a failure that only
+      # dart2js sees — an unsupported construct, a missing web-only conditional import — would not
+      # show up above. This is the exact command nginx/Dockerfile runs.
+      - name: Build
+        working-directory: web
+        run: flutter build web --release
 
   agent-tests:
     name: ${{ matrix.agent }} tests
@@ -88,6 +125,12 @@ jobs:
   # (platform, version) pair that's already out, and `gh release create` fails outright on an
   # existing tag — so without this check every push to main after a release would fail the job
   # rather than no-op. Bumping an agent's Cargo.toml version is what makes it release again.
+  # web-tests is deliberately absent from `needs` below. The agent releases are gated on the whole
+  # agent matrix because the three agents are kept in step with each other, but the admin UI is not
+  # an agent and CI does not publish it anywhere — the nginx image compiles it from source at
+  # `docker compose build`, so a UI regression breaks a deploy rather than a release. Withholding a
+  # macOS agent build because a Dart widget failed to analyze would be coupling with nothing behind
+  # it.
   plan-release:
     name: Plan release
     needs: [backend-tests, agent-tests]

@@ -5,7 +5,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## What this is
 
 Kintsugi is an enterprise patch-management system: an ASP.NET Core 8 backend (`Kintsugi.sln`, Clean
-Architecture) plus three Rust agents — `clients/macos-agent/`, `clients/windows-agent/` and
+Architecture), a Flutter web admin UI (`web/`, Clean Architecture + BLoC, served as static files by
+the nginx container), plus three Rust agents — `clients/macos-agent/`, `clients/windows-agent/` and
 `clients/linux-agent/` — that enroll themselves into the fleet, report their installed applications,
 and run signed upgrade scripts unattended. Upgrade paths for each application are researched by an AI
 provider (Anthropic / OpenAI / Ollama / Goose) that authors the script the agent later executes:
@@ -34,7 +35,13 @@ dotnet test tests/Kintsugi.Tests/Kintsugi.Tests.csproj --filter FullyQualifiedNa
 dotnet tool restore
 dotnet ef migrations add <Name> --project src/Kintsugi.Infrastructure --startup-project src/Kintsugi.WebApi
 
-# Run the whole system (see below — this is the only supported way to run the API)
+# Admin UI (Flutter web). Analyze, test and build the bundle nginx serves.
+cd web && flutter analyze
+cd web && flutter test
+cd web && flutter test test/presentation/instructions_panel_bloc_test.dart
+cd web && flutter build web --release
+
+# Run the whole system (see below — this is the only supported way to run the API *or the UI*)
 docker compose up -d --build
 
 # macOS agent (inline #[cfg(test)] modules — checkin_schedule, identity, self_update, ...)
@@ -59,12 +66,16 @@ There is no `IDesignTimeDbContextFactory`, so `dotnet ef` resolves the connectio
 **Do not expect `dotnet run` to work.** `Program.cs` hardcodes
 `PersistKeysToFileSystem("/data/dataprotection-keys")` and the default connection string points at
 the `db` service; both only exist inside the container. Run via `docker compose`.
-`docker compose build` does not build the tests either — the Dockerfile copies only `src/`.
+`docker compose build` does not build the tests either — the Dockerfile copies only `src/`. Note
+too that the API no longer serves any UI: `dotnet run` would answer `/api`, `/swagger` and
+`/health` and 404 everything else, because the admin UI is served by nginx from a bundle
+`nginx/Dockerfile` compiles. `cd web && flutter run -d chrome` is the way to work on the UI alone,
+and it needs a running `docker compose` for its API calls to go anywhere.
 
 Releasing an agent: bump `version` in that agent's `Cargo.toml` and merge to `main`. CI
 (`.github/workflows/ci.yml`) runs every test suite, then builds and tags a GitHub Release per agent
 whose version isn't already released — `macos-agent-v0.5.0` and so on, one `.tar.gz` asset each.
-It never POSTs to a server; the server pulls, via the Clients page's "Refresh clients" (below).
+It never POSTs to a server; the server pulls, via the Clients screen's "Refresh clients" (below).
 
 Each publish script still works by hand and is still the only place the archive's layout is
 defined; CI calls the same script with `--binary`/`--output-dir` (`-Binary`/`-OutputDir` on
@@ -171,7 +182,7 @@ generation sign automatically.
 **Not every `/api` route is an agent route, and the two auth mechanisms leave a gap between them.**
 nginx requires a client certificate on an *exact-match* regex, so nothing under
 `/api/upgrade-paths/...` ever matches it — deliberately, since those routes are driven by the admin
-UI's JavaScript and a browser has no agent certificate. `Program.cs` then exempts the whole of
+UI and a browser has no agent certificate. `Program.cs` then exempts the whole of
 `/api` from the sign-in gate, on the reasoning that agents authenticate with mutual TLS rather than
 cookies. Each decision is right alone; together they leave a browser-driven route with **no
 authentication of any kind**. That shipped: `save` (accepts an arbitrary script) and `sign-script`
@@ -198,9 +209,12 @@ gated, because neither could be secured as it stood:
 - `PUT /api/patching-policy` was *not* anonymous — it sits inside nginx's exact-match regex, so a
   client certificate was required. That was the problem: it carried no `[RequireAgentIdentity]` and
   no admin gate, so **any enrolled agent could rewrite the fleet-wide patching policy**, while a
-  browser could not reach it at all. Nothing legitimate called it — the Settings page dispatches
-  `UpdatePatchingPolicySettingsCommand` through `ISender`, and all three agents only ever `GET` this
-  path (`policy.rs`). The `GET` stays; it is what agents poll.
+  browser could not reach it at all. Nothing legitimate called it — at the time the Settings page
+  dispatched `UpdatePatchingPolicySettingsCommand` through `ISender`, and all three agents only ever
+  `GET` this path (`policy.rs`). The `GET` stays; it is what agents poll. The write now lives at
+  `PUT /api/admin/settings/patching-policy`, outside that regex and carrying
+  `[RequireAdminSession]`, which is exactly where `PatchingPolicyController`'s own note said such a
+  route belongs.
 
 Still anonymous by design, and correctly so: `POST /api/host/enroll` (an unenrolled agent has no
 certificate; the enrollment token is what protects it) and everything under `/api/agent-packages`
@@ -242,7 +256,7 @@ entries are **bless-only** — correctly, since this server generates those exac
 is for AI-researched scripts, where matching on name is exactly right.
 
 **A remote signature is never served to an agent — the importing server re-signs.** Each agent pins
-exactly one signing key at enrollment: its own server's. So the Upgrade Scripts page's "Refresh
+exactly one signing key at enrollment: its own server's. So the Upgrade Scripts screen's "Refresh
 scripts" verifies the upstream signature and then signs the same bytes with the **local** key. That
 is why this feature needed no change to any of the three agents. Two halves, split on whether
 content arrives: *blessing* a local script whose bytes are already approved upstream is automatic
@@ -257,15 +271,91 @@ is internally consistent and names its signer — *not* that the signer was auth
 is the repository's branch protection on the default branch, and nothing else. The one genuinely
 verified case is a fingerprint equal to `GetPublicKeyFingerprint()`: a signature this server made,
 against a key that never left its private volume. Do not write comments or UI copy that upgrade this
-to "verified"; the page says so plainly and should keep doing so. The consequence worth holding onto:
+to "verified"; the screen says so plainly and should keep doing so. The consequence worth holding onto:
 **a merge to that repository is enough to offer new executable content to every server that
 refreshes**, which is why adoption is not automatic, why adoption refuses a row that already carries
 a signature (agents may be running it), and why `ScriptLanguages.For` must agree on both sides — a
 genuinely-signed `#!/bin/bash` script reaching a PowerShell host is exactly the failure the shared
 `generic` bucket used to permit.
 
-**Razor Pages are not API clients.** `Pages/*.cshtml.cs` inject `ISender` and dispatch the same
-MediatR handlers the controllers do.
+**The admin UI is a separate client, and everything it needs is a REST route.** It used to be
+Razor Pages that injected `ISender` and dispatched MediatR handlers directly, so most screens had no
+API at all. It is now a Flutter web application in `web/`, compiled by `nginx/Dockerfile` and served
+as static files by nginx — see "The admin UI" below.
+
+## The admin UI
+
+`web/` is a Flutter web application. `nginx/Dockerfile` compiles it and bakes the bundle into the
+nginx image, which is why that image is built rather than pulled: `docker compose up -d --build`
+has to stay the one documented way to run the system, and a bundle built on somebody's laptop and
+mounted in would make that untrue on a clean checkout.
+
+**Four layers, and the dependency arrow points inwards.** `domain/` holds entities, narrow
+repository interfaces and use cases, and knows nothing about JSON or HTTP; `data/` implements those
+interfaces and owns every mapping; `presentation/` holds the BLoCs and screens and depends on use
+cases; `core/` holds the transport, theme, router and `core/di/injection.dart`, which is the only
+file in the app that names a concrete implementation. The repository interfaces are deliberately one
+screen's worth each rather than one per layer — a BLoC that reads hosts cannot see the route that
+signs a script.
+
+**Entities extend `Equatable` for a reason that is not tidiness.** The screens poll, so value
+equality is what makes a poll that finds nothing new emit an identical state and rebuild nothing.
+
+**`GET /api/session` is the bootstrap, and the only anonymous route added for the UI.** It reports
+`authenticationSettingsSaved`, `authenticationEnabled` and `signedIn`, which is exactly the state
+`Program.cs`'s middleware used to act on by redirecting. It cannot be gated: it is the route that
+tells a caller whether to sign in, so gating it would leave a fresh deploy unable to reach the screen
+that configures a provider. Everything else the UI calls carries `[RequireAdminSession]`.
+
+**Sign-in stays server-side, and that is a decision rather than an omission.** The client's sign-in
+button is a whole-page navigation to `GET /api/auth/challenge`; the provider comes back to
+`/signin-oidc`, still handled by the OpenIdConnect handler, which sets the cookie
+`[RequireAdminSession]` reads. A browser-side code flow would make this a public client, and
+`AuthenticationSettings` requires a client secret precisely because it is a confidential one —
+Google's web-application clients require it at the token endpoint regardless, so a browser exchange
+would have broken a provider the settings screen offers.
+
+**Browser-driven routes live under `/api/admin/`, and the prefix is load-bearing.** `/api/applications`
+and `/api/patching-policy` are *inside* nginx's exact-match agent regex, so a browser-driven route on
+either path demands a fleet client certificate the browser has not got — and the failure is a 403
+with nothing in the C# to explain it. The prefix cannot collide with that regex however it grows.
+
+**nginx's location precedence is the one thing in `default.conf` not to get creative with.** nginx
+remembers the longest matching *prefix* and then evaluates regex locations — unless that prefix
+carries `^~`, which tells it to stop. So `^~ /api` would become the longest match for `/api/host`,
+the agent block's regex would never be consulted, and every agent-only route would be served with no
+client certificate at all. The block is a plain `location /api` for that reason. The SPA fallback
+(`try_files $uri $uri/ /index.html`) is the last location in the file, so a new server-side route
+means adding a location above it or the client answers it with `index.html` — a 200 containing
+markup, much harder to diagnose than a 404.
+
+**The UI polls; it does not push.** The three background coordinators already expose their progress
+as `*-status` routes designed to be polled, so there is no push channel to consume and adding one
+would be new protocol for a UI that only reads. `core/bloc/polling.dart` is the shared mixin. What
+changed relative to the pages this replaced is what happens with the answer: a poll emits a state
+and the affected widgets rebuild, rather than calling `window.location.reload()`.
+
+**Enums cross the wire as names or as ordinals depending on the type, and that must not be
+"fixed".** `UpgradePathStatus`, `UpgradeMethod` and `ScriptApprovalPublishOutcome` carry converters
+and write their names; `HostStatus`, `AiProvider`, `AuthProvider`, `PatchingTimeUnit` and
+`AgentPackageImportOutcome` have none, so System.Text.Json writes their ordinals. Turning on a
+global string-enum converter would break the fleet: all three agents read some of these as ordinals
+— `clients/*/src/policy.rs` parses `interval_unit` as a `u8`. `web/lib/core/network/json_reader.dart`
+reads whichever form arrives; declaration order in `web/lib/domain/entities/enums.dart` is therefore
+load-bearing. `UpgradeMethod` is written back as a *name*, because `LenientEnumConverter` reads
+nothing else.
+
+**Two things about the image build that each cost a build to learn.** The Flutter stage is pinned to
+`linux/amd64` because Flutter publishes no arm64 Linux SDK, so on Apple Silicon it runs under
+emulation and takes minutes. And `.dockerignore` excludes `web/.dart_tool`: its
+`package_config.json` records *absolute* paths to the SDK and pub cache of whichever machine ran
+`flutter pub get`, so copying it in overwrites the container's own and `dart2js` fails reading
+`/Users/<someone>/.pub-cache/...`.
+
+**The theme key is coupled to `web/web/index.html` by hand.** `ThemeCubit` stores the choice through
+`shared_preferences`, which namespaces its keys under `flutter.`, so the inline script that paints
+the background before Flutter boots looks for `flutter.kintsugi-theme`. Renaming it in one place
+needs renaming in the other; nothing checks that they agree.
 
 **Three independent background coordinators** — upgrade-path scan, per-application refresh, and
 update-check — each registered twice in `Program.cs`: the concrete type for the hosted service
@@ -299,10 +389,10 @@ the row. Nothing errors.
 **Client builds come off GitHub, and the server configures them on the way in.** CI cannot publish
 to a Kintsugi server — it has no route to one, and a server's address is deployment detail that
 must never be committed — so the released archives carry the `kintsugi.example.com` placeholder and
-the direction is reversed. The Clients page checks the repository's releases on every load and
+the direction is reversed. The Clients screen checks the repository's releases on every load and
 "Refresh clients" downloads what's newer, rewrites `api_base_url` to this server's own address, and
 republishes it locally (`ImportAgentPackagesFromSourceCommandHandler`). That address comes from
-`AGENT_API_BASE_URL`, falling back to the address the page was reached on when it is unset.
+`AGENT_API_BASE_URL`, falling back to the address the request arrived on when it is unset.
 
 **The fallback is a guess, and the admin UI's address is frequently the wrong answer.** nginx is
 what verifies the agent's client certificate, so anything terminating TLS in front of it — a
@@ -310,10 +400,12 @@ gateway, a load balancer, a CDN — ends the mutual-TLS handshake at itself and 
 certificate on. `AGENT_API_BASE_URL` must name **nginx's own address and `WEB_TLS_PORT`**. Getting
 it wrong fails in the quietest way the system has: `/api/host/enroll` is deliberately outside
 nginx's client-certificate regex, so the agent enrolls, looks installed, and then 403s on every
-authenticated route forever. That is not hypothetical — it shipped, from an earlier version of this
-page that derived the address unconditionally and argued it was safe because the plain-HTTP
-listener only 301s to the TLS one. That argument covers the scheme and the port and misses the
-front door. The page now says out loud when it is falling back.
+authenticated route forever. That is not hypothetical — it shipped, from an earlier version that
+derived the address unconditionally and argued it was safe because the plain-HTTP listener only
+301s to the TLS one. That argument covers the scheme and the port and misses the front door. The
+resolution now happens server-side in `AdminClientsController.ResolveAgentApiBaseUrl` — never from
+a value the client supplies, which would be a client-supplied instruction about what to bake into
+signed packages — and the screen says out loud when it is falling back.
 
 A deployment where something else already owns 443 therefore needs agents routed to nginx *without*
 that hop terminating them, which is what `nginx/edge-sni-router.conf.example` documents: an
@@ -327,11 +419,13 @@ That rewrite happens at **import**, not download, and the two rewrites `IAgentPa
 performs are deliberately split that way: `api_base_url` is baked into the stored bytes so the
 checksum signed over them already describes this server and an enrolled agent's byte-identical
 self-update download still verifies, while `enrollment_token` is substituted per download because it
-rotates far more often than a build does. Refresh is a **Razor Page handler, not an API route** —
-`location ^~ /api/agent-packages` is a prefix match with no client certificate required and
-`Program.cs` exempts all of `/api` from the sign-in gate, so an API route would be triggerable by
-anyone who can reach the server. This is the rare case where `nginx/default.conf` correctly needs
-no edit.
+rotates far more often than a build does. Refresh used to be a **Razor Page handler rather than an
+API route**, deliberately: `location ^~ /api/agent-packages` is a prefix match with no client
+certificate required and `Program.cs` exempts all of `/api` from the sign-in gate, so an API route
+would be triggerable by anyone who could reach the server. With the UI a client rather than a
+server-rendered page there is no page handler to use, so it is now
+`POST /api/admin/clients/refresh` and what carries that reasoning is `[RequireAdminSession]` on
+`AdminClientsController` — nothing else does.
 
 **GitHub configuration is database-backed, and nothing may capture it.** The four values that used
 to be environment variables (`GITHUB_API_TOKEN`, `AGENT_PACKAGE_GITHUB_REPO`,
@@ -358,9 +452,13 @@ default lives in one place rather than being written into every row.
 It is a lookup rather than a workflow, so there is no other order a reader could predict; keep it
 that way when adding one.
 
-**Fresh deploys redirect everything.** With no `AuthenticationSettings` row saved, all non-`/api`,
-non-`/swagger`, non-`/health` traffic redirects to `/settings/authentication`. The OIDC provider is
-configured at runtime from the database (`DynamicOpenIdConnectOptionsConfigurator`), not at startup.
+**Fresh deploys lock everything to the Authentication screen, and nothing redirects any more.**
+With no `AuthenticationSettings` row saved, the client pins itself to `/settings/authentication`.
+That used to be a 302 from `Program.cs`; the UI is static files in nginx now, so its page load never
+reaches this application to be redirected. `GET /api/session` reports the state and the client's
+router gates on it — see "The admin UI" above and the long comment in `Program.cs` where the
+middleware used to be. The OIDC provider is still configured at runtime from the database
+(`DynamicOpenIdConnectOptionsConfigurator`), not at startup.
 
 ## Platform buckets, and why package managers get their own
 
@@ -414,7 +512,7 @@ Two things follow. `UpgradePath.Apply` drops `ScriptSignature` whenever the cont
 actually differs (same for `Command`/`CommandSignature`) — the invariant that a signature never
 outlives its bytes, which now only ever fires on a deliberate act (a force-refresh, a pasted script,
 `TakeServerWrittenScript`) rather than in the background. And because nothing takes the newer script
-by itself, the Upgrade Scripts page has to say one exists: `PackageManagerCatalog.CurrentScriptFor`
+by itself, the Upgrade Scripts screen has to say one exists: `PackageManagerCatalog.CurrentScriptFor`
 gives the query handler the script this build would write, `LocalScriptDto.NewerServerScriptAvailable`
 flags a row that differs, and `TakeServerWrittenScriptCommand` replaces one — **unsigned**, so the
 new text reaches no host until someone has read it, and one "Sign Script" then covers every row
@@ -534,7 +632,7 @@ serial in request bodies while presenting a certificate whose CN is the old valu
 `[RequireAgentIdentity]` then 403s every authenticated route, permanently, while the host still looks
 enrolled. The remedy is the documented one (delete `identity/` and let it re-enroll), but nothing
 prompts for it and `self_update` delivers the change unattended. So before shipping any change to
-what `serial_number` returns: check the Hosts page for GUID-shaped or placeholder-shaped serials,
+what `serial_number` returns: check the Hosts screen for GUID-shaped or placeholder-shaped serials,
 because those are precisely the hosts that will need re-enrolling.
 
 **Replacing a running binary differs.** macOS and Linux stage next to the target and rename over it
@@ -590,7 +688,7 @@ by then — only the long-running per-user units get restarted.
   lift GitHub's anonymous rate limit and is handed to the AI research client and the agent-package
   source client as well, so reusing it would silently give both of them `contents:write` and
   `pull_requests:write` on the approval repository. Unset means signing approves locally and raises
-  no pull request — the Upgrade Scripts page says so, because the absence of an audit trail is
+  no pull request — the Upgrade Scripts screen says so, because the absence of an audit trail is
   otherwise only discoverable by looking for pull requests that were never opened.
 - `ApprovedScriptCorpus` is the *only* description of the approval repository's layout, and both ends
   of the round trip go through it — the publisher writing an entry and the reader parsing one. A path
@@ -613,6 +711,17 @@ by then — only the long-running per-user units get restarted.
 - Windows PowerShell 5.1 decodes a BOM-less `.ps1` using the system ANSI code page, not UTF-8. The
   Windows agent writes every script with a UTF-8 BOM for exactly that reason, and the
   server-written ones are kept ASCII-only as well.
+- A new server-side route needs a `location` in `nginx/default.conf` *above* the SPA fallback, or
+  nginx answers it with `index.html` — a 200 containing markup rather than a 404, which is
+  considerably harder to diagnose. The fallback is deliberately the last block in the file.
+- Rust structs are not the only hand-mirrored copies of a C# shape any more: `web/lib/data/models/`
+  maps every DTO the admin UI reads, and `web/lib/domain/entities/enums.dart` mirrors the enums in
+  declaration order because several of them cross the wire as ordinals. Changing a DTO's JSON shape
+  means changing the matching mapper as well as the three agents — and unlike the agents, nothing
+  in CI cross-checks the two, because the client is compiled separately.
+- `web/pubspec.yaml`'s `environment: sdk:` constraint and `FLUTTER_VERSION` in `nginx/Dockerfile`
+  have to stay compatible. Bumping one without the other fails at image build time rather than at
+  merge, which is the good failure but only if somebody builds the image.
 
 ## Conventions
 
