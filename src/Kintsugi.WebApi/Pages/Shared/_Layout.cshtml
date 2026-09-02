@@ -18,6 +18,7 @@
     <div class="layout">
         @{
             var activeNav = ViewData["ActiveNav"] as string ?? string.Empty;
+            var inSync = activeNav == "sync" || activeNav.StartsWith("sync.");
             var inSettings = activeNav == "settings" || activeNav.StartsWith("settings.");
         }
         <nav class="sidebar">
@@ -27,8 +28,13 @@
             </div>
             <a href="/hosts" aria-current="@(activeNav == "hosts" ? "page" : null)">Hosts</a>
             <a href="/applications" aria-current="@(activeNav == "applications" ? "page" : null)">Applications</a>
-            <a href="/upgrade-scripts" aria-current="@(activeNav == "upgrade-scripts" ? "page" : null)">Upgrade Scripts</a>
-            <a href="/clients" aria-current="@(activeNav == "clients" ? "page" : null)">Clients</a>
+            <a href="/clients" aria-current="@(inSync ? "page" : null)">Sync</a>
+            <div class="sidebar-subnav">
+                @* Alphabetical by label. Keep it that way when adding one — the list is a lookup,
+                   not a workflow, so there is no order to it that a reader could otherwise predict. *@
+                <a class="sidebar-subnav-link" href="/clients" aria-current="@(activeNav == "sync.clients" ? "page" : null)">Clients</a>
+                <a class="sidebar-subnav-link" href="/upgrade-scripts" aria-current="@(activeNav == "sync.upgrade-scripts" ? "page" : null)">Upgrade Scripts</a>
+            </div>
             <a href="/settings/ai-agent" aria-current="@(inSettings ? "page" : null)">Settings</a>
             <div class="sidebar-subnav">
                 @* Alphabetical by label. Keep it that way when adding one — the list is a lookup,
