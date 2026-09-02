@@ -493,18 +493,39 @@ else
                     }
                     return response.json();
                 })
-                .then(function () {
-                    signStatusEl.textContent = 'Signed.';
+                .then(function (result) {
+                    signStatusEl.innerHTML = 'Signed. ' + describeApprovalOutcome(result);
 
                     // Refresh the table so the Status column drops out of "Review And Sign" —
                     // server-rendered, so a reload is the simplest way to keep this page's markup
-                    // as the single source of truth for it.
-                    window.setTimeout(function () { window.location.reload(); }, 1500);
+                    // as the single source of truth for it. Long enough to actually read the
+                    // approval outcome above before the page reloads out from under it.
+                    window.setTimeout(function () { window.location.reload(); }, 4000);
                 })
                 .catch(function (err) {
                     signBtn.disabled = false;
                     signStatusEl.textContent = 'Failed: ' + err.message;
                 });
+        }
+
+        // Signing always saves the local signature regardless of what happens here — see
+        // SignUpgradePathScriptCommandHandler — so this only ever explains the *publishing* half,
+        // never contradicts "Signed." above it.
+        function describeApprovalOutcome(result) {
+            switch (result.approvalOutcome) {
+                case 'PullRequestOpened':
+                    return 'Opened <a href="' + escapeHtml(result.approvalPullRequestUrl) + '" target="_blank" rel="noopener">a pull request</a> for review.';
+                case 'PullRequestAlreadyOpen':
+                    return 'Already proposed in <a href="' + escapeHtml(result.approvalPullRequestUrl) + '" target="_blank" rel="noopener">an open pull request</a> — nothing new to raise.';
+                case 'AlreadyApproved':
+                    return 'This exact script is already approved on the default branch — nothing new to raise.';
+                case 'Disabled':
+                    return '<span class="muted-text">No pull request raised: ' + escapeHtml(result.approvalMessage || 'no script-approval token is configured.') + '</span>';
+                case 'Failed':
+                    return '<span class="muted-text">Publishing to GitHub failed: ' + escapeHtml(result.approvalMessage || 'unknown error.') + '</span>';
+                default:
+                    return '';
+            }
         }
 
         function resumeRefreshIfRunning(panel, applicationName) {

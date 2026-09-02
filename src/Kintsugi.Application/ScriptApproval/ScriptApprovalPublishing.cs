@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using Kintsugi.Application.UpgradePaths;
 
 namespace Kintsugi.Application.ScriptApproval;
@@ -21,6 +22,11 @@ public record ScriptApprovalSubmission(
     string? SignedBy,
     DateTimeOffset SignedAtUtc);
 
+// Serialized as its name, not its ordinal, because Applications.cshtml's signScript() reads this
+// value straight out of the JSON response to tell the operator why a sign didn't open a pull
+// request — a numeric value silently drifting as cases are reordered would be a much worse failure
+// mode than the enum simply not existing yet.
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum ScriptApprovalPublishOutcome
 {
     /// <summary>No write token is configured, so there is nowhere to publish. Reported rather than
