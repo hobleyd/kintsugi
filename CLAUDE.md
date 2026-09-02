@@ -381,6 +381,15 @@ name and id are read from `--appName`/`--appId` at runtime, never baked in. That
 human "Sign Script" review cover every application a manager handles, via
 `FindExistingSignatureForScriptAsync`.
 
+**Editing one of those bodies re-opens every review of it, and that is the safe outcome.**
+`RegisterApplicationsCommandHandler` rewrites `Script` from the builder on every routine inventory
+report, so `UpgradePath.Apply` drops `ScriptSignature` whenever the content it is replacing actually
+differs (same for `Command`/`CommandSignature`). Without that, an edited body would leave every
+already-signed row carrying a signature over the *previous* text: "signed" on the Upgrade Scripts
+page, refused by every agent, and nothing on screen to say why that manager's applications all
+stopped patching. So expect a script-body change to need **one** human re-sign per (manager,
+isSelfUpdate) case — every other row inherits it through `FindExistingSignatureForScriptAsync`.
+
 ## The three agents
 
 They are deliberately the same program in different clothes: same modules, same names, same
