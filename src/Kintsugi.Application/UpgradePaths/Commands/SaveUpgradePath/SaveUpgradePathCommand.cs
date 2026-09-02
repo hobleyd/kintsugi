@@ -22,4 +22,5 @@ public record SaveUpgradePathCommand(
     string? Instructions,
     string? SourceUrl,
     string? Notes,
-    string? Script = null) : IRequest<UpgradePathResultDto>;
+    string? Script = null,
+    string? ApplicationIdentifier = null) : IRequest<UpgradePathResultDto>;

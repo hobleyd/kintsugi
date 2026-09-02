@@ -27,19 +27,27 @@ public class SaveUpgradePathCommandHandler : IRequestHandler<SaveUpgradePathComm
         // from the method, same as the automated research flow does.
         var status = request.Method == UpgradeMethod.Unknown ? UpgradePathStatus.NotFound : UpgradePathStatus.Found;
 
+        // A hand-saved script row needs an ApplicationIdentifier for exactly the same reason an
+        // AI-researched one does: CheckApplicationUpdateCommandHandler refuses to run
+        // --update-version without one, so falling back to the application name (rather than
+        // leaving it null) is what lets "Find updates" ever pick this row up.
+        var applicationIdentifier = request.ApplicationIdentifier ?? request.ApplicationName;
+
         UpgradePath entity;
         if (existing is null)
         {
             entity = UpgradePath.Create(
                 request.ApplicationName, request.Platform, status, request.LatestVersion, request.Method,
-                request.DownloadUrl, request.Command, request.Instructions, request.SourceUrl, request.Notes, request.Script);
+                request.DownloadUrl, request.Command, request.Instructions, request.SourceUrl, request.Notes, request.Script,
+                applicationIdentifier);
             await _upgradePathRepository.AddAsync(entity, cancellationToken);
         }
         else
         {
             existing.Update(
                 status, request.LatestVersion, request.Method,
-                request.DownloadUrl, request.Command, request.Instructions, request.SourceUrl, request.Notes, request.Script);
+                request.DownloadUrl, request.Command, request.Instructions, request.SourceUrl, request.Notes, request.Script,
+                applicationIdentifier);
             entity = existing;
         }
 
