@@ -1,15 +1,11 @@
-# This file configures the analyzer, which statically analyzes Dart code to
-# check for errors, warnings, and lints.
-#
-# The issues identified by the analyzer are surfaced in the UI of Dart-enabled
-# IDEs (https://dart.dev/tools#ides-and-editors). The analyzer can also be
-# invoked from the command line by running `flutter analyze`.
-
-# The following line activates a set of recommended lints for Flutter apps,
-# packages, and plugins designed to encourage good coding practices.
 include: package:flutter_lints/flutter.yaml
 
 analyzer:
+  errors:
+    # Treated as errors rather than warnings so a stale import or an unused field cannot
+    # accumulate quietly in a codebase this size.
+    unused_import: error
+    unused_local_variable: error
   exclude:
     - build/**
     - android/**
@@ -20,19 +16,20 @@ analyzer:
     - linux/**
 
 linter:
-  # The lint rules applied to this project can be customized in the
-  # section below to disable rules from the `package:flutter_lints/flutter.yaml`
-  # included above or to enable additional rules. A list of all available lints
-  # and their documentation is published at https://dart.dev/lints.
-  #
-  # Instead of disabling a lint rule for the entire project in the
-  # section below, it can also be suppressed for a single line of code
-  # or a specific dart file by using the `// ignore: name_of_lint` and
-  # `// ignore_for_file: name_of_lint` syntax on the line or in the file
-  # producing the lint.
   rules:
-    # avoid_print: false  # Uncomment to disable the `avoid_print` rule
-    # prefer_single_quotes: true  # Uncomment to enable the `prefer_single_quotes` rule
+    # Switched off deliberately, not out of preference: it fires on every bloc here and its
+    # suggestion does not compile. Dart forbids a named parameter beginning with an underscore, so
+    # `required this._getHosts` is a syntax error — and these constructors have three or four
+    # dependencies each, which is exactly where named parameters earn their keep.
+    prefer_initializing_formals: false
 
-# Additional information about this file can be found at
-# https://dart.dev/guides/language/analysis-options
+    # Every widget in this app is const-constructible where it can be, and forgetting it on a
+    # frequently-rebuilt row is a real cost when a poll re-emits.
+    prefer_const_constructors: true
+    prefer_const_declarations: true
+    prefer_single_quotes: true
+
+    # The comment convention this repository uses throughout — say *why*, and name the file at the
+    # other end of a coupling — is worth enforcing at least to the extent of requiring the doc
+    # comment exist on anything public.
+    slash_for_doc_comments: true
