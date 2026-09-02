@@ -1,0 +1,7 @@
+{
+  "sha256": "72d385114cabc97421fd75a908e849a9c75c6172b9c8aba6d566a9e2294ba15e",
+  "signerFingerprint": "sha256:b676f01959a4cf864fa73e5388ce8fe982ca03e866b8d832b6c07ea774a1cb48",
+  "signerPublicKeyPem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEW5URzOY\u002Bh1KDVSTSqueyDx88A6pj\ngjgoARO64PZtdDT3EljDaZsrGG2lZGfwCDEfOXkhmEs85YzV5VmG0c2evQ==\n-----END PUBLIC KEY-----",
+  "signature": "MEQCIH65BQM7/0k\u002B9F8jnBCgrI8G33I5HFbLC8stNRrKdpy8AiAtevDvTcxFuFRIuRFF7s/Owzi7boZMjxU6/gOOYf9WcQ==",
+  "signedAtUtc": "2026-09-02T11:00:06.3747457+00:00"
+}
