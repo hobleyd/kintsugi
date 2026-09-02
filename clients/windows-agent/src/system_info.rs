@@ -45,20 +45,45 @@ pub fn hostname() -> Result<String> {
 /// compares that CN against the serial each request body claims. Two machines sharing a
 /// placeholder serial would share one host record, one certificate, and each other's reported
 /// inventory and patch results.
+///
+/// Deliberately identical to the Linux agent's `PLACEHOLDER_SERIALS`: both agents read the same
+/// SMBIOS field and inherit the same junk from the same board vendors, so a string worth screening
+/// on one is worth screening on the other. (Linux lists `""` and `"1"` as well; the length floor in
+/// [`is_usable_serial_number`] already rejects those.)
 const PLACEHOLDER_SERIAL_NUMBERS: &[&str] = &[
     "to be filled by o.e.m.",
     "to be filled by o.e.m",
+    "fill by oem",
+    "oem",
     "system serial number",
+    "chassis serial number",
     "default string",
     "none",
+    "empty",
     "n/a",
+    "na",
     "not applicable",
     "not specified",
     "0",
     "0123456789",
     "123456789",
+    "xxxxxxx",
     "invalid",
     "unknown",
+];
+
+/// SMBIOS system UUIDs that are constants rather than identities, screened separately because the
+/// UUID is a candidate identity in its own right (see [`choose_serial_number`]).
+///
+/// The all-zero form is caught by the filler screening in [`is_usable_serial_number`] on its own;
+/// these two are not. `FFFFFFFF-...` means the vendor left the field out, and
+/// `03000200-0400-0500-0006-000700080009` is a fixed value shipped by some VMware and Dell
+/// firmware — structurally plausible, and identical on every machine carrying it, so accepting it
+/// would enroll a whole fleet as one host.
+const PLACEHOLDER_SYSTEM_UUIDS: &[&str] = &[
+    "00000000-0000-0000-0000-000000000000",
+    "ffffffff-ffff-ffff-ffff-ffffffffffff",
+    "03000200-0400-0500-0006-000700080009",
 ];
 
 fn is_usable_serial_number(candidate: &str) -> bool {
@@ -72,36 +97,246 @@ fn is_usable_serial_number(candidate: &str) -> bool {
     }
     // A field padded out with a single repeated character ("0000000", "XXXXXXXX") is a placeholder
     // in every practical sense even when it isn't one of the exact strings above.
-    !trimmed.chars().all(|c| c == trimmed.chars().next().unwrap_or(' '))
+    if trimmed.chars().all(|c| c == trimmed.chars().next().unwrap_or(' ')) {
+        return false;
+    }
+    // The same filler character set the Linux agent's `usable_serial` screens on, which catches
+    // mixed fillers ("0-0-0-0", "0000.0000") that the single-character rule above lets through.
+    !trimmed.chars().all(|c| matches!(c, '0' | 'x' | 'X' | '.' | '-' | ' '))
 }
 
-/// This host's stable unique identifier, tried in order of preference:
+/// Screens a candidate SMBIOS system UUID: everything [`is_usable_serial_number`] rejects, plus the
+/// vendor constants in [`PLACEHOLDER_SYSTEM_UUIDS`].
+fn is_usable_system_uuid(candidate: &str) -> bool {
+    is_usable_serial_number(candidate) && !PLACEHOLDER_SYSTEM_UUIDS.contains(&candidate.trim().to_lowercase().as_str())
+}
+
+/// Labels for the sources [`choose_serial_number`] picks between, so the log names exactly which
+/// field this host's identity came from — the first question worth asking when a host enrolls under
+/// something an administrator doesn't recognize.
+const REGISTRY_SERIAL_SOURCE: &str = r"HKLM\HARDWARE\DESCRIPTION\System\BIOS\SystemSerialNumber";
+const MACHINE_GUID_SOURCE: &str = r"HKLM\SOFTWARE\Microsoft\Cryptography\MachineGuid";
+
+/// The firmware identity fields this host's SMBIOS tables carry, read in one pass by
+/// [`read_firmware_identity`]. Every field is optional: a class can be absent, an instance can be
+/// missing, and a vendor can leave any individual field blank — which is the whole reason
+/// [`serial_number`] walks a chain rather than trusting one source.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct FirmwareIdentity {
+    /// The serial Windows reports on `Win32_BIOS` — in practice the system serial, and the value an
+    /// administrator reads off the chassis sticker. Observed populated on hardware whose
+    /// [`REGISTRY_SERIAL_SOURCE`] value is absent, which is why this chain exists at all.
+    bios_serial: Option<String>,
+    /// SMBIOS type 1 system serial (`Win32_ComputerSystemProduct.IdentifyingNumber`) — the same
+    /// field [`REGISTRY_SERIAL_SOURCE`] is populated from, asked for the other way round.
+    product_serial: Option<String>,
+    /// SMBIOS type 2 baseboard serial, and reachable *only* here: the BIOS registry key exposes the
+    /// baseboard's manufacturer, product and version and no serial at all, so the registry-only
+    /// path could never have found it however hard it looked. Whitebox builds and plenty of OEM
+    /// desktops leave the system serial blank with a real board serial present.
+    baseboard_serial: Option<String>,
+    /// SMBIOS type 3 chassis serial. `SMBIOSAssetTag` sits beside it on the same class and is
+    /// deliberately *not* read: an asset tag is administrator-assigned, frequently identical across
+    /// a purchase batch, and identity is the one thing that must not be shared.
+    enclosure_serial: Option<String>,
+    /// SMBIOS type 1 system UUID. Not a serial, but per-machine, populated on nearly all physical
+    /// hardware, and set per-VM by every hypervisor — see [`choose_serial_number`] for why it
+    /// outranks the `MachineGuid`.
+    uuid: Option<String>,
+}
+
+/// Reads all five firmware identity fields in one PowerShell pass. Five separate `Get-CimInstance`
+/// invocations would cost five process starts on the critical path of service startup (`Agent::new`
+/// resolves the serial before it can do anything else), and this is only reached on a host whose
+/// registry serial is already missing.
 ///
-/// 1. the SMBIOS system serial number, read straight from the registry rather than via WMI —
-///    matching what an administrator sees on the chassis sticker and in every asset system, and
-///    the closest analogue to what the macOS agent reports;
-/// 2. failing that (see `PLACEHOLDER_SERIAL_NUMBERS` — plenty of machines ship with the field
-///    unset), the machine's cryptographic `MachineGuid`, which Windows generates per install and
-///    is genuinely unique.
+/// Three details are load-bearing:
 ///
-/// Returns an error rather than any fallback value if neither is usable. Enrolling under a
-/// non-unique identifier is worse than not enrolling: it would silently merge this host's record
-/// with another machine's.
-pub fn serial_number() -> Result<String> {
-    if let Some(serial) = smbios_serial_number() {
-        return Ok(serial);
+/// * `-ErrorAction SilentlyContinue` per query rather than one `$ErrorActionPreference = 'Stop'` —
+///   `Win32_SystemEnclosure` is absent on some virtual hardware, and stopping at the first failure
+///   would throw away a `Win32_BIOS` serial that had already been read successfully.
+/// * `Select-Object -First 1` — `Win32_SystemEnclosure` and `Win32_BaseBoard` are multi-instance
+///   classes, and an unpinned query on a two-enclosure chassis makes `ConvertTo-Json` emit an
+///   *array* where an object is expected. Exactly the shape of failure the `winget list` parser
+///   below exists to survive, so it is pinned here and tolerated in [`parse_firmware_identity`].
+/// * CIM, not WMI (`Get-WmiObject`) — the `wmic` CLI was removed in Windows 11 24H2 and
+///   `Get-WmiObject` is deprecated alongside it; `Get-CimInstance` is what remains.
+const FIRMWARE_IDENTITY_SCRIPT: &str = r#"
+$product = Get-CimInstance Win32_ComputerSystemProduct -ErrorAction SilentlyContinue | Select-Object -First 1
+$bios = Get-CimInstance Win32_BIOS -ErrorAction SilentlyContinue | Select-Object -First 1
+$baseboard = Get-CimInstance Win32_BaseBoard -ErrorAction SilentlyContinue | Select-Object -First 1
+$enclosure = Get-CimInstance Win32_SystemEnclosure -ErrorAction SilentlyContinue | Select-Object -First 1
+[pscustomobject]@{
+    biosSerial = $bios.SerialNumber
+    productSerial = $product.IdentifyingNumber
+    baseboardSerial = $baseboard.SerialNumber
+    enclosureSerial = $enclosure.SerialNumber
+    uuid = $product.UUID
+} | ConvertTo-Json -Compress
+"#;
+
+fn read_firmware_identity() -> FirmwareIdentity {
+    match crate::os_update::run_powershell(FIRMWARE_IDENTITY_SCRIPT) {
+        Ok(output) if output.status.success() => parse_firmware_identity(&String::from_utf8_lossy(&output.stdout)),
+        Ok(output) => {
+            crate::logging::warn(&format!(
+                "could not read this machine's SMBIOS identity fields — PowerShell exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+            FirmwareIdentity::default()
+        }
+        Err(err) => {
+            crate::logging::warn(&format!("could not run PowerShell to read this machine's SMBIOS identity fields: {err:#}"));
+            FirmwareIdentity::default()
+        }
+    }
+}
+
+/// Parses [`FIRMWARE_IDENTITY_SCRIPT`]'s output. Takes a `&str` so the real captured shapes — an
+/// object, an array, every field null — are exercised by tests, the same reason the `winget list`
+/// and `choco list` parsers below do.
+fn parse_firmware_identity(json: &str) -> FirmwareIdentity {
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json.trim()) else {
+        crate::logging::warn(&format!(
+            "could not parse the SMBIOS identity fields PowerShell reported: {}",
+            json.trim()
+        ));
+        return FirmwareIdentity::default();
+    };
+
+    // An array is tolerated rather than expected: the script pins one instance per class, but an
+    // array is what an unpinned multi-instance query produces, and reading its first element beats
+    // reporting nothing at all if that pinning is ever lost.
+    let fields = match &parsed {
+        serde_json::Value::Array(items) => items.first(),
+        other => Some(other),
+    };
+    let Some(fields) = fields else {
+        return FirmwareIdentity::default();
+    };
+
+    // `ConvertTo-Json` writes a blank or absent SMBIOS field as `null` or as an empty string
+    // depending on the vendor; both mean "nothing here", and neither should reach the screening as
+    // a candidate.
+    let field = |name: &str| {
+        fields
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+
+    FirmwareIdentity {
+        bios_serial: field("biosSerial"),
+        product_serial: field("productSerial"),
+        baseboard_serial: field("baseboardSerial"),
+        enclosure_serial: field("enclosureSerial"),
+        uuid: field("uuid"),
+    }
+}
+
+/// Which source [`serial_number`] settled on, and the value it yielded.
+#[derive(Debug, PartialEq, Eq)]
+struct SerialNumberChoice<'a> {
+    source: &'a str,
+    value: &'a str,
+}
+
+/// The ordered choice at the heart of [`serial_number`], split out from the reading so the ordering
+/// itself is unit-testable: none of these sources can be faked under mingw+Wine, which runs this
+/// crate's tests but has neither a registry nor CIM (see the Cargo.toml notes and CLAUDE.md).
+///
+/// The order is by how well each field identifies *this physical machine*, and it deliberately puts
+/// both hardware serials the vendor may have set ahead of anything Windows generated:
+///
+/// 1. the registry system serial — what an administrator sees on the sticker and in every asset
+///    system, and the closest analogue to what the macOS agent reports;
+/// 2. `Win32_BIOS.SerialNumber`, then `Win32_ComputerSystemProduct.IdentifyingNumber` — the same
+///    field by two other routes, either of which can be populated where the registry value is not;
+/// 3. the baseboard, then the chassis serial — a different physical part than the one the asset
+///    system names, but a real vendor-set serial for this machine;
+/// 4. the SMBIOS system UUID — not a serial, but per-machine and per-VM;
+/// 5. the `MachineGuid`, last and reluctantly. See [`machine_guid`].
+fn choose_serial_number<'a>(
+    registry_serial: Option<&'a str>,
+    firmware: &'a FirmwareIdentity,
+    machine_guid: Option<&'a str>,
+) -> Option<SerialNumberChoice<'a>> {
+    let serial_candidates: [(&'a str, Option<&'a str>); 5] = [
+        (REGISTRY_SERIAL_SOURCE, registry_serial),
+        ("Win32_BIOS.SerialNumber", firmware.bios_serial.as_deref()),
+        ("Win32_ComputerSystemProduct.IdentifyingNumber", firmware.product_serial.as_deref()),
+        ("Win32_BaseBoard.SerialNumber", firmware.baseboard_serial.as_deref()),
+        ("Win32_SystemEnclosure.SerialNumber", firmware.enclosure_serial.as_deref()),
+    ];
+
+    for (source, candidate) in serial_candidates {
+        if let Some(value) = candidate.map(str::trim).filter(|value| is_usable_serial_number(value)) {
+            return Some(SerialNumberChoice { source, value });
+        }
     }
 
-    crate::logging::warn(
-        "this machine's SMBIOS serial number is missing or a manufacturer placeholder; \
-         falling back to the Windows MachineGuid as this host's identifier",
-    );
+    if let Some(value) = firmware.uuid.as_deref().map(str::trim).filter(|value| is_usable_system_uuid(value)) {
+        return Some(SerialNumberChoice { source: "Win32_ComputerSystemProduct.UUID", value });
+    }
 
-    machine_guid().context(
-        "could not determine a unique identifier for this machine — neither the SMBIOS serial \
-         number nor the Windows MachineGuid is usable, and enrolling under a non-unique one would \
-         merge this host's record with another machine's",
-    )
+    machine_guid
+        .map(str::trim)
+        .filter(|value| is_usable_serial_number(value))
+        .map(|value| SerialNumberChoice { source: MACHINE_GUID_SOURCE, value })
+}
+
+/// This host's stable unique identifier: the vendor-set hardware serial wherever one can be found,
+/// and a Windows-generated identifier only when none can. See [`choose_serial_number`] for the
+/// order and the reasoning behind it.
+///
+/// Returns an error rather than any fallback value if every source comes up empty. Enrolling under
+/// a non-unique identifier is worse than not enrolling: it would silently merge this host's record
+/// with another machine's.
+///
+/// Called exactly once per process, by `Agent::new` — which is what makes the PowerShell pass in
+/// [`read_firmware_identity`] affordable.
+pub fn serial_number() -> Result<String> {
+    let registry_serial = smbios_serial_number();
+
+    // Only asked for once the registry has come up empty: on a machine whose vendor set the field
+    // properly there is nothing to go looking for, and this costs a process start.
+    let firmware = match &registry_serial {
+        Some(_) => FirmwareIdentity::default(),
+        None => {
+            crate::logging::warn(&format!(
+                "{REGISTRY_SERIAL_SOURCE} holds no usable serial number (absent, or a manufacturer placeholder) — \
+                 reading this machine's SMBIOS identity fields via CIM instead"
+            ));
+            read_firmware_identity()
+        }
+    };
+
+    let machine_guid = machine_guid();
+
+    let choice = choose_serial_number(registry_serial.as_deref(), &firmware, machine_guid.as_deref()).context(
+        "could not determine a unique identifier for this machine — no SMBIOS serial number, system UUID or Windows \
+         MachineGuid is usable, and enrolling under a non-unique one would merge this host's record with another machine's",
+    )?;
+
+    if choice.source != REGISTRY_SERIAL_SOURCE {
+        crate::logging::warn(&format!(
+            "this host's identity comes from {} rather than its SMBIOS system serial number",
+            choice.source
+        ));
+    }
+
+    if choice.source == MACHINE_GUID_SOURCE {
+        crate::logging::warn(
+            "no SMBIOS field on this machine carries a usable identity, so the MachineGuid is being used — which is \
+             unique only if this machine's image was deployed with sysprep. Set a real serial number in the firmware \
+             (or in the hypervisor's configuration) if hosts start sharing a record.",
+        );
+    }
+
+    Ok(choice.value.to_string())
 }
 
 fn smbios_serial_number() -> Option<String> {
@@ -114,6 +349,16 @@ fn smbios_serial_number() -> Option<String> {
     is_usable_serial_number(&value).then(|| value.trim().to_string())
 }
 
+/// The last resort, and the weakest of them: `MachineGuid` identifies a Windows *installation*, not
+/// a machine. Sysprep regenerates it, so an image deployed properly gives every clone its own — but
+/// an image deployed *without* sysprep gives every clone the same one, and those are exactly the
+/// machines whose SMBIOS serial is a vendor placeholder too. It is also lost on a rebuild, which
+/// re-enrolls the host as a new record.
+///
+/// So it sits below every SMBIOS field including the system UUID, rather than immediately below the
+/// registry serial as it once did. The Linux agent's equivalent fallback (`/etc/machine-id`) has the
+/// same shape and the same caveat, one rung better handled: `systemd-firstboot` regenerates it when
+/// an image is cloned properly.
 fn machine_guid() -> Option<String> {
     // Under the 64-bit view explicitly: a 32-bit build of this agent would otherwise be redirected
     // to the WOW6432Node copy, which is a *different* GUID — so the same machine would enroll
@@ -628,7 +873,19 @@ mod tests {
         // Every one of these has been observed shipped on real hardware. Accepting any of them
         // would give two machines the same identity — and so the same certificate CN, the same
         // host record, and each other's inventory.
-        for placeholder in ["To Be Filled By O.E.M.", "System Serial Number", "Default string", "None", "0", "Unknown"] {
+        for placeholder in [
+            "To Be Filled By O.E.M.",
+            "Fill By OEM",
+            "System Serial Number",
+            "Chassis Serial Number",
+            "Default string",
+            "None",
+            "Empty",
+            "OEM",
+            "NA",
+            "0",
+            "Unknown",
+        ] {
             assert!(!is_usable_serial_number(placeholder), "{placeholder} should be rejected");
         }
     }
@@ -650,6 +907,162 @@ mod tests {
     fn is_usable_serial_number_ignores_surrounding_whitespace() {
         assert!(is_usable_serial_number("  5CD2145XYZ  "));
         assert!(!is_usable_serial_number("  None  "));
+    }
+
+    #[test]
+    fn is_usable_serial_number_rejects_mixed_filler() {
+        // Not a single repeated character, so the rule above lets these through; they are still
+        // nobody's serial number. The Linux agent screens the same character set.
+        assert!(!is_usable_serial_number("0-0-0-0"));
+        assert!(!is_usable_serial_number("0000.0000"));
+        assert!(!is_usable_serial_number("--------"));
+    }
+
+    #[test]
+    fn is_usable_system_uuid_rejects_the_vendor_constants() {
+        // The all-zero form is already filler; the other two are structurally plausible and shipped
+        // on real (and virtual) hardware, so every host carrying one would enroll as the same host.
+        for constant in [
+            "00000000-0000-0000-0000-000000000000",
+            "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+            "03000200-0400-0500-0006-000700080009",
+        ] {
+            assert!(!is_usable_system_uuid(constant), "{constant} should be rejected");
+        }
+    }
+
+    #[test]
+    fn is_usable_system_uuid_accepts_a_real_uuid() {
+        assert!(is_usable_system_uuid("4C4C4544-0043-4410-8058-CAC04F573233"));
+    }
+
+    /// `ConvertTo-Json -Compress` output captured from a real Windows 11 host — the one whose
+    /// registry `SystemSerialNumber` is absent while `Win32_BIOS.SerialNumber` carries the sticker
+    /// serial, which is the case this whole chain was added for.
+    const FIRMWARE_IDENTITY_SAMPLE: &str = concat!(
+        r#"{"biosSerial":"5CD6106928","productSerial":"5CD6106928","baseboardSerial":"PGVQC02T4CX0AL","#,
+        r#""enclosureSerial":"5CD6106928","uuid":"4C4C4544-0043-4410-8058-CAC04F573233"}"#,
+        "\r\n",
+    );
+
+    #[test]
+    fn parse_firmware_identity_reads_every_field() {
+        assert_eq!(
+            parse_firmware_identity(FIRMWARE_IDENTITY_SAMPLE),
+            FirmwareIdentity {
+                bios_serial: Some("5CD6106928".to_string()),
+                product_serial: Some("5CD6106928".to_string()),
+                baseboard_serial: Some("PGVQC02T4CX0AL".to_string()),
+                enclosure_serial: Some("5CD6106928".to_string()),
+                uuid: Some("4C4C4544-0043-4410-8058-CAC04F573233".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_firmware_identity_reads_the_first_element_of_an_array() {
+        // What an unpinned multi-instance query produces. The script pins `-First 1` so this should
+        // not arise, but parsing it beats reporting no identity at all if that pinning is lost.
+        let json = r#"[{"biosSerial":"5CD6106928","productSerial":null,"baseboardSerial":null,"enclosureSerial":null,"uuid":null},
+                       {"biosSerial":"OTHER","productSerial":null,"baseboardSerial":null,"enclosureSerial":null,"uuid":null}]"#;
+
+        assert_eq!(parse_firmware_identity(json).bios_serial, Some("5CD6106928".to_string()));
+    }
+
+    #[test]
+    fn parse_firmware_identity_treats_null_and_blank_fields_as_absent() {
+        // A vendor that left the field out gives `null`; one that wrote whitespace into it gives an
+        // empty string. Neither should reach the screening as a candidate.
+        let json = r#"{"biosSerial":null,"productSerial":"","baseboardSerial":"   ","enclosureSerial":null,"uuid":null}"#;
+
+        assert_eq!(parse_firmware_identity(json), FirmwareIdentity::default());
+    }
+
+    #[test]
+    fn parse_firmware_identity_returns_nothing_for_output_that_is_not_json() {
+        // PowerShell writing an error to stdout, or nothing at all. Reporting no fields sends
+        // `serial_number` on to the MachineGuid rather than panicking on the critical startup path.
+        assert_eq!(parse_firmware_identity(""), FirmwareIdentity::default());
+        assert_eq!(parse_firmware_identity("Get-CimInstance : Access denied"), FirmwareIdentity::default());
+    }
+
+    #[test]
+    fn choose_serial_number_prefers_the_registry_serial() {
+        let firmware = FirmwareIdentity { bios_serial: Some("5CD6106928".to_string()), ..Default::default() };
+        let choice = choose_serial_number(Some("PF3K2N9B"), &firmware, Some("9d8f6b1e-0000-4a11-b2c3-5566778899aa")).unwrap();
+
+        assert_eq!(choice.value, "PF3K2N9B");
+        assert_eq!(choice.source, REGISTRY_SERIAL_SOURCE);
+    }
+
+    #[test]
+    fn choose_serial_number_falls_through_a_placeholder_registry_value_to_the_bios_serial() {
+        // The case this chain exists for: the registry value is absent or junk while `Win32_BIOS`
+        // carries the serial printed on the chassis.
+        let firmware = FirmwareIdentity { bios_serial: Some("5CD6106928".to_string()), ..Default::default() };
+
+        for registry in [None, Some("To Be Filled By O.E.M."), Some("Default string")] {
+            let choice = choose_serial_number(registry, &firmware, Some("9d8f6b1e-0000-4a11-b2c3-5566778899aa")).unwrap();
+            assert_eq!(choice.value, "5CD6106928", "registry value {registry:?} should have been skipped");
+            assert_eq!(choice.source, "Win32_BIOS.SerialNumber");
+        }
+    }
+
+    #[test]
+    fn choose_serial_number_walks_the_whole_chain_in_order() {
+        let firmware = FirmwareIdentity {
+            bios_serial: Some("Default string".to_string()),
+            product_serial: None,
+            baseboard_serial: Some("PGVQC02T4CX0AL".to_string()),
+            enclosure_serial: Some("5CD6106928".to_string()),
+            uuid: Some("4C4C4544-0043-4410-8058-CAC04F573233".to_string()),
+        };
+        let choice = choose_serial_number(None, &firmware, Some("9d8f6b1e-0000-4a11-b2c3-5566778899aa")).unwrap();
+
+        // The baseboard serial, not the chassis one and not the UUID: a real vendor-set serial
+        // outranks both, and the order between them is fixed so a host cannot change identity
+        // depending on which field a later firmware update happens to fill in.
+        assert_eq!(choice.value, "PGVQC02T4CX0AL");
+        assert_eq!(choice.source, "Win32_BaseBoard.SerialNumber");
+    }
+
+    #[test]
+    fn choose_serial_number_prefers_the_system_uuid_over_the_machine_guid() {
+        // The MachineGuid identifies a Windows installation; the UUID identifies the machine (and,
+        // under a hypervisor, the VM). See `machine_guid` for why that ordering matters.
+        let firmware = FirmwareIdentity { uuid: Some("4C4C4544-0043-4410-8058-CAC04F573233".to_string()), ..Default::default() };
+        let choice = choose_serial_number(None, &firmware, Some("9d8f6b1e-0000-4a11-b2c3-5566778899aa")).unwrap();
+
+        assert_eq!(choice.value, "4C4C4544-0043-4410-8058-CAC04F573233");
+        assert_eq!(choice.source, "Win32_ComputerSystemProduct.UUID");
+    }
+
+    #[test]
+    fn choose_serial_number_falls_back_to_the_machine_guid_when_the_uuid_is_a_constant() {
+        let firmware = FirmwareIdentity {
+            enclosure_serial: Some("Chassis Serial Number".to_string()),
+            uuid: Some("03000200-0400-0500-0006-000700080009".to_string()),
+            ..Default::default()
+        };
+        let choice = choose_serial_number(None, &firmware, Some("9d8f6b1e-0000-4a11-b2c3-5566778899aa")).unwrap();
+
+        assert_eq!(choice.value, "9d8f6b1e-0000-4a11-b2c3-5566778899aa");
+        assert_eq!(choice.source, MACHINE_GUID_SOURCE);
+    }
+
+    #[test]
+    fn choose_serial_number_refuses_to_invent_an_identity() {
+        // Every source a placeholder and no MachineGuid: `serial_number` turns this into an error
+        // and the agent does not enroll, rather than sharing a record with another machine.
+        let firmware = FirmwareIdentity {
+            bios_serial: Some("To Be Filled By O.E.M.".to_string()),
+            product_serial: Some("Not Specified".to_string()),
+            baseboard_serial: Some("Default string".to_string()),
+            enclosure_serial: Some("0000000000".to_string()),
+            uuid: Some("00000000-0000-0000-0000-000000000000".to_string()),
+        };
+
+        assert_eq!(choose_serial_number(Some("None"), &firmware, None), None);
     }
 
     const WINGET_LIST_SAMPLE: &str = concat!(

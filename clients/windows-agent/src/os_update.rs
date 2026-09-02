@@ -89,7 +89,10 @@ if ($installResult.ResultCode -ne 2 -and $installResult.ResultCode -ne 3) {
 exit 0
 "#;
 
-fn run_powershell(script: &str) -> Result<std::process::Output> {
+/// `pub(crate)` because `system_info::read_firmware_identity` drives CIM through PowerShell too,
+/// for the same reason this module does — one place naming the interpreter and its flags means the
+/// 5.1-vs-`pwsh` decision above is made once rather than per caller.
+pub(crate) fn run_powershell(script: &str) -> Result<std::process::Output> {
     Command::new(POWERSHELL)
         .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
         .output()
