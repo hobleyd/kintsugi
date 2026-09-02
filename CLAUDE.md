@@ -455,15 +455,46 @@ carries anything executable.** An app-patch request names an application; the se
 re-fetches that application's upgrade path from the server and verifies its signature before running
 anything. The worst a forged request can do is start an already-approved upgrade early.
 
-**Windows and Linux serial numbers are frequently placeholders.** `Win32_BIOS.SerialNumber` and
-`/sys/class/dmi/id/product_serial` read the same SMBIOS field and inherit the same junk from board
+**Windows and Linux serial numbers are frequently placeholders.** `HKLM\HARDWARE\DESCRIPTION\System\BIOS`
+and `/sys/class/dmi/id/product_serial` read the same SMBIOS field and inherit the same junk from board
 vendors: "To Be Filled By O.E.M.", "Default string", "0", "Not Specified" (which is what every guest
 of a bare `qemu-system-x86_64` reports). The serial *is* this host's identity — it becomes the
 certificate CN, which `[RequireAgentIdentity]` compares against every request body — so two hosts
 sharing one would share a host record, a certificate, and each other's data.
-`system_info::serial_number` in both agents therefore screens against a placeholder list, falls back
-to a per-installation id (the Windows `MachineGuid`, systemd's `/etc/machine-id`), and **refuses to
-enroll** rather than inventing a value. macOS has no equivalent failure mode.
+`system_info::serial_number` in both agents therefore screens against a placeholder list and
+**refuses to enroll** rather than inventing a value. macOS has no equivalent failure mode.
+
+**One blank field is not one missing serial, and the Windows agent walks a chain.** The registry key
+above is the value an administrator sees on the sticker, but it is routinely *absent* on hardware
+whose `Win32_BIOS.SerialNumber` carries that same serial — so reading only the registry reported no
+serial on a machine that plainly has one. `choose_serial_number` therefore tries, in order: the
+registry serial, `Win32_BIOS.SerialNumber`, `Win32_ComputerSystemProduct.IdentifyingNumber`,
+`Win32_BaseBoard.SerialNumber` (SMBIOS type 2, reachable *only* via CIM — the registry key exposes
+the baseboard's manufacturer, product and version and no serial at all),
+`Win32_SystemEnclosure.SerialNumber`, `Win32_ComputerSystemProduct.UUID`, and only then the
+`MachineGuid`. All five CIM fields come from one PowerShell pass (`FIRMWARE_IDENTITY_SCRIPT`), read
+lazily — a host whose registry value is populated never spawns it. `SMBIOSAssetTag` sits beside the
+chassis serial and is deliberately *not* read: an asset tag is administrator-assigned and frequently
+identical across a purchase batch.
+
+The order is by how well each field identifies *this physical machine*, and the two rungs at the
+bottom are where the reasoning is easy to get backwards. `MachineGuid` is **last**, not second: it
+identifies a Windows *installation*, sysprep regenerates it, and an image deployed *without* sysprep
+gives every clone the same one — which are exactly the machines whose SMBIOS serial is a placeholder
+too. The SMBIOS system UUID outranks it because it is per-machine and set per-VM by every hypervisor,
+but it needs its own screening (`PLACEHOLDER_SYSTEM_UUIDS`): the all-`F` form means "field omitted",
+and `03000200-0400-0500-0006-000700080009` is a constant shipped by some VMware and Dell firmware, so
+accepting it would enroll a whole fleet as one host.
+
+**Widening that chain re-identifies hosts, and `identity::load` will not notice.** It reads the
+certificate off disk and compares nothing, so a host already enrolled under a fallback identity —
+its `MachineGuid`, or a placeholder that used to pass screening — starts sending the newly-found
+serial in request bodies while presenting a certificate whose CN is the old value.
+`[RequireAgentIdentity]` then 403s every authenticated route, permanently, while the host still looks
+enrolled. The remedy is the documented one (delete `identity/` and let it re-enroll), but nothing
+prompts for it and `self_update` delivers the change unattended. So before shipping any change to
+what `serial_number` returns: check the Hosts page for GUID-shaped or placeholder-shaped serials,
+because those are precisely the hosts that will need re-enrolling.
 
 **Replacing a running binary differs.** macOS and Linux stage next to the target and rename over it
 (atomic, and Unix will unlink an open file). Windows locks a running image, so `self_update` renames
