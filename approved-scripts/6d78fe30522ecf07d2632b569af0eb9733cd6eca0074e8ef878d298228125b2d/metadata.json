@@ -2,5 +2,6 @@
   "sha256": "6d78fe30522ecf07d2632b569af0eb9733cd6eca0074e8ef878d298228125b2d",
   "platformBucket": "macOS",
   "language": 0,
-  "applicationName": "MarkViewer"
+  "applicationName": "MarkViewer",
+  "applicationIdentifier": "MarkViewer"
 }
