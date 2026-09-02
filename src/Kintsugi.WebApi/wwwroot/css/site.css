@@ -451,6 +451,30 @@ th.sortable.sort-desc .th-sort-label::after { content: '▼'; opacity: 1; color:
 .settings-aside a { color: var(--neon); }
 .settings-aside .hint { margin-top: 1rem; }
 
+/* Step-by-step help sitting directly under the field it fills in — used by the GitHub settings
+   page's credential column. Deliberately its own block rather than reusing .settings-aside's list
+   styling: that lives behind `.settings-aside p`, which would beat `.hint` on specificity and
+   quietly restyle every hint in the column as body text. */
+.token-help {
+    margin: 0.6rem 0 0;
+    padding: 0.75rem 0.9rem;
+    border-left: 2px solid var(--neon-dim);
+    background: rgba(255, 255, 255, 0.02);
+}
+.token-help > summary {
+    font-family: 'Orbitron', sans-serif;
+    font-size: 0.68rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--neon-dim);
+    cursor: pointer;
+}
+.token-help ol { margin: 0.5rem 0 0; padding-left: 1.1rem; font-size: 0.8rem; color: var(--muted); }
+.token-help li { margin-bottom: 0.35rem; }
+.token-help li:last-child { margin-bottom: 0; }
+.token-help code { font-family: 'Share Tech Mono', 'Courier New', monospace; font-size: 0.8em; color: var(--neon-soft); }
+.token-help a { color: var(--neon); }
+
 .field { display: flex; flex-direction: column; gap: 0.4rem; }
 .field-inline { flex-direction: row; align-items: center; gap: 0.6rem; }
 
