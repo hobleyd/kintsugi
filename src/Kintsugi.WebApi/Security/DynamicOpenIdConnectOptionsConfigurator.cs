@@ -12,7 +12,7 @@ namespace Kintsugi.WebApi.Security;
 /// configured at runtime through the Authentication settings page and stored in the database.
 /// This loads that configuration into <see cref="OpenIdConnectOptions"/> the first time the
 /// "OpenIdConnect" scheme is used after startup, or after the options cache is invalidated
-/// following a settings save (see <c>AuthenticationModel</c> in Pages/Settings) — not on every
+/// following a settings save (see <c>AdminSettingsController.UpdateAuthentication</c>) — not on every
 /// request, since <see cref="IOptionsMonitorCache{TOptions}"/> caches the constructed options
 /// until then.
 /// </summary>
@@ -42,11 +42,16 @@ public class DynamicOpenIdConnectOptionsConfigurator : IConfigureNamedOptions<Op
         // /settings/authentication that is the only way to configure it: a fresh deploy that
         // cannot be set up at all.
         //
-        // Harmless because neither value can reach a provider. Only a challenge would send them,
-        // and with no settings saved the fresh-deploy redirect in Program.cs answers every
-        // non-/api route — Account/Login's Challenge handler included — with /settings/authentication
-        // before the handler runs. Verified by requesting that handler on an empty database: it
-        // redirects to the settings page rather than to an identity provider.
+        // Harmless because neither value can reach a provider — but what guarantees that has
+        // moved, and the reasoning is easy to get wrong. Only a challenge would send them, and it
+        // used to be Program.cs's fresh-deploy redirect that stopped one: with no settings saved it
+        // answered every non-/api route, the old Razor Account/Login challenge handler included,
+        // with /settings/authentication before this handler ever ran. That redirect is gone (the
+        // admin UI is a Flutter client served by nginx, so there is no page request here to
+        // redirect), and the challenge route is now GET /api/auth/challenge — which is under /api
+        // and was never covered by it anyway. SessionController.Challenge therefore refuses
+        // explicitly when nothing has been saved. Keep that check: it is the only thing standing
+        // between an unconfigured server and a redirect to Google bearing "kintsugi-unconfigured".
         options.Authority = "https://accounts.google.com";
         options.ClientId = "kintsugi-unconfigured";
         options.CallbackPath = "/signin-oidc";

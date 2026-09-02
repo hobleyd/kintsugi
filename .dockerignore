@@ -6,3 +6,17 @@
 .git/
 nginx/
 *.md
+
+# Flutter/Dart state from a local build of web/.
+#
+# .dart_tool is the important one, and leaving it out is a correctness fix rather than a
+# size optimisation: package_config.json inside it records *absolute* paths to the SDK and the pub
+# cache on whichever machine ran `flutter pub get`. Copied into the image it overwrites the one the
+# build stage just generated, and dart2js then fails trying to read
+# /Users/<someone>/.pub-cache/... — which is a confusing way to find out that a host artefact
+# leaked into a container.
+web/.dart_tool/
+web/build/
+web/.flutter-plugins
+web/.flutter-plugins-dependencies
+web/*.iml

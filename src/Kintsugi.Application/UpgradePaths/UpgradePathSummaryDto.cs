@@ -29,4 +29,18 @@ public record UpgradePathSummaryDto(
     int UpdateAvailableHostCount,
     IReadOnlyList<string> HostNamesNeedingUpdate,
     string? Script = null,
-    string? ScriptSignature = null);
+    string? ScriptSignature = null)
+{
+    /// <summary>
+    /// The single status this row displays as, folding <see cref="Status"/>,
+    /// <see cref="Method"/>, the signature and the per-host update counts into one value — see
+    /// <see cref="UpgradePathStatusKey.For"/> for the precedence between them.
+    /// </summary>
+    /// <remarks>
+    /// Serialized rather than left for the client to derive, because the rule is not obvious
+    /// (an unsigned script outranks "update available", since an unsigned script means no agent
+    /// runs it at all) and it also drives the status filter. The Flutter client re-deriving it
+    /// would be a second copy free to disagree with the one the server uses.
+    /// </remarks>
+    public string StatusKey => UpgradePathStatusKey.For(this);
+}

@@ -22,10 +22,12 @@ public record ScriptApprovalSubmission(
     string? SignedBy,
     DateTimeOffset SignedAtUtc);
 
-// Serialized as its name, not its ordinal, because Applications.cshtml's signScript() reads this
-// value straight out of the JSON response to tell the operator why a sign didn't open a pull
-// request — a numeric value silently drifting as cases are reordered would be a much worse failure
-// mode than the enum simply not existing yet.
+// Serialized as its name, not its ordinal, because the admin client reads this value straight out
+// of the JSON response to tell the operator why a sign didn't open a pull request (see the
+// Applications screen's sign action in web/lib) — a numeric value silently drifting as cases are
+// reordered would be a much worse failure mode than the enum simply not existing yet. That matters
+// more now than it did: the reader is a separately built client rather than markup rendered by this
+// same build, so nothing would catch the drift at compile time.
 [JsonConverter(typeof(JsonStringEnumConverter))]
 public enum ScriptApprovalPublishOutcome
 {

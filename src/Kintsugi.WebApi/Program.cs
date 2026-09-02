@@ -36,7 +36,6 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
 
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddRazorPages();
 
 builder.Services.AddApplication();
 builder.Services.AddInfrastructure(builder.Configuration);
@@ -113,9 +112,10 @@ var app = builder.Build();
 await ApplyMigrationsAsync(app);
 await SeedGitHubSettingsFromEnvironmentAsync(app);
 
-// Before anything that reads the scheme or host — which is the redirect to
-// /settings/authentication below, the OIDC handler in UseAuthentication, and every page that
-// renders a URL of its own.
+// Before anything that reads the scheme or host — the OIDC handler in UseAuthentication, and the
+// routes that build a URL of their own: the callback URLs in GET /api/session and the fallback
+// agent base URL in GET /api/admin/clients, both of which have to name the address the *browser*
+// used rather than this container's.
 app.UseForwardedHeaders();
 
 app.UseMiddleware<ExceptionHandlingMiddleware>();
@@ -127,54 +127,40 @@ app.UseSwaggerUI(options =>
     options.RoutePrefix = "swagger";
 });
 
-app.UseStaticFiles();
-
 app.UseAuthentication();
 
-// Gates the browser UI behind Authentication settings. Scoped to everything except /api (agents
-// authenticate via mTLS + RequireAgentIdentity, not cookies — see RequireAgentIdentityAttribute),
-// /swagger, and /health.
-var alwaysExemptPrefixes = new[] { "/api", "/swagger", "/health" };
-app.Use(async (context, next) =>
-{
-    if (alwaysExemptPrefixes.Any(prefix => context.Request.Path.StartsWithSegments(prefix)))
-    {
-        await next();
-        return;
-    }
-
-    var authSettingsRepository = context.RequestServices.GetRequiredService<IAuthenticationSettingsRepository>();
-    var authSettings = await authSettingsRepository.GetAsync(context.RequestAborted);
-
-    if (authSettings is null)
-    {
-        // Nothing has been saved on the Authentication settings page yet — there's no way to sign
-        // in and no admin has decided whether to require it, so lock everything else down to that
-        // page rather than leaving the whole site open by default.
-        if (!context.Request.Path.StartsWithSegments("/settings/authentication"))
-        {
-            context.Response.Redirect("/settings/authentication");
-            return;
-        }
-    }
-    else if (authSettings.IsEnabled
-        && !context.Request.Path.StartsWithSegments("/account")
-        && context.User.Identity?.IsAuthenticated != true)
-    {
-        var returnUrl = context.Request.Path + context.Request.QueryString;
-        context.Response.Redirect($"/account/login?returnUrl={Uri.EscapeDataString(returnUrl)}");
-        return;
-    }
-
-    await next();
-});
+// There is deliberately no redirecting sign-in gate here any more, and it is worth saying why so
+// one does not come back.
+//
+// This app used to serve the admin UI itself as Razor Pages, so a middleware could answer a page
+// request with a 302 — to /settings/authentication on a server with nothing configured, or to
+// /account/login when sign-in was required and the caller had no cookie. The admin UI is now a
+// Flutter web application served as static files by nginx (see nginx/default.conf and
+// nginx/Dockerfile), so that page request never arrives here at all: there is nothing left under
+// this app's routes but /api, /swagger, /health and the two OIDC callbacks, and redirecting any of
+// those would break them — /signin-oidc in particular has to be reachable by a caller who is, by
+// definition, not signed in yet.
+//
+// The three jobs that middleware did are now split, and all three need to stay:
+//
+//   * "nothing configured yet, lock everything to the authentication screen" and "sign-in required
+//     and you have no cookie" are reported as data by GET /api/session, which the client fetches
+//     before it renders anything and routes on. See SessionController — that route is anonymous by
+//     design, and is the only new one that is.
+//   * refusing the individual browser-driven /api routes is [RequireAdminSession], per controller.
+//     That attribute mirrors this gate's semantics exactly (required precisely when an
+//     administrator has saved AuthenticationSettings and enabled it) rather than inventing a second
+//     shape that could drift from it.
+//   * handing off to the identity provider is GET /api/auth/challenge, a full-page navigation the
+//     client's sign-in button targets.
+//
+// The consequence to hold onto: /api is still exempt from any framework-level authentication here,
+// so a browser-driven route added without [RequireAdminSession] is anonymous. Nothing else will
+// stop it.
 
 app.UseAuthorization();
 
-app.MapGet("/", () => Results.Redirect("/hosts"));
-
 app.MapControllers();
-app.MapRazorPages();
 app.MapHealthChecks("/health");
 
 app.Run();
