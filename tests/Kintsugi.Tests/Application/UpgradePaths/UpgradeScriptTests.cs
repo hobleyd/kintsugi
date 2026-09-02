@@ -58,6 +58,24 @@ public class UpgradeScriptTests
         Assert.StartsWith("#!/bin/bash", HomebrewUpgradeScript.Build(isSelfUpdate: false));
     }
 
+    [Fact]
+    public void HomebrewScript_LooksTheNameUpInLowercaseToo_BecauseTheBrewApiIsCaseSensitive()
+    {
+        // formulae.brew.sh/api/{formula,cask}/<token>.json is case-sensitive and every brew token is
+        // lowercase, but a row's name doesn't have to be: PrepareUpgradePathScanQueryHandler groups
+        // an application's variants case-insensitively, so one can settle on the display-cased
+        // /Applications bundle name ("Nextcloud") instead of `brew list`'s token ("nextcloud"). Both
+        // URLs then 404, LatestVersion stays null, updateAvailable is false and is_patchable is
+        // false — the application silently never patches. Asserted here because the failure is
+        // invisible: a null LatestVersion is indistinguishable from "no update available".
+        var script = HomebrewUpgradeScript.Build(isSelfUpdate: false);
+
+        Assert.Contains("tr '[:upper:]' '[:lower:]'", script);
+        // The name as given is still tried first, so a row already named by its own token is never
+        // transformed on the way to a lookup that already worked.
+        Assert.Contains("for candidate in \"$APP_NAME\"", script);
+    }
+
     [Theory]
     [MemberData(nameof(LinuxScripts))]
     public void LinuxScripts_AreBash(string script)

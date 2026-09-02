@@ -20,6 +20,12 @@ public class RegisterApplicationsCommandHandlerTests
     /// OS bucket and not the old shared "generic" one. See PlatformBucket.ForPackageManager.</summary>
     private static readonly string HomebrewBucket = PlatformBucket.ForPackageManager(PackageManagerCatalog.Homebrew);
 
+    /// <summary>The exact bytes this handler writes for a Homebrew-managed application. Taken from
+    /// the builder rather than stubbed, because whether a stored row's content equals what the
+    /// builder produces is now the thing that decides if its signature survives — see
+    /// UpgradePath.Apply.</summary>
+    private static readonly string HomebrewScript = HomebrewUpgradeScript.Build(isSelfUpdate: false);
+
     private RegisterApplicationsCommandHandler CreateHandler() =>
         new(_hostRepository.Object, _installedApplicationRepository.Object, _upgradePathRepository.Object, _unitOfWork.Object);
 
@@ -215,11 +221,12 @@ public class RegisterApplicationsCommandHandlerTests
         // The deterministic script content never changes for a given package name, so an admin's
         // prior "Sign Script" review must survive every subsequent routine inventory report —
         // otherwise a signed, patchable row would flip back to unsigned on the agent's very next
-        // check-in.
+        // check-in. The row therefore holds the builder's own bytes, which is what a real signed
+        // row holds; anything else would be exercising the content-changed case below instead.
         SetUpHost(_host);
         var existingPath = UpgradePath.Create(
             "firefox", HomebrewBucket, UpgradePathStatus.Found, "127.0", UpgradeMethod.Script,
-            null, null, null, null, null, "#!/bin/bash\n...", "firefox");
+            null, null, null, null, null, HomebrewScript, "firefox");
         existingPath.SignScript("signed:already-approved");
         _upgradePathRepository.Setup(r => r.GetAsync("firefox", HomebrewBucket, It.IsAny<CancellationToken>())).ReturnsAsync(existingPath);
 
@@ -231,6 +238,33 @@ public class RegisterApplicationsCommandHandlerTests
             CancellationToken.None);
 
         Assert.Equal("signed:already-approved", existingPath.ScriptSignature);
+    }
+
+    [Fact]
+    public async Task Handle_WhenTheGeneratedScriptNoLongerMatchesTheStoredOne_DropsTheStaleSignature()
+    {
+        // The other half of the case above, and the one that used to fail silently: this handler
+        // rewrites Script from the builder on every report, so the day HomebrewUpgradeScript.Build's
+        // body is edited, every already-signed row holds a signature over the *previous* text. Kept,
+        // it would read "signed" on the Upgrade Scripts page while every agent refused to run it —
+        // verification is against the new bytes — and nothing on screen would say why the whole
+        // fleet stopped patching Homebrew applications. Dropped, the row reads as awaiting review.
+        SetUpHost(_host);
+        var existingPath = UpgradePath.Create(
+            "firefox", HomebrewBucket, UpgradePathStatus.Found, "127.0", UpgradeMethod.Script,
+            null, null, null, null, null, "#!/bin/bash\n# an older revision of the Homebrew script\n", "firefox");
+        existingPath.SignScript("signed:over-the-older-revision");
+        _upgradePathRepository.Setup(r => r.GetAsync("firefox", HomebrewBucket, It.IsAny<CancellationToken>())).ReturnsAsync(existingPath);
+
+        await CreateHandler().Handle(
+            new RegisterApplicationsCommand("SERIAL-1", new[]
+            {
+                new ApplicationEntry("firefox", "128.0", PackageManager: "Homebrew", AvailableVersion: "129.0"),
+            }),
+            CancellationToken.None);
+
+        Assert.Equal(HomebrewScript, existingPath.Script);
+        Assert.Null(existingPath.ScriptSignature);
     }
 
     [Fact]

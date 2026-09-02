@@ -214,11 +214,34 @@ public class UpgradePath : BaseEntity
         LatestVersion = string.IsNullOrWhiteSpace(latestVersion) ? null : latestVersion;
         Method = method;
         DownloadUrl = string.IsNullOrWhiteSpace(downloadUrl) ? null : downloadUrl;
-        Command = string.IsNullOrWhiteSpace(command) ? null : command;
+        var replacementCommand = string.IsNullOrWhiteSpace(command) ? null : command;
+        if (!string.Equals(Command, replacementCommand, StringComparison.Ordinal))
+        {
+            CommandSignature = null;
+        }
+        Command = replacementCommand;
         Instructions = string.IsNullOrWhiteSpace(instructions) ? null : instructions;
         SourceUrl = string.IsNullOrWhiteSpace(sourceUrl) ? null : sourceUrl;
         Notes = string.IsNullOrWhiteSpace(notes) ? null : notes;
-        Script = string.IsNullOrWhiteSpace(script) ? null : script;
+
+        // A signature is only ever a signature *over specific bytes*, so replacing either
+        // executable field has to drop the signature that vouched for the old ones. Handled here
+        // rather than left to callers because the dangerous caller is the one that doesn't think of
+        // itself as changing a script at all: RegisterApplicationsCommandHandler rewrites Script
+        // from the matching *UpgradeScript.Build on every routine inventory report, so the day any
+        // package-manager script's body is edited, every already-signed row for that manager would
+        // otherwise keep a signature over the *previous* text — reading "signed" on the Upgrade
+        // Scripts page while every agent refuses to run it, since verification is against the new
+        // bytes. That is silent, fleet-wide, and indistinguishable on screen from working.
+        // Cleared, the row reads as awaiting review, which is what it is; a human re-signs it once
+        // and FindExistingSignatureForScriptAsync (and the corpus bless path) propagate that to
+        // every other row sharing the identical content.
+        var replacementScript = string.IsNullOrWhiteSpace(script) ? null : script;
+        if (!string.Equals(Script, replacementScript, StringComparison.Ordinal))
+        {
+            ScriptSignature = null;
+        }
+        Script = replacementScript;
         // An update that doesn't know the identifier (e.g. a package-manager path, which never
         // looks one up) keeps whatever was already recorded rather than wiping it — this only
         // ever gets cleared by explicitly passing an empty one, not by omission.

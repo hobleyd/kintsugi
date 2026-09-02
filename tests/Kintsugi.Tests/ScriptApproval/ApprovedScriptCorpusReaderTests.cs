@@ -47,7 +47,7 @@ public class ApprovedScriptCorpusReaderTests
     public void ReadCorpus_WhenTheScriptWasEditedInPlace_SkipsTheEntry()
     {
         var files = StandardEntry();
-        var scriptPath = files.Keys.Single(k => k.EndsWith("script.sh", StringComparison.Ordinal));
+        var scriptPath = files.Keys.Single(k => k.EndsWith(".sh", StringComparison.Ordinal));
         files[scriptPath] = Script + "rm -rf /\n";
 
         var result = GitHubScriptApprovalSourceClient.ReadCorpus(BuildArchive(files));
@@ -103,15 +103,56 @@ public class ApprovedScriptCorpusReaderTests
         Assert.Empty(result.SkippedReasons);
     }
 
+    [Fact]
+    public void ReadCorpus_StillReadsAnEntryNamedScriptSh_FromBeforeTheNameWasDescriptive()
+    {
+        // Every entry approved before ApprovedScriptIdentity existed carries the fixed `script.sh`
+        // name. The reader finds the script by extension precisely so those keep importing — a
+        // rename on the trust root would invalidate nothing but would be churn on reviewed content.
+        var result = GitHubScriptApprovalSourceClient.ReadCorpus(
+            BuildArchive(StandardEntry(ApprovedScriptCorpus.LegacyScriptBaseName)));
+
+        var entry = Assert.Single(result.Entries);
+        Assert.Empty(result.SkippedReasons);
+        Assert.Equal(Script, entry.Script);
+    }
+
+    [Fact]
+    public void ReadCorpus_WithBothTheOldAndNewNamePresent_ReadsTheEntryOnce()
+    {
+        // What a re-approval of already-published bytes can leave behind. Both files hold the same
+        // content — the directory name is that content's hash — so either satisfies the entry, and
+        // the reader must not report the directory as ambiguous or read it twice.
+        var files = StandardEntry();
+        files[ApprovedScriptCorpus.ScriptPath(
+            ScriptContentHash.Of(Script), ApprovedScriptCorpus.LegacyScriptBaseName, ScriptLanguage.Bash)] = Script;
+
+        var result = GitHubScriptApprovalSourceClient.ReadCorpus(BuildArchive(files));
+
+        var entry = Assert.Single(result.Entries);
+        Assert.Empty(result.SkippedReasons);
+        Assert.Equal(Script, entry.Script);
+    }
+
+    [Fact]
+    public void ReadCorpus_IgnoresASignatureFileWhenLookingForTheScript()
+    {
+        // signatures/<fingerprint>.json sits inside the same content directory, so a discovery that
+        // matched on prefix alone could pick it up if a language's extension ever collided.
+        var result = GitHubScriptApprovalSourceClient.ReadCorpus(BuildArchive(StandardEntry()));
+
+        Assert.Equal(Script, Assert.Single(result.Entries).Script);
+    }
+
     /// <summary>One well-formed entry, laid out exactly where <c>ApprovedScriptCorpus</c> says it goes
     /// — built through those same helpers so a change to the layout breaks the test rather than
     /// silently diverging from it.</summary>
-    private static Dictionary<string, string> StandardEntry()
+    private static Dictionary<string, string> StandardEntry(string scriptBaseName = "homebrew")
     {
         var sha256 = ScriptContentHash.Of(Script);
         return new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            [ApprovedScriptCorpus.ScriptPath(sha256, ScriptLanguage.Bash)] = Script,
+            [ApprovedScriptCorpus.ScriptPath(sha256, scriptBaseName, ScriptLanguage.Bash)] = Script,
             [ApprovedScriptCorpus.MetadataPath(sha256)] = ApprovedScriptCorpus.Serialize(
                 new ApprovedScriptMetadataDocument(sha256, "pm:Homebrew", ScriptLanguage.Bash, "Firefox", "firefox")),
             [ApprovedScriptCorpus.SignaturePath(sha256, Fingerprint)] = ApprovedScriptCorpus.Serialize(

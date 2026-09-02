@@ -13,10 +13,17 @@ namespace Kintsugi.Application.ScriptApproval;
 /// <remarks>
 /// The layout is content-addressed:
 /// <code>
-/// approved-scripts/&lt;sha256&gt;/script.sh | script.ps1
+/// approved-scripts/&lt;sha256&gt;/&lt;name&gt;.sh | &lt;name&gt;.ps1
 /// approved-scripts/&lt;sha256&gt;/metadata.json
 /// approved-scripts/&lt;sha256&gt;/signatures/&lt;fingerprint&gt;.json
 /// </code>
+/// The script's filename says what it is — <c>homebrew.sh</c> for the script every Homebrew-managed
+/// application shares, <c>com.nextcloud.desktopclient.sh</c> for one application's own — because a
+/// reviewer browsing this repository sees filenames long before they open anything, and a directory
+/// of identically-named <c>script.sh</c> files under hex names tells them nothing. See
+/// <see cref="ApprovedScriptIdentity"/> for how the name is derived. It is not load-bearing: the
+/// reader finds the script by extension (<see cref="ScriptPathsIn"/>) and confirms it by hash, so
+/// entries written under the original fixed <c>script.sh</c> name still read correctly.
 /// Content-addressed because a package-manager script is byte-identical for every application that
 /// manager handles (see each <c>*UpgradeScript.Build</c>, and <c>FindExistingSignatureForScriptAsync</c>
 /// for the same idea applied locally): one review covers all of them, so keying by application would
@@ -50,8 +57,39 @@ public static class ApprovedScriptCorpus
 
     public static string MetadataPath(string sha256) => $"{ContentDirectory(sha256)}/{MetadataFileName}";
 
-    public static string ScriptPath(string sha256, ScriptLanguage language) =>
-        $"{ContentDirectory(sha256)}/script{language.FileExtension()}";
+    /// <summary>The historical filename, from before an entry was named after what it is. Still
+    /// written to rather than replaced when an existing entry already carries it — renaming a file
+    /// on the trust root would be a delete plus a create on content that is already reviewed and
+    /// merged, which is churn for a cosmetic gain.</summary>
+    public const string LegacyScriptBaseName = "script";
+
+    public static string ScriptPath(string sha256, string baseName, ScriptLanguage language) =>
+        $"{ContentDirectory(sha256)}/{baseName}{language.FileExtension()}";
+
+    /// <summary>
+    /// Every path in <paramref name="paths"/> that could be this entry's script: directly inside the
+    /// content directory (so nothing under <see cref="SignaturesDirectory"/>) and carrying
+    /// <paramref name="language"/>'s extension. Ordered so a reader's choice — and any complaint it
+    /// makes — is stable.
+    /// </summary>
+    /// <remarks>
+    /// Discovered rather than computed, because the filename is descriptive and so cannot be
+    /// predicted from the hash alone. More than one candidate is not an error: an entry approved
+    /// before the name became descriptive carries <c>script.sh</c>, and a later approval of the same
+    /// bytes may sit beside it. The caller picks by hash, which is the only test that matters — the
+    /// directory name is the content's own SHA-256.
+    /// </remarks>
+    public static IEnumerable<string> ScriptPathsIn(IEnumerable<string> paths, string sha256, ScriptLanguage language)
+    {
+        var prefix = ContentDirectory(sha256) + "/";
+        var extension = language.FileExtension();
+
+        return paths
+            .Where(path => path.StartsWith(prefix, StringComparison.Ordinal)
+                && path.EndsWith(extension, StringComparison.Ordinal)
+                && !path.AsSpan(prefix.Length).Contains('/'))
+            .OrderBy(path => path, StringComparer.Ordinal);
+    }
 
     /// <summary>The signature file for one signer. <paramref name="fingerprint"/> arrives in the
     /// canonical <c>sha256:&lt;hex&gt;</c> form; the <c>sha256:</c> prefix is dropped for the
@@ -75,11 +113,18 @@ public static class ApprovedScriptCorpus
 /// <param name="Language">Bash or PowerShell. Also derivable from the bucket via
 /// <c>ScriptLanguages.For</c>, and an importer checks it matches — a bash script claiming a Windows
 /// bucket is the exact shape of the bug the <c>generic</c> bucket used to allow.</param>
-/// <param name="ApplicationName">The application the signer was reviewing. Informational for a
-/// content-addressed entry, but it is what the Upgrade Scripts page offers to adopt.</param>
+/// <param name="ApplicationName">What this script is for — one application's name for an
+/// AI-researched script, or the manager for a package manager's shared one, which is not any single
+/// application's (see <see cref="ApprovedScriptIdentity"/>). Informational for a content-addressed
+/// entry, but it is also what the Upgrade Scripts page matches an adoption candidate by, so a
+/// package-manager entry matching no local row's name is what makes those entries bless-only —
+/// correctly, since this server generates those exact bytes itself and the content-match bless in
+/// <c>ImportApprovedScriptsFromSourceCommandHandler</c> already covers them.</param>
 /// <param name="ApplicationIdentifier">The identifier the signing server had recorded, if any —
 /// carried across because a Script row only patches at all when one is present (see
-/// <c>is_patchable</c>).</param>
+/// <c>is_patchable</c>). Null for a package-manager entry: the identifier of whichever application
+/// the reviewer happened to be looking at says nothing about a script shared by all of them, and
+/// <c>UpgradePath.AdoptApprovedScript</c> would otherwise copy it onto an unrelated row.</param>
 public record ApprovedScriptMetadataDocument(
     string Sha256,
     string PlatformBucket,

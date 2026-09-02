@@ -215,13 +215,31 @@ signature (`GitHubScriptApprovalPublisher`). The pull request is a **record and 
 channel, not a gate**: it is raised after `SaveChangesAsync`, and every failure mode is reported
 rather than thrown, because a GitHub outage must not stop a reviewed script from patching the fleet
 it was reviewed for. The layout is content-addressed —
-`approved-scripts/<sha256>/{script.sh|script.ps1, metadata.json, signatures/<fingerprint>.json}` —
+`approved-scripts/<sha256>/{<name>.sh|<name>.ps1, metadata.json, signatures/<fingerprint>.json}` —
 because a package-manager script is byte-identical for every application that manager handles, so
 one review covers all of them (the same reason `FindExistingSignatureForScriptAsync` matches on
 content), and because one signature *file per signer* means two servers approving the same bytes
 never touch the same path and so never conflict. `.gitattributes` exempts `approved-scripts/**` from
 `text=auto eol=lf`: normalizing a PowerShell script's CRLF would change its hash and invalidate
 every signature over it.
+
+**An entry is published as what it is, not as the row somebody happened to sign.** The row a human
+presses "Sign Script" on is one application's; a package-manager script is every application's. So
+`ApprovedScriptIdentity` decides what the metadata, the commit message, the pull request title and
+the filename say: a package-manager entry is `homebrew.sh` / `homebrew-self-update.sh` /
+`winget.ps1` and is labelled for the manager (never *as* the manager — `Homebrew` would match the
+manager's own self-update row in the adoption offer), with `ApplicationIdentifier` dropped because
+whichever application the reviewer was looking at says nothing about a script all of them share; an
+AI-researched entry keeps the application's own name and is filed under its identifier
+(`com.nextcloud.desktopclient.sh`, `Mozilla.Firefox.ps1`). Which of a manager's two scripts an entry
+holds is decided by comparing bytes against `BuildScript(true|false)`, not by trusting the row.
+The filename is **not** load-bearing: `ApprovedScriptCorpus.ScriptPathsIn` finds the script by
+extension and confirms it by hash, which is what keeps entries written under the original fixed
+`script.sh` readable, and why an existing `script.sh` is written to again rather than renamed. One
+consequence to hold onto: a generic package-manager entry matches no local row's name, so those
+entries are **bless-only** — correctly, since this server generates those exact bytes itself and
+`ImportApprovedScriptsFromSourceCommandHandler`'s content-match bless already covers them. Adoption
+is for AI-researched scripts, where matching on name is exactly right.
 
 **A remote signature is never served to an agent — the importing server re-signs.** Each agent pins
 exactly one signing key at enrollment: its own server's. So the Upgrade Scripts page's "Refresh
@@ -380,6 +398,15 @@ Every `*UpgradeScript.Build` must return **byte-identical content for every appl
 name and id are read from `--appName`/`--appId` at runtime, never baked in. That is what lets one
 human "Sign Script" review cover every application a manager handles, via
 `FindExistingSignatureForScriptAsync`.
+
+**Editing one of those bodies re-opens every review of it, and that is the safe outcome.**
+`RegisterApplicationsCommandHandler` rewrites `Script` from the builder on every routine inventory
+report, so `UpgradePath.Apply` drops `ScriptSignature` whenever the content it is replacing actually
+differs (same for `Command`/`CommandSignature`). Without that, an edited body would leave every
+already-signed row carrying a signature over the *previous* text: "signed" on the Upgrade Scripts
+page, refused by every agent, and nothing on screen to say why that manager's applications all
+stopped patching. So expect a script-body change to need **one** human re-sign per (manager,
+isSelfUpdate) case — every other row inherits it through `FindExistingSignatureForScriptAsync`.
 
 ## The three agents
 
