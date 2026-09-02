@@ -42,19 +42,31 @@ public static class HomebrewUpgradeScript
               }
               """
             : """
+              # Both URLs are case-sensitive, and $APP_NAME is not always the lowercase token brew
+              # knows the package by: PrepareUpgradePathScanQueryHandler groups an application's
+              # variants case-insensitively, so a row whose name settled on a display-cased
+              # /Applications bundle ("Nextcloud") rather than on `brew list`'s output ("nextcloud")
+              # 404s on every URL below and leaves LatestVersion null — which makes updateAvailable
+              # false, which makes the agent's is_patchable false, so the application silently never
+              # patches. `brew` itself downcases its argument, so only this lookup is affected.
+              # Tried as given first: a row already named by its token must not be transformed.
               latest_version() {
-                local response
-                response=$(curl -fsSL "https://formulae.brew.sh/api/formula/${APP_NAME}.json" 2>/dev/null) || \
-                  response=$(curl -fsSL "https://formulae.brew.sh/api/cask/${APP_NAME}.json" 2>/dev/null) || return 1
+                local candidate response version
+                for candidate in "$APP_NAME" "$(printf '%s' "$APP_NAME" | tr '[:upper:]' '[:lower:]')"; do
+                  response=$(curl -fsSL "https://formulae.brew.sh/api/formula/${candidate}.json" 2>/dev/null) || \
+                    response=$(curl -fsSL "https://formulae.brew.sh/api/cask/${candidate}.json" 2>/dev/null) || continue
 
-                local version
-                version=$(printf '%s' "$response" | grep -o '"stable":"[^"]*"' | head -1 | sed -E 's/.*:"([^"]*)"/\1/')
-                if [ -z "$version" ]; then
-                  version=$(printf '%s' "$response" | grep -o '"version":"[^"]*"' | head -1 | sed -E 's/.*:"([^"]*)"/\1/')
-                fi
+                  version=$(printf '%s' "$response" | grep -o '"stable":"[^"]*"' | head -1 | sed -E 's/.*:"([^"]*)"/\1/')
+                  if [ -z "$version" ]; then
+                    version=$(printf '%s' "$response" | grep -o '"version":"[^"]*"' | head -1 | sed -E 's/.*:"([^"]*)"/\1/')
+                  fi
 
-                [ -n "$version" ] || return 1
-                printf '%s' "$version"
+                  [ -n "$version" ] || continue
+                  printf '%s' "$version"
+                  return 0
+                done
+
+                return 1
               }
               """;
 
