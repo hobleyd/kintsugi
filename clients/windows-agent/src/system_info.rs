@@ -48,8 +48,11 @@ pub fn hostname() -> Result<String> {
 ///
 /// Deliberately identical to the Linux agent's `PLACEHOLDER_SERIALS`: both agents read the same
 /// SMBIOS field and inherit the same junk from the same board vendors, so a string worth screening
-/// on one is worth screening on the other. (Linux lists `""` and `"1"` as well; the length floor in
-/// [`is_usable_serial_number`] already rejects those.)
+/// on one is worth screening on the other. Kept identical rather than trimmed, even though the
+/// length floor in [`is_usable_serial_number`] makes `"0"`, `"na"`, `"n/a"` and `"oem"` unreachable
+/// here (and covers Linux's `""` and `"1"`, which is why those two are absent) — the floor is the
+/// kind of thing that gets relaxed later, and a list that has to be re-derived from another
+/// platform's is how the two drift apart.
 const PLACEHOLDER_SERIAL_NUMBERS: &[&str] = &[
     "to be filled by o.e.m.",
     "to be filled by o.e.m",
