@@ -315,6 +315,19 @@ button is a whole-page navigation to `GET /api/auth/challenge`; the provider com
 Google's web-application clients require it at the token endpoint regardless, so a browser exchange
 would have broken a provider the settings screen offers.
 
+**An expired cookie has to be handled centrally, and getting this wrong is a regression the
+migration nearly shipped.** When the UI was Razor Pages, an expired session was answered by an
+unconditional 302 that the operator could not miss. A client that only reads JSON gets a 401 — and
+if each screen renders that as an error string, an expired session looks like "Not signed in."
+printed above a stale table, with the sign-out button hidden because the session the client is
+holding still says signed-in. So `ApiClient` raises `UnauthorizedNotifier` on any 401 and
+`SessionBloc` re-reads `GET /api/session` when it does, which routes to the sign-in screen through
+the same gate a page load would have used. `/api/session` itself is excluded from that
+announcement, or a 401 there would loop; a 401 from it is handled where it lands instead, as a
+session needing sign-in rather than as a broken server — `UnauthorizedApiException` is an
+`ApiException`, so the general clause would otherwise pin the client to the "cannot reach Kintsugi"
+screen whose only action re-reads that same route.
+
 **Browser-driven routes live under `/api/admin/`, and the prefix is load-bearing.** `/api/applications`
 and `/api/patching-policy` are *inside* nginx's exact-match agent regex, so a browser-driven route on
 either path demands a fleet client certificate the browser has not got — and the failure is a 403

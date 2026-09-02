@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:kintsugi_web/core/network/api_client.dart';
 import 'package:kintsugi_web/core/network/api_exception.dart';
+import 'package:kintsugi_web/core/network/unauthorized_notifier.dart';
 
 ApiClient clientReturning(
   Object? body, {
@@ -129,5 +130,43 @@ void main() {
   test('returns null for an empty body, which DELETE answers with', () async {
     final api = ApiClient(httpClient: MockClient((_) async => http.Response('', 204)));
     await expectLater(api.delete('/api/hosts/abc'), completes);
+  });
+
+  group('the 401 announcement', () {
+    test('fires for an ordinary route, so the app can get back to a sign-in screen', () async {
+      final notifier = UnauthorizedNotifier();
+      var announced = 0;
+      notifier.stream.listen((_) => announced++);
+
+      final api = ApiClient(
+        httpClient: MockClient((_) async => http.Response('', 401)),
+        unauthorizedNotifier: notifier,
+      );
+
+      await expectLater(api.getJson('/api/hosts'), throwsA(isA<UnauthorizedApiException>()));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(announced, 1);
+      await notifier.dispose();
+    });
+
+    test('does not fire for /api/session itself', () async {
+      // Announcing one would make the session bloc re-read this same route, which would 401
+      // again, which would announce again.
+      final notifier = UnauthorizedNotifier();
+      var announced = 0;
+      notifier.stream.listen((_) => announced++);
+
+      final api = ApiClient(
+        httpClient: MockClient((_) async => http.Response('', 401)),
+        unauthorizedNotifier: notifier,
+      );
+
+      await expectLater(api.getJson('/api/session'), throwsA(isA<UnauthorizedApiException>()));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(announced, 0);
+      await notifier.dispose();
+    });
   });
 }

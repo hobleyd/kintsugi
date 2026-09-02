@@ -17,6 +17,7 @@ import '../../domain/usecases/settings_usecases.dart';
 import '../../domain/usecases/upgrade_path_usecases.dart';
 import '../../domain/usecases/upgrade_script_usecases.dart';
 import '../network/api_client.dart';
+import '../network/unauthorized_notifier.dart';
 import '../platform/browser_page_navigator.dart';
 import '../platform/page_navigator.dart';
 
@@ -32,7 +33,14 @@ Future<void> configureDependencies() async {
   final preferences = await SharedPreferences.getInstance();
   locator.registerSingleton<SharedPreferences>(preferences);
 
-  locator.registerSingleton<ApiClient>(ApiClient());
+  // Registered before the client that raises on it and the bloc that listens: a 401 from anywhere
+  // in the app has to reach the session bloc, or an expired cookie shows up as an error string on
+  // whichever screen happened to be open. See UnauthorizedNotifier for why that is a regression
+  // worth this much wiring.
+  locator.registerSingleton<UnauthorizedNotifier>(UnauthorizedNotifier());
+  locator.registerSingleton<ApiClient>(
+    ApiClient(unauthorizedNotifier: locator<UnauthorizedNotifier>()),
+  );
   locator.registerSingleton<PageNavigator>(const BrowserPageNavigator());
 
   final api = locator<ApiClient>();

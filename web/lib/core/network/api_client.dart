@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import 'api_exception.dart';
+import 'unauthorized_notifier.dart';
 
 /// The one place this app talks to the API.
 ///
@@ -14,9 +15,22 @@ import 'api_exception.dart';
 /// [http.Client] rather than a browser client named outright, so this file stays compilable off
 /// the web target and the unit tests can hand it a fake.
 class ApiClient {
-  ApiClient({http.Client? httpClient}) : _http = httpClient ?? http.Client();
+  ApiClient({http.Client? httpClient, UnauthorizedNotifier? unauthorizedNotifier})
+      : _http = httpClient ?? http.Client(),
+        _unauthorized = unauthorizedNotifier;
+
+  /// The route that reports whether this browser is signed in.
+  ///
+  /// Excluded from the 401 announcement below, and it has to be: announcing one would make the
+  /// session bloc re-read this same route, which would 401 again, which would announce again. A
+  /// 401 from here is handled where it lands instead — see `SessionBloc`.
+  static const _sessionPath = '/api/session';
 
   final http.Client _http;
+
+  /// Optional so the unit tests can build a client without one. In the running application the
+  /// composition root always supplies it; see `core/di/injection.dart`.
+  final UnauthorizedNotifier? _unauthorized;
 
   Future<Object?> getJson(String path, {Map<String, String?>? query}) =>
       _send('GET', path, query: query);
@@ -55,6 +69,10 @@ class ApiClient {
     }
 
     if (response.statusCode == 401) {
+      // Announced as well as thrown. The throw is for the caller that asked; the announcement is
+      // what gets the whole application back to a sign-in screen, rather than leaving one screen
+      // showing "Not signed in." as though it were a validation message.
+      if (path != _sessionPath) _unauthorized?.notify();
       throw UnauthorizedApiException(_problemMessage(response) ?? 'Not signed in.');
     }
 

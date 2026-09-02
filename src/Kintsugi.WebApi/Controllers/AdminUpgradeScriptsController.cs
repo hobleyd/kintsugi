@@ -83,14 +83,17 @@ public class AdminUpgradeScriptsController : ControllerBase
     [HttpPost("adopt")]
     [ProducesResponseType(typeof(UpgradeScriptsViewDto), StatusCodes.Status200OK)]
     public async Task<ActionResult<UpgradeScriptsViewDto>> Adopt(
-        [FromBody] AdoptApprovedScriptCommand command, CancellationToken cancellationToken)
+        [FromBody] AdoptApprovedScriptRequest request, CancellationToken cancellationToken)
     {
         AdoptApprovedScriptResultDto? adopted = null;
         string? adoptError = null;
 
         try
         {
-            adopted = await _sender.Send(command, cancellationToken);
+            adopted = await _sender.Send(
+                new AdoptApprovedScriptCommand(
+                    request.ApplicationName, request.Platform, request.Sha256, request.SignerFingerprint),
+                cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -114,14 +117,16 @@ public class AdminUpgradeScriptsController : ControllerBase
     [HttpPost("take-server-script")]
     [ProducesResponseType(typeof(UpgradeScriptsViewDto), StatusCodes.Status200OK)]
     public async Task<ActionResult<UpgradeScriptsViewDto>> TakeServerScript(
-        [FromBody] TakeServerWrittenScriptCommand command, CancellationToken cancellationToken)
+        [FromBody] TakeServerWrittenScriptRequest request, CancellationToken cancellationToken)
     {
         TakeServerWrittenScriptResultDto? took = null;
         string? takeError = null;
 
         try
         {
-            took = await _sender.Send(command, cancellationToken);
+            took = await _sender.Send(
+                new TakeServerWrittenScriptCommand(request.ApplicationName, request.Platform),
+                cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -137,6 +142,25 @@ public class AdminUpgradeScriptsController : ControllerBase
     private Task<UpgradeScriptsOverviewDto> LoadOverviewAsync(CancellationToken cancellationToken) =>
         _sender.Send(new GetUpgradeScriptsOverviewQuery(), cancellationToken);
 }
+
+/// <summary>What to adopt.</summary>
+/// <remarks>
+/// A request record rather than binding <see cref="AdoptApprovedScriptCommand"/> straight from the
+/// body, matching <c>SaveUpgradePathRequest</c> and <c>SignUpgradePathScriptRequest</c>. Binding
+/// the command directly works, and makes its shape a public wire contract — which is the wrong
+/// property for the two routes that decide what every agent in the fleet executes as root. A field
+/// added to the command for an internal reason should not silently become something a caller can
+/// set.
+/// </remarks>
+public record AdoptApprovedScriptRequest(
+    string ApplicationName,
+    string Platform,
+    string Sha256,
+    string SignerFingerprint);
+
+/// <summary>Which row should take the script this build writes. See
+/// <see cref="AdoptApprovedScriptRequest"/> for why this is a request record.</summary>
+public record TakeServerWrittenScriptRequest(string ApplicationName, string Platform);
 
 /// <summary>The screen's state, plus whatever the action that produced this response did.</summary>
 /// <remarks>

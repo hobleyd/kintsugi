@@ -1,7 +1,10 @@
+import 'dart:async';
+
 import 'package:bloc/bloc.dart';
 import 'package:equatable/equatable.dart';
 
 import '../../core/network/api_exception.dart';
+import '../../core/network/unauthorized_notifier.dart';
 import '../../domain/entities/session.dart';
 import '../../domain/usecases/session_usecases.dart';
 
@@ -76,6 +79,7 @@ class SessionBloc extends Bloc<SessionEvent, SessionState> {
     required ReadSession readSession,
     required SignIn signIn,
     required SignOut signOut,
+    UnauthorizedNotifier? unauthorizedNotifier,
   })  : _readSession = readSession,
         _signIn = signIn,
         _signOut = signOut,
@@ -83,15 +87,49 @@ class SessionBloc extends Bloc<SessionEvent, SessionState> {
     on<SessionRequested>(_onRequested);
     on<SignInRequested>(_onSignIn);
     on<SignOutRequested>(_onSignOut);
+
+    // Any route answering 401 means this browser's session has lapsed, wherever in the app that
+    // happened. Re-reading the session is what puts the client back through the same gate a page
+    // load would have gone through, and the router then sends it to the sign-in screen.
+    _unauthorizedSubscription =
+        unauthorizedNotifier?.stream.listen((_) => add(const SessionRequested()));
   }
 
   final ReadSession _readSession;
   final SignIn _signIn;
   final SignOut _signOut;
+  StreamSubscription<void>? _unauthorizedSubscription;
+
+  @override
+  Future<void> close() {
+    _unauthorizedSubscription?.cancel();
+    return super.close();
+  }
 
   Future<void> _onRequested(SessionRequested event, Emitter<SessionState> emit) async {
     try {
       emit(SessionReady(await _readSession()));
+    } on UnauthorizedApiException {
+      // GET /api/session is anonymous by design, so this should not happen — but the clause has to
+      // be here, and ahead of the general one, because UnauthorizedApiException *is* an
+      // ApiException. If someone gates this route (the class-level [RequireAdminSession] precedent
+      // on every other admin controller makes that a plausible mistake), catching it below would
+      // pin the client to the "cannot reach Kintsugi" screen, whose only action re-reads this same
+      // route — a retry loop with no way to sign in.
+      //
+      // A 401 means one thing wherever it comes from: sign in. So it is reported as a session that
+      // needs signing into rather than as a broken server. The provider name is unknown in this
+      // state, so the sign-in screen falls back to its generic wording.
+      emit(const SessionReady(Session(
+        authenticationSettingsSaved: true,
+        authenticationEnabled: true,
+        signedIn: false,
+        userName: null,
+        providerDisplayName: 'single sign-on',
+        canSignIn: true,
+        callbackUrl: '',
+        signOutCallbackUrl: '',
+      )));
     } on ApiException catch (error) {
       emit(SessionUnavailable(error.message));
     }

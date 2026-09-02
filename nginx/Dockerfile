@@ -51,7 +51,11 @@ WORKDIR /src
 # Dependencies first, so an edit to lib/ does not re-resolve the whole pub cache. pubspec.lock is
 # copied with it, so the build uses the resolved versions rather than re-solving the constraints.
 COPY web/pubspec.yaml web/pubspec.lock ./
-RUN flutter pub get
+
+# --enforce-lockfile, so a pubspec.yaml edited without regenerating pubspec.lock fails the build
+# instead of quietly re-solving the constraints. The point of committing the lock file is that the
+# image is built from the versions that were tested; silently resolving something else defeats it.
+RUN flutter pub get --enforce-lockfile
 
 COPY web/ ./
 
