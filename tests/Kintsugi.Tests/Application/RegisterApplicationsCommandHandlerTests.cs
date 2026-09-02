@@ -21,9 +21,9 @@ public class RegisterApplicationsCommandHandlerTests
     private static readonly string HomebrewBucket = PlatformBucket.ForPackageManager(PackageManagerCatalog.Homebrew);
 
     /// <summary>The exact bytes this handler writes for a Homebrew-managed application. Taken from
-    /// the builder rather than stubbed, because whether a stored row's content equals what the
-    /// builder produces is now the thing that decides if its signature survives — see
-    /// UpgradePath.Apply.</summary>
+    /// the builder rather than stubbed, so a test can tell "the row already holds what this build
+    /// writes" apart from "the builder has moved on since this row was reviewed" — which are the two
+    /// cases the signed-row guard exists to separate.</summary>
     private static readonly string HomebrewScript = HomebrewUpgradeScript.Build(isSelfUpdate: false);
 
     private RegisterApplicationsCommandHandler CreateHandler() =>
@@ -218,11 +218,10 @@ public class RegisterApplicationsCommandHandlerTests
     [Fact]
     public async Task Handle_LeavesAnExistingUpgradePathsScriptSignatureUntouched_OnRepeatRegistration()
     {
-        // The deterministic script content never changes for a given package name, so an admin's
-        // prior "Sign Script" review must survive every subsequent routine inventory report —
-        // otherwise a signed, patchable row would flip back to unsigned on the agent's very next
-        // check-in. The row therefore holds the builder's own bytes, which is what a real signed
-        // row holds; anything else would be exercising the content-changed case below instead.
+        // A signed, patchable row must not flip back to unsigned on the agent's very next check-in.
+        // This is the ordinary case — the row holds exactly what this build writes, so there is
+        // nothing to replace even before the signed-row guard is considered; the case where the two
+        // genuinely differ is the test below.
         SetUpHost(_host);
         var existingPath = UpgradePath.Create(
             "firefox", HomebrewBucket, UpgradePathStatus.Found, "127.0", UpgradeMethod.Script,
