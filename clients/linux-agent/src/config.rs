@@ -1,4 +1,6 @@
 use std::ffi::CStr;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -18,6 +20,21 @@ const DEFAULT_API_BASE_URL: &str = "https://kintsugi.example.com:8443";
 const CONFIG_PATH: &str = "/etc/kintsugi-agent/config.toml";
 const CONFIG_DIR: &str = "/etc/kintsugi-agent";
 const STATE_DIR: &str = "/var/lib/kintsugi-agent";
+
+/// The modes `packaging/install.sh` gives the two directories the privilege split rests on, kept
+/// here as well because the installer is not the only thing that has to get them right — see
+/// `repair_directory_modes`, which re-asserts them on every check-in.
+///
+/// `0711` on the state directory is traverse-only: root remains the only one who can *list* it or
+/// read the identity inside it, but any user can walk through it to reach the queue below. It has
+/// to be at least that, because a `0700` parent makes the queue's own `1733` meaningless — the
+/// drop-box is unreachable no matter what mode it carries, and the per-user process cannot write a
+/// request or a heartbeat into it. That shipped in 0.5.0, and the visible symptom was the
+/// misleading "the root service is not installed" warning in `main::run_ui_agent`.
+pub const STATE_DIR_MODE: u32 = 0o711;
+
+/// See `QUEUE_DIR` and `queue`'s module documentation for what each bit of this is carrying.
+pub const QUEUE_DIR_MODE: u32 = 0o1733;
 
 const ENV_OVERRIDE: &str = "PATCHING_AGENT_API_BASE_URL";
 const ENROLLMENT_TOKEN_ENV_OVERRIDE: &str = "PATCHING_AGENT_ENROLLMENT_TOKEN";
@@ -240,6 +257,57 @@ pub fn state_dir() -> PathBuf {
     PathBuf::from(STATE_DIR)
 }
 
+/// Where the root service writes the fleet-wide patching policy it fetched, for the per-user
+/// `--agent` process to read. Machine-wide and world-readable rather than per-user, because that
+/// process has no identity of its own to fetch it with (see `IDENTITY_DIR`) — and the policy is a
+/// schedule, not a secret. This is the Windows agent's arrangement exactly (see its
+/// `config::policy_cache_path`); the macOS per-user process is the odd one out, fetching this
+/// itself because it holds credentials the other two deliberately withhold.
+///
+/// `/api/patching-policy` is inside nginx's client-certificate regex (see `nginx/default.conf`),
+/// so there is no such thing as fetching it without an identity: 0.5.0 tried, and every Linux host
+/// with a graphical session 403'd on it once a minute forever while the root service, having
+/// deferred to that process, patched nothing.
+pub fn policy_cache_path() -> PathBuf {
+    state_dir().join("policy.json")
+}
+
+/// Re-asserts the two directory modes `packaging/install.sh` sets, on every root check-in.
+///
+/// Not belt-and-braces: `self_update` replaces the binary in place and never re-runs the
+/// installer, so a packaging mistake in these modes is otherwise permanent on every host already
+/// in the field — there is no upgrade path that would repair it. Doing it here means the fix
+/// arrives with the next check-in instead of with a manual reinstall of the whole fleet.
+///
+/// Deliberately narrow: only widens the two directories whose modes the privilege handoff depends
+/// on, only when they differ from what is expected, and never touches `IDENTITY_DIR` — that one is
+/// `0700` on purpose and nothing here should be able to loosen it.
+pub fn repair_directory_modes() {
+    for (path, mode) in [(state_dir(), STATE_DIR_MODE), (queue_dir(), QUEUE_DIR_MODE)] {
+        repair_mode(&path, mode);
+    }
+}
+
+/// The testable half of [`repair_directory_modes`] — the paths it works on are absolute and
+/// system-owned, so this takes one directory and the mode it is supposed to have. A directory that
+/// isn't there is left alone: the installer creates both, and creating one here (as the wrong user,
+/// with the wrong owner) would be worse than reporting nothing.
+fn repair_mode(path: &Path, mode: u32) {
+    let Ok(metadata) = fs::metadata(path) else {
+        return;
+    };
+
+    let current = metadata.permissions().mode() & 0o7777;
+    if current == mode {
+        return;
+    }
+
+    match fs::set_permissions(path, fs::Permissions::from_mode(mode)) {
+        Ok(()) => crate::logging::info(&format!("corrected the mode on {} from {current:04o} to {mode:04o}", path.display())),
+        Err(err) => crate::logging::warn(&format!("could not correct the mode on {} (currently {current:04o}): {err}", path.display())),
+    }
+}
+
 /// Where the `--agent` (per-user) process keeps its own state: the cached patching policy and
 /// scheduling state (next due time, delays used). Lives under the invoking user's home directory
 /// since, unlike the root service's state, this process never runs as root.
@@ -287,6 +355,70 @@ fn home_dir_from_passwd() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch_dir(name: &str, mode: u32) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("kintsugi-config-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+
+    fn mode_of(path: &Path) -> u32 {
+        fs::metadata(path).unwrap().permissions().mode() & 0o7777
+    }
+
+    /// The 0.5.0 packaging bug, in the one form that can be tested without root: a state directory
+    /// left at 0700 has no execute bit for others, so nothing can traverse into the queue below it
+    /// whatever mode that queue carries. Widening it is what makes the drop-box reachable again,
+    /// and it has to happen here because `self_update` never re-runs the installer.
+    #[test]
+    fn repair_mode_widens_a_state_directory_left_at_0700_by_an_older_installer() {
+        let path = scratch_dir("repair-0700", 0o700);
+
+        repair_mode(&path, STATE_DIR_MODE);
+
+        assert_eq!(mode_of(&path), 0o711);
+        let _ = fs::remove_dir_all(&path);
+    }
+
+    /// Including the sticky bit — a queue repaired to a plain 0733 would let one user delete
+    /// another's pending request.
+    #[test]
+    fn repair_mode_restores_the_queues_sticky_bit() {
+        let path = scratch_dir("repair-sticky", 0o733);
+
+        repair_mode(&path, QUEUE_DIR_MODE);
+
+        assert_eq!(mode_of(&path), 0o1733);
+        let _ = fs::remove_dir_all(&path);
+    }
+
+    /// The repair pass runs on every check-in, so the overwhelmingly common case is a directory
+    /// that is already right — it must be a no-op there rather than something that logs a
+    /// correction once an hour forever.
+    #[test]
+    fn repair_mode_leaves_a_correct_directory_untouched() {
+        let path = scratch_dir("repair-correct", 0o711);
+
+        repair_mode(&path, STATE_DIR_MODE);
+
+        assert_eq!(mode_of(&path), 0o711);
+        let _ = fs::remove_dir_all(&path);
+    }
+
+    /// Nothing here may create a system directory: it would land with this process's ownership
+    /// rather than the installer's, which for the queue is precisely the situation the drop-box
+    /// design exists to avoid.
+    #[test]
+    fn repair_mode_does_not_create_a_directory_that_is_not_there() {
+        let missing = std::env::temp_dir().join(format!("kintsugi-config-repair-missing-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&missing);
+
+        repair_mode(&missing, STATE_DIR_MODE);
+
+        assert!(!missing.exists());
+    }
 
     #[test]
     fn load_from_falls_back_to_the_built_in_default_when_no_file_exists() {

@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -51,7 +52,8 @@ pub struct PatchingPolicy {
     pub delay_unit: TimeUnit,
     pub max_delay_count: u32,
     /// When this copy was fetched (or last successfully refreshed) — not part of the API
-    /// response; stamped locally so a stale cache can be told apart from a fresh fetch.
+    /// response; stamped locally so anyone reading the cache file (or the per-user process
+    /// reading it after the root service wrote it) can tell how old the answer is.
     fetched_epoch: u64,
 }
 
@@ -83,10 +85,15 @@ fn now_epoch() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
 }
 
-/// Fetches the current patching policy from the backend and writes it to `cache_path`, so a
-/// later run that can't reach the server (network blip, VPN down) can fall back to the last
-/// known policy rather than having none at all — see `load_or_fetch`.
-pub fn fetch(client: &reqwest::blocking::Client, config: &Config, cache_path: &Path) -> Result<PatchingPolicy> {
+/// Fetches the current patching policy from the backend and writes it to `cache_path` — both so a
+/// later run that can't reach the server (network blip, VPN down) can fall back to the last known
+/// policy rather than having none at all, and because that cache file is how the policy reaches
+/// the per-user process at all. See `refresh` and `load_cached`.
+///
+/// Only ever called by the root service: `/api/patching-policy` is inside nginx's
+/// client-certificate regex (see nginx/default.conf), so this needs the mutual-TLS identity, and
+/// on this platform only root holds one.
+fn fetch(client: &reqwest::blocking::Client, config: &Config, cache_path: &Path) -> Result<PatchingPolicy> {
     let response = client
         .get(config.patching_policy_url())
         .send()
@@ -111,6 +118,10 @@ pub fn fetch(client: &reqwest::blocking::Client, config: &Config, cache_path: &P
     }
     if let Ok(json) = serde_json::to_string_pretty(&policy) {
         let _ = fs::write(cache_path, json);
+        // Explicitly, rather than left to root's umask: the per-user process reads this file, and
+        // it is the only thing standing between that process and having no policy at all. It
+        // carries no secret — the whole file is four intervals and a delay count.
+        let _ = fs::set_permissions(cache_path, fs::Permissions::from_mode(0o644));
     }
 
     crate::logging::info(&format!(
@@ -125,17 +136,28 @@ pub fn fetch(client: &reqwest::blocking::Client, config: &Config, cache_path: &P
     Ok(policy)
 }
 
-fn load_cached(cache_path: &Path) -> Option<PatchingPolicy> {
+/// Reads the last policy the root service wrote to `cache_path`. This is the *only* way the
+/// per-user process ever obtains a policy: it has no mutual-TLS identity of its own to fetch one
+/// with (see `config::identity_dir` for why that's deliberate on Linux), so the root service
+/// fetches on every check-in and this side reads what landed. Returns `None` until that first
+/// successful fetch — the caller should keep polling.
+///
+/// Identical in shape to the Windows agent's `policy::load_cached`, and for the identical reason.
+pub fn load_cached(cache_path: &Path) -> Option<PatchingPolicy> {
     let contents = fs::read_to_string(cache_path).ok()?;
     serde_json::from_str(&contents).ok()
 }
 
-/// Fetches a fresh policy, falling back to whatever was last cached on disk if the fetch fails
-/// (e.g. the server is briefly unreachable) — patching scheduling should keep working off the
-/// last known policy rather than stalling entirely over a transient network error. Returns
-/// `Ok(None)` only when there's neither a successful fetch nor any usable cache yet (e.g. first
-/// run with no network) — the caller should keep polling and try again.
-pub fn load_or_fetch(client: &reqwest::blocking::Client, config: &Config, cache_path: &Path) -> Option<PatchingPolicy> {
+/// Fetches a fresh policy and caches it, falling back to whatever was last cached on disk if the
+/// fetch fails (e.g. the server is briefly unreachable) — patching scheduling should keep working
+/// off the last known policy rather than stalling entirely over a transient network error. Called
+/// only from the root service; returns `None` when there's neither a successful fetch nor any
+/// usable cache yet (e.g. first run with no network).
+///
+/// Unconditional on every check-in rather than staleness-gated the way the Windows service's is:
+/// that service is resident and loops far faster than the policy changes, while this one is a
+/// systemd oneshot fired hourly, so "every invocation" already *is* the refresh interval.
+pub fn refresh(client: &reqwest::blocking::Client, config: &Config, cache_path: &Path) -> Option<PatchingPolicy> {
     match fetch(client, config, cache_path) {
         Ok(policy) => Some(policy),
         Err(err) => {
@@ -143,12 +165,6 @@ pub fn load_or_fetch(client: &reqwest::blocking::Client, config: &Config, cache_
             load_cached(cache_path)
         }
     }
-}
-
-/// Whether a cached policy is old enough to be worth refreshing — the schedule loop checks this
-/// on every tick but only actually re-fetches occasionally, since the policy changes rarely.
-pub fn is_stale(policy: &PatchingPolicy, max_age_seconds: u64) -> bool {
-    now_epoch().saturating_sub(policy.fetched_epoch) >= max_age_seconds
 }
 
 #[cfg(test)]

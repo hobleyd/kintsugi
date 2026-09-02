@@ -153,8 +153,13 @@ fn write_request(queue_dir: &Path, kind: RequestKind, body: &str) -> Result<Path
     // so a directory created here would be the user's own — a queue root could not safely act on.
     // Failing loudly instead is the correct outcome.
     if !queue_dir.is_dir() {
+        // "Not reachable", not "not there": this process cannot list the state directory the queue
+        // sits in, so a parent missing its execute bit fails `is_dir` exactly as an absent
+        // directory does. 0.5.0 shipped that parent at 0700 and this message blamed the service
+        // for not being installed on hosts where it was installed and checking in fine — see
+        // `config::repair_directory_modes` and packaging/install.sh.
         anyhow::bail!(
-            "the request queue directory {} does not exist — is the kintsugi-agent service installed?",
+            "the request queue directory {} is not reachable — is the kintsugi-agent service installed, and can this user traverse its parent?",
             queue_dir.display()
         );
     }
@@ -352,29 +357,54 @@ pub fn record_heartbeat(queue_dir: &Path) {
     }
 }
 
-/// Whether any per-user agent has recorded a heartbeat within `max_age`. Read by the root service
-/// only, which is the only thing that can read this directory at all.
-pub fn ui_agent_is_live(queue_dir: &Path, max_age: Duration) -> bool {
-    ui_agent_is_live_at(queue_dir, max_age, SystemTime::now())
+/// A live per-user agent, as the root service sees it: which user's, and how long ago it last
+/// said so. Both are carried purely so the deferral can name them in the log — deferring is the
+/// single decision that can stop a host patching, and 0.5.0 recorded it as one unqualified line
+/// with nothing in it to check against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UiAgentHeartbeat {
+    /// The uid the heartbeat file names, as written (see `record_heartbeat`), or `"?"` if the
+    /// file name doesn't parse — a diagnostic, never something dispatched on.
+    pub uid: String,
+    pub age: Duration,
 }
 
-fn ui_agent_is_live_at(queue_dir: &Path, max_age: Duration, now: SystemTime) -> bool {
-    let Ok(entries) = fs::read_dir(queue_dir) else {
-        return false;
-    };
+/// The freshest per-user heartbeat recorded within `max_age`, if there is one — i.e. "a per-user
+/// agent is alive on this host and is driving the patching schedule". Read by the root service
+/// only, which is the only thing that can read this directory at all.
+///
+/// Returns the heartbeat rather than a bare bool so the caller's log line can name whose session
+/// it is and how stale the claim is; see `main::patch_unattended_if_nobody_is_logged_in`, the only
+/// caller, for why that detail earns its place.
+pub fn live_ui_agent(queue_dir: &Path, max_age: Duration) -> Option<UiAgentHeartbeat> {
+    live_ui_agent_at(queue_dir, max_age, SystemTime::now())
+}
+
+fn live_ui_agent_at(queue_dir: &Path, max_age: Duration, now: SystemTime) -> Option<UiAgentHeartbeat> {
+    let entries = fs::read_dir(queue_dir).ok()?;
 
     entries
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|extension| extension == "heartbeat"))
-        .any(|path| {
-            fs::metadata(&path)
-                .and_then(|metadata| metadata.modified())
-                .ok()
-                // A heartbeat dated in the future counts as live: a clock that has just jumped is
-                // not evidence that the user went away.
-                .is_some_and(|modified| now.duration_since(modified).map(|age| age <= max_age).unwrap_or(true))
+        .filter_map(|path| {
+            let modified = fs::metadata(&path).and_then(|metadata| metadata.modified()).ok()?;
+            // A heartbeat dated in the future counts as live, with an age of zero: a clock that
+            // has just jumped is not evidence that the user went away.
+            let age = now.duration_since(modified).unwrap_or_default();
+            (age <= max_age).then(|| UiAgentHeartbeat { uid: uid_from_heartbeat_name(&path), age })
         })
+        .min_by_key(|heartbeat| heartbeat.age)
+}
+
+/// Pulls the uid back out of a `ui-{uid}.heartbeat` file name — see `record_heartbeat`, which puts
+/// it there. Only ever used to make a log line say *whose* session is holding the schedule.
+fn uid_from_heartbeat_name(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .and_then(|stem| stem.strip_prefix("ui-"))
+        .unwrap_or("?")
+        .to_string()
 }
 
 #[cfg(test)]
@@ -553,7 +583,7 @@ mod tests {
 
         let error = write_request(&missing, RequestKind::Plan, "").unwrap_err();
 
-        assert!(error.to_string().contains("does not exist"), "unexpected error: {error}");
+        assert!(error.to_string().contains("is not reachable"), "unexpected error: {error}");
         assert!(!missing.exists(), "an unprivileged process must not create the queue directory");
     }
 
@@ -571,22 +601,39 @@ mod tests {
     }
 
     #[test]
-    fn ui_agent_is_live_sees_a_fresh_heartbeat() {
+    fn live_ui_agent_sees_a_fresh_heartbeat() {
         let dir = scratch_queue("heartbeat-fresh");
         record_heartbeat(&dir);
 
-        assert!(ui_agent_is_live(&dir, HEARTBEAT_MAX_AGE));
+        assert!(live_ui_agent(&dir, HEARTBEAT_MAX_AGE).is_some());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The root service's deferral is the one decision that can leave a host unpatched, and after
+    /// 0.5.0 it logs *whose* session is holding the schedule. That only helps if the uid it prints
+    /// is this heartbeat's own.
+    #[test]
+    fn live_ui_agent_reports_the_uid_that_recorded_the_heartbeat() {
+        let dir = scratch_queue("heartbeat-uid");
+        record_heartbeat(&dir);
+
+        let heartbeat = live_ui_agent(&dir, HEARTBEAT_MAX_AGE).expect("the heartbeat just written should be live");
+
+        // SAFETY: `getuid` cannot fail and touches nothing — the same call `record_heartbeat` makes.
+        assert_eq!(heartbeat.uid, unsafe { libc::getuid() }.to_string());
+        assert!(heartbeat.age <= Duration::from_secs(60), "a heartbeat written a moment ago should not read as old");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn ui_agent_is_live_ignores_a_heartbeat_that_has_gone_stale() {
+    fn live_ui_agent_ignores_a_heartbeat_that_has_gone_stale() {
         let dir = scratch_queue("heartbeat-stale");
         record_heartbeat(&dir);
 
         assert!(
-            !ui_agent_is_live_at(&dir, HEARTBEAT_MAX_AGE, SystemTime::now() + HEARTBEAT_MAX_AGE + Duration::from_secs(60)),
+            live_ui_agent_at(&dir, HEARTBEAT_MAX_AGE, SystemTime::now() + HEARTBEAT_MAX_AGE + Duration::from_secs(60)).is_none(),
             "a user who logged out hours ago must not keep a server from patching itself"
         );
 
@@ -594,10 +641,10 @@ mod tests {
     }
 
     #[test]
-    fn ui_agent_is_live_is_false_on_a_host_where_nobody_has_ever_logged_in() {
+    fn live_ui_agent_finds_nothing_on_a_host_where_nobody_has_ever_logged_in() {
         let dir = scratch_queue("heartbeat-none");
 
-        assert!(!ui_agent_is_live(&dir, HEARTBEAT_MAX_AGE));
+        assert!(live_ui_agent(&dir, HEARTBEAT_MAX_AGE).is_none());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -614,7 +661,7 @@ mod tests {
         assert_eq!(handler.plans_requested, 0, "a heartbeat should not be dispatched as a request");
         assert!(handler.patched.is_empty());
         assert_eq!(handler.os_updates_installed, 0);
-        assert!(ui_agent_is_live(&dir, HEARTBEAT_MAX_AGE), "and it should still be there afterwards");
+        assert!(live_ui_agent(&dir, HEARTBEAT_MAX_AGE).is_some(), "and it should still be there afterwards");
 
         let _ = fs::remove_dir_all(&dir);
     }

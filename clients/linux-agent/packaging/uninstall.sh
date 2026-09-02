@@ -48,8 +48,9 @@ systemctl daemon-reload
 
 echo "Removed the systemd units and binary."
 echo "Config left in place at:          $CONFIG_DIR"
-echo "State (identity, queue, logs) at: $STATE_DIR"
+echo "State (identity, queue, logs,"
+echo "  policy cache) at:               $STATE_DIR"
 echo "  Remove both manually if this host is not coming back — note that deleting the identity"
 echo "  means the host has to re-enroll with a current token if it ever is."
-echo "Per-user schedule/policy state left in place under each user's"
+echo "Per-user schedule state left in place under each user's"
 echo "  ~/.local/state/kintsugi-agent (remove manually if no longer needed)."
