@@ -306,7 +306,10 @@ fn app_bundle_name_in_applications(path: &str) -> Option<String> {
 /// but plenty of casks (e.g. Adobe Acrobat Reader) install via a `.pkg`
 /// installer instead and have no `app` artifact at all — their `uninstall`
 /// artifact's `delete` paths are the only place the resulting
-/// `/Applications/*.app` bundle name shows up, so that's checked too.
+/// `/Applications/*.app` bundle name shows up, so that's checked too. Both
+/// stanzas can be a bare string or an array; see [`strings_in`] for why
+/// reading only the array form is a security-relevant bug rather than a
+/// missed optimization.
 fn brew_installed_info(brew: &Path, run_as: Option<&str>) -> BrewInstalledInfo {
     let mut command = brew_command(brew, run_as);
     command.args(["info", "--json=v2", "--installed"]);
@@ -331,13 +334,45 @@ fn brew_installed_info(brew: &Path, run_as: Option<&str>) -> BrewInstalledInfo {
         }
     };
 
-    let json: serde_json::Value = match serde_json::from_slice(&output.stdout) {
-        Ok(json) => json,
+    match parse_brew_installed_info(&String::from_utf8_lossy(&output.stdout)) {
+        Ok(info) => info,
         Err(err) => {
             crate::logging::warn(&format!("failed to parse `brew info --json=v2 --installed` output: {err}"));
-            return empty();
+            empty()
         }
-    };
+    }
+}
+
+/// Every string under `value`, which Homebrew writes as a bare string when a
+/// cask's stanza names one item and as an array when it names several.
+///
+/// Reading only the array form silently drops the single-item case, and for
+/// `uninstall`'s `delete` that is not cosmetic: the dropped bundle name never
+/// reaches `cask_app_bundle_names`, so [`scan_applications_folder`] stops
+/// recognizing the bundle as cask-installed and reports it a *second* time as
+/// a standalone application — this time carrying a `CFBundleIdentifier`. That
+/// identifier is exactly what the backend's `is_patchable` requires before it
+/// will run a `Script` row (see `UpgradePathRepository.GetStatusesAsync`), so
+/// a Homebrew row that the per-user process cannot patch at all becomes
+/// eligible for patching. It shipped that way: `nextcloud` declares
+/// `delete: "/Applications/Nextcloud.app"` as a single string, so every patch
+/// cycle quit Nextcloud, failed inside `brew` (a `pkg` cask needs root, which
+/// this process has no way to obtain — see `upgrade::patch_one`), and left the
+/// client stopped, forever.
+fn strings_in(value: &serde_json::Value) -> Vec<&str> {
+    match value {
+        serde_json::Value::String(text) => vec![text.as_str()],
+        serde_json::Value::Array(items) => items.iter().filter_map(|item| item.as_str()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The pure half of [`brew_installed_info`], split out so it can be exercised
+/// against captured `brew info --json=v2 --installed` output rather than only
+/// via a real (macOS-and-Homebrew-only) subprocess call — the same shape every
+/// other output parser in this agent uses.
+fn parse_brew_installed_info(json_text: &str) -> Result<BrewInstalledInfo> {
+    let json: serde_json::Value = serde_json::from_str(json_text).context("not valid JSON")?;
 
     let mut latest_versions = HashMap::new();
 
@@ -355,26 +390,19 @@ fn brew_installed_info(brew: &Path, run_as: Option<&str>) -> BrewInstalledInfo {
         }
 
         for artifact in cask["artifacts"].as_array().into_iter().flatten() {
-            let apps = artifact["app"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|name| name.as_str().map(str::to_string));
-            cask_app_bundle_names.extend(apps);
+            cask_app_bundle_names.extend(strings_in(&artifact["app"]).into_iter().map(str::to_string));
 
             let deleted_apps = artifact["uninstall"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|entry| entry["delete"].as_array())
-                .flatten()
-                .filter_map(|path| path.as_str())
+                .flat_map(|entry| strings_in(&entry["delete"]))
                 .filter_map(app_bundle_name_in_applications);
             cask_app_bundle_names.extend(deleted_apps);
         }
     }
 
-    BrewInstalledInfo { latest_versions, cask_app_bundle_names }
+    Ok(BrewInstalledInfo { latest_versions, cask_app_bundle_names })
 }
 
 /// Homebrew installs to a fixed prefix depending on CPU architecture
@@ -491,4 +519,137 @@ fn list_brew_packages(brew: &Path, run_as: Option<&str>, kind: &str, latest_vers
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Trimmed from real `brew info --json=v2 --installed` output on a Mac
+    /// running the fleet's own agent. Keeps the three shapes that matter: a
+    /// formula (for `latest_versions`), an `app` cask, and a `pkg` cask whose
+    /// `uninstall` stanza names a single path — which Homebrew writes as a
+    /// bare string rather than a one-element array.
+    const BREW_INFO_JSON: &str = r#"{
+      "formulae": [
+        { "name": "jq", "versions": { "stable": "1.7.1" } }
+      ],
+      "casks": [
+        {
+          "token": "rectangle",
+          "version": "1.100",
+          "artifacts": [
+            { "uninstall": [ { "quit": "com.knollsoft.Rectangle", "login_item": "Rectangle" } ] },
+            { "app": [ "Rectangle.app" ], "target": "/Applications/Rectangle.app" }
+          ]
+        },
+        {
+          "token": "microsoft-teams",
+          "version": "26.1.0",
+          "artifacts": [
+            {
+              "uninstall": [
+                {
+                  "delete": [
+                    "/Applications/Microsoft Teams.app",
+                    "/Library/Preferences/com.microsoft.teams.plist"
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "token": "nextcloud",
+          "version": "34.0.3",
+          "artifacts": [
+            {
+              "uninstall": [
+                {
+                  "launchctl": "com.nextcloud.desktopclient",
+                  "quit": "com.nextcloud.desktopclient",
+                  "pkgutil": "com.nextcloud.desktopclient",
+                  "delete": "/Applications/Nextcloud.app"
+                }
+              ]
+            },
+            { "pkg": [ "Nextcloud-34.0.3.pkg" ] }
+          ]
+        }
+      ]
+    }"#;
+
+    #[test]
+    fn parse_brew_installed_info_reads_latest_versions_for_formulae_and_casks() {
+        let info = parse_brew_installed_info(BREW_INFO_JSON).expect("should parse");
+
+        assert_eq!(info.latest_versions.get("jq").map(String::as_str), Some("1.7.1"));
+        assert_eq!(info.latest_versions.get("nextcloud").map(String::as_str), Some("34.0.3"));
+    }
+
+    #[test]
+    fn parse_brew_installed_info_takes_bundle_names_from_the_app_stanza() {
+        let info = parse_brew_installed_info(BREW_INFO_JSON).expect("should parse");
+
+        assert!(info.cask_app_bundle_names.contains("Rectangle.app"));
+    }
+
+    #[test]
+    fn parse_brew_installed_info_takes_bundle_names_from_a_multi_path_uninstall_delete() {
+        let info = parse_brew_installed_info(BREW_INFO_JSON).expect("should parse");
+
+        // A `pkg` cask has no `app` stanza at all, so its `uninstall`'s
+        // `delete` paths are the only place the bundle name appears.
+        assert!(info.cask_app_bundle_names.contains("Microsoft Teams.app"));
+    }
+
+    #[test]
+    fn parse_brew_installed_info_takes_bundle_names_from_a_single_path_uninstall_delete() {
+        let info = parse_brew_installed_info(BREW_INFO_JSON).expect("should parse");
+
+        // The regression this test exists for: `nextcloud` names one path, so
+        // Homebrew writes `delete` as a bare string. Reading only the array
+        // form dropped it, `/Applications/Nextcloud.app` escaped the dedup in
+        // `scan_applications_folder`, and it was reported a second time as a
+        // standalone application carrying a bundle identifier — which is what
+        // made an unpatchable Homebrew row look patchable. See `strings_in`.
+        assert!(
+            info.cask_app_bundle_names.contains("Nextcloud.app"),
+            "single-path `delete` was dropped: {:?}",
+            info.cask_app_bundle_names
+        );
+    }
+
+    #[test]
+    fn parse_brew_installed_info_ignores_paths_outside_applications() {
+        let info = parse_brew_installed_info(BREW_INFO_JSON).expect("should parse");
+
+        // `/Library/Preferences/com.microsoft.teams.plist` sits beside a real
+        // bundle path in the same `delete` array and must not be mistaken for
+        // one — nor must the `pkg`/`binary` stanzas contribute anything.
+        assert_eq!(
+            info.cask_app_bundle_names,
+            ["Rectangle.app", "Microsoft Teams.app", "Nextcloud.app"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<HashSet<String>>()
+        );
+    }
+
+    #[test]
+    fn parse_brew_installed_info_reports_an_error_for_unparseable_output() {
+        // `brew_installed_info` turns this into an empty (not partial) result,
+        // so a Homebrew whose JSON shape changes degrades to "no enrichment"
+        // rather than to a wrong dedup set.
+        assert!(parse_brew_installed_info("not json at all").is_err());
+    }
+
+    #[test]
+    fn app_bundle_name_in_applications_accepts_only_top_level_bundles() {
+        assert_eq!(app_bundle_name_in_applications("/Applications/Nextcloud.app").as_deref(), Some("Nextcloud.app"));
+        assert_eq!(app_bundle_name_in_applications("/Applications/Nextcloud.app/Contents/MacOS/nextcloudcmd"), None);
+        assert_eq!(app_bundle_name_in_applications("/Applications/Utilities/Foo.app"), None);
+        assert_eq!(app_bundle_name_in_applications("/Applications/DisplayLink"), None);
+        assert_eq!(app_bundle_name_in_applications("/Library/Preferences/com.example.plist"), None);
+    }
 }
