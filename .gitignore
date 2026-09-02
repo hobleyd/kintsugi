@@ -11,6 +11,15 @@ target/
 # rebuild with cargo-zigbuild rather than committing them.
 dist/
 
+# Flutter/Dart build output and tool state for the admin UI in web/. build/ holds the compiled
+# bundle nginx serves; it is produced by the Flutter stage of nginx/Dockerfile on every
+# `docker compose build`, so committing it would only ever be a stale copy of that.
+web/build/
+web/.dart_tool/
+web/.flutter-plugins
+web/.flutter-plugins-dependencies
+web/*.iml
+
 # ---- IDE / editor ----
 .vs/
 .vscode/

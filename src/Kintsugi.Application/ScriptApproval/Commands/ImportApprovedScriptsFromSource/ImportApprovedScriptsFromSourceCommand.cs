@@ -7,10 +7,12 @@ namespace Kintsugi.Application.ScriptApproval.Commands.ImportApprovedScriptsFrom
 /// stores every well-formed approval entry, and signs any local upgrade path whose script is already
 /// byte-for-byte one of them.
 ///
-/// Backs the Upgrade Scripts page's "Refresh scripts" action. Like the Clients page's refresh, this is
-/// a Razor Page handler rather than an API route — see <c>ClientsModel.OnPostRefreshAsync</c> for the
-/// reasoning, which applies with more force here: an <c>/api</c> route would be exempt from the
-/// sign-in gate, and this one changes what agents execute.
+/// Backs the Upgrade Scripts screen's "Refresh scripts" action, via
+/// <c>AdminUpgradeScriptsController.Refresh</c>. This used to be a Razor Page handler specifically so
+/// that it would <em>not</em> be an <c>/api</c> route, since <c>Program.cs</c> exempts all of
+/// <c>/api</c> from the sign-in gate and this action changes what agents execute. With the admin UI
+/// now a client rather than a server-rendered page there is no page handler to use, so what carries
+/// that reasoning is <c>[RequireAdminSession]</c> on the controller — and nothing else does.
 /// </summary>
 public record ImportApprovedScriptsFromSourceCommand : IRequest<ImportApprovedScriptsResultDto>;
 

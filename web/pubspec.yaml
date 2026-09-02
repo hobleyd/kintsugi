@@ -1,0 +1,54 @@
+name: kintsugi_web
+description: >-
+  Kintsugi's administration UI. A Flutter web application served as static files by the nginx
+  container, talking to the ASP.NET Core API over the same origin — see nginx/default.conf for the
+  routing and src/Kintsugi.WebApi/Controllers/SessionController.cs for how sign-in works.
+publish_to: 'none'
+version: 1.0.0
+
+environment:
+  sdk: ^3.13.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # State management. Every screen's transitions are driven by a BLoC so a change lands in the
+  # widget tree by emitting a state, not by reloading the document — which is the whole reason
+  # this app replaced the server-rendered pages.
+  flutter_bloc: ^9.1.1
+  bloc: ^9.0.1
+  equatable: ^2.0.7
+
+  # Service location. The composition root (lib/core/di/injection.dart) is the only place that
+  # names a concrete implementation, so presentation depends on abstractions and nothing else does
+  # the wiring.
+  get_it: ^8.2.0
+
+  # Declarative routing with real URLs, so a deep link like /applications?status=update-available
+  # still works — the Hosts screen's "N app updates" badge relies on it, as it did before.
+  go_router: ^16.2.4
+
+  http: ^1.5.0
+
+  # The same three families the Razor layout pulled from the Google Fonts CDN (Orbitron, Rajdhani,
+  # Share Tech Mono). Fetched at runtime exactly as that <link> was, and falls back to a system
+  # font when unreachable — so an air-gapped deployment degrades the same way it already did.
+  google_fonts: ^6.3.2
+
+  # Theme choice, persisted to the browser's localStorage. See web/index.html, which reads the same
+  # key before Flutter boots so the loading screen does not flash the wrong background.
+  shared_preferences: ^2.5.3
+
+  intl: ^0.20.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  bloc_test: ^10.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/img/
