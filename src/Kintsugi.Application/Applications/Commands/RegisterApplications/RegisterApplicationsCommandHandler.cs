@@ -93,14 +93,28 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
     /// <c>is_patchable</c>, which only trusts a signed <see cref="UpgradeMethod.Script"/> row).
     /// An entry naming a manager this system doesn't recognize is left entirely alone here: there
     /// is no script to write for it, and the scan is what resolves it to NotFound with a note.
-    /// Leaves any existing <see cref="UpgradePath.ScriptSignature"/> untouched when one's already
-    /// set, since the script content for a given (manager, isSelfUpdate) case never changes — an
-    /// admin's prior "Sign Script" review shouldn't be silently invalidated by the next routine
-    /// inventory report. A row with no signature yet (brand new, or never reviewed) inherits one
-    /// automatically the moment some other row's identical script content has already been signed —
-    /// a human still has to review and sign the very first script per manager, but every other
-    /// application sharing that exact content never needs its own separate review.
+    /// A row with no signature yet (brand new, or never reviewed) inherits one automatically the
+    /// moment some other row's identical script content has already been signed — a human still has
+    /// to review and sign the very first script per manager, but every other application sharing
+    /// that exact content never needs its own separate review.
     /// </summary>
+    /// <remarks>
+    /// A row that already carries a <see cref="UpgradePath.ScriptSignature"/> keeps its script
+    /// exactly as reviewed; only its <see cref="UpgradePath.LatestVersion"/> moves. This used to
+    /// rewrite <see cref="UpgradePath.Script"/> from the builder unconditionally, under the belief
+    /// that "the script content for a given (manager, isSelfUpdate) case never changes". It does
+    /// change — every time one of the <c>*UpgradeScript.Build</c> bodies is edited — so what that
+    /// actually meant was that a routine inventory report could swap the content of a signed row,
+    /// content the fleet's agents may be executing right now, on the strength of a deployment
+    /// nobody was watching. It is the same thing <see cref="UpgradePath.AdoptApprovedScript"/>
+    /// refuses to do, for the same reason, and a background report has less business doing it than
+    /// a human pressing Adopt does.
+    ///
+    /// So a signed script survives a server upgrade, and taking a newer server-written one is a
+    /// deliberate act: the Upgrade Scripts page shows which rows this build would now write
+    /// differently (<see cref="PackageManagerCatalog.CurrentScriptFor"/>) and
+    /// <c>TakeServerWrittenScriptCommand</c> replaces one, unsigned, for review.
+    /// </remarks>
     private async Task UpsertPackageManagerUpgradePathsAsync(IReadOnlyList<ApplicationEntry> applications, CancellationToken cancellationToken)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -136,12 +150,18 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
                 _upgradePathRepository.Remove(legacyRow);
             }
 
-            var script = packageManager.BuildScript(false);
             // winget and Chocolatey address a package by its id; Homebrew has none, so the package
             // name stands in. Either way this is only ever handed straight back to the script as
             // --appId — see the *UpgradeScript builders.
             var applicationIdentifier = entry.ApplicationIdentifier ?? entry.Name;
             var existing = await _upgradePathRepository.GetAsync(entry.Name, platform, cancellationToken);
+
+            // A reviewed script is left exactly as it was reviewed — see the remarks above. Only a
+            // row nobody has signed yet is (re)written from the builder, which is what carries a
+            // fixed script forward to rows that are still waiting for their first review.
+            var script = existing?.ScriptSignature is not null
+                ? existing.Script
+                : packageManager.BuildScript(false);
 
             if (existing is null)
             {

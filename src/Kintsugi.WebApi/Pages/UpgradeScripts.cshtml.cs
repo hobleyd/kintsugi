@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc.RazorPages;
 using Kintsugi.Application.ScriptApproval.Commands.AdoptApprovedScript;
 using Kintsugi.Application.ScriptApproval.Commands.ImportApprovedScriptsFromSource;
 using Kintsugi.Application.ScriptApproval.Queries.GetApprovedScripts;
+using Kintsugi.Application.UpgradePaths.Commands.TakeServerWrittenScript;
 
 namespace Kintsugi.WebApi.Pages;
 
@@ -26,6 +27,10 @@ public class UpgradeScriptsModel : PageModel
     public string? AdoptError { get; private set; }
 
     public AdoptApprovedScriptResultDto? Adopted { get; private set; }
+
+    public string? TakeServerScriptError { get; private set; }
+
+    public TakeServerWrittenScriptResultDto? TookServerScript { get; private set; }
 
     public async Task OnGetAsync(CancellationToken cancellationToken)
     {
@@ -74,6 +79,30 @@ public class UpgradeScriptsModel : PageModel
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             AdoptError = ex.Message;
+        }
+
+        await LoadAsync(cancellationToken);
+        return Page();
+    }
+
+    /// <summary>
+    /// Puts the script this build writes for one package-manager row onto it, unsigned.
+    ///
+    /// Per-row and human-pressed for the reason <c>RegisterApplicationsCommandHandler</c> no longer
+    /// does it in the background: replacing the content of a signed row is replacing what the
+    /// fleet's agents execute, and that is a decision, not a side effect of a deployment.
+    /// </summary>
+    public async Task<IActionResult> OnPostTakeServerScriptAsync(
+        string applicationName, string platform, CancellationToken cancellationToken)
+    {
+        try
+        {
+            TookServerScript = await _sender.Send(
+                new TakeServerWrittenScriptCommand(applicationName, platform), cancellationToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            TakeServerScriptError = ex.Message;
         }
 
         await LoadAsync(cancellationToken);

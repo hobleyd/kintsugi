@@ -241,19 +241,44 @@ public class RegisterApplicationsCommandHandlerTests
     }
 
     [Fact]
-    public async Task Handle_WhenTheGeneratedScriptNoLongerMatchesTheStoredOne_DropsTheStaleSignature()
+    public async Task Handle_WhenThisBuildWouldWriteADifferentScript_LeavesASignedRowExactlyAsReviewed()
     {
-        // The other half of the case above, and the one that used to fail silently: this handler
-        // rewrites Script from the builder on every report, so the day HomebrewUpgradeScript.Build's
-        // body is edited, every already-signed row holds a signature over the *previous* text. Kept,
-        // it would read "signed" on the Upgrade Scripts page while every agent refused to run it —
-        // verification is against the new bytes — and nothing on screen would say why the whole
-        // fleet stopped patching Homebrew applications. Dropped, the row reads as awaiting review.
+        // The case that matters when a *UpgradeScript.Build body is edited. This handler used to
+        // rewrite Script from the builder unconditionally, so a deployment would swap the content of
+        // a signed row — content the fleet's agents may be executing right now — with nobody
+        // deciding to. A reviewed script survives a server upgrade; only LatestVersion moves. Taking
+        // the newer one is TakeServerWrittenScriptCommand's job, pressed by a human.
+        const string reviewed = "#!/bin/bash\n# an older revision of the Homebrew script\n";
+        SetUpHost(_host);
+        var existingPath = UpgradePath.Create(
+            "firefox", HomebrewBucket, UpgradePathStatus.Found, "127.0", UpgradeMethod.Script,
+            null, null, null, null, null, reviewed, "firefox");
+        existingPath.SignScript("signed:over-the-reviewed-revision");
+        _upgradePathRepository.Setup(r => r.GetAsync("firefox", HomebrewBucket, It.IsAny<CancellationToken>())).ReturnsAsync(existingPath);
+
+        await CreateHandler().Handle(
+            new RegisterApplicationsCommand("SERIAL-1", new[]
+            {
+                new ApplicationEntry("firefox", "128.0", PackageManager: "Homebrew", AvailableVersion: "129.0"),
+            }),
+            CancellationToken.None);
+
+        Assert.Equal(reviewed, existingPath.Script);
+        Assert.Equal("signed:over-the-reviewed-revision", existingPath.ScriptSignature);
+        // The point of the report is still honoured: the manager's own catalog said 129.0.
+        Assert.Equal("129.0", existingPath.LatestVersion);
+    }
+
+    [Fact]
+    public async Task Handle_WhenAnUnsignedRowHoldsAnOlderScript_WritesTheCurrentOne()
+    {
+        // The other side of it. Nothing is being protected on an unsigned row — no agent will run it
+        // — so a fixed script reaches it without anyone having to ask, and it is still unsigned
+        // afterwards, which is what keeps a human between the new text and the fleet.
         SetUpHost(_host);
         var existingPath = UpgradePath.Create(
             "firefox", HomebrewBucket, UpgradePathStatus.Found, "127.0", UpgradeMethod.Script,
             null, null, null, null, null, "#!/bin/bash\n# an older revision of the Homebrew script\n", "firefox");
-        existingPath.SignScript("signed:over-the-older-revision");
         _upgradePathRepository.Setup(r => r.GetAsync("firefox", HomebrewBucket, It.IsAny<CancellationToken>())).ReturnsAsync(existingPath);
 
         await CreateHandler().Handle(

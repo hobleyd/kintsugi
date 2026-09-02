@@ -69,6 +69,34 @@ public static class PackageManagerCatalog
     /// </summary>
     public static string Canonicalize(string name) =>
         TryGet(name, out var manager) ? manager.Name : name;
+
+    /// <summary>
+    /// The script this server's current build would write for the row
+    /// (<paramref name="applicationName"/>, <paramref name="platform"/>), or null when that row is
+    /// not a recognized package manager's — an AI-researched script has no canonical current
+    /// version to compare against.
+    /// </summary>
+    /// <remarks>
+    /// Exists so a row's stored script can be compared against what this build would produce, which
+    /// is the only way to notice that an edit to a <c>*UpgradeScript.Build</c> body has left a
+    /// signed row running an older text. Nothing rewrites a signed row on the strength of it — see
+    /// <c>TakeServerWrittenScriptCommand</c>, which a human presses, and
+    /// <c>RegisterApplicationsCommandHandler</c>, which deliberately does not.
+    /// </remarks>
+    public static string? CurrentScriptFor(string applicationName, string platform)
+    {
+        var managerName = PlatformBucket.PackageManagerNameFrom(platform);
+        if (managerName is null || !TryGet(managerName, out var manager))
+        {
+            return null;
+        }
+
+        // The self-update row is the one named after the manager itself: a manager is its own
+        // manager, so its own row lives in the very bucket its managed applications do. Same rule
+        // PrepareUpgradePathScanQueryHandler uses to decide which kind of work item to emit.
+        var isSelfUpdate = string.Equals(applicationName, manager.Name, StringComparison.OrdinalIgnoreCase);
+        return manager.BuildScript(isSelfUpdate);
+    }
 }
 
 /// <param name="BuildScript">Takes <c>isSelfUpdate</c> — true for the manager's own row (upgrading

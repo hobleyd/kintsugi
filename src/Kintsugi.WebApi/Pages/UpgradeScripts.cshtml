@@ -68,6 +68,29 @@ else if (Model.Adopted is not null)
     </div>
 }
 
+@if (Model.TakeServerScriptError is not null)
+{
+    <div class="alert alert-error">Could not take the newer script: @Model.TakeServerScriptError</div>
+}
+else if (Model.TookServerScript is { } took)
+{
+    @if (took.Changed)
+    {
+        <div class="alert alert-success">
+            @took.ApplicationName on @took.Platform now holds the script this server writes, and is
+            <strong>awaiting review</strong> — no agent will run it until it is signed. Signing it
+            covers every other row holding the same content.
+        </div>
+    }
+    else
+    {
+        <div class="alert alert-success">
+            @took.ApplicationName on @took.Platform already holds the script this server writes;
+            nothing changed.
+        </div>
+    }
+}
+
 @if (Model.ImportResult is { } import)
 {
     <div class="alert alert-success">
@@ -115,6 +138,18 @@ else if (Model.Adopted is not null)
         <a href="/applications">Applications</a> page.
     </div>
 }
+@if (Model.Overview.NewerServerScripts > 0)
+{
+    @* Deliberately not phrased as work outstanding: these rows are signed and patching normally.
+       A signed script is never replaced by a deployment (see RegisterApplicationsCommandHandler),
+       so this is the only thing that says a newer one exists. *@
+    <div class="alert alert-info">
+        @Model.Overview.NewerServerScripts signed row(s) hold a script this server no longer writes —
+        one of its package-manager scripts has been changed since they were reviewed. They keep
+        running the text that was approved, and go on patching, until someone takes the newer one
+        below. Taking it leaves that row unsigned until it is reviewed and signed.
+    </div>
+}
 @if (Model.Overview.LocalScripts.Count == 0)
 {
     <div class="panel">
@@ -132,6 +167,7 @@ else
                     <th>Content</th>
                     <th>Approved here</th>
                     <th>Approved upstream</th>
+                    <th>Server script</th>
                 </tr>
             </thead>
             <tbody>
@@ -159,6 +195,24 @@ else
                             else
                             {
                                 <span class="muted-text">—</span>
+                            }
+                        </td>
+                        <td class="actions">
+                            @if (script.NewerServerScriptAvailable)
+                            {
+                                @* The row keeps running its reviewed script until this is pressed —
+                                   see RegisterApplicationsCommandHandler for why nothing does it by
+                                   itself. Taking it leaves the row unsigned, so the button says so
+                                   rather than implying the new text goes live on click. *@
+                                <form method="post" asp-page-handler="TakeServerScript">
+                                    <input type="hidden" name="applicationName" value="@script.ApplicationName" />
+                                    <input type="hidden" name="platform" value="@script.Platform" />
+                                    <button type="submit" class="btn-secondary">Take newer, for review</button>
+                                </form>
+                            }
+                            else
+                            {
+                                <span class="muted-text">Current</span>
                             }
                         </td>
                     </tr>

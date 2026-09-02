@@ -181,6 +181,49 @@ public class UpgradeScriptTests
         Assert.Equal(SnapUpgradeScript.Build(isSelfUpdate: true), SnapUpgradeScript.Build(isSelfUpdate: false));
     }
 
+    [Fact]
+    public void CurrentScriptFor_AManagedRow_IsTheManagedScript_AndTheManagersOwnRowIsTheSelfUpdateOne()
+    {
+        // How the Upgrade Scripts page notices that a signed row holds a script this build no longer
+        // writes. The two cases share a bucket — a manager is its own manager — and are told apart
+        // by name, the same rule PrepareUpgradePathScanQueryHandler uses. Backwards, this would put
+        // `brew upgrade "$APP_NAME"` on Homebrew's own row.
+        var bucket = PlatformBucket.ForPackageManager(PackageManagerCatalog.Homebrew);
+
+        Assert.Equal(
+            HomebrewUpgradeScript.Build(isSelfUpdate: false),
+            PackageManagerCatalog.CurrentScriptFor("firefox", bucket));
+        Assert.Equal(
+            HomebrewUpgradeScript.Build(isSelfUpdate: true),
+            PackageManagerCatalog.CurrentScriptFor(PackageManagerCatalog.Homebrew, bucket));
+    }
+
+    [Fact]
+    public void CurrentScriptFor_MatchesTheManagersNameCaseInsensitively()
+    {
+        // Rows are matched case-insensitively throughout (see UpgradePathRepository.GetAsync), so a
+        // self-update row whose name settled on a different casing must not be handed the
+        // per-application script.
+        var bucket = PlatformBucket.ForPackageManager(PackageManagerCatalog.Homebrew);
+
+        Assert.Equal(
+            HomebrewUpgradeScript.Build(isSelfUpdate: true),
+            PackageManagerCatalog.CurrentScriptFor("homebrew", bucket));
+    }
+
+    [Theory]
+    [InlineData(PlatformBucket.MacOs)]
+    [InlineData(PlatformBucket.Windows)]
+    [InlineData(PlatformBucket.Linux)]
+    [InlineData(PlatformBucket.Generic)]
+    [InlineData("pm:APT")]
+    public void CurrentScriptFor_ARowThisServerWritesNoScriptFor_IsNull(string platform)
+    {
+        // An AI-researched script has no canonical current version to differ from, and neither does
+        // an unrecognized manager's row — apt and friends are deliberately absent from the catalog.
+        Assert.Null(PackageManagerCatalog.CurrentScriptFor("Firefox", platform));
+    }
+
     [Theory]
     [MemberData(nameof(WindowsScripts))]
     public void WindowsScripts_AreNeverBash(string script)

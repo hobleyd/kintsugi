@@ -184,6 +184,39 @@ public class UpgradePath : BaseEntity
         MarkUpdated();
     }
 
+    /// <summary>
+    /// Puts the script this server's current build writes for a package-manager row onto it, leaving
+    /// it unsigned so a human reviews the new text before any agent runs it (see
+    /// <c>TakeServerWrittenScriptCommand</c>).
+    /// </summary>
+    /// <remarks>
+    /// The counterpart to <see cref="AdoptApprovedScript"/>, and deliberately allowed where that one
+    /// refuses. Adoption takes content out of a repository anyone with write access could have
+    /// edited, so replacing a signed row's script — content agents may be running right now — is the
+    /// one thing it must never do. This content comes from this server's own builder, and the human
+    /// pressing it is asking for exactly that replacement. What the two have in common is that
+    /// neither one signs: the row goes back to awaiting review, which is what stops the new text
+    /// reaching a single host until somebody has read it.
+    ///
+    /// Nothing routine calls this. A signed row keeps its reviewed script across server upgrades —
+    /// <c>RegisterApplicationsCommandHandler</c> no longer rewrites one — so the replacement happens
+    /// when a human decides it should and not when a deployment happens to land.
+    /// </remarks>
+    public void TakeServerWrittenScript(string script)
+    {
+        if (string.IsNullOrWhiteSpace(script))
+        {
+            throw new DomainException("A server-written script cannot be empty.");
+        }
+
+        Script = script;
+        ScriptSignature = null;
+        Status = UpgradePathStatus.Found;
+        Method = UpgradeMethod.Script;
+        CheckedUtc = DateTimeOffset.UtcNow;
+        MarkUpdated();
+    }
+
     private void Apply(
         string applicationName,
         string platform,
