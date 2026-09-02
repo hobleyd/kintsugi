@@ -1,46 +1,57 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <!--
-    If you are serving your web app in a path other than the root, change the
-    href value below to reflect the base path you are serving from.
-
-    The path provided below has to start and end with a slash "/" in order for
-    it to work correctly.
-
-    For more details:
-    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
-
-    This is a placeholder for base href that will be replaced by the value of
-    the `--base-href` argument provided to `flutter build`.
-  -->
-  <base href="$FLUTTER_BASE_HREF">
+  <!-- Served from the root by nginx, which also rewrites any unrecognised path to this document
+       so a deep link like /applications?status=update-available works. See nginx/default.conf. -->
+  <base href="/">
 
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
-  <meta name="description" content="A new Flutter project.">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Kintsugi - enterprise patch management.">
 
-  <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
-  <meta name="apple-mobile-web-app-title" content="kintsugi_web">
-  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+  <meta name="apple-mobile-web-app-title" content="Kintsugi">
+  <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
 
-  <!-- Favicon -->
-  <link rel="icon" type="image/png" href="favicon.png"/>
+  <link rel="icon" href="favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png">
 
-  <title>kintsugi_web</title>
+  <title>Kintsugi</title>
   <link rel="manifest" href="manifest.json">
-</head>
-<body>
-  <!--
-    You can customize the "flutter_bootstrap.js" script.
-    This is useful to provide a custom configuration to the Flutter loader
-    or to give the user feedback during the initialization process.
 
-    For more details:
-    * https://docs.flutter.dev/platform-integration/web/initialization
-  -->
+  <script>
+    // Paints the visitor's saved theme before Flutter boots.
+    //
+    // The theme is a per-browser preference with no server-side record, so it can only be read
+    // here, inline, ahead of the first paint: the Flutter bundle takes a moment to load, and
+    // without this a light-mode visitor stares at the dark default for the whole of it.
+    //
+    // Note the key. ThemeCubit stores it through shared_preferences, which namespaces everything
+    // it writes under "flutter." — so the key on the wire is "flutter.kintsugi-theme" even though
+    // the Dart side calls it "kintsugi-theme". Changing the name in ThemeCubit means changing it
+    // here too; nothing checks that they agree.
+    (function () {
+      var dark = '#050810';
+      var light = '#f4f7fa';
+      var background = dark;
+      try {
+        if (window.localStorage.getItem('flutter.kintsugi-theme') === 'light') {
+          background = light;
+        }
+      } catch (e) {
+        // Storage blocked (private mode, hardened settings): keep the dark default.
+      }
+      document.documentElement.style.backgroundColor = background;
+      document.addEventListener('DOMContentLoaded', function () {
+        document.body.style.backgroundColor = background;
+      });
+    })();
+  </script>
+</head>
+<body style="margin: 0">
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

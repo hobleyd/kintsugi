@@ -42,6 +42,11 @@ dependencies:
 
   intl: ^0.20.2
 
+  # Not used directly anywhere in lib/. It is here because Flutter's own text-selection controls
+  # reference CupertinoIcons, so every build of a page containing a TextField warns that it cannot
+  # find that font family without it — and this app is mostly forms.
+  cupertino_icons: ^1.0.9
+
   # Imported directly by exactly one file — lib/core/platform/browser_page_navigator.dart, which
   # performs the whole-page navigations sign-in and sign-out need. Declared rather than leaned on
   # as a transitive dependency of the framework, since this app does import it itself.
