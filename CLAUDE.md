@@ -613,6 +613,27 @@ by then — only the long-running per-user units get restarted.
 - Windows PowerShell 5.1 decodes a BOM-less `.ps1` using the system ANSI code page, not UTF-8. The
   Windows agent writes every script with a UTF-8 BOM for exactly that reason, and the
   server-written ones are kept ASCII-only as well.
+- **`brew info --json=v2` writes a cask stanza as a bare string when it names one item and as an
+  array when it names several**, and reading only the array form is a security bug rather than a
+  missed optimization. `strings_in` in the macOS agent's `system_info.rs` handles both. It shipped
+  wrong: `nextcloud` declares `uninstall delete: "/Applications/Nextcloud.app"` as a single string,
+  so the bundle name never reached `cask_app_bundle_names`, `scan_applications_folder` stopped
+  recognizing it as cask-installed, and it was reported a *second* time as a standalone application
+  — carrying a `CFBundleIdentifier`. That identifier is exactly what `is_patchable` requires before
+  it will run a `Script` row, so a Homebrew row the per-user process **cannot** patch became
+  eligible for patching. Every cycle then quit Nextcloud (Homebrew's `start_upgrade` quits the app
+  before installing, and only reopens it on success), failed, and left the client stopped.
+- **A `pkg`-artifact cask cannot be upgraded by the macOS agent at all, and the failure is
+  disguised.** `Cask::Pkg#uninstall` pipes the NUL-joined BOM (371 KB for nextcloud) into
+  `sudo -u root -E -- /usr/bin/xargs -0 -- /bin/rm --`; the per-user process has no TTY and no
+  `SUDO_ASKPASS`, so sudo exits before reading and Ruby's `Errno::EPIPE` surfaces as
+  `Error: <cask>: Broken pipe`. Homebrew's `SystemCommand#each_output_line` writes stdin *before*
+  starting its output-reader thread, so sudo's real stderr is never reported. There is no
+  arrangement that fixes this inside Homebrew: `brew` refuses to run as root (`brew.sh`'s
+  `check-run-command-as-root`), `as-console-user` immediately drops back to the console user,
+  `SUDO_ASKPASS` still needs a real password, and `HOMEBREW_SUDO_THROUGH_SUDO_USER` is only
+  passwordless if brew is already root. Root-requiring casks are therefore **not agent-patchable**;
+  do not try to route them through the root queue by having the daemon drive `brew`.
 
 ## Conventions
 
