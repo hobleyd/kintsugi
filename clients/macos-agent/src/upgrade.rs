@@ -197,10 +197,63 @@ pub fn patch_one(status: &UpgradeStatus, identity: &AgentIdentity) -> Result<()>
     }
 }
 
+/// The two fixed prefixes Homebrew installs into — `/opt/homebrew` on Apple Silicon, `/usr/local`
+/// on Intel. The same pair `system_info::find_brew_binary` probes, and for the same reason.
+const HOMEBREW_BIN_DIRS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
+
+/// What launchd hands a job when nothing sets `PATH` — used only if the inherited value is missing
+/// or empty, so a script still finds the system tools it can normally take for granted.
+const LAUNCHD_DEFAULT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+/// `PATH` for everything this module spawns.
+///
+/// Both entry points below run under launchd, which gives a job the bare
+/// `/usr/bin:/bin:/usr/sbin:/sbin` and nothing of the logged-in user's shell configuration — so
+/// `brew` is invisible on `PATH` even on a Mac that plainly has it, since neither of Homebrew's
+/// prefixes is on that list. That is exactly why `system_info::find_brew_binary` locates the
+/// binary by hand for the inventory scan; the upgrade path never got the same treatment, so the
+/// Homebrew upgrade script's own `command -v brew` guard (see the server's
+/// `HomebrewUpgradeScript.Build`) reported "homebrew is not installed" and *every*
+/// Homebrew-managed application failed to patch, on every Mac in the fleet.
+///
+/// Prepended rather than substituted: an AI-authored `--update` script is told it may use whatever
+/// the platform provides, so it must still see everything launchd offered. The other two agents
+/// need no equivalent — a SYSTEM service inherits the machine-wide `PATH` both winget and
+/// Chocolatey install themselves onto (see the Windows agent's
+/// `system_info::scan_package_managers`), and systemd's compiled-in default already covers
+/// `/usr/local/bin` (see the Linux agent's `system_info::find_binary`).
+fn spawn_path() -> String {
+    let inherited = std::env::var("PATH").unwrap_or_default();
+    prepend_homebrew_prefixes(&inherited)
+}
+
+fn prepend_homebrew_prefixes(inherited: &str) -> String {
+    let inherited = if inherited.is_empty() { LAUNCHD_DEFAULT_PATH } else { inherited };
+
+    // Skipping the entries already there keeps a PATH that happens to name a Homebrew prefix from
+    // growing a duplicate every time this runs.
+    HOMEBREW_BIN_DIRS
+        .into_iter()
+        .chain(
+            inherited
+                .split(':')
+                .filter(|dir| !dir.is_empty() && !HOMEBREW_BIN_DIRS.contains(dir)),
+        )
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
 fn run_shell_command(command: &str) -> Result<()> {
     logging::info(&format!("running command: sh -c {command:?}"));
 
-    let output = Command::new("sh").arg("-c").arg(command).output().context("failed to run command")?;
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        // A legacy PackageManagerCommand row is typically a bare `brew upgrade <formula>`, which
+        // launchd's own PATH cannot resolve — see spawn_path.
+        .env("PATH", spawn_path())
+        .output()
+        .context("failed to run command")?;
 
     log_output("command", command, &output);
 
@@ -276,6 +329,10 @@ fn run_script(application_name: &str, script: &str, args: &[&str]) -> Result<Str
 
     let result = Command::new(&script_path)
         .args(args)
+        // Homebrew's prefixes are not on the PATH launchd hands this process, and a `--update`
+        // script reaching for `brew` (or anything else Homebrew provides) has no other way to
+        // find it — see spawn_path.
+        .env("PATH", spawn_path())
         .output()
         .context("failed to execute script");
 
@@ -296,3 +353,42 @@ fn run_script(application_name: &str, script: &str, args: &[&str]) -> Result<Str
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prepend_homebrew_prefixes_puts_both_prefixes_ahead_of_launchds_own_path() {
+        // The exact value `launchctl print gui/<uid>/au.com.sharpblue.kintsugiagent-ui` reports as
+        // this job's default environment, which is what made the Homebrew script's `command -v
+        // brew` guard fail on a Mac with Homebrew installed.
+        let path = prepend_homebrew_prefixes("/usr/bin:/bin:/usr/sbin:/sbin");
+
+        assert_eq!(path, "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+    }
+
+    #[test]
+    fn prepend_homebrew_prefixes_keeps_everything_the_process_inherited() {
+        let path = prepend_homebrew_prefixes("/usr/bin:/somewhere/custom");
+
+        assert!(path.split(':').any(|dir| dir == "/somewhere/custom"));
+    }
+
+    #[test]
+    fn prepend_homebrew_prefixes_does_not_duplicate_a_prefix_already_present() {
+        // A PATH that already names a prefix (an interactive `brew`-configured shell, say) would
+        // otherwise grow a duplicate entry on every call.
+        let path = prepend_homebrew_prefixes("/usr/local/bin:/usr/bin:/opt/homebrew/bin");
+
+        assert_eq!(path, "/opt/homebrew/bin:/usr/local/bin:/usr/bin");
+    }
+
+    #[test]
+    fn prepend_homebrew_prefixes_falls_back_to_the_system_path_when_nothing_was_inherited() {
+        // An empty result would leave a script unable to find even `/usr/bin/curl`, which is a
+        // worse failure than the one being fixed.
+        let path = prepend_homebrew_prefixes("");
+
+        assert_eq!(path, "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin");
+    }
+}
