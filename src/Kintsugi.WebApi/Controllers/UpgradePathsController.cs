@@ -153,7 +153,8 @@ public class UpgradePathsController : ControllerBase
     public async Task<ActionResult<UpgradePathResultDto>> Save([FromBody] SaveUpgradePathRequest request, CancellationToken cancellationToken) =>
         Ok(await _sender.Send(new SaveUpgradePathCommand(
             request.ApplicationName, request.Platform, request.LatestVersion, request.Method,
-            request.DownloadUrl, request.Command, request.Instructions, request.SourceUrl, request.Notes, request.Script), cancellationToken));
+            request.DownloadUrl, request.Command, request.Instructions, request.SourceUrl, request.Notes, request.Script,
+            request.ApplicationIdentifier), cancellationToken));
 
     /// <summary>
     /// Signs one already-saved upgrade path's script with the server's artifact-signing key, after
@@ -199,4 +200,5 @@ public record SaveUpgradePathRequest(
     string? Instructions,
     string? SourceUrl,
     string? Notes,
-    string? Script = null);
+    string? Script = null,
+    string? ApplicationIdentifier = null);

@@ -106,4 +106,39 @@ public class SaveUpgradePathCommandHandlerTests
 
         _unitOfWork.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Once);
     }
+
+    [Fact]
+    public async Task Handle_WithNoApplicationIdentifierGiven_DefaultsItToTheApplicationName()
+    {
+        // CheckApplicationUpdateCommandHandler refuses to run --update-version at all when
+        // ApplicationIdentifier is blank, so a hand-saved row with none would never pick up a
+        // LatestVersion from "Find updates" again — this default is what the AI research flow
+        // already relies on for the same reason.
+        _repository.Setup(r => r.GetAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((UpgradePath?)null);
+
+        UpgradePath? saved = null;
+        _repository.Setup(r => r.AddAsync(It.IsAny<UpgradePath>(), It.IsAny<CancellationToken>()))
+            .Callback<UpgradePath, CancellationToken>((p, _) => saved = p)
+            .Returns(Task.CompletedTask);
+
+        await CreateHandler().Handle(Command(), CancellationToken.None);
+
+        Assert.Equal("Firefox", saved?.ApplicationIdentifier);
+    }
+
+    [Fact]
+    public async Task Handle_WithAnExplicitApplicationIdentifier_UsesItRatherThanTheApplicationName()
+    {
+        _repository.Setup(r => r.GetAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>())).ReturnsAsync((UpgradePath?)null);
+
+        UpgradePath? saved = null;
+        _repository.Setup(r => r.AddAsync(It.IsAny<UpgradePath>(), It.IsAny<CancellationToken>()))
+            .Callback<UpgradePath, CancellationToken>((p, _) => saved = p)
+            .Returns(Task.CompletedTask);
+
+        var command = Command() with { ApplicationIdentifier = "org.mozilla.firefox" };
+        await CreateHandler().Handle(command, CancellationToken.None);
+
+        Assert.Equal("org.mozilla.firefox", saved?.ApplicationIdentifier);
+    }
 }
