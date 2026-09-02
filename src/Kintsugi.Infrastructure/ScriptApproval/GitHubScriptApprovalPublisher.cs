@@ -80,7 +80,12 @@ public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
         GitHubTarget target, ScriptApprovalSubmission submission, CancellationToken cancellationToken)
     {
         var defaultBranch = await GetDefaultBranchAsync(target, cancellationToken);
-        var files = BuildFiles(submission);
+
+        // What this entry is, as opposed to which row was signed to produce it — the two differ for
+        // every package-manager script. See ApprovedScriptIdentity.
+        var identity = ApprovedScriptIdentity.For(submission);
+        var scriptPath = await ResolveScriptPathAsync(target, submission, identity, defaultBranch, cancellationToken);
+        var files = BuildFiles(submission, identity, scriptPath);
         var signaturePath = ApprovedScriptCorpus.SignaturePath(submission.Sha256, submission.SignerFingerprint);
 
         // Already merged: this signer has vouched for these exact bytes on the trust root, so there
@@ -108,7 +113,7 @@ public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
         var wrote = false;
         foreach (var (path, content) in files)
         {
-            wrote |= await PutFileAsync(target, path, content, branch, submission, cancellationToken);
+            wrote |= await PutFileAsync(target, path, content, branch, submission, identity, cancellationToken);
         }
 
         if (!wrote)
@@ -121,22 +126,49 @@ public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
                 Message: $"Branch {branch} in {target.Repository} already carries this approval unchanged.");
         }
 
-        var url = await OpenPullRequestAsync(target, branch, defaultBranch, submission, cancellationToken);
+        var url = await OpenPullRequestAsync(target, branch, defaultBranch, submission, identity, cancellationToken);
         return new ScriptApprovalPublishResult(ScriptApprovalPublishOutcome.PullRequestOpened, url);
+    }
+
+    /// <summary>
+    /// The path this entry's script is written to: the descriptive name from
+    /// <paramref name="identity"/>, unless the entry already carries the original fixed
+    /// <c>script.sh</c>/<c>script.ps1</c> name on <paramref name="defaultBranch"/> with exactly
+    /// these bytes — in which case that existing file <em>is</em> the script and is written to
+    /// again, rather than leaving the same content in the directory twice under two names.
+    /// </summary>
+    private async Task<string> ResolveScriptPathAsync(
+        GitHubTarget target,
+        ScriptApprovalSubmission submission,
+        ApprovedScriptIdentity identity,
+        string defaultBranch,
+        CancellationToken cancellationToken)
+    {
+        var descriptive = ApprovedScriptCorpus.ScriptPath(submission.Sha256, identity.FileBaseName, submission.Language);
+        var legacy = ApprovedScriptCorpus.ScriptPath(
+            submission.Sha256, ApprovedScriptCorpus.LegacyScriptBaseName, submission.Language);
+        if (string.Equals(descriptive, legacy, StringComparison.Ordinal))
+        {
+            return descriptive;
+        }
+
+        var existing = await GetFileAsync(target, legacy, defaultBranch, cancellationToken);
+        return existing is not null && existing.Content == submission.Script ? legacy : descriptive;
     }
 
     /// <summary>
     /// The three files one approval consists of, keyed by repository path. Built together so the
     /// script, its metadata and the signature over it are always written as one consistent set.
     /// </summary>
-    private static Dictionary<string, string> BuildFiles(ScriptApprovalSubmission submission)
+    private static Dictionary<string, string> BuildFiles(
+        ScriptApprovalSubmission submission, ApprovedScriptIdentity identity, string scriptPath)
     {
         var metadata = new ApprovedScriptMetadataDocument(
             submission.Sha256,
             submission.PlatformBucket,
             submission.Language,
-            submission.ApplicationName,
-            submission.ApplicationIdentifier);
+            identity.DisplayName,
+            identity.ApplicationIdentifier);
 
         var signature = new ApprovedScriptSignatureDocument(
             submission.Sha256,
@@ -150,7 +182,7 @@ public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
         {
             // The script's bytes exactly as signed — no trailing newline added, no re-indentation,
             // nothing. Any change here changes its hash and invalidates every signature over it.
-            [ApprovedScriptCorpus.ScriptPath(submission.Sha256, submission.Language)] = submission.Script,
+            [scriptPath] = submission.Script,
             [ApprovedScriptCorpus.MetadataPath(submission.Sha256)] = ApprovedScriptCorpus.Serialize(metadata),
             [ApprovedScriptCorpus.SignaturePath(submission.Sha256, submission.SignerFingerprint)] =
                 ApprovedScriptCorpus.Serialize(signature),
@@ -266,7 +298,8 @@ public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
     /// anything actually changed, which is how the caller knows whether a pull request would have
     /// anything to show.</summary>
     private async Task<bool> PutFileAsync(
-        GitHubTarget target, string path, string content, string branch, ScriptApprovalSubmission submission, CancellationToken cancellationToken)
+        GitHubTarget target, string path, string content, string branch, ScriptApprovalSubmission submission,
+        ApprovedScriptIdentity identity, CancellationToken cancellationToken)
     {
         var existing = await GetFileAsync(target, path, branch, cancellationToken);
         if (existing is not null && existing.Content == content)
@@ -278,7 +311,7 @@ public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
             target, HttpMethod.Put, $"https://api.github.com/repos/{target.Repository}/contents/{path}",
             new
             {
-                message = $"Approve {submission.ApplicationName} upgrade script for {submission.PlatformBucket}",
+                message = $"Approve the {identity.DisplayName} upgrade script for {submission.PlatformBucket}",
                 content = Convert.ToBase64String(Encoding.UTF8.GetBytes(content)),
                 branch,
                 sha = existing?.Sha,
@@ -289,16 +322,17 @@ public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
     }
 
     private async Task<string?> OpenPullRequestAsync(
-        GitHubTarget target, string branch, string baseBranch, ScriptApprovalSubmission submission, CancellationToken cancellationToken)
+        GitHubTarget target, string branch, string baseBranch, ScriptApprovalSubmission submission,
+        ApprovedScriptIdentity identity, CancellationToken cancellationToken)
     {
         using var response = await SendJsonAsync(
             target, HttpMethod.Post, $"https://api.github.com/repos/{target.Repository}/pulls",
             new
             {
-                title = $"Approve {submission.ApplicationName} upgrade script ({submission.PlatformBucket})",
+                title = $"Approve the {identity.DisplayName} upgrade script ({submission.PlatformBucket})",
                 head = branch,
                 @base = baseBranch,
-                body = BuildPullRequestBody(submission),
+                body = BuildPullRequestBody(submission, identity),
             },
             cancellationToken);
         await EnsureSuccessAsync(response, "open the pull request", cancellationToken);
@@ -313,12 +347,21 @@ public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
     /// What a reviewer sees. Says plainly that merging is what makes the script adoptable by other
     /// servers, because that is the one consequence of the merge that isn't obvious from the diff.
     /// </summary>
-    private static string BuildPullRequestBody(ScriptApprovalSubmission submission)
+    private static string BuildPullRequestBody(ScriptApprovalSubmission submission, ApprovedScriptIdentity identity)
     {
         var builder = new StringBuilder();
-        builder.AppendLine($"`{submission.ApplicationName}` on `{submission.PlatformBucket}` "
+        builder.AppendLine($"`{identity.DisplayName}` on `{submission.PlatformBucket}` "
             + $"({submission.Language.Interpreter()}), signed and reviewed on one Kintsugi server.");
         builder.AppendLine();
+        if (identity.IsPackageManagerScript)
+        {
+            // Said out loud because it changes what the reviewer is being asked to weigh: not
+            // "is this right for ada-url" but "is this right for everything this manager handles".
+            builder.AppendLine("This is the script that manager's applications all share — it takes the "
+                + "application from `--appName`/`--appId` at runtime and bakes nothing in, so reviewing it "
+                + "once covers every application the manager handles rather than any single one.");
+            builder.AppendLine();
+        }
         builder.AppendLine($"- Script SHA-256: `{submission.Sha256}`");
         builder.AppendLine($"- Signer fingerprint: `{submission.SignerFingerprint}`");
         builder.AppendLine($"- Signed by: {submission.SignedBy ?? "unrecorded"}");

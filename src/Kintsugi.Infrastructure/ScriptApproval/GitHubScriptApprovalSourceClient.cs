@@ -153,22 +153,33 @@ public class GitHubScriptApprovalSourceClient : IScriptApprovalSourceClient
                 continue;
             }
 
-            var scriptPath = prefix + $"script{metadata.Language.FileExtension()}";
-            if (!files.TryGetValue(scriptPath, out var script))
+            // Found by extension rather than by a fixed filename: an entry's script is named after
+            // what it is (see ApprovedScriptIdentity), which cannot be derived from the hash. An
+            // entry approved before that carries the original `script.sh`, and both may sit in one
+            // directory, so the candidates are separated by the only test that decides anything —
+            // the directory name is the content's own SHA-256.
+            var scriptPaths = ApprovedScriptCorpus.ScriptPathsIn(files.Keys, sha256, metadata.Language).ToList();
+            if (scriptPaths.Count == 0)
             {
-                skipped.Add($"{sha256}: no script file at {scriptPath}.");
+                skipped.Add($"{sha256}: no {metadata.Language.FileExtension()} script file.");
                 continue;
             }
 
-            // The directory name is the content's own hash, so this catches an entry whose script was
-            // edited in place — and, equally, one that was moved into the wrong directory. Either way
-            // the entry no longer describes itself and nothing downstream should trust its metadata.
-            var actual = ScriptContentHash.Of(script);
-            if (!string.Equals(actual, sha256, StringComparison.OrdinalIgnoreCase))
+            // The hash check also catches an entry whose script was edited in place, and one that was
+            // moved into the wrong directory. Either way the entry no longer describes itself and
+            // nothing downstream should trust its metadata.
+            var scriptPath = scriptPaths.FirstOrDefault(
+                path => string.Equals(ScriptContentHash.Of(files[path]), sha256, StringComparison.OrdinalIgnoreCase));
+            if (scriptPath is null)
             {
-                skipped.Add($"{sha256}: script hashes to {actual}, so the directory name does not describe its contents.");
+                skipped.Add(scriptPaths.Count == 1
+                    ? $"{sha256}: script hashes to {ScriptContentHash.Of(files[scriptPaths[0]])}, so the directory "
+                        + "name does not describe its contents."
+                    : $"{sha256}: none of {scriptPaths.Count} candidate script files hashes to the directory name.");
                 continue;
             }
+
+            var script = files[scriptPath];
 
             if (!string.Equals(metadata.Sha256, sha256, StringComparison.OrdinalIgnoreCase))
             {
