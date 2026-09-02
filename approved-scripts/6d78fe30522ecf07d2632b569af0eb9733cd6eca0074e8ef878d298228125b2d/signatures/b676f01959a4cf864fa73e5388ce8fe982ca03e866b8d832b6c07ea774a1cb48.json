@@ -2,6 +2,6 @@
   "sha256": "6d78fe30522ecf07d2632b569af0eb9733cd6eca0074e8ef878d298228125b2d",
   "signerFingerprint": "sha256:b676f01959a4cf864fa73e5388ce8fe982ca03e866b8d832b6c07ea774a1cb48",
   "signerPublicKeyPem": "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEW5URzOY\u002Bh1KDVSTSqueyDx88A6pj\ngjgoARO64PZtdDT3EljDaZsrGG2lZGfwCDEfOXkhmEs85YzV5VmG0c2evQ==\n-----END PUBLIC KEY-----",
-  "signature": "MEQCIDzG1TRODIq5IgfpQo0EtfNItRqzeUNBzw7MWeYlFPqoAiA8lmNfBPgj\u002B9bQFH6qCUVqwqnGRp1HZTVqlamjRnEt6g==",
-  "signedAtUtc": "2026-09-02T12:26:10.011839+00:00"
+  "signature": "MEYCIQCes1UwSyIkwMwnFub49ci5pWliWChou9Z91G6tgVR\u002BGQIhALjHRmLtjGQvYx5qLU\u002BYdMwJP31yc8HV3E\u002BQpMj9vALA",
+  "signedAtUtc": "2026-09-02T12:54:02.0021187+00:00"
 }
