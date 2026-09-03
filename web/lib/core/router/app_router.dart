@@ -10,6 +10,7 @@ import '../../presentation/settings/ai_agent_screen.dart';
 import '../../presentation/settings/authentication_screen.dart';
 import '../../presentation/settings/github_screen.dart';
 import '../../presentation/settings/patching_policy_screen.dart';
+import '../../presentation/settings/vanta_screen.dart';
 import '../../presentation/shell/app_shell.dart';
 import '../../presentation/upgrade_scripts/upgrade_scripts_screen.dart';
 import 'bloc_listenable.dart';
@@ -25,6 +26,7 @@ abstract final class Routes {
   static const settingsAuthentication = '/settings/authentication';
   static const settingsGitHub = '/settings/github';
   static const settingsPatchingPolicy = '/settings/patching-policy';
+  static const settingsVanta = '/settings/vanta';
   static const signIn = '/login';
   static const starting = '/starting';
   static const unavailable = '/unavailable';
@@ -106,6 +108,7 @@ GoRouter createRouter(SessionBloc sessionBloc) {
             path: Routes.settingsPatchingPolicy,
             builder: (_, _) => const PatchingPolicySettingsScreen(),
           ),
+          GoRoute(path: Routes.settingsVanta, builder: (_, _) => const VantaSettingsScreen()),
         ],
       ),
     ],

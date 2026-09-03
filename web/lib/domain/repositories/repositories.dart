@@ -115,6 +115,10 @@ abstract interface class AiAgentSettingsRepository {
   Future<List<String>> ollamaModels(String baseUrl);
 
   Future<GooseCliStatus> gooseCliStatus(String? endpoint);
+
+  /// Takes no endpoint: the Claude Agent SDK runs as a subprocess of the API, and the token the
+  /// probe needs is the stored one, which this client has never been given.
+  Future<ClaudeAgentSdkStatus> claudeAgentSdkStatus();
 }
 
 /// The editable half of the AI agent settings.
@@ -147,6 +151,31 @@ abstract interface class AuthenticationSettingsRepository {
     required String? hostedDomain,
     required bool isEnabled,
   });
+}
+
+abstract interface class VantaSettingsRepository {
+  Future<VantaSettings> read();
+
+  /// A blank client secret means "keep the stored one"; [clearClientSecret] is how one is removed,
+  /// since blank cannot mean both.
+  Future<VantaSettings> update({
+    required bool enabled,
+    required String? clientId,
+    required String? clientSecret,
+    required bool clearClientSecret,
+    required String? apiBaseUrl,
+    required String? vulnerableComponentResourceId,
+    required String? packageVulnerabilityResourceId,
+    required String? consoleBaseUrl,
+    required double? severity,
+    required int? syncIntervalHours,
+  });
+
+  Future<VantaSyncStatus> readSyncStatus();
+
+  /// Starts a sync and returns its opening status. The run itself happens in the background — the
+  /// screen polls [readSyncStatus] for the outcome.
+  Future<VantaSyncStatus> startSync();
 }
 
 abstract interface class GitHubSettingsRepository {

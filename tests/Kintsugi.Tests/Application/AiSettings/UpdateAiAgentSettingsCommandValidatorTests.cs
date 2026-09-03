@@ -57,6 +57,14 @@ public class UpdateAiAgentSettingsCommandValidatorTests
     }
 
     [Fact]
+    public void ClaudeAgentSdk_WithNoBaseUrl_IsAccepted_SinceTheSubprocessIsLocal()
+    {
+        var result = _validator.TestValidate(new UpdateAiAgentSettingsCommand(AiProvider.ClaudeAgentSdk, "sk-ant-oat01-example", null, null, true));
+
+        result.ShouldNotHaveAnyValidationErrors();
+    }
+
+    [Fact]
     public void ApiKey_LongerThan512Characters_IsRejected()
     {
         var result = _validator.TestValidate(new UpdateAiAgentSettingsCommand(AiProvider.Anthropic, new string('a', 513), null, null, true));

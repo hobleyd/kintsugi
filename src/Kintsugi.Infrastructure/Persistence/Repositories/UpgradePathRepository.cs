@@ -120,6 +120,66 @@ public class UpgradePathRepository : IUpgradePathRepository
             .ToList();
     }
 
+    /// <inheritdoc />
+    public async Task<IReadOnlyList<UpgradeStatusDto>> GetOutdatedStatusesAsync(CancellationToken cancellationToken)
+    {
+        var installed = await _context.InstalledApplications
+            .Join(_context.Hosts, a => a.HostId, h => h.Id, (a, h) => new
+            {
+                a.Name,
+                a.Version,
+                a.ApplicationIdentifier,
+                a.ParentApplicationId,
+                h.Hostname,
+                h.SerialNumber,
+                h.OperatingSystem,
+                h.DeletedAtUtc
+            })
+            // A host pending removal is already hidden from the hosts list, so its applications must
+            // not turn up here either — otherwise the Vanta sync would carry vulnerabilities for a
+            // machine no component record is being synced for, and every one of them would name a
+            // uniqueId Vanta does not hold.
+            .Where(x => x.DeletedAtUtc == null)
+            .ToListAsync(cancellationToken);
+
+        var upgradePaths = await _context.UpgradePaths.ToListAsync(cancellationToken);
+        var byNameAndPlatform = BuildByNameAndPlatformLookup(upgradePaths);
+        var packageManagerNames = await LoadPackageManagerNamesAsync(installed.Select(x => x.ParentApplicationId), cancellationToken);
+
+        var results = new List<UpgradeStatusDto>();
+
+        foreach (var app in installed)
+        {
+            var path = ResolvePath(byNameAndPlatform, app.Name, app.OperatingSystem, PackageManagerOf(packageManagerNames, app.ParentApplicationId));
+            if (path is null || !ComputeUpdateAvailable(path, app.Version))
+            {
+                continue;
+            }
+
+            results.Add(new UpgradeStatusDto(
+                app.Name,
+                app.Hostname,
+                app.SerialNumber,
+                app.Version,
+                path.LatestVersion,
+                true,
+                path.Status,
+                path.Method,
+                path.DownloadUrl,
+                path.Command,
+                path.Instructions,
+                path.SourceUrl,
+                path.Notes,
+                path.CheckedUtc,
+                path.Script,
+                app.ApplicationIdentifier,
+                path.ScriptSignature,
+                path.CommandSignature));
+        }
+
+        return results;
+    }
+
     public async Task<IReadOnlyList<UpgradePathSummaryDto>> GetSummariesAsync(CancellationToken cancellationToken)
     {
         // Host identity (not just an aggregate count) has to survive into this method now, so the

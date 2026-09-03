@@ -579,6 +579,56 @@ namespace Kintsugi.Infrastructure.Persistence.Migrations
                     b.ToTable("upgrade_paths", "patching");
                 });
 
+            modelBuilder.Entity("Kintsugi.Domain.Entities.VantaSettings", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ApiBaseUrl")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("ClientId")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<string>("ClientSecret")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<string>("ConsoleBaseUrl")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("Enabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("PackageVulnerabilityResourceId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<double>("Severity")
+                        .HasColumnType("double precision");
+
+                    b.Property<int>("SyncIntervalHours")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset?>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("VulnerableComponentResourceId")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("vanta_settings", "patching");
+                });
+
             modelBuilder.Entity("Kintsugi.Domain.Entities.InstalledApplication", b =>
                 {
                     b.HasOne("Kintsugi.Domain.Entities.Host", null)

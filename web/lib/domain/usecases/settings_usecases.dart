@@ -36,6 +36,14 @@ class CheckGooseCliStatus {
   Future<GooseCliStatus> call(String? endpoint) => _repository.gooseCliStatus(endpoint);
 }
 
+class CheckClaudeAgentSdkStatus {
+  const CheckClaudeAgentSdkStatus(this._repository);
+
+  final AiAgentSettingsRepository _repository;
+
+  Future<ClaudeAgentSdkStatus> call() => _repository.claudeAgentSdkStatus();
+}
+
 class GetAuthenticationSettings {
   const GetAuthenticationSettings(this._repository);
 
@@ -103,6 +111,61 @@ class UpdateGitHubSettings {
         scriptApprovalToken: scriptApprovalToken,
         clearScriptApprovalToken: clearScriptApprovalToken,
       );
+}
+
+class GetVantaSettings {
+  const GetVantaSettings(this._repository);
+
+  final VantaSettingsRepository _repository;
+
+  Future<VantaSettings> call() => _repository.read();
+}
+
+class UpdateVantaSettings {
+  const UpdateVantaSettings(this._repository);
+
+  final VantaSettingsRepository _repository;
+
+  Future<VantaSettings> call({
+    required bool enabled,
+    required String? clientId,
+    required String? clientSecret,
+    required bool clearClientSecret,
+    required String? apiBaseUrl,
+    required String? vulnerableComponentResourceId,
+    required String? packageVulnerabilityResourceId,
+    required String? consoleBaseUrl,
+    required double? severity,
+    required int? syncIntervalHours,
+  }) =>
+      _repository.update(
+        enabled: enabled,
+        clientId: clientId,
+        clientSecret: clientSecret,
+        clearClientSecret: clearClientSecret,
+        apiBaseUrl: apiBaseUrl,
+        vulnerableComponentResourceId: vulnerableComponentResourceId,
+        packageVulnerabilityResourceId: packageVulnerabilityResourceId,
+        consoleBaseUrl: consoleBaseUrl,
+        severity: severity,
+        syncIntervalHours: syncIntervalHours,
+      );
+}
+
+class GetVantaSyncStatus {
+  const GetVantaSyncStatus(this._repository);
+
+  final VantaSettingsRepository _repository;
+
+  Future<VantaSyncStatus> call() => _repository.readSyncStatus();
+}
+
+class StartVantaSync {
+  const StartVantaSync(this._repository);
+
+  final VantaSettingsRepository _repository;
+
+  Future<VantaSyncStatus> call() => _repository.startSync();
 }
 
 class GetPatchingPolicySettings {

@@ -36,13 +36,15 @@ enum AiProvider {
   anthropic,
   openAI,
   ollama,
-  gooseCli;
+  gooseCli,
+  claudeAgentSdk;
 
   String get label => switch (this) {
-        AiProvider.anthropic => 'Anthropic (Claude)',
+        AiProvider.anthropic => 'Anthropic API (Claude)',
         AiProvider.openAI => 'OpenAI',
         AiProvider.ollama => 'Local LLM (Ollama)',
         AiProvider.gooseCli => 'Goose CLI',
+        AiProvider.claudeAgentSdk => 'Claude Agent SDK (this server\'s Claude subscription)',
       };
 }
 

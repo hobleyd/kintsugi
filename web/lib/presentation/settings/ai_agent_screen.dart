@@ -24,6 +24,7 @@ class AiAgentSettingsScreen extends StatelessWidget {
           updateSettings: locator<UpdateAiAgentSettings>(),
           getOllamaModels: locator<GetOllamaModels>(),
           checkGooseCliStatus: locator<CheckGooseCliStatus>(),
+          checkClaudeAgentSdkStatus: locator<CheckClaudeAgentSdkStatus>(),
         )..add(const AiAgentSettingsRequested()),
         child: const _AiAgentForm(),
       );
@@ -71,6 +72,8 @@ class _AiAgentFormState extends State<_AiAgentForm> {
       bloc.add(OllamaModelsRequested(_baseUrl.text));
     } else if (_provider == AiProvider.gooseCli) {
       bloc.add(GooseCliStatusRequested(_baseUrl.text));
+    } else if (_provider == AiProvider.claudeAgentSdk) {
+      bloc.add(const ClaudeAgentSdkStatusRequested());
     }
   }
 
@@ -91,7 +94,11 @@ class _AiAgentFormState extends State<_AiAgentForm> {
         builder: (context, state) {
           final isOllama = _provider == AiProvider.ollama;
           final isGoose = _provider == AiProvider.gooseCli;
-          final isCloud = !isOllama && !isGoose;
+          final isClaudeAgentSdk = _provider == AiProvider.claudeAgentSdk;
+          // "Cloud" here means a hosted API called with a metered key. The Claude Agent SDK also
+          // needs a stored credential, but it is a subscription's OAuth token rather than an API
+          // key, so it gets its own field rather than borrowing this one's wording.
+          final isCloud = !isOllama && !isGoose && !isClaudeAgentSdk;
 
           return PageScaffold(
             title: 'AI Agent',
@@ -135,6 +142,47 @@ class _AiAgentFormState extends State<_AiAgentForm> {
                         onChanged: (_) => _edited(),
                       ),
                     ),
+                  if (isClaudeAgentSdk)
+                    LabelledField(
+                      label: 'OAuth Token',
+                      hints: [
+                        const HintText(
+                          'Run `claude setup-token` on a machine signed in to the Claude '
+                          'subscription this server should use, and paste the one-year token it '
+                          'prints. Research runs then bill that subscription instead of metered '
+                          'API credits — a Pro, Max, Team or Enterprise plan is required.',
+                        ),
+                        if (state.value?.hasApiKey == true)
+                          const HintText('A token is already configured. Leave blank to keep it.'),
+                      ],
+                      child: KintsugiTextField(
+                        controller: _apiKey,
+                        obscureText: true,
+                        hintText: state.value?.hasApiKey == true
+                            ? '•••••••••••• (leave blank to keep current token)'
+                            : 'sk-ant-oat01-...',
+                        errorText: state.errorFor('ApiKey'),
+                        onChanged: (_) => _edited(),
+                      ),
+                    ),
+                  if (isClaudeAgentSdk)
+                    LabelledField(
+                      label: 'Server status',
+                      hints: [
+                        if (state.probeMessage != null) HintText(state.probeMessage!),
+                        const HintText(
+                          'Checks the saved token, not the one typed above — save first, then '
+                          'check. The check makes one real request, so it takes a few seconds.',
+                        ),
+                      ],
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: SecondaryButton(
+                          label: 'Check',
+                          onPressed: state.probing ? null : _probe,
+                        ),
+                      ),
+                    ),
                   if (isOllama || isGoose)
                     LabelledField(
                       label: 'Endpoint URL',
@@ -172,6 +220,11 @@ class _AiAgentFormState extends State<_AiAgentForm> {
                     hints: [
                       if (isGoose)
                         const HintText("Leave blank to use Goose's currently configured model."),
+                      if (isClaudeAgentSdk)
+                        const HintText(
+                          'An alias (opus, sonnet, haiku) or a full model id. Leave blank to use '
+                          'whichever model the Claude Code CLI defaults to.',
+                        ),
                     ],
                     child: isOllama
                         ? _OllamaModelPicker(

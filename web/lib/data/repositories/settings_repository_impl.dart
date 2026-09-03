@@ -41,6 +41,11 @@ class AiAgentSettingsRepositoryImpl implements AiAgentSettingsRepository {
         await _api.getJson('/api/ai-settings/goose-cli-status', query: {'endpoint': endpoint})
             as Map<String, dynamic>,
       );
+
+  @override
+  Future<ClaudeAgentSdkStatus> claudeAgentSdkStatus() async => claudeAgentSdkStatusFromJson(
+        await _api.getJson('/api/ai-settings/claude-agent-sdk-status') as Map<String, dynamic>,
+      );
 }
 
 class AuthenticationSettingsRepositoryImpl implements AuthenticationSettingsRepository {
@@ -104,6 +109,55 @@ class GitHubSettingsRepositoryImpl implements GitHubSettingsRepository {
           'scriptApprovalToken': scriptApprovalToken,
           'clearScriptApprovalToken': clearScriptApprovalToken,
         }) as Map<String, dynamic>,
+      );
+}
+
+class VantaSettingsRepositoryImpl implements VantaSettingsRepository {
+  const VantaSettingsRepositoryImpl(this._api);
+
+  final ApiClient _api;
+
+  @override
+  Future<VantaSettings> read() async => vantaSettingsFromJson(
+        await _api.getJson('/api/admin/settings/vanta') as Map<String, dynamic>,
+      );
+
+  @override
+  Future<VantaSettings> update({
+    required bool enabled,
+    required String? clientId,
+    required String? clientSecret,
+    required bool clearClientSecret,
+    required String? apiBaseUrl,
+    required String? vulnerableComponentResourceId,
+    required String? packageVulnerabilityResourceId,
+    required String? consoleBaseUrl,
+    required double? severity,
+    required int? syncIntervalHours,
+  }) async =>
+      vantaSettingsFromJson(
+        await _api.putJson('/api/admin/settings/vanta', body: {
+          'enabled': enabled,
+          'clientId': clientId,
+          'clientSecret': clientSecret,
+          'clearClientSecret': clearClientSecret,
+          'apiBaseUrl': apiBaseUrl,
+          'vulnerableComponentResourceId': vulnerableComponentResourceId,
+          'packageVulnerabilityResourceId': packageVulnerabilityResourceId,
+          'consoleBaseUrl': consoleBaseUrl,
+          'severity': severity,
+          'syncIntervalHours': syncIntervalHours,
+        }) as Map<String, dynamic>,
+      );
+
+  @override
+  Future<VantaSyncStatus> readSyncStatus() async => vantaSyncStatusFromJson(
+        await _api.getJson('/api/admin/settings/vanta/sync-status') as Map<String, dynamic>,
+      );
+
+  @override
+  Future<VantaSyncStatus> startSync() async => vantaSyncStatusFromJson(
+        await _api.postJson('/api/admin/settings/vanta/sync') as Map<String, dynamic>,
       );
 }
 

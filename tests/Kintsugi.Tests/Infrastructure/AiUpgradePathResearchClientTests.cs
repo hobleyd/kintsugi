@@ -71,6 +71,7 @@ public class AiUpgradePathResearchClientTests
         new ConfigurationBuilder().Build(),
         FakeGitHubSettings.Provider(),
         Mock.Of<IGooseCliClient>(),
+        Mock.Of<IClaudeAgentSdkClient>(),
         NullLogger<AiUpgradePathResearchClient>.Instance);
 
     [Fact]

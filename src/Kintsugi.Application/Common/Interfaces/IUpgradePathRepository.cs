@@ -52,6 +52,19 @@ public interface IUpgradePathRepository
     /// the database level — safe to call across a large fleet, unlike expanding to one row per host.</summary>
     Task<IReadOnlyList<UpgradePathSummaryDto>> GetSummariesAsync(CancellationToken cancellationToken);
 
+    /// <summary>Every (host, application) pairing whose installed version is behind the latest known
+    /// one, fleet-wide.</summary>
+    /// <remarks>
+    /// Unscoped, unlike <see cref="GetStatusesAsync(string, CancellationToken)"/> — deliberately, and
+    /// only because the caller genuinely needs one row per (host, application): the Vanta sync sends
+    /// exactly that shape, one package-vulnerability record per out-of-date installation, so there is
+    /// no cheaper form of the same answer. It materializes the same installed-application rows
+    /// <see cref="GetSummariesAsync"/> and <see cref="GetAppUpdateCountsByHostAsync"/> already do,
+    /// and returns only the out-of-date ones, so what comes back is bounded by how far behind the
+    /// fleet is rather than by its size. It is not an agent-facing query and should not become one.
+    /// </remarks>
+    Task<IReadOnlyList<UpgradeStatusDto>> GetOutdatedStatusesAsync(CancellationToken cancellationToken);
+
     /// <summary>Every upgrade path currently resolved via an AI-generated script — what "Check for
     /// Updates" re-checks by running each one's own <c>--update-version</c> mode, with no AI call
     /// involved.</summary>
