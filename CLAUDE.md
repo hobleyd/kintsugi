@@ -725,13 +725,6 @@ by then — only the long-running per-user units get restarted.
   api service healthy and nginx in a restart loop, complaining about a missing certificate nothing
   was ever going to write. Do not make the CA lazy again on the grounds that nothing needs it
   until an agent turns up.
-- `nginx/generate-self-signed-cert.sh` exists for bringing the stack up locally without a real
-  certificate, and it refuses to overwrite an existing one without `FORCE=1` — because what it
-  would overwrite is quite possibly the real one, and a self-signed certificate there takes the
-  whole fleet offline at the next check-in (see the `rustls-tls-native-roots` note above). If you
-  already hold a real certificate, the better local answer is a hosts entry pointing one of its
-  own names at `127.0.0.1`: the certificate is genuinely valid for that name, so the browser is
-  happy and agents keep working.
 - Volumes that must survive a redeploy: `dataprotection-keys` (or every session is signed out),
   `agent-ca-private` / `agent-ca-public` (or the whole fleet must re-enroll), `agent-packages`,
   `db-data`.
