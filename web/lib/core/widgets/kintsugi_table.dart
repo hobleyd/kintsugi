@@ -3,6 +3,13 @@ import 'package:flutter/material.dart';
 import '../theme/kintsugi_palette.dart';
 import 'panel.dart';
 
+/// The horizontal gutter every cell — header and body — is inset by.
+///
+/// 12 rather than the 18 the stylesheet used, because a column pays it twice and the Applications
+/// table has eight of them: those six pixels are 96px of the width budget that decides whether the
+/// table fits a 1512-wide display or scrolls sideways inside its panel.
+const _cellGutter = 12.0;
+
 /// One column of a [KintsugiTable].
 class TableColumnSpec {
   const TableColumnSpec({
@@ -90,7 +97,7 @@ class KintsugiTable extends StatelessWidget {
         children: [
           if (toolbar != null)
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+              padding: const EdgeInsets.symmetric(horizontal: _cellGutter, vertical: 14),
               decoration: BoxDecoration(
                 color: palette.accentWash(0.03),
                 border: Border(bottom: BorderSide(color: palette.border)),
@@ -150,8 +157,8 @@ class KintsugiTableRow {
           for (var i = 0; i < columns.length; i++)
             Padding(
               padding: EdgeInsets.only(
-                left: i == 0 && isChild ? 40 : 18,
-                right: 18,
+                left: i == 0 && isChild ? _cellGutter + 22 : _cellGutter,
+                right: _cellGutter,
                 top: 14,
                 bottom: 14,
               ),
@@ -169,7 +176,10 @@ class KintsugiTableRow {
             // A Table has no column-span, so the panel goes in the first cell and every other
             // cell is empty. The panel's own width is then the first column's, which is why the
             // expanding column is always the widest one on a table that uses this.
-            Padding(padding: const EdgeInsets.all(18), child: expanded!),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: _cellGutter, vertical: 18),
+              child: expanded!,
+            ),
             for (var i = 1; i < columns.length; i++) const SizedBox.shrink(),
           ],
         ),
@@ -192,8 +202,26 @@ class _HeaderCell extends StatelessWidget {
 
     Widget label = Row(
       mainAxisSize: MainAxisSize.min,
+      // Top, not centre: the sort arrow belongs beside the label's first line once the label
+      // wraps.
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(column.label.toUpperCase(), style: Theme.of(context).textTheme.labelLarge),
+        // Flexible, and wrapping. A header label is routinely wider than the column beneath it —
+        // "Hosts Installed On" sits over a count badge, "Actions" over a single icon — and a Row
+        // that cannot fit its child does not shrink it, it paints it straight over the next
+        // column. That is what the Applications header did: the hosts label ran across the
+        // platform one. The label is what a reader recognises the column by, so it wraps to a
+        // second line rather than being shortened to fit.
+        Flexible(
+          child: Text(
+            column.label.toUpperCase(),
+            // The cross-axis alignment below puts the *Row* on the right; this is what puts the
+            // wrapped lines inside it there too, so a two-line header still reads as one block
+            // over its right-aligned column.
+            textAlign: column.alignRight ? TextAlign.right : TextAlign.left,
+            style: Theme.of(context).textTheme.labelLarge,
+          ),
+        ),
         if (sortable)
           Padding(
             padding: const EdgeInsets.only(left: 4),
@@ -217,14 +245,22 @@ class _HeaderCell extends StatelessWidget {
       );
     }
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-      child: Column(
-        crossAxisAlignment: column.alignRight ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-        children: [
-          label,
-          if (column.filter != null) ...[const SizedBox(height: 8), column.filter!],
-        ],
+    // Top-aligned, and per cell rather than by changing the table's `defaultVerticalAlignment`:
+    // only some header cells carry a filter control, so the row's height is set by those and the
+    // rest would otherwise float to the middle of it — which is why the Applications header read
+    // as three labels at one height and five at another. The body rows and the expanded panel
+    // still want the table's middle default, so this must not become a table-wide setting.
+    return TableCell(
+      verticalAlignment: TableCellVerticalAlignment.top,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: _cellGutter, vertical: 14),
+        child: Column(
+          crossAxisAlignment: column.alignRight ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+          children: [
+            label,
+            if (column.filter != null) ...[const SizedBox(height: 8), column.filter!],
+          ],
+        ),
       ),
     );
   }
