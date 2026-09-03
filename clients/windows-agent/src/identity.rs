@@ -46,13 +46,46 @@ struct EnrollResponse {
 }
 
 /// Loads this agent's already-established identity from disk, if enrollment has already happened.
-/// Returns `None` (not an error) when any expected file is missing, so the caller can fall through
-/// to `enroll`.
-pub fn load(dir: &Path) -> Option<AgentIdentity> {
-    let certificate_pem = fs::read_to_string(dir.join(CERT_FILE)).ok()?;
-    let private_key_pem = fs::read_to_string(dir.join(KEY_FILE)).ok()?;
-    let artifact_signing_public_key_pem = fs::read_to_string(dir.join(ARTIFACT_PUBKEY_FILE)).ok()?;
-    Some(AgentIdentity { certificate_pem, private_key_pem, artifact_signing_public_key_pem })
+///
+/// Three outcomes, and the distinction between the last two is the whole reason this returns a
+/// `Result` rather than an `Option`: `Ok(Some)` is enrolled, `Ok(None)` is genuinely not enrolled
+/// yet — so the caller should go and `enroll` — and `Err` is *enrolled but unreadable*, meaning the
+/// files are on disk and this process cannot open them.
+///
+/// Collapsing those last two into one `None` is what turns a permissions fault into a long
+/// diagnosis. The identity directory is restricted to SYSTEM and Administrators (see
+/// `restrict_identity_permissions`), so a service running as anything else can read none of it —
+/// and the agent would report "this agent has not enrolled an identity yet", re-enroll on every
+/// check-in forever, burn a certificate issuance on the server each time, and then die on the
+/// *write*. The file named in that failure is `agent.crt`, the first one written, which is not
+/// necessarily the file whose read actually failed — so the error points somewhere unhelpful.
+/// Only `NotFound` means "not enrolled"; anything else is a broken installation and says so.
+pub fn load(dir: &Path) -> Result<Option<AgentIdentity>> {
+    // Every file is attempted rather than short-circuiting on the first absent one: a directory
+    // this process cannot read reports each of them as unreadable, and stopping early would hide
+    // that behind whichever file happened to be missing.
+    let certificate_pem = read_identity_file(dir, CERT_FILE)?;
+    let private_key_pem = read_identity_file(dir, KEY_FILE)?;
+    let artifact_signing_public_key_pem = read_identity_file(dir, ARTIFACT_PUBKEY_FILE)?;
+
+    match (certificate_pem, private_key_pem, artifact_signing_public_key_pem) {
+        (Some(certificate_pem), Some(private_key_pem), Some(artifact_signing_public_key_pem)) => {
+            Ok(Some(AgentIdentity { certificate_pem, private_key_pem, artifact_signing_public_key_pem }))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Reads one identity file, separating "not there" (`Ok(None)` — this agent has never enrolled)
+/// from "there and refused" (`Err`). The counterpart to `write_identity_file`, and it names the
+/// path for the same reason.
+fn read_identity_file(dir: &Path, file_name: &str) -> Result<Option<String>> {
+    let path = dir.join(file_name);
+    match fs::read_to_string(&path) {
+        Ok(contents) => Ok(Some(contents)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(anyhow::Error::new(err).context(format!("could not read {}", path.display()))),
+    }
 }
 
 /// One-time bootstrap into the fleet's mutual-TLS identity system: generates a fresh keypair
@@ -142,8 +175,27 @@ pub fn build_client(timeout: std::time::Duration, identity: Option<&AgentIdentit
 pub fn load_or_enroll(config: &Config, serial_number: &str) -> Option<AgentIdentity> {
     let dir = crate::config::identity_dir();
 
-    if let Some(identity) = load(&dir) {
-        return Some(identity);
+    match load(&dir) {
+        Ok(Some(identity)) => return Some(identity),
+        Ok(None) => {}
+        // Enrolled, but this process cannot read what it enrolled with. Deliberately *not* followed
+        // by an enrollment attempt: the write would be refused by the same permissions that just
+        // refused the read, so trying would replace this precise diagnosis with a misleading one
+        // about `agent.crt` — and would spend a certificate issuance on the server every check-in
+        // to do it. Nothing here can fix the fault, so it is reported in the terms an administrator
+        // can act on instead.
+        Err(err) => {
+            crate::logging::error(&format!(
+                "this agent's identity is on disk but cannot be read, so it will present no certificate and every \
+                 agent-only server request will be rejected: {err:#}. This is a permissions fault rather than a \
+                 missing enrollment — the identity directory is restricted to SYSTEM and the local Administrators \
+                 group, so check which account the service runs as (`sc.exe qc {}`). To start over: stop the \
+                 service, delete the identity directory outright — the whole directory, not its contents, which is \
+                 what clears stale per-file permissions — and start the service again.",
+                crate::config::SERVICE_NAME
+            ));
+            return None;
+        }
     }
 
     let enrollment_client = match build_client(std::time::Duration::from_secs(30), None) {
@@ -246,6 +298,73 @@ mod tests {
     use p256::ecdsa::signature::Signer;
     use p256::ecdsa::SigningKey;
     use p256::pkcs8::EncodePublicKey;
+
+    /// A scratch identity directory of its own per test, named the way the rest of this agent
+    /// names temporary paths (see `policy`, `self_update`) since there is no tempfile dependency.
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("kintsugi-identity-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("creating a scratch directory under the temp dir always works");
+        dir
+    }
+
+    #[test]
+    fn load_reports_no_identity_when_nothing_has_been_enrolled_yet() {
+        let dir = scratch_dir("absent");
+
+        // Ok(None), not Err: a fresh install has no identity and that is not a fault.
+        assert!(load(&dir).expect("an empty directory is not an error").is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_reports_no_identity_when_only_some_of_the_files_are_present() {
+        let dir = scratch_dir("partial");
+        fs::write(dir.join(CERT_FILE), "cert").unwrap();
+        fs::write(dir.join(KEY_FILE), "key").unwrap();
+        // artifact-signing.pub missing — the pinned key `verify_artifact_signature` needs.
+
+        assert!(load(&dir).expect("a missing file is not an error").is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_returns_the_identity_once_every_file_is_present() {
+        let dir = scratch_dir("complete");
+        fs::write(dir.join(CERT_FILE), "cert-pem").unwrap();
+        fs::write(dir.join(KEY_FILE), "key-pem").unwrap();
+        fs::write(dir.join(ARTIFACT_PUBKEY_FILE), "pub-pem").unwrap();
+
+        let identity = load(&dir).expect("readable files are not an error").expect("all three files are present");
+
+        assert_eq!(identity.certificate_pem, "cert-pem");
+        assert_eq!(identity.private_key_pem, "key-pem");
+        assert_eq!(identity.artifact_signing_public_key_pem, "pub-pem");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_identity_file_distinguishes_an_absent_file_from_an_unreadable_one() {
+        // The distinction the whole signature exists for. A directory where a file's name is taken
+        // by a *directory* is the portable stand-in for "present and refused" — opening it to read
+        // fails with something that is not NotFound, exactly as a permissions refusal does.
+        let dir = scratch_dir("unreadable");
+        fs::create_dir_all(dir.join(CERT_FILE)).unwrap();
+
+        assert!(read_identity_file(&dir, KEY_FILE).expect("an absent file is not an error").is_none());
+
+        let err = read_identity_file(&dir, CERT_FILE).expect_err("a file that cannot be read is an error");
+        assert!(err.to_string().contains(CERT_FILE), "the error should name the path it failed on: {err:#}");
+
+        // And the error must travel all the way out of `load`, rather than being flattened back
+        // into "not enrolled" — which is what sent the agent into a doomed re-enrollment loop.
+        assert!(load(&dir).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     /// A fixed (not random) test keypair — deterministic input, no RNG dependency needed just to
     /// exercise signature verification.
