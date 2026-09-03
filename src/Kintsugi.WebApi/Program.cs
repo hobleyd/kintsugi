@@ -110,6 +110,7 @@ builder.Services.AddHealthChecks()
 var app = builder.Build();
 
 await ApplyMigrationsAsync(app);
+EnsureAgentFleetCaExists(app);
 await SeedGitHubSettingsFromEnvironmentAsync(app);
 
 // Before anything that reads the scheme or host — the OIDC handler in UseAuthentication, and the
@@ -164,6 +165,52 @@ app.MapControllers();
 app.MapHealthChecks("/health");
 
 app.Run();
+
+/// <summary>
+/// Generates the agent fleet's CA now, if it does not exist yet, rather than waiting for the first
+/// agent to enroll.
+/// </summary>
+/// <remarks>
+/// <para>
+/// This is not an optimization — without it a clean deployment cannot start at all. nginx loads
+/// <c>ssl_client_certificate /etc/nginx/agent-ca/ca.crt</c> at startup and exits if the file is
+/// absent, and that file is the public half of the CA, mirrored into the shared
+/// <c>agent-ca-public</c> volume by <see cref="ICaService"/>. But the CA was only ever created
+/// lazily, on the first call to <c>GetCaCertificatePem</c> or
+/// <c>IssueClientCertificatePem</c> — which is to say by <c>EnrollAgentCommandHandler</c>, on the
+/// first agent enrollment. An enrollment has to arrive through nginx. So nginx waited on a file
+/// only an enrollment would create, and the enrollment waited on nginx: `docker compose up`
+/// reported the api service healthy and the nginx service in a restart loop, complaining about a
+/// missing certificate that nothing was ever going to write.
+/// </para>
+/// <para>
+/// Synchronous because <see cref="ICaService"/> is; it runs once, before the first request is
+/// served, and generating a P-256 keypair costs microseconds. Failures are logged rather than
+/// thrown: the api service refusing to start would take the Settings screens down with it, and
+/// they are the only way to diagnose anything. nginx will keep saying what is wrong in the
+/// meantime, which is the more useful place for it to be said.
+/// </para>
+/// </remarks>
+static void EnsureAgentFleetCaExists(WebApplication app)
+{
+    using var scope = app.Services.CreateScope();
+    var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+
+    try
+    {
+        // Reading it is what creates it — see CaService.LoadOrCreateCa, which also mirrors the
+        // public half into the directory nginx mounts. The value itself is not wanted here.
+        _ = scope.ServiceProvider.GetRequiredService<ICaService>().GetCaCertificatePem();
+        logger.LogInformation("Agent fleet CA is present; its public certificate is available for nginx.");
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(
+            ex,
+            "Could not prepare the agent fleet CA. nginx will not start until its public certificate "
+            + "exists, and no agent can enroll. Check the agent-ca-private and agent-ca-public volumes.");
+    }
+}
 
 static async Task ApplyMigrationsAsync(WebApplication app)
 {
