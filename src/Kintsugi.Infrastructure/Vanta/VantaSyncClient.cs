@@ -24,7 +24,13 @@ public class VantaSyncClient : IVantaSyncClient
     /// optional field is genuinely absent rather than an explicit <c>null</c> — which matters for
     /// the fields this integration deliberately never populates (<c>cveId</c>, <c>cvss3Score</c>,
     /// <c>cvss3Vector</c>).</summary>
-    private static readonly JsonSerializerOptions JsonOptions = new()
+    /// <remarks>
+    /// Public so a test can assert the emitted property names against the spec's required lists.
+    /// Nothing else checks them: a renamed record property or a stray <c>[JsonIgnore]</c> would pass
+    /// every other test and surface only as Vanta's own rejection message in the settings screen's
+    /// status line.
+    /// </remarks>
+    public static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
