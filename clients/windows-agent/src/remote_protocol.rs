@@ -1,5 +1,16 @@
 //! The two wire protocols remote control uses, and the only place either is described on this side.
 //!
+//! **A copy of the macOS agent's `remote_protocol.rs`, deliberately, and it must not diverge.** The
+//! viewer is the same browser talking the same protocol whatever the host is, so the two agents are
+//! kept identical here the same way their module names, orderings and comments are kept identical
+//! everywhere else. If one changes, the other and
+//! `web/lib/data/models/remote_control_mapper.dart` change with it.
+//!
+//! `diff` the two and exactly one line differs outside this module comment: the cross-reference on
+//! `ViewerInput::Key`, which names `input_injection::scan_code_for_hid` here and
+//! `virtual_key_for_hid` there. That is not drift — the two platforms genuinely reach the same
+//! positional key through differently-named APIs — but anything *else* showing up in that diff is.
+//!
 //! **They are separate protocols with separate peers, and that is the whole architecture.** The
 //! *control* protocol is between this agent and the Kintsugi server: session requests in, the host
 //! user's answer out. Its C# counterpart is `RemoteControlProtocol.cs`, mirrored by hand here the
@@ -10,6 +21,12 @@
 //! `RemoteControlSessionBroker`), so its counterpart is not C# at all: it is
 //! `web/lib/presentation/remote_control/`. Nothing in the server needs to change to add a
 //! capability to it, and nothing in the server will catch the two ends drifting apart either.
+//!
+//! One thing differs from macOS, and it is not in this file: on Windows the two halves of this
+//! protocol are spoken by *different processes*. The control protocol is the service's, because only
+//! the service holds this host's identity; the media protocol is the tray process's, because only a
+//! session on the user's desktop can capture a screen or post input. `remote_ipc` is what joins
+//! them.
 //!
 //! Everything here is pure — bytes and strings in, values out — so the format can be tested
 //! without a socket, a screen or a server. That matters more than usual: a header field written
@@ -222,7 +239,7 @@ pub enum ViewerInput {
         delta_y: f64,
     },
     /// A USB HID usage code, as Flutter's `PhysicalKeyboardKey.usbHidUsage` reports it — the
-    /// physical key, not the character it would produce. See `input_injection::virtual_key_for_hid`
+    /// physical key, not the character it would produce. See `input_injection::scan_code_for_hid`
     /// for why the physical key is the right thing to send.
     Key { hid: u32, down: bool },
     /// The viewer asking for a different trade between picture and bandwidth.

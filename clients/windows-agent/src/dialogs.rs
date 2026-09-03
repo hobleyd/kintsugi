@@ -30,6 +30,91 @@ pub enum ConfirmChoice {
     TimedOut,
 }
 
+/// What the person at the keyboard said when asked to hand over control of this host.
+///
+/// **A separate type from [`ConfirmChoice`] on purpose, because a timeout means the opposite
+/// thing.** There, nobody answering means "they were not at the desk, so count it as a delay and
+/// patch later" — the user never refused, and patching happens regardless. Here, nobody answering
+/// means **nobody consented**, and the only safe reading of silence is refusal. Reusing that enum
+/// would have left the safe default one careless `match` arm away from handing an unattended
+/// desktop to whoever asked. Kept identical to the macOS agent's `RemoteControlChoice`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RemoteControlChoice {
+    Allow,
+    Deny,
+    /// The dialog was left up until its own timer dismissed it. Treated exactly as [`Self::Deny`]
+    /// by every caller, and kept distinct only so the audit record can tell an empty desk from a
+    /// deliberate refusal.
+    TimedOut,
+}
+
+const ALLOW_BUTTON: &str = "Allow";
+const DENY_BUTTON: &str = "Deny";
+
+/// Composes the consent dialog's text. Split out so the wording — the part somebody has to make a
+/// decision from — can be tested without a window.
+///
+/// It names the administrator, says plainly what is being granted, and says how to end it. All
+/// three matter: a dialog reading "allow remote access?" with no name is one people click through,
+/// and one that does not mention the notification area leaves someone who regrets it with no
+/// visible way out.
+fn remote_control_message(requested_by: &str, restrictions: &[String]) -> String {
+    let mut message = format!(
+        "{requested_by} is asking to control this computer remotely.\r\n\r\n\
+         If you allow this, they will see your screen and be able to use your keyboard and mouse as \
+         though they were sitting here. You can end the session at any time from the Kintsugi icon \
+         in the notification area.\r\n"
+    );
+
+    if !restrictions.is_empty() {
+        message.push_str("\r\n");
+        for restriction in restrictions {
+            message.push_str(&format!("  \u{2022} {restriction}\r\n"));
+        }
+    }
+
+    message
+}
+
+/// Asks the host user to hand over control, and returns what they said.
+///
+/// **Deny is listed first, which makes it the default button** — `show_dialog` gives index 0
+/// `BS_DEFPUSHBUTTON`. That is deliberate in the one dialog where getting it wrong hands over
+/// somebody's desktop: pressing Return or Space on a prompt that appeared unannounced refuses.
+///
+/// It also puts Deny in the rightmost position, because that implementation lays buttons out
+/// right-to-left from index 0, and rightmost is where Windows conventionally puts the *primary*
+/// action. That is a real cost and it is accepted rather than overlooked: the two properties are
+/// coupled in `show_dialog`, and of the pair, "the button under a habitual click refuses" is worth
+/// more here than "the button in the usual place is the affirmative one". Decoupling them would
+/// mean a `default_index` parameter on a dialog helper shared with the patching flow, for one
+/// caller.
+pub fn confirm_remote_control(
+    requested_by: &str,
+    restrictions: &[String],
+    timeout_seconds: u64,
+) -> Result<RemoteControlChoice> {
+    crate::logging::info(&format!("asking the console user to approve remote control for {requested_by}"));
+
+    let message = remote_control_message(requested_by, restrictions);
+    let choice = match show_dialog(&message, &[DENY_BUTTON, ALLOW_BUTTON], timeout_seconds)? {
+        Some(0) => RemoteControlChoice::Deny,
+        Some(_) => RemoteControlChoice::Allow,
+        None => RemoteControlChoice::TimedOut,
+    };
+
+    crate::logging::info(&format!(
+        "console user chose: {}",
+        match choice {
+            RemoteControlChoice::Allow => "allow remote control",
+            RemoteControlChoice::Deny => "deny remote control",
+            RemoteControlChoice::TimedOut => "timed out (treated as a refusal)",
+        }
+    ));
+
+    Ok(choice)
+}
+
 /// Shows the confirm-or-delay dialog. When `delays_remaining` is zero, no delay option is offered
 /// at all — the caller is expected to show `acknowledge` instead in that case, since there's
 /// nothing left to choose between. Only ever called once the caller has already confirmed there's
@@ -356,6 +441,36 @@ unsafe extern "system" fn dialog_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remote_control_message_names_who_is_asking_and_how_to_stop_it() {
+        let message = remote_control_message("admin@example.com", &[]);
+
+        assert!(message.contains("admin@example.com is asking to control this computer"), "{message}");
+        assert!(message.contains("keyboard and mouse"), "{message}");
+        // Somebody who regrets allowing it needs to know there is a way out.
+        assert!(message.contains("notification area"), "{message}");
+    }
+
+    #[test]
+    fn remote_control_message_lists_what_the_session_cannot_do() {
+        let message = remote_control_message(
+            "admin@example.com",
+            &["Elevated windows cannot be clicked.".to_string()],
+        );
+
+        assert!(message.contains("\u{2022} Elevated windows cannot be clicked."), "{message}");
+    }
+
+    #[test]
+    fn remote_control_uses_windows_line_endings_like_every_other_dialog_here() {
+        // The dialog is a Win32 static control, which renders a bare \n as a box rather than a
+        // break — the existing confirm_message has the same requirement.
+        let message = remote_control_message("admin@example.com", &[]);
+
+        assert!(message.contains("\r\n"), "{message}");
+        assert!(!message.replace("\r\n", "").contains('\n'), "{message}");
+    }
+
     use super::*;
 
     #[test]

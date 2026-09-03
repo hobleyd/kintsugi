@@ -765,13 +765,56 @@ therefore offered regardless of status and the *server* answers — with a sessi
 `AgentUnreachable`, which the remote-control screen explains. Disabling the button on a stale status
 would hide working hosts.
 
-**Why the other two agents need a different design.** On macOS the per-user process holds the fleet
-identity, which is exactly what remote control needs — the screen and keyboard belong to a GUI
-session the root daemon does not have. On Windows and Linux the per-user half holds no identity and
-makes no network call at all, going through a queue instead (see the agents table above), so neither
-can open a socket of its own. Whatever is built there will either move the identity or proxy the
-socket through the privileged service, and the second is the one that keeps the existing security
-property.
+**The other two agents need a different design, and Windows now has it.** On macOS the per-user
+process holds the fleet identity, which is exactly what remote control needs — the screen and
+keyboard belong to a GUI session the root daemon does not have. On Windows the per-user half holds no
+identity and makes no network call at all, so it cannot open a socket; and the service, which does
+hold the identity, cannot reach a desktop at all because of session 0 isolation. Neither half can do
+this alone.
+
+So Windows splits it, and `remote_ipc` is the boundary: the **service** holds both WebSockets and
+relays bytes, the **tray process** asks the user and does the capture and the input, and a named pipe
+joins them. The rejected alternative was handing the certificate and key to the tray so it could
+behave like macOS — that would put the fleet private key in the address space of a process running as
+whoever is logged in, which is precisely what the identity directory's ACL exists to prevent.
+
+Three things about that pipe are load-bearing. It is **not** the existing `queue.rs`: a queue entry is
+a file in a drop-box polled every two seconds, which is right for "run this patch" and hopeless for a
+frame stream — but the queue's security property is kept, in that **a pipe message never carries
+anything executable** either. Its DACL admits Local System, Administrators and `IU` (interactive
+users) and nothing else, with no `WRITE_DAC` and no `FILE_CREATE_PIPE_INSTANCE`, so a logged-in user
+can neither widen it nor stand up a rival instance and impersonate the service. And because `IU`
+admits *every* interactive session, `PipeListener::accept` additionally checks the client's session
+against `WTSGetActiveConsoleSessionId` and refuses anything else — which stops a second logged-in
+session or a service account standing in for the console user, though not an attacker already running
+code as that user, who can read their screen directly anyway.
+
+**Windows reachability follows the pipe, not the service.** The control socket exists only while a
+console-session tray is connected. That is the correct semantics rather than a shortcut: with nobody
+logged in there is no screen and nobody to ask, so the host is genuinely unreachable and the server
+says so — the same answer macOS gives, arrived at differently.
+
+**Two things Windows remote control cannot do, and neither is a bug.** `SendInput` from the tray
+process runs at medium integrity, so UIPI refuses input aimed at an already-elevated window; and the
+UAC secure desktop cannot be captured or injected into by any ordinary process, so the picture
+freezes on the last frame until a prompt is answered at the machine. Both would need a permanently
+elevated input-injecting helper in every logged-in session, which is a much bigger thing to justify
+than the gap it closes. The consent dialog lists both up front rather than letting them be discovered
+mid-call.
+
+**Windows captures with GDI, not Desktop Duplication, and Remote Desktop is why.** DXGI Desktop
+Duplication is the modern API and gives dirty rectangles for free, but `DuplicateOutput` returns
+`DXGI_ERROR_UNSUPPORTED` in an RDP session — and a fleet agent is very often reached over RDP, so the
+modern API fails precisely on the hosts an administrator is already logged into remotely. `StretchBlt`
+from the desktop DC works in both. The costs are named in `screen_capture`: no hardware video
+overlays, some layered windows missed, and the cursor has to be drawn in by hand because `BitBlt`
+does not include it.
+
+**Linux is still to come, and it is the harder one.** Its per-user half also holds no identity, so it
+gets the same split — but its root side is a `systemd` oneshot on a timer with nothing resident to
+hold a socket, and capture and injection both run into Wayland, where the portal route needs
+PipeWire: a C library, which would break the statically-linked musl release that exists so there is
+no libc floor at all.
 
 ## Platform buckets, and why package managers get their own
 
@@ -849,7 +892,7 @@ original — then the others for what each platform forced to differ. The differ
 | OS updates | `softwareupdate` | Windows Update Agent COM API, via PowerShell | apt / dnf / yum / zypper / pacman / apk |
 | Host identity | hardware serial, always present | SMBIOS serial, **often a placeholder** | DMI serial, **often a placeholder** |
 | Nobody logged in | nothing patches | nothing patches | root service patches unattended — see below |
-| Remote control | per-user process, consent + capture + input | not yet — per-user half holds no identity | not yet — same reason |
+| Remote control | per-user process, consent + capture + input | service holds the socket, tray does consent + capture + input, named pipe between | not yet — see below |
 
 **Linux borrows its architecture from Windows, not macOS, and for the same forcing reason.** Every
 upgrade it can perform (`apt-get`, `dnf`, `flatpak update --system`, `snap refresh`) requires root,
@@ -1097,6 +1140,15 @@ by then — only the long-running per-user units get restarted.
   is `ByteData`'s default on the reading side; get it wrong and the picture still draws, just
   scrambled. `web/test/data/remote_control_mapper_test.dart` asserts the exact bytes the agent's own
   test emits, and is the only check that exists.
+- The Windows agent's `remote_protocol.rs` is a copy of the macOS agent's and must stay one. `diff`
+  them and exactly one line should differ outside the module comment — the cross-reference naming
+  `scan_code_for_hid` rather than `virtual_key_for_hid`, because the two platforms reach the same
+  positional key through differently-named APIs. Anything else in that diff is drift, and since the
+  server relays the media protocol without parsing it, nothing else would notice.
+- The Windows agent's `screen_capture.rs` shares its whole "pure half" — `FrameEncoder`,
+  `tile_differs`, `extract_rgb` and the tile constants — verbatim with the macOS agent's. Both feed
+  the same viewer, so the tile grid and the full-frame threshold have to agree; the platform half
+  above it is the only part that differs.
 - `remote_control::CONSENT_TIMEOUT` (60s) must stay *shorter* than
   `RemoteControlDefaults.ConsentTimeout` (90s). The agent's dialog is what should give up, so the
   answer is a reported `TimedOut`; the server's is only a backstop for an agent that never answers
