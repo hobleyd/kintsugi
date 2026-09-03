@@ -64,7 +64,11 @@ public class AiAgentSettings : BaseEntity
             // What it stores is not an API key — it is the one-year OAuth token `claude
             // setup-token` prints, which is what makes the run bill a Claude subscription rather
             // than metered API credits. See ClaudeAgentSdkClient.
-            var resolvedApiKey = string.IsNullOrWhiteSpace(apiKey) ? ApiKey : apiKey;
+            // Trimmed rather than stored verbatim: ClaudeAgentSdk hands this value to the
+            // `claude` subprocess as CLAUDE_CODE_OAUTH_TOKEN, and a token pasted with a trailing
+            // newline is a different string to the credential endpoint. The failure is
+            // "401 OAuth access token is invalid", indistinguishable from a wrong token.
+            var resolvedApiKey = string.IsNullOrWhiteSpace(apiKey) ? ApiKey : apiKey.Trim();
 
             if (string.IsNullOrWhiteSpace(resolvedApiKey))
             {

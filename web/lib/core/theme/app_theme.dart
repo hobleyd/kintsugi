@@ -87,6 +87,17 @@ abstract final class AppTheme {
         // .hint / .muted-text.
         bodySmall: body.bodySmall?.copyWith(fontSize: 12.8, color: palette.muted),
       ),
+      // The highlight behind selected text, for the app-wide SelectionArea in main.dart as well
+      // as for text fields. Set here because Flutter's own fallback is a flat 50% grey, which on
+      // the dark theme's near-black background is a muddy smear rather than a selection; a wash of
+      // the accent is what the rest of the UI already tints with. The dark theme carries more
+      // alpha because its accent is a bright cyan on black, where the light theme's is a dark teal
+      // on near-white and the same strength would swallow the text it is meant to be highlighting.
+      textSelectionTheme: TextSelectionThemeData(
+        selectionColor: palette.accentWash(brightness == Brightness.dark ? 0.32 : 0.22),
+        cursorColor: palette.neon,
+        selectionHandleColor: palette.neon,
+      ),
       dividerTheme: DividerThemeData(color: palette.border, thickness: 1, space: 1),
       iconTheme: IconThemeData(color: palette.neonDim, size: 18),
       inputDecorationTheme: InputDecorationTheme(

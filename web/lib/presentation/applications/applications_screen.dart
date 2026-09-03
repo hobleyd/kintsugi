@@ -372,7 +372,9 @@ class _ManualSteps extends StatelessWidget {
           tilePadding: EdgeInsets.zero,
           childrenPadding: EdgeInsets.zero,
           title: Text('View steps', style: Theme.of(context).textTheme.bodyMedium),
-          children: [SelectableText(instructions, style: Theme.of(context).textTheme.bodySmall)],
+          // Text rather than SelectableText — see the note in script_dialog.dart; the app-wide
+          // SelectionArea covers this, and a nested one would break a drag across the panel.
+          children: [Text(instructions, style: Theme.of(context).textTheme.bodySmall)],
         ),
       );
 }

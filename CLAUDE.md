@@ -390,6 +390,36 @@ emulation and takes minutes. And `.dockerignore` excludes `web/.dart_tool`: its
 the background before Flutter boots looks for `flutter.kintsugi-theme`. Renaming it in one place
 needs renaming in the other; nothing checks that they agree.
 
+**Text is selectable app-wide, and the line that does it needs an Overlay it has to bring itself.**
+Flutter web paints its text into a canvas, so there is no DOM for the browser's own selection to act
+on and *nothing* is selectable unless a `SelectionArea` says so. `main.dart` puts one in
+`MaterialApp.builder`, which is inside the `Theme` and `Localizations` the selection toolbar needs
+and above the Navigator — so it covers the routes `AppShell` does not (sign-in, the
+cannot-reach-Kintsugi screen) and both dialogs, which are routes pushed on that same Navigator. It
+is wrapped in `Overlay.wrap` because `SelectableRegion` asserts an `Overlay` ancestor (it floats its
+toolbar and magnifier in one) and `builder` runs above the Navigator that would otherwise supply
+one; without it the first frame throws "No Overlay widget found" — **in debug only, since it is an
+assert**, so a clean `flutter build web --release` says nothing about it and only running the app
+does. `test/presentation/text_selection_test.dart` pumps that same arrangement for exactly that
+reason.
+
+Its focus node is supplied rather than defaulted, for `skipTraversal`, and that argument is not
+tidiness either: on web — and *only* on web — `SelectableRegion` wraps its child in a `Stack`
+holding an `HtmlElementView` for the browser's own right-click menu, the browser reports a
+view-focus change before that Stack's first layout, and the traversal sort reads every node's
+`rect`, which asserts `hasSize` on a render object that has none. Skipping traversal keeps the node
+out of the sort. **No test in `web/test/` can catch that one**: `kIsWeb` is false under `flutter
+test`, so the VM never builds that `Stack`. `cd web && flutter run -d chrome` and reading the
+console is the only detector, which makes it worth doing after any change to this wiring.
+
+Two things follow. **Do not use `SelectableText` in `lib/`**: inside a `SelectionArea` it is a
+selection *island* that a drag starting outside it stops at, so the two that predated this made
+their own text the part a drag across the screen excluded — including the script dialog's script,
+which is the one thing anyone opens that dialog to copy. And both themes state
+`textSelectionTheme.selectionColor`, because Flutter's fallback is a flat 50% grey which on the dark
+palette's near-black background is a smear rather than a highlight — a selection that copies
+correctly and looks broken.
+
 **Three independent background coordinators** — upgrade-path scan, per-application refresh, and
 update-check — each registered twice in `Program.cs`: the concrete type for the hosted service
 (which needs writer-side methods) and a narrow interface for Application handlers. Follow that
@@ -757,6 +787,23 @@ enrolled. The remedy is the documented one (delete `identity/` and let it re-enr
 prompts for it and `self_update` delivers the change unattended. So before shipping any change to
 what `serial_number` returns: check the Hosts screen for GUID-shaped or placeholder-shaped serials,
 because those are precisely the hosts that will need re-enrolling.
+
+**The Windows identity directory is SYSTEM and Administrators only, and a service running as
+anything else cannot read its own identity.** `identity::restrict_identity_permissions` strips
+inheritance and grants exactly `S-1-5-18` and `S-1-5-32-544`, once, inside `enroll` — there is no
+repair pass re-asserting it, unlike Linux's `config::repair_directory_modes`. The failure mode is
+quiet in a specific way: `icacls` reads as perfectly correct, because it *is* correct for the two
+SIDs it names. Check `sc.exe qc KintsugiAgent` before believing an ACL. `install.ps1` pins
+`obj= LocalSystem` on both branches now, but nothing stops a hardening baseline changing it later.
+
+`identity::load` used to answer that with `None` — the same answer it gives a host that has never
+enrolled — so the agent reported "this agent has not enrolled an identity yet", re-enrolled every
+check-in forever, spent a certificate issuance on the server each time, and died on the *write*,
+naming `agent.crt` (the first file written) rather than whichever read actually failed. It now
+separates `NotFound` from every other error and refuses to start an enrollment it knows will be
+refused. The remedy is to delete the identity directory **outright** rather than its contents:
+`create_dir_all` then recreates it inheriting from the parent, which is what clears stale per-file
+permissions.
 
 **Replacing a running binary differs.** macOS and Linux stage next to the target and rename over it
 (atomic, and Unix will unlink an open file). Windows locks a running image, so `self_update` renames

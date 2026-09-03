@@ -80,8 +80,12 @@ class _AiAgentFormState extends State<_AiAgentForm> {
   void _save() => context.read<AiAgentBloc>().add(AiAgentSettingsSaveRequested(AiAgentSettingsUpdate(
         provider: _provider,
         // Blank means "keep the stored key", which is why an empty field is sent as null rather
-        // than as an empty string.
-        apiKey: _apiKey.text.isEmpty ? null : _apiKey.text,
+        // than as an empty string. Trimmed for the same reason the other fields are, but the
+        // consequence here is sharper: this value is handed to the `claude` subprocess as
+        // CLAUDE_CODE_OAUTH_TOKEN, and a token pasted with a trailing newline authenticates as a
+        // different string — reported as "401 OAuth access token is invalid", which reads exactly
+        // like a wrong or expired token. See ClaudeAgentSdkClient.
+        apiKey: _apiKey.text.trim().isEmpty ? null : _apiKey.text.trim(),
         baseUrl: _baseUrl.text.trim().isEmpty ? null : _baseUrl.text.trim(),
         model: _model.text.trim().isEmpty ? null : _model.text.trim(),
         isEnabled: _isEnabled,
