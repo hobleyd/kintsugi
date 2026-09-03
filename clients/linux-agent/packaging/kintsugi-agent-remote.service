@@ -1,0 +1,39 @@
+[Unit]
+Description=Kintsugi remote control channel
+# The socket to the server has to be genuinely up, not merely configured — the same reason
+# kintsugi-agent.service wants -online rather than plain network.target.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Type=simple, and the only long-running root unit this agent has. The other three cannot hold a
+# standing connection: kintsugi-agent.service is a oneshot on a timer, kintsugi-agent-queue.service
+# is a oneshot on a path watch, and kintsugi-agent-ui.service holds no identity and makes no network
+# call at all. Remote control needs a connection the *server* can reach this host through within
+# seconds, and an hourly check-in cannot carry "somebody would like to see your screen now".
+ExecStart=/usr/local/bin/kintsugi-agent --remote-control
+
+# always, not on-failure: this process is meant to be up whenever the host is, and it exits only if
+# something went wrong. There is no equivalent of the per-user unit's "exits 0 because there is no
+# display" case here — that decision belongs to the per-user half, which simply never connects (see
+# src/remote_session.rs), leaving this unit holding an idle listening socket and the server reporting
+# the host as unreachable.
+Restart=always
+RestartSec=10
+
+# It relays bytes and installs nothing, so unlike kintsugi-agent.service there is no reason to leave
+# it unsandboxed. What it genuinely needs is narrow: the network, its own state directory (for the
+# local socket and to read the identity), and nothing else.
+#
+# Note what is deliberately *not* here: this unit does not take src/lock.rs's advisory flock. That
+# lock exists so a queue-triggered patch cannot land inside an unattended cycle and deadlock two
+# apt-get runs on the dpkg lock. Holding it here would mean a remote session blocked patching for as
+# long as somebody was watching.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ReadWritePaths=/var/lib/kintsugi-agent
+
+[Install]
+WantedBy=multi-user.target

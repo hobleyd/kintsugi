@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Mutex, OnceLock};
 
@@ -21,6 +22,19 @@ static PATCH_NOW_TX: OnceLock<Sender<()>> = OnceLock::new();
 /// The live tray, once `run` has managed to register one. `None` on a host with no notification
 /// area (see `run`), which every update below then silently skips.
 static TRAY: Mutex<Option<Handle<KintsugiTray>>> = Mutex::new(None);
+
+/// Who is currently controlling this host, if anybody.
+///
+/// **The only thing on screen that says a session is happening, which makes it part of the security
+/// model rather than a nicety.** Somebody who allowed a session — or who walks up to a machine where
+/// one is running — has to be able to see whose it is and end it without finding an administrator.
+static REMOTE_SESSION: Mutex<Option<String>> = Mutex::new(None);
+
+/// Set by "End Remote Session" and cleared by whoever acts on it. A flag rather than a channel for
+/// the same reason both other agents use one: the click has to be meaningful whether or not a
+/// session is running at that instant, and ksni rebuilds the menu from `&self` so a closure cannot
+/// hold one.
+static END_REMOTE_SESSION: AtomicBool = AtomicBool::new(false);
 
 /// The two lines of menu text the icon currently shows, plus whether "Patch Now" is selectable —
 /// greyed out mid-cycle, the same way both other agents' menu items are, so a second cycle can't
@@ -53,7 +67,7 @@ impl ksni::Tray for KintsugiTray {
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        vec![
+        let mut items: Vec<MenuItem<Self>> = vec![
             StandardItem {
                 label: self.status_line.clone(),
                 enabled: false,
@@ -67,6 +81,35 @@ impl ksni::Tray for KintsugiTray {
             }
             .into(),
             MenuItem::Separator,
+        ];
+
+        // Directly under the status lines and above "Patch Now": while a session is running it is
+        // the most important thing in this menu. Absent entirely otherwise, rather than greyed out —
+        // the overwhelming majority of hosts never have one.
+        if let Some(requested_by) = REMOTE_SESSION.lock().ok().and_then(|held| held.clone()) {
+            items.push(
+                StandardItem {
+                    label: format!("Remote session: {requested_by}"),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+            items.push(
+                StandardItem {
+                    label: "End Remote Session".into(),
+                    activate: Box::new(|_: &mut Self| {
+                        logging::info("\"End Remote Session\" clicked in the notification area");
+                        END_REMOTE_SESSION.store(true, Ordering::SeqCst);
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
+            items.push(MenuItem::Separator);
+        }
+
+        items.extend([
             StandardItem {
                 label: "Patch Now".into(),
                 enabled: self.patch_now_enabled,
@@ -94,7 +137,9 @@ impl ksni::Tray for KintsugiTray {
                 ..Default::default()
             }
             .into(),
-        ]
+        ]);
+
+        items
     }
 }
 
@@ -143,6 +188,27 @@ pub fn run(patch_now_tx: Sender<()>) -> Result<()> {
 
 /// Pushes a status update to the notification area. Safe to call from any thread — the scheduler
 /// thread is the only real caller.
+/// Shows or hides the remote-session block in the menu. Safe to call from any thread.
+pub fn report_remote_session(requested_by: Option<String>) {
+    if let Ok(mut held) = REMOTE_SESSION.lock() {
+        *held = requested_by;
+    }
+
+    // ksni rebuilds the menu from `&self`, so it has to be told the model changed — unlike the
+    // Windows agent, where the menu is constructed fresh on every click and setting the value is
+    // the whole of it.
+    if let Ok(handle) = TRAY.lock() {
+        if let Some(handle) = handle.as_ref() {
+            handle.update(|_: &mut KintsugiTray| {});
+        }
+    }
+}
+
+/// Whether the person at the keyboard has asked for the session to end, clearing the request.
+pub fn take_end_remote_session_request() -> bool {
+    END_REMOTE_SESSION.swap(false, Ordering::SeqCst)
+}
+
 pub fn report_status(status: AgentStatus) {
     let (status_line, progress_line, patch_now_enabled) = match &status {
         AgentStatus::Idle { next_due_epoch } => (

@@ -160,6 +160,14 @@ cross-compilation involved at all — a Linux container *is* the target:
 docker run --rm -v "$PWD/clients/linux-agent":/w -w /w rust:1-slim cargo test
 ```
 
+One thing that container will *not* do on an Apple Silicon Mac: build the
+`x86_64-unknown-linux-musl` release CI ships. `rust:1-slim` is arm64 there, so its `musl-gcc` cannot
+cross-compile `ring`'s C, and the failure looks alarming — a `cc-rs` error deep in a dependency
+rather than anything about the target. Use `aarch64-unknown-linux-musl` to check the static-linking
+property (it holds or fails for the same reasons), or `--platform linux/amd64` if the exact artifact
+matters. And note `cargo build` for the *host* works on macOS too, which is the quickest syntax check
+of all — see the coupling note on keeping it that way.
+
 It links no C library and no GUI toolkit (see the `ksni` note in its `Cargo.toml`), so the stock
 image needs nothing added. Every output-parsing function — `flatpak list`, `snap list`, the DMI
 serial screening, `apt-get --just-print upgrade` and the four other package managers' listings —
@@ -810,11 +818,52 @@ from the desktop DC works in both. The costs are named in `screen_capture`: no h
 overlays, some layered windows missed, and the cursor has to be drawn in by hand because `BitBlt`
 does not include it.
 
-**Linux is still to come, and it is the harder one.** Its per-user half also holds no identity, so it
-gets the same split — but its root side is a `systemd` oneshot on a timer with nothing resident to
-hold a socket, and capture and injection both run into Wayland, where the portal route needs
-PipeWire: a C library, which would break the statically-linked musl release that exists so there is
-no libc floor at all.
+**Linux takes the same split, and two things about it are specific to the platform.**
+
+The first is that it needed **a fourth root unit**. The other three cannot hold a standing
+connection — `kintsugi-agent.service` is a oneshot on a timer, `kintsugi-agent-queue.service` is a
+oneshot on a path watch, and the per-user unit holds no identity — so remote control runs as
+`kintsugi-agent --remote-control` under `kintsugi-agent-remote.service`, resident and
+`Restart=always`. It deliberately does **not** take `lock.rs`'s advisory flock: that lock stops two
+`apt-get` runs deadlocking on the dpkg lock, this unit installs nothing, and holding it would mean a
+remote session blocked patching for as long as somebody was watching.
+
+The second is **X11 only, with Wayland refused rather than half-supported**. Capturing a Wayland
+session means the `xdg-desktop-portal` ScreenCast interface, which hands back a PipeWire node — and
+PipeWire is a C library. This agent links none, which is the only reason CI can ship a statically
+linked musl binary with no libc floor at all. Linking PipeWire would reintroduce that floor for the
+whole fleet to add remote control on part of it. So capture is `x11rb` (pure Rust, no libxcb) and
+input is XTEST, and a Wayland host reports as unreachable with a reason.
+
+**The Wayland check runs before the display check, and that ordering is the whole point.** Most
+Wayland sessions also run XWayland and *do* set `DISPLAY`, so an X11 connection succeeds — and then
+the root window is not the compositor's output, so `GetImage` returns black or a desktop containing
+only X11 clients. A plausible-looking wrong picture is far worse than an error, so
+`screen_capture::unavailable_reason` tests for Wayland first.
+
+**On Linux a host that cannot be controlled never connects at all.** The per-user process checks
+`unavailable_reason` once and, if there is one, never opens the local socket — so the root unit never
+opens its control socket and the server reports the host unreachable. That is the same mechanism as
+"nobody is logged in", which means there is exactly one way for a host to be unavailable rather than
+a session that starts and shows nothing.
+
+**Three Linux-only costs, all named where they are paid.** `GetImage` transfers the whole root window
+every frame (~8 MB at 1920x1080) and it is downscaled in software, which is why the frame rate is 8
+rather than macOS's 15 — MIT-SHM would avoid the transfer and is deliberately not used, for one code
+path rather than two. The consent dialog is zenity or kdialog, and **a host with neither cannot be
+remote controlled at all**: no dialog program means consent cannot be asked for, which is the
+opposite of what `confirm_patch` does with the same situation, where it proceeds rather than nags.
+And kdialog has no way to make No the default button, so its labels are *reversed* — Deny is the Yes
+button — which keeps Return and every unexpected exit status on the refusing side.
+
+**A self-update had to learn about the new unit, and the gap it closes would have been invisible.**
+`install_binary` replaces only the binary, so a host self-updating from a release that predates
+remote control would get the new agent and no unit file to run it under — reporting as unreachable
+forever with nothing to explain why, until somebody re-ran `install.sh` on every host.
+`self_update::restart_remote_control_unit` therefore installs the unit **if and only if** the path
+does not exist, and restarts it otherwise: it is also the one root unit a self-update must restart,
+being the only long-running one, or it would go on executing the previous binary until reboot.
+Writing units only when absent is what keeps it from ever clobbering a file an administrator edited.
 
 ## Platform buckets, and why package managers get their own
 
@@ -892,7 +941,7 @@ original — then the others for what each platform forced to differ. The differ
 | OS updates | `softwareupdate` | Windows Update Agent COM API, via PowerShell | apt / dnf / yum / zypper / pacman / apk |
 | Host identity | hardware serial, always present | SMBIOS serial, **often a placeholder** | DMI serial, **often a placeholder** |
 | Nobody logged in | nothing patches | nothing patches | root service patches unattended — see below |
-| Remote control | per-user process, consent + capture + input | service holds the socket, tray does consent + capture + input, named pipe between | not yet — see below |
+| Remote control | per-user process, consent + capture + input | service holds the socket, tray does the rest, named pipe between | resident root unit holds the socket, per-user process does the rest, unix socket between; **X11 only** |
 
 **Linux borrows its architecture from Windows, not macOS, and for the same forcing reason.** Every
 upgrade it can perform (`apt-get`, `dnf`, `flatpak update --system`, `snap refresh`) requires root,
@@ -1140,15 +1189,24 @@ by then — only the long-running per-user units get restarted.
   is `ByteData`'s default on the reading side; get it wrong and the picture still draws, just
   scrambled. `web/test/data/remote_control_mapper_test.dart` asserts the exact bytes the agent's own
   test emits, and is the only check that exists.
-- The Windows agent's `remote_protocol.rs` is a copy of the macOS agent's and must stay one. `diff`
-  them and exactly one line should differ outside the module comment — the cross-reference naming
-  `scan_code_for_hid` rather than `virtual_key_for_hid`, because the two platforms reach the same
-  positional key through differently-named APIs. Anything else in that diff is drift, and since the
-  server relays the media protocol without parsing it, nothing else would notice.
-- The Windows agent's `screen_capture.rs` shares its whole "pure half" — `FrameEncoder`,
-  `tile_differs`, `extract_rgb` and the tile constants — verbatim with the macOS agent's. Both feed
-  the same viewer, so the tile grid and the full-frame threshold have to agree; the platform half
-  above it is the only part that differs.
+- All three agents' `remote_protocol.rs` are copies of one another and must stay so. `diff` any two
+  and exactly one line should differ outside the module comment — the cross-reference naming
+  `virtual_key_for_hid`, `scan_code_for_hid` or `xtest_keycode_for_hid`, because the three platforms
+  reach the same positional key through differently-named APIs. Anything else in that diff is drift,
+  and since the server relays the media protocol without parsing it, nothing else would notice.
+- **The Linux agent compiles on macOS, and that is worth not breaking.** It is a Linux program, but
+  `cargo build` on a Mac is the fastest way to check a change before waiting on a container — and the
+  one place remote control needed a Linux-only facility (`libc::ucred`/`SO_PEERCRED`, for the peer
+  check on the local socket) is `#[cfg(target_os = "linux")]` with a stub behind it purely for that
+  reason. The stub can never run: only the root unit calls it, and there is no root unit off Linux.
+- The Linux agent must keep linking no C library. `x11rb` is pure Rust (its whole tree is
+  `rustix`/`linux-raw-sys`) and that is why it was chosen over the `x11`/`libxcb` bindings; the
+  check that matters is CI's own, that the musl artifact is not dynamically linked. Adding anything
+  that pulls a `-sys` crate here breaks the release for the whole fleet, not just remote control.
+- All three `screen_capture.rs` share their whole "pure half" — `FrameEncoder`, `tile_differs`,
+  `extract_rgb` and the tile constants — verbatim. They all feed the same viewer, so the tile grid
+  and the full-frame threshold have to agree; the platform half above it is the only part that
+  differs, and it differs completely (ScreenCaptureKit, GDI, X11 `GetImage`).
 - `remote_control::CONSENT_TIMEOUT` (60s) must stay *shorter* than
   `RemoteControlDefaults.ConsentTimeout` (90s). The agent's dialog is what should give up, so the
   answer is a reported `TimedOut`; the server's is only a backstop for an agent that never answers

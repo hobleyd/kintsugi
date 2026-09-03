@@ -97,6 +97,7 @@ cp "$SCRIPT_DIR/kintsugi-agent.timer" "$WORK_DIR/kintsugi-agent.timer"
 cp "$SCRIPT_DIR/kintsugi-agent-queue.service" "$WORK_DIR/kintsugi-agent-queue.service"
 cp "$SCRIPT_DIR/kintsugi-agent-queue.path" "$WORK_DIR/kintsugi-agent-queue.path"
 cp "$SCRIPT_DIR/kintsugi-agent-ui.service" "$WORK_DIR/kintsugi-agent-ui.service"
+cp "$SCRIPT_DIR/kintsugi-agent-remote.service" "$WORK_DIR/kintsugi-agent-remote.service"
 cp "$SCRIPT_DIR/install.sh" "$WORK_DIR/install.sh"
 cp "$SCRIPT_DIR/uninstall.sh" "$WORK_DIR/uninstall.sh"
 chmod 755 "$WORK_DIR/install.sh" "$WORK_DIR/uninstall.sh"
@@ -110,7 +111,7 @@ tar -czf "$ARCHIVE_PATH" -C "$WORK_DIR" \
     kintsugi-agent config.toml \
     kintsugi-agent.service kintsugi-agent.timer \
     kintsugi-agent-queue.service kintsugi-agent-queue.path \
-    kintsugi-agent-ui.service \
+    kintsugi-agent-ui.service kintsugi-agent-remote.service \
     install.sh uninstall.sh
 
 # --output-dir stops here: the archive is the deliverable, and there is no server to send it to.

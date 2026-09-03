@@ -20,6 +20,7 @@ TIMER_UNIT="kintsugi-agent.timer"
 QUEUE_SERVICE_UNIT="kintsugi-agent-queue.service"
 QUEUE_PATH_UNIT="kintsugi-agent-queue.path"
 UI_UNIT="kintsugi-agent-ui.service"
+REMOTE_CONTROL_UNIT="kintsugi-agent-remote.service"
 
 # Stop each logged-in user's agent before removing the unit file it runs from — `systemctl stop`
 # on a unit whose file has already been deleted still works, but doing it in this order keeps the
@@ -34,6 +35,10 @@ done < <(loginctl list-users --no-legend 2>/dev/null || true)
 systemctl --global disable "$UI_UNIT" 2>/dev/null || true
 systemctl disable --now "$TIMER_UNIT" 2>/dev/null || true
 systemctl disable --now "$QUEUE_PATH_UNIT" 2>/dev/null || true
+# --now matters more for this one than for the two above: it is resident and Restart=always, so
+# without it the process would still be running — and still holding a socket to the server — after
+# its binary was deleted.
+systemctl disable --now "$REMOTE_CONTROL_UNIT" 2>/dev/null || true
 systemctl stop "$SERVICE_UNIT" 2>/dev/null || true
 systemctl stop "$QUEUE_SERVICE_UNIT" 2>/dev/null || true
 
@@ -41,6 +46,7 @@ rm -f "${SYSTEM_UNIT_DIR}/${SERVICE_UNIT}" \
       "${SYSTEM_UNIT_DIR}/${TIMER_UNIT}" \
       "${SYSTEM_UNIT_DIR}/${QUEUE_SERVICE_UNIT}" \
       "${SYSTEM_UNIT_DIR}/${QUEUE_PATH_UNIT}" \
+      "${SYSTEM_UNIT_DIR}/${REMOTE_CONTROL_UNIT}" \
       "${USER_UNIT_DIR}/${UI_UNIT}"
 rm -f "$BIN_DEST"
 
