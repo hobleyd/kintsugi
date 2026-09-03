@@ -53,6 +53,16 @@ class _VantaFormState extends State<_VantaForm> {
   bool _enabled = false;
   bool _clearClientSecret = false;
 
+  /// Set when a numeric box holds something that is not a number.
+  ///
+  /// Checked here rather than left to the server, unlike every other field on this screen, because
+  /// the two numeric fields are the one place where "unparseable" and "leave it alone" would arrive
+  /// as the same thing: the command reads them as nullable, and null means "keep the stored value".
+  /// Typing `twelve` into Severity would otherwise report "Vanta settings saved." over a value that
+  /// silently did not change.
+  String? _severityError;
+  String? _syncIntervalError;
+
   @override
   void dispose() {
     _clientId.dispose();
@@ -83,23 +93,50 @@ class _VantaFormState extends State<_VantaForm> {
     setState(() {
       _enabled = settings.enabled;
       _clearClientSecret = false;
+      _severityError = null;
+      _syncIntervalError = null;
     });
   }
 
-  void _edited() => context.read<VantaSettingsBloc>().add(const VantaSettingsEdited());
+  void _edited() {
+    if (_severityError != null || _syncIntervalError != null) {
+      setState(() {
+        _severityError = null;
+        _syncIntervalError = null;
+      });
+    }
+    context.read<VantaSettingsBloc>().add(const VantaSettingsEdited());
+  }
 
-  void _save() => context.read<VantaSettingsBloc>().add(VantaSettingsSaveRequested(
-        enabled: _enabled,
-        clientId: _clientId.text.trim(),
-        clientSecret: _clientSecret.text.isEmpty ? null : _clientSecret.text,
-        clearClientSecret: _clearClientSecret,
-        apiBaseUrl: _apiBaseUrl.text.trim(),
-        vulnerableComponentResourceId: _vulnerableComponentResourceId.text.trim(),
-        packageVulnerabilityResourceId: _packageVulnerabilityResourceId.text.trim(),
-        consoleBaseUrl: _consoleBaseUrl.text.trim(),
-        severity: double.tryParse(_severity.text.trim()),
-        syncIntervalHours: int.tryParse(_syncIntervalHours.text.trim()),
-      ));
+  void _save() {
+    final severityText = _severity.text.trim();
+    final intervalText = _syncIntervalHours.text.trim();
+    final severity = severityText.isEmpty ? null : double.tryParse(severityText);
+    final interval = intervalText.isEmpty ? null : int.tryParse(intervalText);
+
+    // A blank box legitimately means "keep the stored value". Text that is not a number means the
+    // operator meant something and mistyped it, and sending it as null would look like a save.
+    if ((severityText.isNotEmpty && severity == null) || (intervalText.isNotEmpty && interval == null)) {
+      setState(() {
+        _severityError = severityText.isNotEmpty && severity == null ? 'Enter a number between 0 and 10.' : null;
+        _syncIntervalError = intervalText.isNotEmpty && interval == null ? 'Enter a whole number of hours.' : null;
+      });
+      return;
+    }
+
+    context.read<VantaSettingsBloc>().add(VantaSettingsSaveRequested(
+          enabled: _enabled,
+          clientId: _clientId.text.trim(),
+          clientSecret: _clientSecret.text.isEmpty ? null : _clientSecret.text,
+          clearClientSecret: _clearClientSecret,
+          apiBaseUrl: _apiBaseUrl.text.trim(),
+          vulnerableComponentResourceId: _vulnerableComponentResourceId.text.trim(),
+          packageVulnerabilityResourceId: _packageVulnerabilityResourceId.text.trim(),
+          consoleBaseUrl: _consoleBaseUrl.text.trim(),
+          severity: severity,
+          syncIntervalHours: interval,
+        ));
+  }
 
   @override
   Widget build(BuildContext context) => BlocConsumer<VantaSettingsBloc, VantaState>(
@@ -256,7 +293,7 @@ class _VantaFormState extends State<_VantaForm> {
                       child: KintsugiTextField(
                         controller: _severity,
                         hintText: '5.0',
-                        errorText: state.settings.errorFor('Severity'),
+                        errorText: _severityError ?? state.settings.errorFor('Severity'),
                         onChanged: (_) => _edited(),
                       ),
                     ),
@@ -271,7 +308,7 @@ class _VantaFormState extends State<_VantaForm> {
                       child: KintsugiTextField(
                         controller: _syncIntervalHours,
                         hintText: '24',
-                        errorText: state.settings.errorFor('SyncIntervalHours'),
+                        errorText: _syncIntervalError ?? state.settings.errorFor('SyncIntervalHours'),
                         onChanged: (_) => _edited(),
                       ),
                     ),
