@@ -227,12 +227,64 @@ static async Task ApplyMigrationsAsync(WebApplication app)
             logger.LogInformation("Database migrations applied successfully.");
             return;
         }
+        // Retrying is only right while the answer might change — the db service accepting
+        // connections a moment later. A rejected credential or a missing database is a settled
+        // answer, and looping over it for thirty seconds while logging "Database not ready" is
+        // actively misleading: the database is ready and is refusing us. From the outside that
+        // reads as `api` sitting in "health: starting" and then exiting, which compose reports to
+        // whatever was waiting on it as "Container ... is unhealthy" — a message that sends you
+        // looking at health checks and TLS certificates rather than at a password.
+        catch (Exception ex) when (IsSettledDatabaseRejection(ex))
+        {
+            logger.LogCritical(
+                ex,
+                "The database refused this connection, and retrying will not change that, so startup "
+                + "is stopping here rather than looping. Check that POSTGRES_USER, POSTGRES_PASSWORD "
+                + "and POSTGRES_DB in .env match the database this server is pointed at. If they look "
+                + "right, note that the postgres image reads POSTGRES_PASSWORD only when it first "
+                + "initialises its data directory: changing it afterwards leaves the db-data volume on "
+                + "the original password. Either restore the old value, or ALTER USER to the new one, "
+                + "or discard that volume if the data is expendable.");
+            throw;
+        }
         catch (Exception ex) when (attempt < maxAttempts)
         {
             logger.LogWarning(ex, "Database not ready (attempt {Attempt}/{MaxAttempts}). Retrying in 3s...", attempt, maxAttempts);
             await Task.Delay(TimeSpan.FromSeconds(3));
         }
     }
+}
+
+/// <summary>
+/// Whether the database has given a definitive "no" that retrying cannot change.
+/// </summary>
+/// <remarks>
+/// Deliberately narrow. Anything not listed here keeps its retry behaviour, because the common
+/// case at startup really is a database that has not finished accepting connections yet, and
+/// failing fast on that would trade a misleading log for a broken deployment.
+/// </remarks>
+static bool IsSettledDatabaseRejection(Exception exception)
+{
+    for (var current = exception; current is not null; current = current.InnerException)
+    {
+        if (current is Npgsql.PostgresException postgres)
+        {
+            // 28P01 invalid_password, 28000 invalid_authorization_specification, 3D000
+            // invalid_catalog_name (the database itself does not exist).
+            //
+            // The password one is worth knowing by heart, because it has a cause that surprises
+            // everybody exactly once: the postgres image reads POSTGRES_PASSWORD only when it
+            // *initialises* a fresh data directory. Change it in .env afterwards and the db
+            // service keeps the original, so the two disagree forever and only the api service
+            // says so.
+            if (postgres.SqlState is "28P01" or "28000" or "3D000")
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 /// <summary>
