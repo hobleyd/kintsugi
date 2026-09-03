@@ -502,9 +502,9 @@ configuration, which is precisely what cannot be captured. Callers that need to 
 provider, which is also where the `hobleyd/kintsugi` default is resolved — at read time, so the
 default lives in one place rather than being written into every row.
 
-**The settings subnav is alphabetical by label.** AI Agent, Authentication, GitHub, Patching Policy.
-It is a lookup rather than a workflow, so there is no other order a reader could predict; keep it
-that way when adding one.
+**The settings subnav is alphabetical by label.** AI Agent, Authentication, GitHub, Patching Policy,
+Vanta. It is a lookup rather than a workflow, so there is no other order a reader could predict; keep
+it that way when adding one.
 
 **Fresh deploys lock everything to the Authentication screen, and nothing redirects any more.**
 With no `AuthenticationSettings` row saved, the client pins itself to `/settings/authentication`.
@@ -513,6 +513,75 @@ reaches this application to be redirected. `GET /api/session` reports the state 
 router gates on it — see "The admin UI" above and the long comment in `Program.cs` where the
 middleware used to be. The OIDC provider is still configured at runtime from the database
 (`DynamicOpenIdConnectOptionsConfigurator`), not at startup.
+
+## Compliance evidence: the Vanta integration
+
+Kintsugi pushes its view of the fleet into Vanta as a private "Build integrations" data source
+(https://developer.vanta.com/reference/build-integrations.json). Configured at Settings > Vanta,
+run on a timer by `VantaSyncBackgroundService`, and **off until an administrator turns it on** —
+`VantaSettings` is deliberately *not* seeded from the environment the way `GitHubSettings` is, since
+that seeding exists only to carry deployments off variables that used to be there, and these never
+were.
+
+**Two of the spec's thirteen resource types are synced, and the eleven omissions include two that
+look like the obvious fit.** A host becomes a `VulnerableComponent`; each out-of-date application on
+it, and each pending OS update, becomes a `PackageVulnerabilityConnectors` record naming that
+component. What is *not* synced is `macos_user_computer` and `windows_user_computer`, and the reason
+is not effort: every one of `drives`, `users`, `systemScreenlockPolicies`, `isManaged` and
+`autoUpdatesEnabled` is **required** by those schemas, and Kintsugi collects none of them. An empty
+`drives` array is not a gap in a compliance tool, it is an assertion about disk encryption — so
+filling those from defaults would put invented evidence behind real controls. (There is no
+`linux_user_computer` endpoint at all, so a third of the fleet could not be covered even if the data
+existed.) The Vanta screen says all of this out loud; keep it saying it.
+
+**`severity` is a number the administrator picks, and the CVSS fields are absent rather than
+nullable.** Vanta makes severity mandatory on a 0-10 scale. Kintsugi compares an installed version
+against a latest known version; it has no CVE feed, no CVSS vector and no reachability analysis. So
+`VantaSettings.Severity` is one configured constant applied uniformly, `VantaPackageVulnerability`
+has no `CveId`/`Cvss3Score`/`Cvss3Vector`/`IsReachable` properties **at all** (a test asserts that),
+and each record's own description says it came from a version comparison rather than a feed. Do not
+"improve" this by deriving a score from staleness — a plausible number in a compliance record is
+worse than an honest constant.
+
+**Every sync is a state-of-the-world replacement, which makes an empty payload a deletion.** Vanta
+deletes any `uniqueId` previously sent and now omitted, so there is no chunked or incremental form of
+this: `VantaResourceBuilder.Build` produces the complete set in memory and only then does
+`SyncVantaResourcesCommandHandler` send it. That handler carries the one guard that matters — **zero
+components is never sent**, because a query returning no hosts would otherwise wipe the whole
+inventory, and a fleet with no hosts has nothing to sync anyway. The asymmetry is deliberate and must
+not be "fixed": an empty *package* list **is** sent, and is how a fleet that has just finished
+patching clears what Vanta still holds for it.
+
+**Order matters, and a failed component sync cancels the package sync.** Each package names its
+component by `uniqueId`, so components land first; if that call fails, packages are not sent at all
+rather than sent as orphans.
+
+**`uniqueId`s are derived, never row identity.** A host keys on its serial number — the value that
+*is* this system's host identity (it is the certificate CN) and the only one that survives both a
+`Reregister` hostname change and a delete-and-re-enroll, which mints a fresh `Host.Id`. An
+application keys on (serial, application name) and explicitly **not** on `InstalledApplication.Id`,
+because `RegisterApplicationsCommandHandler` deletes and recreates every row on each routine
+inventory report: a row-keyed id would change on every check-in, and since each sync replaces
+everything, Vanta would see the fleet's entire vulnerability history deleted and recreated daily.
+
+**`collectedTimestamp` is `Host.LastSeenUtc`, not now**, and a host that has never checked in is
+dropped from the sync entirely rather than stamped with the current time — nothing has been collected
+from it. Its applications go with it, since a package naming an absent component is an orphan.
+
+**One access token, and that shapes the concurrency.** Vanta issues one active token per application
+and *revokes the previous one the moment a new one is requested*, so `VantaAccessTokenProvider` is a
+singleton holding a single cached token behind a `SemaphoreSlim`, keyed on the credentials it was
+obtained with (rotating the secret on the settings page therefore invalidates it implicitly).
+`VantaSyncCoordinator` allows one run at a time for the same reason, and "Sync now" answers `409`
+rather than queueing. The token is attached to each individual request, never to
+`HttpClient.DefaultRequestHeaders` — the same rule the GitHub clients follow, and for the same
+reason: a typed client outlives one call.
+
+**`VantaSettings.ConsoleBaseUrl` is its own setting and is not `AGENT_API_BASE_URL`.** It is the
+address every synced record links back to, so it must be the *browser's* door, not nginx's agent one
+— see "The fallback is a guess" above. It cannot be derived from the request either, because the
+sync normally runs on a timer with nothing in flight. HTTPS is enforced at save time in the domain
+entity, because Vanta requires it and the alternative is an opaque rejection a day later.
 
 ## Platform buckets, and why package managers get their own
 
@@ -803,6 +872,14 @@ by then — only the long-running per-user units get restarted.
   declaration order because several of them cross the wire as ordinals. Changing a DTO's JSON shape
   means changing the matching mapper as well as the three agents — and unlike the agents, nothing
   in CI cross-checks the two, because the client is compiled separately.
+- The Vanta sync mirrors Vanta's own JSON shapes by hand in `VantaResources.cs`, the same way the
+  Rust structs and `web/lib/data/models/` mirror this system's. Nothing validates them against
+  `build-integrations.json`; a required field added upstream shows up as a rejected sync with
+  Vanta's message in the settings screen's status line, which is the only place it will appear.
+- `VantaResourceBuilder`'s package `externalUrl` builds the Applications screen's own deep link
+  (`/applications?status=update-available&host=…`), so it is coupled to `UpgradePathStatusKey` and
+  to `app_router.dart` reading those query parameters. Change either and every synced record links
+  to an unfiltered page — a 200 that looks fine, which is why nothing would report it.
 - `web/pubspec.yaml`'s `environment: sdk:` constraint and `FLUTTER_VERSION` in `nginx/Dockerfile`
   have to stay compatible. Bumping one without the other fails at image build time rather than at
   merge, which is the good failure but only if somebody builds the image.
