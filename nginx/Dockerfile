@@ -15,7 +15,13 @@
 # minutes rather than seconds, which is worth knowing before assuming the build has hung. The
 # runtime stage below is deliberately *not* pinned, so the image that actually runs is native to
 # whatever built it; only files cross between them.
-FROM --platform=linux/amd64 debian:12-slim AS webbuild
+#
+# Through a build arg rather than written inline, for two reasons: buildx warns on a constant
+# --platform (FromPlatformFlagConstDisallowed) because a hardcoded one is usually a mistake, and
+# this way the pin can be overridden — `--build-arg WEBBUILD_PLATFORM=linux/arm64` — the day
+# Flutter ships an arm64 Linux SDK, without editing this file.
+ARG WEBBUILD_PLATFORM=linux/amd64
+FROM --platform=${WEBBUILD_PLATFORM} debian:12-slim AS webbuild
 
 # Pinned, and pinned deliberately: the SDK is a compiler, so "whatever stable is today" would make
 # this image's contents depend on the day it was built. Bumping it is a deliberate act — check
