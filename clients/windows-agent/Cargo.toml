@@ -78,9 +78,13 @@ features = [
     # CreateNamedPipeW and friends: the channel between the service (which holds this host's
     # identity) and the tray process (which holds the desktop) — see remote_ipc.
     "Win32_System_Pipes",
-    # WTSGetActiveConsoleSessionId, which is how the pipe admits only the session that actually owns
-    # the screen an administrator is asking to see.
+    # WTSGetActiveConsoleSessionId and WTSQueryUserToken: which session owns the screen, and whether
+    # anybody is logged into it — the service's reachability test, and where it launches the session
+    # helper.
     "Win32_System_RemoteDesktop",
+    # OpenInputDesktop/SetThreadDesktop, which is what lets the session helper follow Windows onto
+    # the secure desktop when a UAC prompt appears. See remote_desktop.rs.
+    "Win32_System_StationsAndDesktops",
     "Win32_System_Threading",
     # PIPE_ACCESS_DUPLEX and WRITE_DAC.
     "Win32_Storage_FileSystem",

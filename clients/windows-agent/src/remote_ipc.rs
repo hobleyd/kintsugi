@@ -37,17 +37,19 @@
 //! viewer's input, and the tray→service direction carries an answer and JPEG bytes. Nothing on it
 //! is a script, a path or a command.
 //!
-//! # What a hostile local process could do
+//! # No interactive user on either end any more
 //!
-//! Worth stating, because the pipe is reachable by interactive users. The tray end is unprivileged,
-//! so nothing the service sends it can escalate anything. In the other direction a process that
-//! connected first could answer a consent request itself and then feed the administrator a
-//! fabricated screen while swallowing their keystrokes. That is a real attack, and it is why
-//! [`PipeListener::accept`] checks the client's Windows session against the active console session
-//! and refuses anything else — but note what it does *not* buy: an attacker already running code in
-//! the console user's own session can read that user's screen and keyboard directly, so against
-//! that attacker this check is not the defence. It is what stops a *different* logged-in session, or
-//! a service account, from standing in for the console user.
+//! This pipe used to run between the service and the *tray* process, which meant it had to be
+//! reachable by whoever was logged in — and that carried a real attack: a local process could race
+//! to answer a consent request and then feed the administrator a fabricated screen while swallowing
+//! their keystrokes. The session helper being SYSTEM removes the whole category. Both ends are now
+//! privileged, so the ACL grants Local System and Administrators and **nothing else**, and an
+//! unprivileged process cannot open the pipe at all.
+//!
+//! What replaced the session check is stricter as well as simpler: the service launches the helper
+//! itself, so it knows the process id it is expecting, and [`PipeListener::accept`] reports the
+//! client's id for the caller to compare. Guessing is not an option and neither is racing — the pipe
+//! is unreachable without SYSTEM or Administrators in the first place.
 
 
 use anyhow::{anyhow, Context, Result};
@@ -235,11 +237,7 @@ mod platform {
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
         PeekNamedPipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE, PIPE_WAIT,
     };
-    // Both live under RemoteDesktop, which reads oddly for ProcessIdToSessionId — it is a
-    // kernel32 export about Terminal Services sessions, and every logged-in Windows session is one.
-    use windows_sys::Win32::System::RemoteDesktop::{ProcessIdToSessionId, WTSGetActiveConsoleSessionId};
 
-    use crate::logging;
     use crate::win32::wide;
 
     use super::PIPE_NAME;
@@ -250,18 +248,15 @@ mod platform {
 
     /// The pipe's DACL, in SDDL.
     ///
-    /// `SY` (Local System) and `BA` (Builtin Administrators) get everything, because the service is
-    /// one of them and an administrator repairing this host should not be locked out of it. `IU`
-    /// (Interactive Users — anyone logged in at a console or an RDP session, and *not* a service
-    /// account) gets read and write on the pipe itself and nothing else: no `WRITE_DAC`, so a
-    /// logged-in user cannot widen this, and no `FILE_CREATE_PIPE_INSTANCE`, so they cannot stand up
-    /// a second instance of this pipe and impersonate the service to the tray.
+    /// `SY` (Local System) and `BA` (Builtin Administrators) only. Both ends of this pipe are now
+    /// SYSTEM — the service on one side and the session helper on the other — so there is no reason
+    /// for anybody else to be able to open it, and an interactive user cannot.
     ///
-    /// `0x12019f` is `FILE_GENERIC_READ | FILE_GENERIC_WRITE` written out, which is what a duplex
-    /// pipe client needs. Spelled numerically because the SDDL mnemonics (`GR`, `GW`) map to
-    /// generic rights that a pipe maps *differently* from a file, and the numeric form is the one
-    /// every Microsoft example uses for pipes.
-    const PIPE_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x12019f;;;IU)";
+    /// **`IU` used to be here and its removal is the security win of the whole helper change.** With
+    /// the tray as the other end, this had to admit interactive users, which meant reasoning about a
+    /// local process racing to answer a consent request. That is now impossible rather than merely
+    /// checked for.
+    const PIPE_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)";
 
     /// The service's end: creates the pipe and waits for the console session's tray to connect.
     pub struct PipeListener {
@@ -330,50 +325,37 @@ mod platform {
             Ok(Self { handle: unsafe { OwnedHandle::from_raw_handle(handle as *mut _) } })
         }
 
-        /// Blocks until a tray process connects, and returns it only if it is the console session's.
+        /// Blocks until something connects, and reports its process id alongside the connection.
         ///
-        /// A rejected client is disconnected and the wait resumes, so a wrong-session process cannot
-        /// hold the pipe open and starve the right one.
-        pub fn accept(&self) -> Result<PipeConnection> {
-            loop {
-                let raw = self.handle.as_raw_handle() as HANDLE;
+        /// The id is reported rather than judged here: only the caller knows which helper it
+        /// launched, and comparing against that is a stronger check than anything this function
+        /// could apply on its own. Combined with the ACL — which admits nothing below SYSTEM or
+        /// Administrators — that leaves no way for an unexpected process to be on the other end.
+        pub fn accept(&self) -> Result<(PipeConnection, u32)> {
+            let raw = self.handle.as_raw_handle() as HANDLE;
 
-                // SAFETY: a documented call on a pipe handle this struct owns. ERROR_PIPE_CONNECTED
-                // means a client won the race between CreateNamedPipeW and this call, which is a
-                // success rather than a failure.
-                let connected = unsafe { ConnectNamedPipe(raw, ptr::null_mut()) };
-                if connected == 0 {
-                    // SAFETY: no preconditions.
-                    let error = unsafe { GetLastError() };
-                    if error != ERROR_PIPE_CONNECTED {
-                        return Err(anyhow!("could not accept a remote control pipe client (error {error})"));
-                    }
+            // SAFETY: a documented call on a pipe handle this struct owns. ERROR_PIPE_CONNECTED
+            // means a client won the race between CreateNamedPipeW and this call, which is a
+            // success rather than a failure.
+            let connected = unsafe { ConnectNamedPipe(raw, ptr::null_mut()) };
+            if connected == 0 {
+                // SAFETY: no preconditions.
+                let error = unsafe { GetLastError() };
+                if error != ERROR_PIPE_CONNECTED {
+                    return Err(anyhow!("could not accept a remote control pipe client (error {error})"));
                 }
-
-                match client_session_is_console(raw) {
-                    Ok(true) => return Ok(PipeConnection::adopt(raw)),
-                    Ok(false) => {
-                        logging::warn(
-                            "a remote control pipe client from a non-console session was refused",
-                        );
-                    }
-                    Err(err) => logging::warn(&format!(
-                        "could not establish which session a remote control pipe client belongs to: {err:#}"
-                    )),
-                }
-
-                // SAFETY: a documented call on a connected pipe; the next iteration waits again.
-                unsafe { DisconnectNamedPipe(raw) };
             }
+
+            let pid = client_process_id(raw).unwrap_or(0);
+            Ok((PipeConnection::adopt(raw), pid))
         }
     }
 
-    /// Whether the process at the other end of `pipe` is running in the active console session.
+    /// The process id at the other end of `pipe`, straight from the kernel.
     ///
-    /// The check that makes the pipe's DACL meaningful: `IU` admits every interactive session, and
-    /// on a machine with fast user switching or an RDP session there can be several. Only the
-    /// console one owns the screen an administrator is asking to see.
-    fn client_session_is_console(pipe: HANDLE) -> Result<bool> {
+    /// Unforgeable by the peer, which is what makes it worth asking — the caller compares it against
+    /// the helper it launched itself.
+    fn client_process_id(pipe: HANDLE) -> Result<u32> {
         let mut process_id: u32 = 0;
         // SAFETY: documented; `process_id` is a valid out-pointer.
         if unsafe { GetNamedPipeClientProcessId(pipe, &mut process_id) } == 0 {
@@ -381,18 +363,7 @@ mod platform {
             return Err(anyhow!("GetNamedPipeClientProcessId failed (error {})", unsafe { GetLastError() }));
         }
 
-        let mut client_session: u32 = 0;
-        // SAFETY: documented; `client_session` is a valid out-pointer.
-        if unsafe { ProcessIdToSessionId(process_id, &mut client_session) } == 0 {
-            // SAFETY: no preconditions.
-            return Err(anyhow!("ProcessIdToSessionId failed (error {})", unsafe { GetLastError() }));
-        }
-
-        // SAFETY: no arguments, no preconditions. 0xFFFFFFFF means there is no console session at
-        // all right now (nobody logged in, or a session in transition), which is not a match.
-        let console_session = unsafe { WTSGetActiveConsoleSessionId() };
-
-        Ok(console_session != u32::MAX && console_session == client_session)
+        Ok(process_id)
     }
 
     /// Which end of the pipe a [`PipeConnection`] is, which decides what its `Drop` must do.
@@ -400,11 +371,11 @@ mod platform {
     /// The two ends have genuinely different obligations and conflating them was a real bug: the
     /// listener owns its pipe *instance* handle and reuses it for the next client, so a connection
     /// on that side must disconnect without closing; the client opened its own handle and must close
-    /// it, or the tray process leaks one per reconnect.
+    /// it, or the helper leaks one per session.
     enum PipeRole {
         /// The service's side. The handle belongs to `PipeListener`.
         Listener,
-        /// The tray's side. The handle belongs to this connection.
+        /// The session helper's side. The handle belongs to this connection.
         Client,
     }
 
@@ -501,31 +472,10 @@ mod platform {
         }
     }
 
-    /// Whether this process is running in the active console session — the tray's own check before
-    /// it tries to connect.
-    ///
-    /// Pushing the decision to the tray is what keeps the service side to a single pipe instance:
-    /// every logged-in user has a tray, but only one of them is at the screen an administrator can
-    /// ask to see, and only that one connects.
-    pub fn in_console_session() -> bool {
-        // SAFETY: no arguments, no preconditions.
-        let console_session = unsafe { WTSGetActiveConsoleSessionId() };
-        if console_session == u32::MAX {
-            return false;
-        }
-
-        let mut own_session: u32 = 0;
-        // SAFETY: documented; `own_session` is a valid out-pointer.
-        let resolved = unsafe {
-            ProcessIdToSessionId(windows_sys::Win32::System::Threading::GetCurrentProcessId(), &mut own_session)
-        };
-
-        resolved != 0 && own_session == console_session
-    }
 }
 
 #[cfg(windows)]
-pub use platform::{in_console_session, PipeConnection, PipeListener};
+pub use platform::{PipeConnection, PipeListener};
 
 #[cfg(test)]
 mod tests {
