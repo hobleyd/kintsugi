@@ -142,6 +142,106 @@ fn parse_confirm_result(result: &str, delay_button_label: &str) -> ConfirmChoice
     }
 }
 
+/// What the person at the keyboard said when asked to hand over control of their Mac.
+///
+/// **A separate type from [`ConfirmChoice`] on purpose, because the polarity of a timeout is the
+/// opposite.** There, nobody answering means "they were not at the desk, so count it as a delay and
+/// patch later" — the user never said no, and patching is going to happen regardless. Here, nobody
+/// answering means **nobody consented**, and the only safe reading of silence is refusal. Reusing
+/// that enum would have made the safe default one careless `match` arm away from letting an
+/// unattended Mac be taken over.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RemoteControlChoice {
+    Allow,
+    Deny,
+    /// The dialog was left up until AppleScript dismissed it. Treated exactly as [`Self::Deny`] by
+    /// every caller, and kept distinct only so the audit record can tell an empty desk from a
+    /// deliberate refusal.
+    TimedOut,
+}
+
+const ALLOW_BUTTON: &str = "Allow";
+const DENY_BUTTON: &str = "Deny";
+
+/// Composes the consent dialog's text. Split out from the subprocess call so the wording — the part
+/// somebody has to be able to make a decision from — can be tested directly.
+///
+/// It names the administrator, says what is being granted in plain terms, and says how to end it.
+/// All three matter: a dialog reading "allow remote access?" with no name is one people click
+/// through, and one that does not mention the menu bar leaves someone who regrets it with no
+/// visible way out.
+fn remote_control_message(requested_by: &str, restrictions: &[String]) -> String {
+    let mut message = format!(
+        "{requested_by} is asking to control this Mac remotely.\n\n\
+         If you allow this, they will see your screen and be able to use your keyboard and mouse \
+         as though they were sitting here. You can end the session at any time from the Kintsugi \
+         icon in the menu bar.\n"
+    );
+
+    // Said out loud rather than discovered once the session is running and half of it does not
+    // work — see screen_capture and input_injection on why either permission can be missing.
+    if !restrictions.is_empty() {
+        message.push('\n');
+        for restriction in restrictions {
+            message.push_str(&format!("  \u{2022} {restriction}\n"));
+        }
+    }
+
+    message
+}
+
+/// Asks the host user to hand over control, and returns what they said.
+///
+/// `restrictions` is anything the session will not be able to do (see
+/// `remote_control::describe_restrictions`), listed in the dialog so the decision is an informed
+/// one.
+///
+/// The default button is **Deny**, deliberately. AppleScript reports `button returned:<default
+/// button>` even when it dismissed the dialog itself, so making Allow the default would mean a
+/// timeout arriving as an apparent click on Allow — and while `parse_remote_control_result` checks
+/// `gave up:` first and would catch that, a safe default is worth having in the one dialog where
+/// getting it wrong hands over somebody's desktop. Pressing Return also refuses, which is the right
+/// way round for a prompt that appears unannounced.
+pub fn confirm_remote_control(requested_by: &str, restrictions: &[String], timeout_seconds: u64) -> Result<RemoteControlChoice> {
+    crate::logging::info(&format!("asking the console user to approve remote control for {requested_by}"));
+
+    let script = format!(
+        r#"display dialog "{}" with title "Kintsugi Remote Control" buttons {{"{}", "{}"}} default button "{}" with icon caution giving up after {}"#,
+        escape(&remote_control_message(requested_by, restrictions)),
+        DENY_BUTTON,
+        ALLOW_BUTTON,
+        DENY_BUTTON,
+        timeout_seconds
+    );
+
+    let result = run_osascript(&script)?;
+    let choice = parse_remote_control_result(&result);
+
+    crate::logging::info(&format!(
+        "console user chose: {}",
+        match choice {
+            RemoteControlChoice::Allow => "allow remote control",
+            RemoteControlChoice::Deny => "deny remote control",
+            RemoteControlChoice::TimedOut => "timed out (treated as a refusal)",
+        }
+    ));
+
+    Ok(choice)
+}
+
+/// Interprets the consent dialog's result. `gave up:` is checked first for the same reason
+/// `parse_confirm_result` checks it first, and the fallback is `Deny` rather than `Allow` — an
+/// unparseable answer must never be read as consent.
+fn parse_remote_control_result(result: &str) -> RemoteControlChoice {
+    if result.contains("gave up:true") {
+        RemoteControlChoice::TimedOut
+    } else if result.contains(&format!("button returned:{ALLOW_BUTTON}")) {
+        RemoteControlChoice::Allow
+    } else {
+        RemoteControlChoice::Deny
+    }
+}
+
 /// A single-button dialog for the "no delays left, proceeding regardless" case, and other
 /// blocking messages the user must actively dismiss rather than a passive notification banner.
 ///
@@ -265,6 +365,56 @@ mod tests {
 
         assert!(message.contains("3 application updates and a macOS update are ready"), "{message}");
         assert!(message.contains("  \u{2022} Zoom"), "{message}");
+    }
+
+    #[test]
+    fn remote_control_result_explicit_allow() {
+        assert_eq!(parse_remote_control_result("button returned:Allow, gave up:false"), RemoteControlChoice::Allow);
+    }
+
+    #[test]
+    fn remote_control_result_explicit_deny() {
+        assert_eq!(parse_remote_control_result("button returned:Deny, gave up:false"), RemoteControlChoice::Deny);
+    }
+
+    #[test]
+    fn remote_control_result_timeout_is_not_consent() {
+        // The whole reason this has its own enum: unlike a patch dialog, nobody answering must not
+        // be read as permission. Deny is the default button, so this is what a timeout looks like.
+        assert_eq!(parse_remote_control_result("button returned:Deny, gave up:true"), RemoteControlChoice::TimedOut);
+    }
+
+    #[test]
+    fn remote_control_result_timeout_wins_over_an_allow_button() {
+        // Belt and braces: even if the default button were ever changed to Allow, a dismissed
+        // dialog must still not grant anything.
+        assert_eq!(parse_remote_control_result("button returned:Allow, gave up:true"), RemoteControlChoice::TimedOut);
+    }
+
+    #[test]
+    fn remote_control_result_unparseable_is_a_refusal() {
+        assert_eq!(parse_remote_control_result(""), RemoteControlChoice::Deny);
+        assert_eq!(parse_remote_control_result("something unexpected"), RemoteControlChoice::Deny);
+    }
+
+    #[test]
+    fn remote_control_message_names_who_is_asking_and_how_to_stop_it() {
+        let message = remote_control_message("admin@example.com", &[]);
+
+        assert!(message.contains("admin@example.com is asking to control this Mac"), "{message}");
+        assert!(message.contains("keyboard and mouse"), "{message}");
+        // Somebody who regrets allowing it needs to know there is a way out.
+        assert!(message.contains("menu bar"), "{message}");
+    }
+
+    #[test]
+    fn remote_control_message_lists_what_the_session_cannot_do() {
+        let message = remote_control_message(
+            "admin@example.com",
+            &["Keyboard and mouse control is unavailable: this agent has not been granted Accessibility.".to_string()],
+        );
+
+        assert!(message.contains("\u{2022} Keyboard and mouse control is unavailable"), "{message}");
     }
 
     #[test]

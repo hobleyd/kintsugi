@@ -143,6 +143,43 @@ pub fn build_client(timeout: std::time::Duration, identity: Option<&AgentIdentit
     builder.build().context("failed to build HTTP client")
 }
 
+/// Builds a rustls `ClientConfig` presenting this agent's certificate, for the one thing that
+/// cannot go through `reqwest`: the remote control WebSocket.
+///
+/// `reqwest` does all of this internally for a `reqwest::Identity`, but it does not speak WebSocket,
+/// and `tungstenite` wants a `ClientConfig` rather than a PEM buffer. Same certificate, same key,
+/// same trust source (the host OS store, via rustls-native-certs, which is what
+/// `rustls-tls-native-roots` gives the HTTP client) — so an agent that can check in can also open
+/// this socket, and one that cannot will fail both the same way.
+pub fn to_rustls_client_config(identity: &AgentIdentity) -> Result<std::sync::Arc<rustls::ClientConfig>> {
+    let native = rustls_native_certs::load_native_certs();
+    let mut roots = rustls::RootCertStore::empty();
+    for certificate in native.certs {
+        // Individually, ignoring failures: the macOS trust store contains certificates rustls
+        // declines to parse, and one of those must not stop the other few hundred being loaded.
+        let _ = roots.add(certificate);
+    }
+
+    if roots.is_empty() {
+        anyhow::bail!("no trusted root certificates could be loaded from this Mac's own trust store");
+    }
+
+    let certificate_chain = rustls_pemfile::certs(&mut identity.certificate_pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .context("could not parse this agent's certificate")?;
+
+    let private_key = rustls_pemfile::private_key(&mut identity.private_key_pem.as_bytes())
+        .context("could not parse this agent's private key")?
+        .context("this agent's key file contains no private key")?;
+
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(certificate_chain, private_key)
+        .context("could not build a TLS configuration from this agent's certificate and key")?;
+
+    Ok(std::sync::Arc::new(config))
+}
+
 /// Loads this agent's identity from disk, enrolling it first if it doesn't exist yet. `probe_url`
 /// is used only to build a short-lived, unauthenticated client for that one enrollment call.
 pub fn load_or_enroll(config: &Config, serial_number: &str) -> Option<AgentIdentity> {

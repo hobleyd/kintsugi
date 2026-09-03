@@ -91,3 +91,26 @@ enum ScriptApprovalPublishOutcome {
   failed,
   unknown,
 }
+
+/// Mirrors `RemoteControlConsent`. Sent as its name, like `UpgradePathStatus` — the C# enum carries
+/// a converter. Safe there in a way it is not for the ordinal-encoded enums above, because no agent
+/// reads this value at all: the agent is the one *reporting* it, as a name.
+enum RemoteControlConsent {
+  pending,
+  granted,
+  denied,
+  timedOut,
+  agentUnreachable;
+
+  /// What the remote-control screen says happened. Phrased as the outcome rather than the state,
+  /// because every one of these is something the administrator has to react to.
+  String get label => switch (this) {
+        RemoteControlConsent.pending => 'Waiting for the person at the keyboard to answer',
+        RemoteControlConsent.granted => 'Allowed',
+        RemoteControlConsent.denied => 'Refused by the person at the keyboard',
+        RemoteControlConsent.timedOut => 'Nobody answered',
+        RemoteControlConsent.agentUnreachable =>
+          'This host is not reachable: its agent is not connected, which usually means it is asleep, '
+              'switched off, or has nobody logged in',
+      };
+}

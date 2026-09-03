@@ -661,6 +661,118 @@ address every synced record links back to, so it must be the *browser's* door, n
 sync normally runs on a timer with nothing in flight. HTTPS is enforced at save time in the domain
 entity, because Vanta requires it and the alternative is an opaque rejection a day later.
 
+## Remote control
+
+An administrator can take control of a macOS host's screen, keyboard and mouse from the Hosts
+screen's Connect action. **macOS only for now** — see the note at the end on why the other two
+agents need a different shape.
+
+**Nothing happens until the person at the keyboard says yes.** The whole feature rests on three
+properties, and none of them is optional or configurable: consent is asked for every session and
+names the requesting administrator; silence is a refusal; and while a session runs it is visible in
+the menu bar with a way to end it. A fourth, durable one sits behind them —
+`remote_control_sessions` records every *request*, including the refused ones, the timed-out ones
+and the ones against a host that never answered, because "an administrator asked to watch this
+laptop and was told no" is precisely the event an auditor is looking for.
+
+**Two auth mechanisms, one on each end, and that is why this is a relay rather than a direct
+connection.** The agent's sockets arrive on `/api/remote-control`, inside nginx's exact-match
+client-certificate regex, carrying `[RequireAgentIdentity]` so the verified CN must equal the serial
+number in the query string. The browser's arrives on `/api/admin/remote-control/...`, outside that
+regex and carrying `[RequireAdminSession]`. Neither end could be authenticated by the other's
+mechanism, and mutual TLS can only be verified by whatever terminates it — which is nginx. A
+peer-to-peer or TURN-relayed design re-terminates somewhere holding no fleet CA, so it would need a
+second, parallel auth mechanism *and* an inbound port on every managed Mac. Same constraint as "the
+fallback is a guess" above.
+
+**The server relays the media protocol without parsing it, and that is load-bearing.** Once the two
+sockets are joined, `RemoteControlSessionBroker` copies bytes between them with message type and
+boundaries preserved and nothing in between reading either direction. So the JPEG tiling, the
+pointer coordinate space and the keycode mapping are a contract between
+`clients/macos-agent/src/remote_protocol.rs` and `web/lib/data/models/remote_control_mapper.dart`
+**alone** — adding a capability to the viewer needs no server change, and nothing in the server will
+ever catch the two ends drifting apart. `web/test/data/remote_control_mapper_test.dart` asserts the
+exact bytes the agent's own `encodes_a_tile_header_big_endian` test produces, which is the only
+thing that does.
+
+**One route for the agent's two sockets, because nginx's regex matches a single path segment.** The
+standing *control* socket (`?serialNumber=`) and a per-session *media* socket
+(`?serialNumber=&sessionId=`) share `/api/remote-control` and are told apart by query string. That
+also means `[RequireAgentIdentity]` works unchanged — it falls back to an action argument named
+`serialNumber`, and a WebSocket handshake has no body for it to read. The route has its own `=`
+location in `default.conf` rather than another alternative in the regex, because a WebSocket needs a
+read timeout measured in hours and putting that on the agent block would apply it to `/api/host`
+too, where a request holding a worker for an hour is the worse failure.
+
+**The control socket is standing, and it is the only push channel in the system.** Everything else
+an agent does is a request it makes when it has something to say; remote control is the one case
+where the server has to reach a host, and an hourly check-in cannot carry "somebody would like to
+see your screen now". So the per-user process holds one socket open for its life, with reconnect
+backoff. Sessions get their own socket so a frame stream can never queue behind a control message,
+and so a session dropping does not cost the host its reachability.
+
+**Consent timeouts have the opposite polarity to patching, and the code keeps them apart.**
+`dialogs::ConfirmChoice::TimedOut` means "nobody was at the desk, so count it as a delay" — the user
+never refused and patching happens regardless. `RemoteControlChoice::TimedOut` means **nobody
+consented**, and is treated exactly as a refusal. They are separate enums for that reason; reusing
+the first would have put the safe default one careless `match` arm away. The dialog's default button
+is Deny for the same reason, since AppleScript reports the default button as `button returned:` even
+when it dismissed the dialog itself.
+
+**The relay is in-memory and single-process.** A session pairs two sockets that must land in the
+same process, so a second API replica behind a load balancer would break remote control specifically
+unless both were routed to the same instance. Nothing does that today — compose runs one `api` — but
+it is the assumption to check first if that changes.
+
+**`ui.Image` and `CGEventSource` both need releasing by hand.** The viewer keeps decoded tiles as
+live `ui.Image`s keyed by position rather than compositing to an offscreen surface, so a repaint is a
+few `drawImageRect` calls — but each holds a native texture the garbage collector does not account
+for, so every replaced or discarded tile is disposed explicitly. On the agent side
+`InputInjector::release_all` runs on **every** path out of a session including a dropped socket: a
+session that ends while the remote user happens to be holding Command otherwise leaves the Mac's own
+owner with Command stuck down, and nothing on screen explaining it.
+
+**Both TCC permissions fail silently, which is why they are checked before consent is asked.**
+`CGEventPost` without Accessibility is dropped with no error and no return code — the session shows
+the screen perfectly and ignores the mouse. ScreenCaptureKit without Screen Recording produces
+either nothing or a desktop with every window missing. So `describe_restrictions` checks both up
+front and the consent dialog lists whatever will not work, rather than leaving it to be discovered
+mid-call.
+
+**Pre-approving those permissions by MDM needs the agent code-signed, and it is not.**
+`packaging/kintsugi-remote-control.mobileconfig.example` is a complete PPPC profile bar one field:
+every entry needs a `CodeRequirement` matched against the binary's signature, and `cargo build
+--release` produces an ad-hoc, linker-signed binary whose designated requirement is a bare `cdhash`
+of that exact build. A profile written against it would work until the next release and then stop,
+because `self_update` replaces the binary unattended — remote control failing across the fleet on an
+upgrade, with the profile still reporting as installed. Signing with a Developer ID Application
+certificate (which nothing in `publish-release.sh` or CI does today) is the prerequisite; until then
+both permissions need a human at each Mac, and Accessibility specifically **cannot be granted from
+its prompt at all** — macOS only offers to open System Settings, where someone then has to find the
+binary in a list.
+
+**A browser cannot forward every keystroke, and that is permanent.** ⌘W, ⌘Q, ⌘T and ⌘Tab are claimed
+by the browser and the OS before any page handler runs, so `RemoteKeyCombinations` offers them as
+buttons that send an explicit down/up sequence — Force Quit (⌘⌥⎋) most usefully. Keys are sent as
+USB HID usages (`PhysicalKeyboardKey.usbHidUsage`) rather than characters, because a virtual keycode
+names a *position* and the host applies its own layout: send the character and an administrator on a
+US keyboard controlling a French host types the wrong letters.
+
+**A host is reachable only if somebody is logged in**, which is a stronger statement than the Hosts
+screen's own status. "Online" there means a check-in within the last interval, up to an hour ago;
+reachable here means a per-user agent process holds a socket right now. The Connect button is
+therefore offered regardless of status and the *server* answers — with a session already marked
+`AgentUnreachable`, which the remote-control screen explains. Disabling the button on a stale status
+would hide working hosts.
+
+**Why the other two agents need a different design.** On macOS the per-user process holds the fleet
+identity, which is exactly what remote control needs — the screen and keyboard belong to a GUI
+session the root daemon does not have. On Windows and Linux the per-user half holds no identity and
+makes no network call at all, going through a queue instead (see the agents table above), so neither
+can open a socket of its own. Whatever is built there will either move the identity or proxy the
+socket through the privileged service, and the second is the one that keeps the existing security
+property.
+
 ## Platform buckets, and why package managers get their own
 
 `PlatformBucket` keys an `upgrade_paths` row. An AI-researched row lives under an *OS* bucket
@@ -737,6 +849,7 @@ original — then the others for what each platform forced to differ. The differ
 | OS updates | `softwareupdate` | Windows Update Agent COM API, via PowerShell | apt / dnf / yum / zypper / pacman / apk |
 | Host identity | hardware serial, always present | SMBIOS serial, **often a placeholder** | DMI serial, **often a placeholder** |
 | Nobody logged in | nothing patches | nothing patches | root service patches unattended — see below |
+| Remote control | per-user process, consent + capture + input | not yet — per-user half holds no identity | not yet — same reason |
 
 **Linux borrows its architecture from Windows, not macOS, and for the same forcing reason.** Every
 upgrade it can perform (`apt-get`, `dnf`, `flatpak update --system`, `snap refresh`) requires root,
@@ -975,6 +1088,28 @@ by then — only the long-running per-user units get restarted.
   (`/applications?status=update-available&host=…`), so it is coupled to `UpgradePathStatusKey` and
   to `app_router.dart` reading those query parameters. Change either and every synced record links
   to an unfiltered page — a 200 that looks fine, which is why nothing would report it.
+- **The remote-control media protocol is the one hand-mirrored pair with nothing between the two
+  ends.** Every other mirrored shape in this repo (the Rust request structs, `web/lib/data/models/`)
+  has a C# definition sitting between them, so a mismatch is at least visible in one place. This one
+  is agent-to-browser directly — `clients/macos-agent/src/remote_protocol.rs` and
+  `web/lib/data/models/remote_control_mapper.dart` — and the server relays the bytes without
+  parsing them, so nothing server-side can ever notice. The tile header is big-endian because that
+  is `ByteData`'s default on the reading side; get it wrong and the picture still draws, just
+  scrambled. `web/test/data/remote_control_mapper_test.dart` asserts the exact bytes the agent's own
+  test emits, and is the only check that exists.
+- `remote_control::CONSENT_TIMEOUT` (60s) must stay *shorter* than
+  `RemoteControlDefaults.ConsentTimeout` (90s). The agent's dialog is what should give up, so the
+  answer is a reported `TimedOut`; the server's is only a backstop for an agent that never answers
+  at all. Invert them and the server abandons a dialog that is still on screen, so a user who then
+  clicks Allow grants a session nobody is waiting for.
+- `/api/remote-control` is gated by its **own `=` location** in `nginx/default.conf`, not by the
+  agent regex — the only agent route that is. A new agent route still belongs in the regex; this one
+  is separate because a WebSocket needs an hour-long `proxy_read_timeout` that must not apply to
+  `/api/host`. The regex's own comment says so, and both need to keep saying it.
+- The PPPC profile's `CodeRequirement` is tied to the agent's code signature, and the agent is only
+  ad-hoc signed — so the profile cannot be used until `publish-release.sh` signs with a Developer ID.
+  See `packaging/kintsugi-remote-control.mobileconfig.example`, which explains what breaks if
+  somebody fills it in from an unsigned build anyway.
 - `web/pubspec.yaml`'s `environment: sdk:` constraint and `FLUTTER_VERSION` in `nginx/Dockerfile`
   have to stay compatible. Bumping one without the other fails at image build time rather than at
   merge, which is the good failure but only if somebody builds the image.

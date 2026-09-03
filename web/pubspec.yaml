@@ -31,6 +31,11 @@ dependencies:
 
   http: ^1.5.0
 
+  # The remote-control viewer's media channel, and the only socket this app opens. Same-origin, so
+  # the session cookie [RequireAdminSession] reads rides along on the upgrade request exactly as it
+  # does on every other call — see data/repositories/remote_control_repository_impl.dart.
+  web_socket_channel: ^3.0.3
+
   # The same three families the Razor layout pulled from the Google Fonts CDN (Orbitron, Rajdhani,
   # Share Tech Mono). Fetched at runtime exactly as that <link> was, and falls back to a system
   # font when unreachable — so an air-gapped deployment degrades the same way it already did.

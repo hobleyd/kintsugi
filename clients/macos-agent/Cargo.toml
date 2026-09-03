@@ -35,7 +35,53 @@ rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"]
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 time = { version = "0.3", features = ["formatting", "macros"] }
 tray-icon = "0.24"
-image = { version = "0.25", default-features = false, features = ["png"] }
+# "jpeg" alongside "png": png is the menu bar icon, jpeg is every remote control frame. JPEG rather
+# than a video codec because the viewer is a Flutter web application — it decodes an image with the
+# browser's own decoder, whereas H.264 would need WebCodecs, which Flutter web cannot reach. See
+# remote_protocol.rs.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+# Remote control's transport. Blocking, like reqwest above and for the same reason — this agent is
+# threads-and-blocking-calls throughout, and an async runtime would be the only one in the process.
+#
+# The rustls feature, not native-tls, for exactly the reason reqwest uses rustls (see its comment
+# above): this socket presents the same client certificate, and SecItemImport is the same trap. It
+# needs a rustls ClientConfig built by hand rather than a reqwest Identity, which is what
+# identity::to_rustls_client_config exists for.
+tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-native-roots"] }
+# Parses the agent's own certificate/key PEM into the DER rustls wants. reqwest does this internally
+# for its Identity; the WebSocket path has to do it itself.
+rustls-pemfile = "2"
+rustls-native-certs = "0.8"
+
+# Screen capture. ScreenCaptureKit rather than CGDisplayCreateImage, which Apple deprecated in
+# macOS 15 and tells you to replace with exactly this — a remote control feature that stops working
+# on a future macOS is worse than one that took longer to write. Needs macOS 12.3 or newer, which
+# every host this agent supports already is.
+objc2-screen-capture-kit = { version = "0.3", default-features = false, features = [
+    "std", "block2", "dispatch2",
+    "SCStream", "SCShareableContent", "SCError",
+    # Each of these three carries a type this module reads off ScreenCaptureKit rather than a
+    # feature of its own: CGRect for SCDisplay's frame, CGDirectDisplayID for its id, and CMTime for
+    # the configuration's minimum frame interval. Without them those accessors simply are not
+    # generated, and the error is "method not found" rather than anything about features.
+    "objc2-core-foundation", "objc2-core-graphics", "objc2-core-media",
+] }
+# The frames SCStream hands back are CMSampleBuffers wrapping CVPixelBuffers, and both are C APIs
+# rather than Objective-C ones, so they come from their own crates rather than through objc2 itself.
+# "objc2" is what makes CMSampleBuffer usable as an Objective-C method argument (it has no
+# RefEncode without it, and the SCStreamOutput callback will not compile); "objc2-core-video" is
+# what generates CMSampleBuffer::image_buffer, which is the only way to reach the pixels.
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "objc2", "objc2-core-video", "CMSampleBuffer", "CMFormatDescription", "CMTime"] }
+# "CVBase" carries CVPixelBufferLockFlags and gates the lock/unlock functions.
+objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVBase", "CVPixelBuffer", "CVImageBuffer", "CVBuffer", "CVReturn"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }
+# CGEventPost and friends for injecting keyboard and mouse. Deliberately bound by hand in
+# input_injection.rs rather than pulled from the core-graphics crate: that crate carries its own
+# core-foundation, and this binary already refuses to link two copies of anything (see the objc2
+# note below). Seven functions and three constants is less risk than another dependency tree.
+block2 = "0.6"
+dispatch2 = "0.3"
 
 # Drives the menu bar and progress window directly via AppKit instead of through a windowing
 # crate like winit: every published tray-icon version (>=0.19) pins objc2 ^0.6, while winit 0.30

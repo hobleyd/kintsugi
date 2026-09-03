@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import '../../presentation/applications/applications_screen.dart';
 import '../../presentation/clients/clients_screen.dart';
 import '../../presentation/hosts/hosts_screen.dart';
+import '../../presentation/remote_control/remote_control_screen.dart';
 import '../../presentation/session/session_bloc.dart';
 import '../../presentation/session/sign_in_screen.dart';
 import '../../presentation/session/startup_screens.dart';
@@ -19,6 +20,11 @@ import 'bloc_listenable.dart';
 /// from one screen into another all have to agree on them.
 abstract final class Routes {
   static const hosts = '/hosts';
+
+  /// One host's remote control session. A real path rather than a dialog, so a support call has an
+  /// address somebody can be sent, and so leaving it is an ordinary navigation that the screen can
+  /// hang the session up on.
+  static String remoteControl(String hostId) => '/hosts/${Uri.encodeComponent(hostId)}/remote';
   static const applications = '/applications';
   static const clients = '/clients';
   static const upgradeScripts = '/upgrade-scripts';
@@ -87,6 +93,16 @@ GoRouter createRouter(SessionBloc sessionBloc) {
         builder: (context, state, child) => AppShell(location: state.uri.path, child: child),
         routes: [
           GoRoute(path: Routes.hosts, builder: (_, _) => const HostsScreen()),
+          GoRoute(
+            // Nested under the host it controls, so the address says what it is. The hostname rides
+            // along as a query parameter purely so the heading can name the host before the first
+            // response arrives; the screen works without it.
+            path: '/hosts/:hostId/remote',
+            builder: (context, state) => RemoteControlScreen(
+              hostId: state.pathParameters['hostId']!,
+              hostname: state.uri.queryParameters['hostname'],
+            ),
+          ),
           GoRoute(
             path: Routes.applications,
             builder: (context, state) => ApplicationsScreen(
