@@ -166,7 +166,14 @@ if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
         -StartupType Automatic | Out-Null
     # Delayed start: this service's first act is a network round trip, and starting after the
     # network stack has settled avoids a boot-time failure and retry on every single startup.
-    & sc.exe config $ServiceName start= delayed-auto | Out-Null
+    #
+    # `obj= LocalSystem` is asserted here rather than left to New-Service's default, so this branch
+    # says the same thing the reinstall branch above already does. The account is not cosmetic:
+    # identity.rs's restrict_identity_permissions strips inheritance from the identity directory and
+    # grants *only* SYSTEM and Administrators, so a service running as anything else (LocalService,
+    # NetworkService, a hardening baseline's own account) cannot write its own certificate there —
+    # and the ACL still reads as correct to a human, because it is correct for the two SIDs it names.
+    & sc.exe config $ServiceName start= delayed-auto obj= LocalSystem | Out-Null
 }
 
 # Restart on failure rather than staying dead. The macOS daemon gets this for free — launchd
