@@ -72,10 +72,28 @@ too that the API no longer serves any UI: `dotnet run` would answer `/api`, `/sw
 `nginx/Dockerfile` compiles. `cd web && flutter run -d chrome` is the way to work on the UI alone,
 and it needs a running `docker compose` for its API calls to go anywhere.
 
-Releasing an agent: bump `version` in that agent's `Cargo.toml` and merge to `main`. CI
-(`.github/workflows/ci.yml`) runs every test suite, then builds and tags a GitHub Release per agent
-whose version isn't already released — `macos-agent-v0.5.0` and so on, one `.tar.gz` asset each.
-It never POSTs to a server; the server pulls, via the Clients screen's "Refresh clients" (below).
+Releasing an agent: bump `version` in that agent's `Cargo.toml` **and regenerate its `Cargo.lock`**,
+then merge to `main`. CI (`.github/workflows/ci.yml`) runs every test suite, then builds and tags a
+GitHub Release per agent whose version isn't already released — `macos-agent-v0.5.0` and so on, one
+`.tar.gz` asset each. It never POSTs to a server; the server pulls, via the Clients screen's
+"Refresh clients" (below).
+
+**The lock file is half the bump, and forgetting it fails after the merge rather than before it.**
+A crate's own version is recorded in its `Cargo.lock` as well as its `Cargo.toml`, and every cargo
+invocation in CI passes `--locked` (`ci.yml:122`, `190-191`, `228`, `275`) — which exists precisely
+to refuse a lock file that doesn't match. So a bump that touches only `Cargo.toml` dies at
+`error: cannot update the lock file ... because --locked was passed`, *before compiling anything*.
+The failure reads as "the agent tests failed" when the tests never ran, and because it stops at the
+test step the release job never fires, so the tag is silently never cut. A bare `cargo test` will
+not reproduce it — the flag is the whole difference — so verify a bump with the same invocation CI
+uses:
+
+```bash
+cd clients/<platform>-agent && cargo test --locked
+```
+
+Running any ordinary `cargo build`/`test`/`check` after editing the version updates the lock file in
+passing; the trap is doing that in a scratch copy of the tree and committing only from the original.
 
 Each publish script still works by hand and is still the only place the archive's layout is
 defined; CI calls the same script with `--binary`/`--output-dir` (`-Binary`/`-OutputDir` on

@@ -42,6 +42,7 @@ public static class DependencyInjection
         services.AddScoped<IGitHubSettingsProvider, GitHubSettingsProvider>();
         services.AddScoped<IAuthenticationSettingsRepository, AuthenticationSettingsRepository>();
         services.AddScoped<IVantaSettingsRepository, VantaSettingsRepository>();
+        services.AddScoped<IRemoteControlSessionRepository, RemoteControlSessionRepository>();
         // Scoped and read per call, for the same reason IGitHubSettingsProvider is: these values are
         // edited on a settings page while the process runs.
         services.AddScoped<IVantaSettingsProvider, VantaSettingsProvider>();
