@@ -61,6 +61,16 @@ class _KintsugiAppState extends State<KintsugiApp> {
             darkTheme: AppTheme.dark(),
             themeMode: themeMode,
             routerConfig: _router,
+            // Every screen's text is selectable and copyable, which on this client is a decision
+            // rather than a default: Flutter web paints its text into a canvas, so there is no
+            // DOM for the browser's own selection to act on and nothing is selectable unless a
+            // SelectionArea says so. It goes in `builder` rather than around AppShell because
+            // that is the one place inside MaterialApp's Theme and Localizations (the selection
+            // toolbar needs both) and *above* the Navigator, so it covers the routes the shell
+            // does not — sign-in, the cannot-reach-Kintsugi screen — and every dialog, which is
+            // an overlay entry of that same Navigator. See script_dialog.dart, whose script is
+            // plain Text for this reason.
+            builder: (context, child) => SelectionArea(child: child!),
           ),
         ),
       );

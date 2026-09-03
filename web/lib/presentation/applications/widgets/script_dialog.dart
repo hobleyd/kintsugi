@@ -86,7 +86,11 @@ class _ScriptDialogState extends State<_ScriptDialog> {
                     borderRadius: BorderRadius.circular(3),
                   ),
                   child: SingleChildScrollView(
-                    child: SelectableText(
+                    // Text, not SelectableText: the app-wide SelectionArea in main.dart already
+                    // makes this selectable, and a SelectableText inside one is a selection
+                    // *island* a drag starting outside it stops at — which on this dialog would
+                    // exclude the script, the one thing anyone is here to copy.
+                    child: Text(
                       widget.script,
                       style: AppTheme.mono(color: palette.text, size: 13),
                     ),
