@@ -100,11 +100,10 @@ pub fn enroll(client: &reqwest::blocking::Client, config: &Config, serial_number
     let private_key_pem = key_pair.serialize_pem();
 
     fs::create_dir_all(dir).with_context(|| format!("could not create identity directory {}", dir.display()))?;
-    fs::write(dir.join(CERT_FILE), &parsed.certificate_pem).context("failed to save agent certificate")?;
-    fs::write(dir.join(KEY_FILE), &private_key_pem).context("failed to save agent private key")?;
-    fs::write(dir.join(CA_FILE), &parsed.ca_certificate_pem).context("failed to save CA certificate")?;
-    fs::write(dir.join(ARTIFACT_PUBKEY_FILE), &parsed.artifact_signing_public_key_pem)
-        .context("failed to save artifact-signing public key")?;
+    write_identity_file(dir, CERT_FILE, &parsed.certificate_pem, "this agent's certificate")?;
+    write_identity_file(dir, KEY_FILE, &private_key_pem, "this agent's private key")?;
+    write_identity_file(dir, CA_FILE, &parsed.ca_certificate_pem, "the CA certificate")?;
+    write_identity_file(dir, ARTIFACT_PUBKEY_FILE, &parsed.artifact_signing_public_key_pem, "the artifact-signing public key")?;
     restrict_identity_permissions(dir);
 
     crate::logging::info(&format!("enrolled agent identity for serial number {serial_number}"));
@@ -164,6 +163,23 @@ pub fn load_or_enroll(config: &Config, serial_number: &str) -> Option<AgentIdent
             None
         }
     }
+}
+
+/// Writes one of the four identity files, naming the full path it failed on.
+///
+/// Worth a helper rather than four `context` strings because of what Windows reports when a write
+/// is refused: `Access is denied. (os error 5)` and nothing else. That single message covers two
+/// faults needing opposite fixes — a *directory* that won't accept a new file (the account this
+/// process runs as is neither of the two SIDs `restrict_identity_permissions` grants, so the
+/// agent's own hardening has locked it out; check `sc.exe qc KintsugiAgent`) and an *existing file*
+/// that won't accept a rewrite (read-only attribute, or delete-pending because someone removed
+/// `identity/` by hand to recover from a regenerated CA, which is the documented remedy). Naming
+/// the path is what points an administrator at which of the two to go and look at; without it the
+/// only visible symptom is the downstream 403, since a failed enrollment leaves `load_or_enroll`
+/// returning `None` and `build_client` presenting no certificate at all.
+fn write_identity_file(dir: &Path, file_name: &str, contents: &str, description: &str) -> Result<()> {
+    let path = dir.join(file_name);
+    fs::write(&path, contents).with_context(|| format!("failed to save {description} to {}", path.display()))
 }
 
 /// Locks the identity directory (and so the freshly written private key inside it) to SYSTEM and
