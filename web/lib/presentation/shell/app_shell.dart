@@ -128,6 +128,13 @@ class _Sidebar extends StatelessWidget {
                     path: Routes.settingsPatchingPolicy,
                     selected: location == Routes.settingsPatchingPolicy,
                   ),
+                  // Alphabetical by label, and Vanta lands last. This subnav is a lookup rather
+                  // than a workflow, so there is no other order a reader could predict.
+                  _SubNavLink(
+                    label: 'Vanta',
+                    path: Routes.settingsVanta,
+                    selected: location == Routes.settingsVanta,
+                  ),
                 ],
               ),
               const Expanded(child: SizedBox(height: 24)),

@@ -69,6 +69,17 @@ public class ExceptionHandlingMiddleware
 
             await WriteProblemDetailsAsync(context, problemDetails);
         }
+        catch (ConflictException ex)
+        {
+            var problemDetails = new ProblemDetails
+            {
+                Status = (int)HttpStatusCode.Conflict,
+                Title = "Request conflicts with existing data.",
+                Detail = ex.Message
+            };
+
+            await WriteProblemDetailsAsync(context, problemDetails);
+        }
         catch (ExternalServiceException ex)
         {
             var problemDetails = new ProblemDetails

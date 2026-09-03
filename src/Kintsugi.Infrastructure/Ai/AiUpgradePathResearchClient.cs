@@ -28,7 +28,12 @@ namespace Kintsugi.Infrastructure.Ai;
 /// starting point, not a verified fact. Goose is reached over ACP against a `goose serve` instance
 /// rather than a local subprocess — see <see cref="GooseCliClient"/> — since it manages its own
 /// provider/web-search configuration outside this system; the prompt is simply handed to it as-is
-/// and its reply text is treated the same way as any other provider's answer.
+/// and its reply text is treated the same way as any other provider's answer. The Claude Agent SDK
+/// is handled the same way — the prompt goes over whole, and the agent does its own searching with
+/// the WebSearch and WebFetch tools it ships with — but its subprocess *is* in this image; see
+/// <see cref="ClaudeAgentSdkClient"/>, and note that what it authenticates with is a Claude
+/// subscription's OAuth token rather than the metered API key <see cref="AiProvider.Anthropic"/>
+/// uses.
 /// </summary>
 public class AiUpgradePathResearchClient : IUpgradePathResearchClient
 {
@@ -40,15 +45,17 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
     private readonly IConfiguration _configuration;
     private readonly IGitHubSettingsProvider _gitHubSettingsProvider;
     private readonly IGooseCliClient _gooseCliClient;
+    private readonly IClaudeAgentSdkClient _claudeAgentSdkClient;
     private readonly ILogger<AiUpgradePathResearchClient> _logger;
 
-    public AiUpgradePathResearchClient(HttpClient httpClient, IConfiguration configuration, IGitHubSettingsProvider gitHubSettingsProvider, IGooseCliClient gooseCliClient, ILogger<AiUpgradePathResearchClient> logger)
+    public AiUpgradePathResearchClient(HttpClient httpClient, IConfiguration configuration, IGitHubSettingsProvider gitHubSettingsProvider, IGooseCliClient gooseCliClient, IClaudeAgentSdkClient claudeAgentSdkClient, ILogger<AiUpgradePathResearchClient> logger)
     {
         _httpClient = httpClient;
         _httpClient.Timeout = TimeSpan.FromSeconds(300);
         _configuration = configuration;
         _gitHubSettingsProvider = gitHubSettingsProvider;
         _gooseCliClient = gooseCliClient;
+        _claudeAgentSdkClient = claudeAgentSdkClient;
         _logger = logger;
     }
 
@@ -231,6 +238,11 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
         AiProvider.OpenAI => AskOpenAiWithSearchAsync(settings, request, hostingSiteContext, cancellationToken),
         AiProvider.Ollama => AskOllamaWithSearchAsync(settings, request, hostingSiteContext, cancellationToken),
         AiProvider.GooseCli => _gooseCliClient.RunAsync(ResolvePrompt(request, hostingSiteContext), settings.Model, settings.BaseUrl, cancellationToken),
+        // No hosting-site context is stitched in for the two agent providers and no web-search
+        // tool is declared: both drive an agent that does its own searching, so the prompt is
+        // handed over whole. What ApiKey carries here is an OAuth token, not an API key — see
+        // ClaudeAgentSdkClient.
+        AiProvider.ClaudeAgentSdk => _claudeAgentSdkClient.RunAsync(ResolvePrompt(request, hostingSiteContext), settings.Model, settings.ApiKey, cancellationToken),
         _ => throw new ExternalServiceException($"Unsupported AI provider '{settings.Provider}'.")
     };
 
@@ -240,6 +252,7 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
         AiProvider.OpenAI => AskOpenAiRawAsync(settings, prompt, cancellationToken),
         AiProvider.Ollama => AskOllamaRawAsync(settings, prompt, cancellationToken),
         AiProvider.GooseCli => _gooseCliClient.RunAsync(prompt, settings.Model, settings.BaseUrl, cancellationToken),
+        AiProvider.ClaudeAgentSdk => _claudeAgentSdkClient.RunAsync(prompt, settings.Model, settings.ApiKey, cancellationToken),
         _ => throw new ExternalServiceException($"Unsupported AI provider '{settings.Provider}'.")
     };
 

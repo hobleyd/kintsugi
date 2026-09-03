@@ -134,6 +134,21 @@ void main() {
 
   test('aiAgentSettingsFromJson reads the provider ordinal', () {
     expect(aiAgentSettingsFromJson({'provider': 3}).provider, AiProvider.gooseCli);
+    // Pinned so that a member inserted rather than appended in either `AiProvider` declaration
+    // fails here instead of silently re-mapping every operator's saved provider on screen.
+    expect(aiAgentSettingsFromJson({'provider': 4}).provider, AiProvider.claudeAgentSdk);
+  });
+
+  test('claudeAgentSdkStatusFromJson reads the probe result', () {
+    final status = claudeAgentSdkStatusFromJson({
+      'isAvailable': true,
+      'version': '2.1.211 (Claude Code)',
+      'error': null,
+    });
+
+    expect(status.isAvailable, isTrue);
+    expect(status.version, '2.1.211 (Claude Code)');
+    expect(status.error, isNull);
   });
 
   test('authenticationSettingsFromJson reads the provider ordinal', () {
@@ -141,5 +156,50 @@ void main() {
       authenticationSettingsFromJson({'provider': 1}).provider,
       AuthProvider.microsoftEntra,
     );
+  });
+
+  group('vantaSettingsFromJson', () {
+    test('never carries the client secret, only whether one is stored', () {
+      final settings = vantaSettingsFromJson({'hasClientSecret': true, 'clientId': 'abc'});
+
+      // The DTO has no secret field at all, which is what lets the form honestly offer "leave
+      // blank to keep the existing one".
+      expect(settings.hasClientSecret, isTrue);
+      expect(settings.clientId, 'abc');
+    });
+
+    test('falls back to the same defaults the server resolves', () {
+      final settings = vantaSettingsFromJson(const {});
+
+      expect(settings.severity, 5.0);
+      expect(settings.syncIntervalHours, 24);
+      expect(settings.enabled, isFalse);
+      expect(settings.isConfigured, isFalse);
+    });
+  });
+
+  group('vantaSyncStatusFromJson', () {
+    test('keeps "never run" distinct from "the last run failed"', () {
+      final neverRun = vantaSyncStatusFromJson(const {'running': false});
+      final failed = vantaSyncStatusFromJson(const {'running': false, 'lastRunSucceeded': false});
+
+      // The status is held in memory on the server, so a restart resets it to null. That is a very
+      // different thing to be looking at from a failure, and the screen says so.
+      expect(neverRun.lastRunSucceeded, isNull);
+      expect(failed.lastRunSucceeded, isFalse);
+    });
+
+    test('parses the timestamps the server sends as UTC', () {
+      final status = vantaSyncStatusFromJson(const {
+        'running': false,
+        'completedUtc': '2026-09-03T04:05:06+00:00',
+        'componentCount': 3,
+        'packageCount': 7,
+      });
+
+      expect(status.completedUtc, isNotNull);
+      expect(status.componentCount, 3);
+      expect(status.packageCount, 7);
+    });
   });
 }

@@ -19,6 +19,9 @@ public class HostRepository : IHostRepository
     public Task<Host?> GetBySerialNumberAsync(string serialNumber, CancellationToken cancellationToken) =>
         _context.Hosts.FirstOrDefaultAsync(h => h.SerialNumber == serialNumber, cancellationToken);
 
+    public Task<Host?> GetByHostnameAsync(string hostname, CancellationToken cancellationToken) =>
+        _context.Hosts.FirstOrDefaultAsync(h => h.Hostname == hostname, cancellationToken);
+
     public async Task<IReadOnlyList<Host>> GetAllAsync(CancellationToken cancellationToken) =>
         await _context.Hosts.AsNoTracking().Where(h => h.DeletedAtUtc == null).ToListAsync(cancellationToken);
 

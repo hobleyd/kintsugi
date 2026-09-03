@@ -3,6 +3,7 @@ using MediatR;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using Kintsugi.Application.Authentication;
+using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Application.Authentication.Commands.UpdateAuthenticationSettings;
 using Kintsugi.Application.Authentication.Queries.GetAuthenticationSettings;
 using Kintsugi.Application.GitHub;
@@ -11,13 +12,16 @@ using Kintsugi.Application.GitHub.Queries.GetGitHubSettings;
 using Kintsugi.Application.PatchingPolicy;
 using Kintsugi.Application.PatchingPolicy.Commands.UpdatePatchingPolicySettings;
 using Kintsugi.Application.PatchingPolicy.Queries.GetPatchingPolicySettings;
+using Kintsugi.Application.Vanta;
+using Kintsugi.Application.Vanta.Commands.UpdateVantaSettings;
+using Kintsugi.Application.Vanta.Queries.GetVantaSettings;
 using Kintsugi.WebApi.Filters;
 
 namespace Kintsugi.WebApi.Controllers;
 
 /// <summary>
-/// The three settings screens that had no REST surface of their own — authentication, GitHub and
-/// patching policy. (The AI agent's already has one: see <see cref="AiSettingsController"/>.)
+/// The settings screens that had no REST surface of their own — authentication, GitHub, patching
+/// policy and Vanta. (The AI agent's already has one: see <see cref="AiSettingsController"/>.)
 /// </summary>
 /// <remarks>
 /// <para>
@@ -42,13 +46,16 @@ public class AdminSettingsController : ControllerBase
 {
     private readonly ISender _sender;
     private readonly IOptionsMonitorCache<OpenIdConnectOptions> _oidcOptionsCache;
+    private readonly IVantaSyncCoordinator _vantaSyncCoordinator;
 
     public AdminSettingsController(
         ISender sender,
-        IOptionsMonitorCache<OpenIdConnectOptions> oidcOptionsCache)
+        IOptionsMonitorCache<OpenIdConnectOptions> oidcOptionsCache,
+        IVantaSyncCoordinator vantaSyncCoordinator)
     {
         _sender = sender;
         _oidcOptionsCache = oidcOptionsCache;
+        _vantaSyncCoordinator = vantaSyncCoordinator;
     }
 
     [HttpGet("authentication")]
@@ -116,4 +123,50 @@ public class AdminSettingsController : ControllerBase
     public async Task<ActionResult<PatchingPolicySettingsDto>> UpdatePatchingPolicy(
         UpdatePatchingPolicySettingsCommand command, CancellationToken cancellationToken) =>
         Ok(await _sender.Send(command, cancellationToken));
+
+    [HttpGet("vanta")]
+    [ProducesResponseType(typeof(VantaSettingsDto), StatusCodes.Status200OK)]
+    public async Task<ActionResult<VantaSettingsDto>> GetVanta(CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(new GetVantaSettingsQuery(), cancellationToken));
+
+    [HttpPut("vanta")]
+    [ProducesResponseType(typeof(VantaSettingsDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<VantaSettingsDto>> UpdateVanta(
+        UpdateVantaSettingsCommand command, CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(command, cancellationToken));
+
+    /// <summary>Asks the background service to sync this fleet's patch state to Vanta now.</summary>
+    /// <remarks>
+    /// Returns immediately with the run's starting status rather than the result: a fleet-wide sync
+    /// builds the complete state of the world and uploads it in two requests, which is longer than an
+    /// HTTP request should block for. The screen polls <c>vanta/sync-status</c> for the outcome, the
+    /// same way the upgrade-path screens poll theirs.
+    ///
+    /// A <c>409</c> when a run is already in flight, and that is a real constraint rather than
+    /// politeness: Vanta issues one access token per application and revokes the previous one each
+    /// time a new one is asked for, so two overlapping runs would invalidate each other's
+    /// credentials mid-upload.
+    /// </remarks>
+    [HttpPost("vanta/sync")]
+    [ProducesResponseType(typeof(VantaSyncStatusDto), StatusCodes.Status202Accepted)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public ActionResult<VantaSyncStatusDto> SyncVanta()
+    {
+        if (!_vantaSyncCoordinator.TryRequestStart())
+        {
+            return Conflict(new ProblemDetails
+            {
+                Title = "A Vanta sync is already running.",
+                Detail = "Wait for the run in progress to finish before starting another.",
+                Status = StatusCodes.Status409Conflict,
+            });
+        }
+
+        return Accepted(_vantaSyncCoordinator.GetStatus());
+    }
+
+    [HttpGet("vanta/sync-status")]
+    [ProducesResponseType(typeof(VantaSyncStatusDto), StatusCodes.Status200OK)]
+    public ActionResult<VantaSyncStatusDto> GetVantaSyncStatus() => Ok(_vantaSyncCoordinator.GetStatus());
 }

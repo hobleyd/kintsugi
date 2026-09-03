@@ -6,7 +6,8 @@ namespace Kintsugi.Domain.Entities;
 
 /// <summary>
 /// Singleton configuration describing which AI agent (Anthropic, OpenAI, a local Ollama
-/// endpoint, or a local Goose CLI installation) the system should use, and how to reach it.
+/// endpoint, a Goose agent, or Claude through the Agent SDK) the system should use, and how to
+/// reach it.
 /// </summary>
 public class AiAgentSettings : BaseEntity
 {
@@ -58,11 +59,18 @@ public class AiAgentSettings : BaseEntity
         }
         else
         {
+            // ClaudeAgentSdk lands here deliberately rather than beside GooseCli: it does need a
+            // stored credential, and it wants exactly this branch's blank-means-keep behaviour.
+            // What it stores is not an API key — it is the one-year OAuth token `claude
+            // setup-token` prints, which is what makes the run bill a Claude subscription rather
+            // than metered API credits. See ClaudeAgentSdkClient.
             var resolvedApiKey = string.IsNullOrWhiteSpace(apiKey) ? ApiKey : apiKey;
 
             if (string.IsNullOrWhiteSpace(resolvedApiKey))
             {
-                throw new DomainException($"An API key is required for {provider}.");
+                throw new DomainException(provider == AiProvider.ClaudeAgentSdk
+                    ? "A Claude Code OAuth token is required for the Claude Agent SDK. Run `claude setup-token` on a machine signed in to the Claude subscription this server should use, and paste the token it prints."
+                    : $"An API key is required for {provider}.");
             }
 
             ApiKey = resolvedApiKey;

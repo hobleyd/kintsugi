@@ -9,8 +9,8 @@ Architecture), a Flutter web admin UI (`web/`, Clean Architecture + BLoC, served
 the nginx container), plus three Rust agents — `clients/macos-agent/`, `clients/windows-agent/` and
 `clients/linux-agent/` — that enroll themselves into the fleet, report their installed applications,
 and run signed upgrade scripts unattended. Upgrade paths for each application are researched by an AI
-provider (Anthropic / OpenAI / Ollama / Goose) that authors the script the agent later executes:
-**bash for macOS and Linux, PowerShell for Windows**.
+provider (Anthropic API / OpenAI / Ollama / Goose / Claude Agent SDK) that authors the script the
+agent later executes: **bash for macOS and Linux, PowerShell for Windows**.
 
 This directory is a git repository; `origin` is `git@github.com:hobleyd/kintsugi.git`, and it is
 **public**. So no real deployment detail belongs in a tracked file — not just credentials but the
@@ -222,6 +222,26 @@ certificate; the enrollment token is what protects it) and everything under `/ap
 protected by a signed checksum instead). `/swagger` is also exempt from the sign-in gate, so the
 route listing is readable anonymously — disclosure only, but worth knowing.
 
+**Removing a host is two-phase, and the soft-deleted row still owns its name.** The Hosts screen's
+delete is a *request*: `RequestHostRemoval` sets `DeletedAtUtc` (so the host vanishes from the list
+at once) and `RemovalRequested` (so the next check-in response tells the agent to uninstall itself).
+The row is hard-deleted only when the agent confirms via `POST /api/host-removed`. An agent that
+cannot authenticate never confirms — and cannot even *learn* it should uninstall, since both routes
+are inside nginx's client-certificate regex — so the row lingers forever, invisible but still
+holding `Hostname` and `SerialNumber` in unique indexes.
+
+That is not hypothetical: it deadlocked a Windows host whose identity write was failing. Re-register
+under a *different* serial (a re-imaged machine, or one whose serial moved between rungs of
+`choose_serial_number`) and `CreateHostCommandHandler` — which looks up by serial number only —
+inserts, collides on `IX_hosts_Hostname`, and returns a bare 500 whose only clue is a constraint
+name in the server log, on a route agents call unattended every hour. So `ReclaimHostnameAsync` now
+hard-deletes a **removed** row whose name is being claimed (installed applications go with it;
+`installed_applications` cascades on `HostId`), and a name held by a **live** host raises
+`ConflictException` → 409 rather than deleting either record on an agent's say-so. Keep that split.
+The reclaim is deliberately reachable only when no row matched the reported serial, which is what
+leaves the ordinary removal flow intact: a host coming back under its *own* serial still matches
+above, still carries `RemovalRequested`, and is still told to uninstall rather than resurrected.
+
 **Script approval is shared through a GitHub repository, and the default branch is the trust root.**
 Signing a script is effective locally at once — the human at the console reviewed it — and *also*
 opens a pull request against `SCRIPT_APPROVAL_GITHUB_REPO` carrying the script, its metadata and the
@@ -385,6 +405,27 @@ under (`bash` vs `pwsh`). That's why the runtime image installs all four; removi
 silently degrades generation to fail-open, or leaves `LatestVersion` null — and a null
 `LatestVersion` means `updateAvailable` is false, which means the agent's `is_patchable` returns
 false, which means **nothing on that platform ever patches**.
+
+**Two AI providers reach Claude, and the difference is which meter they spend.** `Anthropic` calls
+`api.anthropic.com` with an API key and bills metered credits. `ClaudeAgentSdk` runs the `claude`
+binary the runtime image installs (Anthropic's apt repository, `stable` channel — package-manager
+installs never auto-update themselves, so the version answering research runs changes only when the
+image is rebuilt) as a `-p --output-format json` subprocess, authenticating with the one-year OAuth
+token `claude setup-token` prints, which bills that subscription's included usage instead. Model
+output is indistinguishable between the two; only the bill differs, which is why
+`ClaudeAgentSdkClient` **removes** `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_PROFILE`
+and the three `CLAUDE_CODE_USE_*` variables from the child's environment rather than merely setting
+the token: Claude Code's credential precedence ranks every one of them *above*
+`CLAUDE_CODE_OAUTH_TOKEN`, so a `.env` that also carries an API key for the `Anthropic` provider —
+an entirely ordinary thing for it to carry — would silently move the whole fleet's research back
+onto the API. For the same reason `--bare` must never be added to that command line however
+attractive its faster startup looks: bare mode does not read `CLAUDE_CODE_OAUTH_TOKEN` at all and
+requires an API key. The empty working directory the client runs in exists because `--bare` is
+unavailable — without it the CLI reads `.claude/`, `.mcp.json` and `CLAUDE.md` from wherever it
+starts. It runs `--permission-mode dontAsk --allowedTools WebSearch,WebFetch` because `-p` starts in
+Manual mode on every plan, which would deny the research tools and answer from memory with nothing
+to say it had; and deliberately **not** `--dangerously-skip-permissions`, because this container
+holds the fleet CA and the signing key.
 
 **`--update-version` always runs on the Linux API server; `--update` always runs on the managed
 host.** This split is the whole reason a durable script is generated at all — checking for a new

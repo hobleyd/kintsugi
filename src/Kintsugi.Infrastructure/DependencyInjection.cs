@@ -11,6 +11,7 @@ using Kintsugi.Infrastructure.Persistence;
 using Kintsugi.Infrastructure.Persistence.Repositories;
 using Kintsugi.Infrastructure.Security;
 using Kintsugi.Infrastructure.Storage;
+using Kintsugi.Infrastructure.Vanta;
 
 namespace Kintsugi.Infrastructure;
 
@@ -40,6 +41,10 @@ public static class DependencyInjection
         // may capture these values in a constructor any more.
         services.AddScoped<IGitHubSettingsProvider, GitHubSettingsProvider>();
         services.AddScoped<IAuthenticationSettingsRepository, AuthenticationSettingsRepository>();
+        services.AddScoped<IVantaSettingsRepository, VantaSettingsRepository>();
+        // Scoped and read per call, for the same reason IGitHubSettingsProvider is: these values are
+        // edited on a settings page while the process runs.
+        services.AddScoped<IVantaSettingsProvider, VantaSettingsProvider>();
         services.AddSingleton<IAgentPackageStorage, AgentPackageFileStorage>();
         services.AddSingleton<IAgentPackageArchiveRewriter, AgentPackageArchiveRewriter>();
         // The upstream client builds come from — see GitHubAgentPackageSourceClient and the
@@ -53,7 +58,14 @@ public static class DependencyInjection
         services.AddHttpClient<IScriptApprovalPublisher, GitHubScriptApprovalPublisher>();
         services.AddHttpClient<IOllamaModelsClient, OllamaModelsClient>();
         services.AddHttpClient<IUpgradePathResearchClient, AiUpgradePathResearchClient>();
+        // The Vanta sync. Its access token is held by a *singleton* alongside the typed client
+        // rather than inside it, because Vanta permits one active token per application and revokes
+        // the previous one whenever a new one is issued — two components each holding their own
+        // would spend a sync invalidating each other. See VantaAccessTokenProvider.
+        services.AddHttpClient<IVantaSyncClient, VantaSyncClient>();
+        services.AddSingleton<VantaAccessTokenProvider>();
         services.AddScoped<IGooseCliClient, GooseCliClient>();
+        services.AddScoped<IClaudeAgentSdkClient, ClaudeAgentSdkClient>();
         services.AddSingleton<ICaService, CaService>();
         services.AddSingleton<IArtifactSigningService, ArtifactSigningService>();
         services.AddSingleton<IScriptSignatureVerifier, ScriptSignatureVerifier>();

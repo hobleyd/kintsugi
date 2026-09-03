@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Kintsugi.Application.AiSettings;
 using Kintsugi.Application.AiSettings.Commands.UpdateAiAgentSettings;
 using Kintsugi.Application.AiSettings.Queries.GetAiAgentSettings;
+using Kintsugi.Application.AiSettings.Queries.GetClaudeAgentSdkStatus;
 using Kintsugi.Application.AiSettings.Queries.GetGooseCliStatus;
 using Kintsugi.Application.AiSettings.Queries.GetOllamaModels;
 using Kintsugi.Application.Common.Interfaces;
@@ -58,4 +59,13 @@ public class AiSettingsController : ControllerBase
     [ProducesResponseType(typeof(GooseCliStatus), StatusCodes.Status200OK)]
     public async Task<ActionResult<GooseCliStatus>> GetGooseCliStatus([FromQuery] string? endpoint, CancellationToken cancellationToken) =>
         Ok(await _sender.Send(new GetGooseCliStatusQuery(endpoint), cancellationToken));
+
+    /// <summary>Checks that the Claude Agent SDK is usable from this server — that the `claude`
+    /// binary is installed and that the stored OAuth token still authenticates — to power a status
+    /// check in Settings. It takes no parameters on purpose: the token is never sent to the
+    /// browser, so the probe reads the stored one rather than one supplied by the caller.</summary>
+    [HttpGet("claude-agent-sdk-status")]
+    [ProducesResponseType(typeof(ClaudeAgentSdkStatus), StatusCodes.Status200OK)]
+    public async Task<ActionResult<ClaudeAgentSdkStatus>> GetClaudeAgentSdkStatus(CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(new GetClaudeAgentSdkStatusQuery(), cancellationToken));
 }

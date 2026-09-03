@@ -55,7 +55,8 @@ Future<void> configureDependencies() async {
     ..registerSingleton<AiAgentSettingsRepository>(AiAgentSettingsRepositoryImpl(api))
     ..registerSingleton<AuthenticationSettingsRepository>(AuthenticationSettingsRepositoryImpl(api))
     ..registerSingleton<GitHubSettingsRepository>(GitHubSettingsRepositoryImpl(api))
-    ..registerSingleton<PatchingPolicySettingsRepository>(PatchingPolicySettingsRepositoryImpl(api));
+    ..registerSingleton<PatchingPolicySettingsRepository>(PatchingPolicySettingsRepositoryImpl(api))
+    ..registerSingleton<VantaSettingsRepository>(VantaSettingsRepositoryImpl(api));
 
   _registerUseCases();
 }
@@ -71,6 +72,7 @@ void _registerUseCases() {
   final auth = locator<AuthenticationSettingsRepository>();
   final gitHub = locator<GitHubSettingsRepository>();
   final policy = locator<PatchingPolicySettingsRepository>();
+  final vanta = locator<VantaSettingsRepository>();
 
   locator
     ..registerSingleton(ReadSession(session))
@@ -98,10 +100,15 @@ void _registerUseCases() {
     ..registerSingleton(UpdateAiAgentSettings(ai))
     ..registerSingleton(GetOllamaModels(ai))
     ..registerSingleton(CheckGooseCliStatus(ai))
+    ..registerSingleton(CheckClaudeAgentSdkStatus(ai))
     ..registerSingleton(GetAuthenticationSettings(auth))
     ..registerSingleton(UpdateAuthenticationSettings(auth))
     ..registerSingleton(GetGitHubSettings(gitHub))
     ..registerSingleton(UpdateGitHubSettings(gitHub))
     ..registerSingleton(GetPatchingPolicySettings(policy))
-    ..registerSingleton(UpdatePatchingPolicySettings(policy));
+    ..registerSingleton(UpdatePatchingPolicySettings(policy))
+    ..registerSingleton(GetVantaSettings(vanta))
+    ..registerSingleton(UpdateVantaSettings(vanta))
+    ..registerSingleton(GetVantaSyncStatus(vanta))
+    ..registerSingleton(StartVantaSync(vanta));
 }

@@ -53,6 +53,14 @@ final class GooseCliStatusRequested extends AiAgentEvent {
   List<Object?> get props => [endpoint];
 }
 
+/// Checks that the Claude Agent SDK is usable *from the server* — the `claude` binary is installed
+/// there and the stored OAuth token still authenticates. It carries no argument because it can't:
+/// the token is never sent to this client, so the probe reads the saved one, which also means it
+/// describes what the server will actually run with rather than what is currently on screen.
+final class ClaudeAgentSdkStatusRequested extends AiAgentEvent {
+  const ClaudeAgentSdkStatusRequested();
+}
+
 final class AiAgentState extends Equatable {
   const AiAgentState({
     this.value,
@@ -76,8 +84,9 @@ final class AiAgentState extends Equatable {
   /// What the configured Ollama endpoint is serving. Empty until asked.
   final List<String> ollamaModels;
 
-  /// The outcome of the last endpoint probe, Ollama's or Goose's. One field for both because only
-  /// one of them is on screen at a time — which provider is selected decides which.
+  /// The outcome of the last provider probe — Ollama's, Goose's or the Claude Agent SDK's. One
+  /// field for all of them because only one is on screen at a time: which provider is selected
+  /// decides which.
   final String? probeMessage;
 
   final bool probing;
@@ -127,10 +136,12 @@ class AiAgentBloc extends Bloc<AiAgentEvent, AiAgentState> {
     required UpdateAiAgentSettings updateSettings,
     required GetOllamaModels getOllamaModels,
     required CheckGooseCliStatus checkGooseCliStatus,
+    required CheckClaudeAgentSdkStatus checkClaudeAgentSdkStatus,
   })  : _getSettings = getSettings,
         _updateSettings = updateSettings,
         _getOllamaModels = getOllamaModels,
         _checkGooseCliStatus = checkGooseCliStatus,
+        _checkClaudeAgentSdkStatus = checkClaudeAgentSdkStatus,
         super(const AiAgentState()) {
     on<AiAgentSettingsRequested>(_onRequested);
     on<AiAgentSettingsSaveRequested>(_onSave);
@@ -139,12 +150,14 @@ class AiAgentBloc extends Bloc<AiAgentEvent, AiAgentState> {
     );
     on<OllamaModelsRequested>(_onOllamaModels);
     on<GooseCliStatusRequested>(_onGooseStatus);
+    on<ClaudeAgentSdkStatusRequested>(_onClaudeAgentSdkStatus);
   }
 
   final GetAiAgentSettings _getSettings;
   final UpdateAiAgentSettings _updateSettings;
   final GetOllamaModels _getOllamaModels;
   final CheckGooseCliStatus _checkGooseCliStatus;
+  final CheckClaudeAgentSdkStatus _checkClaudeAgentSdkStatus;
 
   Future<void> _onRequested(AiAgentSettingsRequested event, Emitter<AiAgentState> emit) async {
     emit(state.copyWith(loading: true, clearError: true));
@@ -158,6 +171,8 @@ class AiAgentBloc extends Bloc<AiAgentEvent, AiAgentState> {
         add(OllamaModelsRequested(settings.baseUrl!));
       } else if (settings.provider == AiProvider.gooseCli) {
         add(GooseCliStatusRequested(settings.baseUrl));
+      } else if (settings.provider == AiProvider.claudeAgentSdk) {
+        add(const ClaudeAgentSdkStatusRequested());
       }
     } on ApiException catch (error) {
       emit(state.copyWith(loading: false, error: error.message));
@@ -198,6 +213,30 @@ class AiAgentBloc extends Bloc<AiAgentEvent, AiAgentState> {
         probing: false,
         ollamaModels: const [],
         probeMessage: 'Could not reach the Ollama endpoint.',
+      ));
+    }
+  }
+
+  Future<void> _onClaudeAgentSdkStatus(
+    ClaudeAgentSdkStatusRequested event,
+    Emitter<AiAgentState> emit,
+  ) async {
+    // Slower than the other probes by design: the server makes a real one-turn model request,
+    // because an installed binary with an expired token would otherwise report as healthy.
+    emit(state.copyWith(probing: true, probeMessage: 'Checking…'));
+    try {
+      final status = await _checkClaudeAgentSdkStatus();
+      emit(state.copyWith(
+        probing: false,
+        probeMessage: status.isAvailable
+            ? 'Claude Agent SDK ready (claude ${status.version ?? 'version unknown'}). '
+                'Runs bill this token\'s Claude subscription, not the Anthropic API.'
+            : status.error ?? 'The Claude Agent SDK is not usable on this server.',
+      ));
+    } on ApiException {
+      emit(state.copyWith(
+        probing: false,
+        probeMessage: 'Could not check the Claude Agent SDK on this server.',
       ));
     }
   }

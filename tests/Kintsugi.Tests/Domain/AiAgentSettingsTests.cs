@@ -46,6 +46,35 @@ public class AiAgentSettingsTests
     }
 
     [Fact]
+    public void Create_ForClaudeAgentSdk_RequiresAToken_SinceThereIsNothingElseToAuthenticateWith()
+    {
+        // Unlike GooseCli, which manages its own credentials outside this system, the Agent SDK
+        // subprocess is given its credential by this system on every run.
+        Assert.Throws<DomainException>(() => AiAgentSettings.Create(AiProvider.ClaudeAgentSdk, apiKey: null, baseUrl: null, model: null, isEnabled: true));
+    }
+
+    [Fact]
+    public void Create_ForClaudeAgentSdk_StoresTheOauthTokenInTheApiKeyField()
+    {
+        var settings = AiAgentSettings.Create(AiProvider.ClaudeAgentSdk, "sk-ant-oat01-example", baseUrl: null, model: "opus", isEnabled: true);
+
+        Assert.Equal("sk-ant-oat01-example", settings.ApiKey);
+        Assert.Equal("opus", settings.Model);
+        Assert.Null(settings.BaseUrl);
+    }
+
+    [Fact]
+    public void Update_ForClaudeAgentSdk_WithABlankToken_KeepsTheStoredOne()
+    {
+        var settings = AiAgentSettings.Create(AiProvider.ClaudeAgentSdk, "sk-ant-oat01-original", null, null, true);
+
+        settings.Update(AiProvider.ClaudeAgentSdk, apiKey: "", baseUrl: null, model: "sonnet", isEnabled: true);
+
+        Assert.Equal("sk-ant-oat01-original", settings.ApiKey);
+        Assert.Equal("sonnet", settings.Model);
+    }
+
+    [Fact]
     public void Update_WithABlankApiKey_KeepsTheCurrentlyStoredOne_RatherThanClearingIt()
     {
         // The UI never round-trips the real key back to the browser, so a blank submission means

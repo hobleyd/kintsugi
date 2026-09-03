@@ -12,6 +12,7 @@ using Kintsugi.Infrastructure.Persistence;
 using Kintsugi.WebApi.Middleware;
 using Kintsugi.WebApi.Security;
 using Kintsugi.WebApi.UpgradePathScanning;
+using Kintsugi.WebApi.Vanta;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -84,6 +85,15 @@ builder.Services.AddHostedService<UpgradePathRefreshBackgroundService>();
 builder.Services.AddSingleton<UpdateCheckCoordinator>();
 builder.Services.AddSingleton<IUpdateCheckCoordinator>(sp => sp.GetRequiredService<UpdateCheckCoordinator>());
 builder.Services.AddHostedService<UpdateCheckBackgroundService>();
+
+// The Vanta sync, registered the same way for the same reason. It differs from the three above in
+// having a clock of its own as well as a trigger: it pushes the fleet's patch state to Vanta on a
+// configured interval, and immediately when the settings screen asks. Inert until an administrator
+// configures and enables it — see VantaSettings, which is deliberately not seeded from the
+// environment.
+builder.Services.AddSingleton<VantaSyncCoordinator>();
+builder.Services.AddSingleton<IVantaSyncCoordinator>(sp => sp.GetRequiredService<VantaSyncCoordinator>());
+builder.Services.AddHostedService<VantaSyncBackgroundService>();
 
 builder.Services.AddSwaggerGen(options =>
 {
