@@ -40,10 +40,22 @@ class _KintsugiAppState extends State<KintsugiApp> {
   // rebuilding it would drop the browser's history.
   late final _router = createRouter(_sessionBloc);
 
+  // The app-wide SelectionArea's focus node, supplied rather than left to default for the sake of
+  // `skipTraversal`. Two reasons, and the second is the one that bites: Tab should move between a
+  // form's fields rather than stopping on a selection region that spans the whole page, and — on
+  // web only — SelectableRegion wraps its child in a Stack holding an HtmlElementView for the
+  // browser's own right-click menu. The browser hands Flutter a view-focus change before that
+  // Stack's first layout, and the traversal sort reads every node's `rect`, which asserts
+  // `hasSize` on a render object that has none yet. Skipping traversal keeps the node out of that
+  // sort. Deleting this argument brings back a first-frame exception that no test here can see:
+  // `kIsWeb` is false under `flutter test`, so the VM never builds that Stack at all.
+  final _selectionFocusNode = FocusNode(skipTraversal: true, debugLabel: 'selection');
+
   @override
   void dispose() {
     _sessionBloc.close();
     _router.dispose();
+    _selectionFocusNode.dispose();
     super.dispose();
   }
 
@@ -67,10 +79,19 @@ class _KintsugiAppState extends State<KintsugiApp> {
             // SelectionArea says so. It goes in `builder` rather than around AppShell because
             // that is the one place inside MaterialApp's Theme and Localizations (the selection
             // toolbar needs both) and *above* the Navigator, so it covers the routes the shell
-            // does not — sign-in, the cannot-reach-Kintsugi screen — and every dialog, which is
-            // an overlay entry of that same Navigator. See script_dialog.dart, whose script is
-            // plain Text for this reason.
-            builder: (context, child) => SelectionArea(child: child!),
+            // does not — sign-in, the cannot-reach-Kintsugi screen — and both dialogs, which are
+            // routes pushed on that same Navigator. See script_dialog.dart, whose script is plain
+            // Text for this reason.
+            //
+            // Overlay.wrap is load-bearing rather than decoration: SelectableRegion asserts an
+            // Overlay ancestor (it floats its toolbar and magnifier in one), and `builder` runs
+            // *above* the Navigator that would otherwise provide it — so a bare SelectionArea
+            // here throws "No Overlay widget found" on the first frame. In debug only, since it
+            // is an assert, which is exactly why the release bundle compiling proves nothing;
+            // test/presentation/text_selection_test.dart pumps this same arrangement.
+            builder: (context, child) => Overlay.wrap(
+              child: SelectionArea(focusNode: _selectionFocusNode, child: child!),
+            ),
           ),
         ),
       );
