@@ -758,6 +758,23 @@ prompts for it and `self_update` delivers the change unattended. So before shipp
 what `serial_number` returns: check the Hosts screen for GUID-shaped or placeholder-shaped serials,
 because those are precisely the hosts that will need re-enrolling.
 
+**The Windows identity directory is SYSTEM and Administrators only, and a service running as
+anything else cannot read its own identity.** `identity::restrict_identity_permissions` strips
+inheritance and grants exactly `S-1-5-18` and `S-1-5-32-544`, once, inside `enroll` — there is no
+repair pass re-asserting it, unlike Linux's `config::repair_directory_modes`. The failure mode is
+quiet in a specific way: `icacls` reads as perfectly correct, because it *is* correct for the two
+SIDs it names. Check `sc.exe qc KintsugiAgent` before believing an ACL. `install.ps1` pins
+`obj= LocalSystem` on both branches now, but nothing stops a hardening baseline changing it later.
+
+`identity::load` used to answer that with `None` — the same answer it gives a host that has never
+enrolled — so the agent reported "this agent has not enrolled an identity yet", re-enrolled every
+check-in forever, spent a certificate issuance on the server each time, and died on the *write*,
+naming `agent.crt` (the first file written) rather than whichever read actually failed. It now
+separates `NotFound` from every other error and refuses to start an enrollment it knows will be
+refused. The remedy is to delete the identity directory **outright** rather than its contents:
+`create_dir_all` then recreates it inheriting from the parent, which is what clears stale per-file
+permissions.
+
 **Replacing a running binary differs.** macOS and Linux stage next to the target and rename over it
 (atomic, and Unix will unlink an open file). Windows locks a running image, so `self_update` renames
 the *old* binary aside — which Windows does allow — copies the new one into the freed path, and
