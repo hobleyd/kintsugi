@@ -20,6 +20,36 @@ every agent's `DEFAULT_API_BASE_URL` and `packaging/config.toml` ships the place
 `PATCHING_AGENT_API_BASE_URL` and never by editing that default. Keep the three agents' defaults
 identical — each one's comment claims it is in step with the others.
 
+## Working alongside other sessions
+
+**Several Claude Code sessions are usually working in this one checkout at the same time.** They
+share a single working tree, a single index and a single `HEAD`, so the uncommitted changes sitting
+beside yours are probably somebody else's, and the branch you are on is not necessarily the one you
+checked out.
+
+**Commit the paths you wrote, and nothing else.** `git add -A`, `git add .` and `git commit -a`
+stage whatever happens to be dirty, which here means another session's half-finished work — so name
+your files instead: `git add web/lib/main.dart web/test/presentation/text_selection_test.dart`.
+Check `git status` first and expect to see edits you did not make; leave them alone. This is not
+hypothetical: one session's `git add -A` swept another's in-progress `main.dart` and its test into a
+commit about the Windows agent's identity handling, so a commit message describing one change
+shipped a tree containing two.
+
+**Naming a path is not enough when the other session is editing the same file.** Staging a file
+stages all of it, so `git add CLAUDE.md` on a file two sessions are appending to commits both
+appends — which is how this very section first went in carrying somebody else's release note. When
+`git diff --cached` shows more than you wrote, stage the hunks rather than the file: `git add -p`,
+or build the blob you meant (`git hash-object -w`, `git update-index --cacheinfo`), which stages
+your version without disturbing what is on disk for whoever is still typing into it.
+
+**Check `HEAD` before amending, and never amend a commit you did not write.** `git commit --amend`
+rewrites whatever `HEAD` points at, and `HEAD` moves when another session switches branch — which
+happens without warning, because the branch is shared state rather than yours. `git branch
+--show-current` and `git log -1` immediately before committing cost nothing; recovering somebody
+else's rewritten commit out of the reflog costs a good deal more. For the same reason, re-read a
+branch's log right before merging it: commits may have landed on it since you last looked, and they
+will go out under your merge unless you notice and say so.
+
 ## Commands
 
 Requires the .NET SDK 8 — every csproj targets `net8.0` and `dotnet-ef` is pinned to `8.0.10` with
