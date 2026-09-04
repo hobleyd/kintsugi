@@ -508,6 +508,14 @@ fn run_session(
     let mut pending_flush = false;
     let started = Instant::now();
 
+    // Counted so the log can distinguish the three ways a viewer sees nothing: ScreenCaptureKit
+    // delivered no frame (a permission or stream fault — frames_captured stays 0), frames arrived
+    // but nothing left this process (tiles_sent stays 0), or everything was sent and the fault is
+    // downstream. Without these all three read as "session started, session ended".
+    let mut frames_captured: u64 = 0;
+    let mut tiles_sent: u64 = 0;
+    let mut bytes_sent: u64 = 0;
+
     let reason = 'session: loop {
         if stop.load(Ordering::SeqCst) {
             break "the session was ended on the host".to_string();
@@ -525,7 +533,19 @@ fn run_session(
             // the remote end sees a lower frame rate rather than a growing delay.
             std::thread::sleep(FRAME_POLL_INTERVAL);
         } else if let Some(frame) = capture.next_frame(FRAME_POLL_INTERVAL) {
+            frames_captured += 1;
+            if frames_captured == 1 {
+                logging::info(&format!(
+                    "remote control session {session_id}: first frame captured after {}ms ({}x{})",
+                    started.elapsed().as_millis(),
+                    frame.width,
+                    frame.height
+                ));
+            }
+
             for tile in encoder.encode_changes(&frame) {
+                tiles_sent += 1;
+                bytes_sent += tile.len() as u64;
                 // Labelled, because breaking the inner loop alone would discard the error and go
                 // straight back to capturing for a socket that is no longer there.
                 if let Err(err) = socket.write(Message::Binary(tile.into())) {
@@ -540,6 +560,13 @@ fn run_session(
         }
     };
 
+    if frames_captured == 0 {
+        logging::warn(&format!(
+            "remote control session {session_id}: ScreenCaptureKit delivered no frames at all in {}s",
+            started.elapsed().as_secs()
+        ));
+    }
+
     // Explicitly, before anything else unwinds: a session that ended while the remote user happened
     // to be holding Command must not leave this Mac's own owner with Command stuck down. `Drop`
     // does this too, as a backstop for a panic.
@@ -551,7 +578,8 @@ fn run_session(
     let _ = socket.close(None);
 
     logging::info(&format!(
-        "remote control session {session_id} ended after {}s: {reason}",
+        "remote control session {session_id} ended after {}s: {reason} \
+         (frames captured: {frames_captured}, tiles sent: {tiles_sent}, bytes sent: {bytes_sent})",
         started.elapsed().as_secs()
     ));
 

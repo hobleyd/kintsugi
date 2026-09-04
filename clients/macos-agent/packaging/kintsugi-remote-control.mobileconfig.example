@@ -10,11 +10,11 @@
     ============================================================================================
 
     Every PPPC entry needs a CodeRequirement, and macOS checks it against the binary's signature
-    before honouring the grant. `cargo build --release` produces an *ad-hoc, linker-signed* binary
-    whose designated requirement is a bare `cdhash` — a hash of that exact build:
+    before honouring the grant. `publish-release.sh` signs the packaged binary *ad hoc*, so its
+    designated requirement is a bare `cdhash` per slice — a hash of that exact build:
 
         $ codesign -d -r- /usr/local/bin/kintsugi-agent
-        # designated => cdhash H"f10e7c9be0903bbe7c9184d53bbc054febb4d4ad"
+        # designated => cdhash H"fbb593c395e2cce91c9305cbae4316c29d309883" or cdhash H"105d13709a204541759dc41561f4300c763c182d"
 
     A profile written against that hash would work until the next agent release and then silently
     stop, because `self_update` replaces the binary unattended and the new build hashes differently.

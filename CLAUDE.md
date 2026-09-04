@@ -802,17 +802,29 @@ either nothing or a desktop with every window missing. So `describe_restrictions
 front and the consent dialog lists whatever will not work, rather than leaving it to be discovered
 mid-call.
 
-**Pre-approving those permissions by MDM needs the agent code-signed, and it is not.**
-`packaging/kintsugi-remote-control.mobileconfig.example` is a complete PPPC profile bar one field:
-every entry needs a `CodeRequirement` matched against the binary's signature, and `cargo build
---release` produces an ad-hoc, linker-signed binary whose designated requirement is a bare `cdhash`
+**Pre-approving those permissions by MDM needs the agent code-signed with a Developer ID, and it is
+not.** `packaging/kintsugi-remote-control.mobileconfig.example` is a complete PPPC profile bar one
+field: every entry needs a `CodeRequirement` matched against the binary's signature, and the
+ad-hoc signature `publish-release.sh` applies has a designated requirement that is a bare `cdhash`
 of that exact build. A profile written against it would work until the next release and then stop,
 because `self_update` replaces the binary unattended — remote control failing across the fleet on an
 upgrade, with the profile still reporting as installed. Signing with a Developer ID Application
 certificate (which nothing in `publish-release.sh` or CI does today) is the prerequisite; until then
 both permissions need a human at each Mac, and Accessibility specifically **cannot be granted from
 its prompt at all** — macOS only offers to open System Settings, where someone then has to find the
-binary in a list.
+binary in a list (`/usr` is hidden in the file picker; ⌘⇧G and type `/usr/local/bin`).
+
+**The ad-hoc signature in `publish-release.sh` is load-bearing, and `cargo build` alone is not
+enough.** The linker signs an arm64 slice as "linker-signed" — no designated requirement — and
+signs an x86_64 slice not at all, and TCC accepts neither as an identity. What that looks like is
+not an error: System Settings shows the binary added and switched on under both Screen Recording
+and Accessibility, and the process still fails both checks, however many times the rows are removed
+and re-added, restarted or not. 0.6.0 shipped that way; the tell was the system `TCC.db` holding a
+`csreq` naming two cdhashes that matched neither slice of the installed file. `codesign --sign -`
+on the packaged binary gives it a requirement TCC records verbatim. A grant is still per build, so
+after every agent release the two rows have to be removed and re-added — and the per-user process
+relaunched (`launchctl kickstart -k gui/$(id -u)/au.com.sharpblue.kintsugiagent-ui`), because a
+process that was denied stays denied until it reconnects to WindowServer.
 
 **A browser cannot forward every keystroke, and that is permanent.** ⌘W, ⌘Q, ⌘T and ⌘Tab are claimed
 by the browser and the OS before any page handler runs, so `RemoteKeyCombinations` offers them as

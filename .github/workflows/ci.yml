@@ -206,6 +206,9 @@ jobs:
               target/aarch64-apple-darwin/release/kintsugi-agent \
               target/x86_64-apple-darwin/release/kintsugi-agent
           lipo -info target/universal/kintsugi-agent
+          # Not signed here: publish-release.sh ad-hoc signs whatever binary it packages, so a
+          # hand-run publish and this one produce the same kind of artifact. See the note there on
+          # why a linker-signed slice is not enough for TCC.
 
       # Packaged by the agent's own publish script rather than a `tar` call written here: the
       # archive's top-level entry names are load-bearing (self_update.rs extracts "kintsugi-agent"

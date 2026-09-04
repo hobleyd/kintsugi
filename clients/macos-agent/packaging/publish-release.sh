@@ -87,6 +87,23 @@ WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 cp "$BUILT_BIN" "$WORK_DIR/kintsugi-agent"
+
+# Ad-hoc signed here, on the copy, so every slice of whatever was built carries a real signature.
+# `cargo build` alone does not give one: the linker signs the arm64 slice (macOS will not exec an
+# unsigned arm64 image) but as "linker-signed" — no designated requirement — and leaves an x86_64
+# slice unsigned altogether. TCC does not accept either as an identity. System Settings records a
+# Screen Recording or Accessibility grant against a requirement it synthesises, the running process
+# never satisfies it, and remote control reports both permissions missing however many times the
+# administrator re-adds the binary — which is how 0.6.0 shipped. A proper ad-hoc signature has a
+# designated requirement (`cdhash H"..."`, one per slice) that TCC records verbatim and the process
+# then matches. The identifier is fixed rather than derived from the file name, so it is the same
+# whether the input came from CI's lipo output or a local target/release build.
+#
+# Still a per-build identity: a new release changes the cdhash and every grant has to be redone.
+# Signing with a Developer ID is what fixes that, and is the prerequisite the PPPC profile in
+# kintsugi-remote-control.mobileconfig.example is waiting on.
+codesign --sign - --force --identifier kintsugi-agent "$WORK_DIR/kintsugi-agent"
+codesign --display --requirements - "$WORK_DIR/kintsugi-agent"
 cp "$SCRIPT_DIR/config.toml" "$WORK_DIR/config.toml"
 cp "$SCRIPT_DIR/au.com.sharpblue.kintsugiagent.plist" "$WORK_DIR/au.com.sharpblue.kintsugiagent.plist"
 cp "$SCRIPT_DIR/au.com.sharpblue.kintsugiagent-ui.plist" "$WORK_DIR/au.com.sharpblue.kintsugiagent-ui.plist"
