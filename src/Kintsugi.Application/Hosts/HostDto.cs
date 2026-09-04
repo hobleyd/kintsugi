@@ -17,6 +17,11 @@ public record HostDto(
     int AppUpdatesAvailableCount,
     bool RemovalRequested)
 {
+    /// <summary>
+    /// <c>Status</c> is <see cref="Host.StatusAt"/> as of now, not the stored column: the column
+    /// only ever records that the host was online at its last check-in, and the Hosts screen
+    /// needs to know whether it still is.
+    /// </summary>
     public static HostDto FromEntity(Host host, int appUpdatesAvailableCount = 0) =>
         new(
             host.Id,
@@ -24,7 +29,7 @@ public record HostDto(
             host.SerialNumber,
             host.OperatingSystem,
             host.IpAddress,
-            host.Status,
+            host.StatusAt(DateTimeOffset.UtcNow),
             host.LastSeenUtc,
             host.AgentVersion,
             host.OperatingSystemUpdateAvailable,

@@ -50,6 +50,37 @@ public class HostTests
     }
 
     [Fact]
+    public void StatusAt_WithinTheOnlineWindow_IsOnline()
+    {
+        var host = new Host("host-1", "SERIAL-1");
+        host.RecordHeartbeat(HostStatus.Online);
+
+        var status = host.StatusAt(host.LastSeenUtc!.Value + Host.OnlineWindow);
+
+        Assert.Equal(HostStatus.Online, status);
+    }
+
+    [Fact]
+    public void StatusAt_PastTheOnlineWindow_IsOffline()
+    {
+        var host = new Host("host-1", "SERIAL-1");
+        host.RecordHeartbeat(HostStatus.Online);
+
+        var status = host.StatusAt(host.LastSeenUtc!.Value + Host.OnlineWindow + TimeSpan.FromSeconds(1));
+
+        Assert.Equal(HostStatus.Offline, status);
+        Assert.Equal(HostStatus.Online, host.Status); // the stored column is what the agent reported, and is left alone
+    }
+
+    [Fact]
+    public void StatusAt_WhenNeverCheckedIn_IsUnknown()
+    {
+        var host = new Host("host-1", "SERIAL-1");
+
+        Assert.Equal(HostStatus.Unknown, host.StatusAt(DateTimeOffset.UtcNow));
+    }
+
+    [Fact]
     public void Reregister_WithNullOptionalFields_LeavesExistingValuesUnchanged()
     {
         var host = new Host("host-1", "SERIAL-1", "macOS 14.0", "10.0.0.1", operatingSystemUpdateAvailable: true, operatingSystemLatestVersion: "15.0");

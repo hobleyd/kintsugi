@@ -75,6 +75,34 @@ public class Host : BaseEntity
         MarkUpdated();
     }
 
+    /// <summary>
+    /// How long a host may go without checking in before it reads as offline. Agents check in
+    /// once an hour (see <c>ICheckInLoadBalancer</c>, which spreads those check-ins across the
+    /// hour), so two hours means a host has missed one entirely rather than merely run a few
+    /// minutes late — a reassigned check-in minute or a slow network must not flicker it offline.
+    /// </summary>
+    public static readonly TimeSpan OnlineWindow = TimeSpan.FromHours(2);
+
+    /// <summary>
+    /// The status to display, as of <paramref name="now"/>. <see cref="Status"/> is what the agent
+    /// last reported — every check-in writes <see cref="HostStatus.Online"/>, and nothing ever
+    /// writes anything else — so read alone it says a host is online forever after its first
+    /// check-in. This ages it: an online host whose <see cref="LastSeenUtc"/> is older than
+    /// <see cref="OnlineWindow"/> is <see cref="HostStatus.Offline"/>. Derived at read time rather
+    /// than by a background sweep so it is never stale, and pure so it can be pinned by a test.
+    /// </summary>
+    public HostStatus StatusAt(DateTimeOffset now)
+    {
+        if (Status != HostStatus.Online)
+        {
+            return Status;
+        }
+
+        return LastSeenUtc is { } lastSeen && now - lastSeen <= OnlineWindow
+            ? HostStatus.Online
+            : HostStatus.Offline;
+    }
+
     public void Reregister(
         string hostname,
         string? operatingSystem,
