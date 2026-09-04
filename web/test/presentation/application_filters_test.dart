@@ -6,6 +6,7 @@ import 'package:kintsugi_web/presentation/applications/applications_bloc.dart';
 
 UpgradePathSummary path({
   required String statusKey,
+  List<String> hostNames = const ['alpha', 'beta'],
   List<String> hostNamesNeedingUpdate = const [],
   String platform = 'macOS',
 }) =>
@@ -25,27 +26,42 @@ UpgradePathSummary path({
       hostCount: 2,
       upToDateHostCount: 1,
       updateAvailableHostCount: hostNamesNeedingUpdate.length,
+      hostNames: hostNames,
       hostNamesNeedingUpdate: hostNamesNeedingUpdate,
       script: '#!/bin/bash',
       scriptSignature: 'signed',
     );
 
+/// [installedOn] is the *application's* host list -- every host running an application of this
+/// name, whatever platform bucket it resolved to. [pathInstalledOn] is the row's own, which is the
+/// narrower thing the host filter reads; it defaults to the same list, since most applications
+/// resolve to one bucket.
 ApplicationTableRow row({
   required String statusKey,
   List<String> installedOn = const ['alpha', 'beta'],
+  List<String>? pathInstalledOn,
   List<String> needingUpdate = const [],
-}) =>
-    ApplicationTableRow(
-      application: ApplicationRow(
-        name: 'Firefox',
-        hostCount: installedOn.length,
-        hostNames: installedOn,
-        upgradePaths: [path(statusKey: statusKey, hostNamesNeedingUpdate: needingUpdate)],
-        children: const [],
-      ),
-      upgradePath: path(statusKey: statusKey, hostNamesNeedingUpdate: needingUpdate),
-      isChild: false,
-    );
+  String platform = 'macOS',
+}) {
+  final summary = path(
+    statusKey: statusKey,
+    platform: platform,
+    hostNames: pathInstalledOn ?? installedOn,
+    hostNamesNeedingUpdate: needingUpdate,
+  );
+
+  return ApplicationTableRow(
+    application: ApplicationRow(
+      name: 'Firefox',
+      hostCount: installedOn.length,
+      hostNames: installedOn,
+      upgradePaths: [summary],
+      children: const [],
+    ),
+    upgradePath: summary,
+    isChild: false,
+  );
+}
 
 void main() {
   group('search', () {
@@ -85,6 +101,45 @@ void main() {
       expect(
         const ApplicationFilters(hostName: 'gamma').matches(row(statusKey: 'up-to-date')),
         isFalse,
+      );
+    });
+
+    // The application-level host list is keyed on the name alone, so an application installed from
+    // Homebrew on a Mac and from winget on a PC has one list spanning both while being two rows.
+    // Filtering by the PC used to keep the pm:Homebrew row, platform label and all.
+    test('excludes a row whose own bucket the chosen host is not in', () {
+      final homebrewRow = row(
+        statusKey: 'up-to-date',
+        platform: 'pm:Homebrew',
+        installedOn: const ['mac-host', 'win-host'],
+        pathInstalledOn: const ['mac-host'],
+      );
+
+      expect(const ApplicationFilters(hostName: 'win-host').matches(homebrewRow), isFalse);
+      expect(const ApplicationFilters(hostName: 'mac-host').matches(homebrewRow), isTrue);
+    });
+
+    test('falls back to the application hosts when the row carries no host list of its own', () {
+      // A row with no researched path has none to carry; an empty one from a server predating the
+      // field looks the same, and emptying the table under every host filter is the worse answer.
+      const noPath = ApplicationTableRow(
+        application: ApplicationRow(
+          name: 'Firefox',
+          hostCount: 1,
+          hostNames: ['alpha'],
+          upgradePaths: [],
+          children: [],
+        ),
+        upgradePath: null,
+        isChild: false,
+      );
+
+      expect(const ApplicationFilters(hostName: 'alpha').matches(noPath), isTrue);
+      expect(const ApplicationFilters(hostName: 'gamma').matches(noPath), isFalse);
+      expect(
+        const ApplicationFilters(hostName: 'alpha')
+            .matches(row(statusKey: 'up-to-date', pathInstalledOn: const [])),
+        isTrue,
       );
     });
   });

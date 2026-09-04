@@ -183,7 +183,7 @@ class _ApplicationsTable extends StatelessWidget {
         ),
       ),
       TableColumnSpec(
-        label: 'Hosts Installed On',
+        label: 'Hosts',
         width: const FixedColumnWidth(150),
         alignRight: true,
         sortKey: 'hosts',

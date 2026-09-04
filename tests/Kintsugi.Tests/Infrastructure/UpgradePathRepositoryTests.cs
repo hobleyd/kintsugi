@@ -347,6 +347,7 @@ public class UpgradePathRepositoryTests
         Assert.Equal(2, summary.HostCount);
         Assert.Equal(1, summary.UpToDateHostCount);
         Assert.Equal(1, summary.UpdateAvailableHostCount);
+        Assert.Equal(new[] { "host-a", "host-b" }, summary.HostNames);
         Assert.Equal(new[] { "host-b" }, summary.HostNamesNeedingUpdate);
     }
 
@@ -473,6 +474,14 @@ public class UpgradePathRepositoryTests
         Assert.Equal(2, summaries.Count);
         Assert.Contains(summaries, s => s.Platform == HomebrewBucket);
         Assert.Contains(summaries, s => s.Platform == PlatformBucket.ForPackageManager(PackageManagerCatalog.Winget));
+
+        // And each row names only the hosts that resolved to *it*. The Applications page's host
+        // filter reads this rather than the application-level host list, which is keyed on the name
+        // alone and so spans both — filtering by the PC used to leave the pm:Homebrew row on screen.
+        Assert.Equal(new[] { "mac-host" }, summaries.Single(s => s.Platform == HomebrewBucket).HostNames);
+        Assert.Equal(
+            new[] { "pc-1" },
+            summaries.Single(s => s.Platform == PlatformBucket.ForPackageManager(PackageManagerCatalog.Winget)).HostNames);
     }
 
     [Fact]

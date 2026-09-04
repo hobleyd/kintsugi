@@ -75,7 +75,20 @@ class ApplicationFilters extends Equatable {
       return outdated.any((h) => h.toLowerCase() == host);
     }
 
-    return row.application.hostNames.any((h) => h.toLowerCase() == host);
+    // The row's *own* hosts, not the application's. `ApplicationRow.hostNames` is keyed on the
+    // application's name alone, so an application installed from Homebrew on a Mac and from winget
+    // on a PC is two rows sharing one host list -- and testing that list left the `pm:Homebrew` row
+    // on screen, labelled as such, under a filter naming a Windows host.
+    //
+    // Falling back to it when the path has no host list of its own covers two cases and is the safe
+    // direction in both: a row with no researched path at all has no per-row list to consult, and
+    // an empty one from a server that predates the field would otherwise empty the table under any
+    // host filter (the bundle nginx serves and the API are separate images, either of which can be
+    // rebuilt without the other).
+    final rowHostNames = row.upgradePath?.hostNames ?? const <String>[];
+    final hostNames = rowHostNames.isEmpty ? row.application.hostNames : rowHostNames;
+
+    return hostNames.any((h) => h.toLowerCase() == host);
   }
 
   @override

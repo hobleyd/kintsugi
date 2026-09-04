@@ -219,6 +219,17 @@ public class UpgradePathRepository : IUpgradePathRepository
                 var upToDateCount = path.LatestVersion is null
                     ? 0
                     : platformGroup.Where(x => !VersionComparer.IsNewer(path.LatestVersion, x.Version)).Select(x => x.HostId).Distinct().Count();
+                // The hosts whose installation resolved to *this* bucket, which is not the
+                // application-level host list the Applications page also holds: that one is keyed
+                // on the application's name alone, so an application installed from Homebrew on a
+                // Mac and from winget on a PC has one list spanning both while being two rows here.
+                // Filtering the table on it kept the pm:Homebrew row on screen under a Windows
+                // host filter.
+                var hostNames = platformGroup
+                    .Select(x => x.Hostname)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(h => h, StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
                 var hostNamesNeedingUpdate = path.LatestVersion is null
                     ? Array.Empty<string>()
                     : platformGroup
@@ -248,6 +259,7 @@ public class UpgradePathRepository : IUpgradePathRepository
                     hostCount,
                     upToDateCount,
                     updateAvailableCount,
+                    hostNames,
                     hostNamesNeedingUpdate,
                     path.Script,
                     path.ScriptSignature));
