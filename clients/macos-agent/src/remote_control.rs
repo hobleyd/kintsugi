@@ -672,14 +672,7 @@ fn connect(url: &str, identity: &AgentIdentity) -> Result<Socket> {
     // otherwise block this thread until the OS gave up, which can be minutes), and
     // `client_tls_with_config` is the only entry point that accepts a rustls configuration carrying
     // a client certificate.
-    let address = (host, port)
-        .to_socket_addrs()
-        .with_context(|| format!("could not resolve {host}"))?
-        .next()
-        .with_context(|| format!("{host} resolved to no addresses"))?;
-
-    let stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT)
-        .with_context(|| format!("could not connect to {address}"))?;
+    let stream = connect_tcp(host, port)?;
 
     // Nagle off: this connection sends small messages that matter immediately — a keystroke, a
     // tile — and coalescing them into fuller packets trades exactly the latency a remote session is
@@ -691,6 +684,35 @@ fn connect(url: &str, identity: &AgentIdentity) -> Result<Socket> {
         .with_context(|| format!("the WebSocket handshake with {url} failed"))?;
 
     Ok(socket)
+}
+
+/// Connects to the first address of `host` that answers, trying each one the resolver returns.
+///
+/// Every address, not the first — the same thing `TcpStream::connect` and the check-in's HTTP client
+/// do, and the reason a host whose check-ins were fine could still not open a session. A name that
+/// resolves to a public address and a private one (split-horizon DNS, or a resolver that knows both)
+/// hands them back in rotating order; from inside the network the public one is often unreachable
+/// without hairpin NAT. Taking only the first meant the control socket connected whenever it drew
+/// the private address, and the session socket timed out whenever it drew the other — a session that
+/// consented and then "could not connect", on a host that was plainly reachable.
+fn connect_tcp(host: &str, port: u16) -> Result<TcpStream> {
+    let addresses: Vec<_> = (host, port)
+        .to_socket_addrs()
+        .with_context(|| format!("could not resolve {host}"))?
+        .collect();
+    if addresses.is_empty() {
+        return Err(anyhow!("{host} resolved to no addresses"));
+    }
+
+    let mut failures = Vec::with_capacity(addresses.len());
+    for address in &addresses {
+        match TcpStream::connect_timeout(address, CONNECT_TIMEOUT) {
+            Ok(stream) => return Ok(stream),
+            Err(err) => failures.push(format!("{address}: {err}")),
+        }
+    }
+
+    Err(anyhow!("could not connect to {host} at any of its addresses ({})", failures.join("; ")))
 }
 
 /// Puts the socket into non-blocking mode.
