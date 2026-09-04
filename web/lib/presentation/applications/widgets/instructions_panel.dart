@@ -161,11 +161,9 @@ class _InstructionsColumn extends StatelessWidget {
             children: [
               SecondaryButton(
                 label: 'Send to AI',
-                onPressed: state.sending
-                    ? null
-                    : () => context
-                        .read<InstructionsPanelBloc>()
-                        .add(InstructionsSent(controller.text)),
+                busy: state.sending,
+                onPressed: () =>
+                    context.read<InstructionsPanelBloc>().add(InstructionsSent(controller.text)),
               ),
               if (state.statusMessage != null) ...[
                 const SizedBox(width: 12),
@@ -213,15 +211,19 @@ class _ScriptColumn extends StatelessWidget {
           children: [
             SecondaryButton(
               label: 'Save Script',
-              onPressed: state.saving ? null : () => bloc.add(ScriptSaveRequested(controller.text)),
+              busy: state.saving,
+              onPressed: () => bloc.add(ScriptSaveRequested(controller.text)),
             ),
             if (state.saveMessage != null) HintText(state.saveMessage!),
             SecondaryButton(
               label: 'Sign Script',
-              tooltip: state.canSign
-                  ? 'Sign the saved script so an agent will run it'
-                  : 'Signing signs what the server already holds. Save your changes first, or run '
-                      'the AI again, to bring this box back in step with it.',
+              busy: state.signing,
+              tooltip: state.signing
+                  ? 'Signing the saved script'
+                  : state.canSign
+                      ? 'Sign the saved script so an agent will run it'
+                      : 'Signing signs what the server already holds. Save your changes first, or run '
+                          'the AI again, to bring this box back in step with it.',
               onPressed: state.canSign ? () => bloc.add(const ScriptSignRequested()) : null,
             ),
             if (state.signMessage != null && state.signMessage!.isNotEmpty)

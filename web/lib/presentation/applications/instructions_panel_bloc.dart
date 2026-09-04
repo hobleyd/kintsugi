@@ -133,10 +133,14 @@ final class InstructionsPanelState extends Equatable {
         saving: saving ?? this.saving,
         signing: signing ?? this.signing,
         inSyncWithServer: inSyncWithServer ?? this.inSyncWithServer,
-        statusMessage: clearMessages ? null : (statusMessage ?? this.statusMessage),
-        saveMessage: clearMessages ? null : (saveMessage ?? this.saveMessage),
-        signMessage: clearMessages ? null : (signMessage ?? this.signMessage),
-        signApprovalUrl: clearMessages ? null : (signApprovalUrl ?? this.signApprovalUrl),
+        // An explicit message wins over [clearMessages], which clears only what is *not* being
+        // set: the in-flight emits pass both, to drop the previous outcome and announce the new
+        // run in one state. Letting the clear win swallowed "Signing..." and "Saving...", so the
+        // button dimmed and nothing said why.
+        statusMessage: statusMessage ?? (clearMessages ? null : this.statusMessage),
+        saveMessage: saveMessage ?? (clearMessages ? null : this.saveMessage),
+        signMessage: signMessage ?? (clearMessages ? null : this.signMessage),
+        signApprovalUrl: signApprovalUrl ?? (clearMessages ? null : this.signApprovalUrl),
         loadError: loadError ?? this.loadError,
         reloadTable: reloadTable,
       );

@@ -204,6 +204,18 @@ void main() {
         expect(repository.signedPlatform, 'macOS');
       },
     );
+
+    test('the in-flight state announces itself rather than only disabling the button', () {
+      // `_onSign` clears the previous outcome and sets "Signing..." in one copyWith. The clear used
+      // to win, so the button dimmed and nothing said why — the state the spinner now reads was
+      // right, but the message beside it was silently null.
+      final state = const InstructionsPanelState(signMessage: 'Signed.', saveMessage: 'Saved.')
+          .copyWith(signing: true, clearMessages: true, signMessage: 'Signing...');
+
+      expect(state.signing, isTrue);
+      expect(state.signMessage, 'Signing...');
+      expect(state.saveMessage, isNull, reason: 'the clear still drops what is not being set');
+    });
   });
 
   group('saving', () {

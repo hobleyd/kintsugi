@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../theme/app_theme.dart';
 import '../theme/kintsugi_palette.dart';
+import 'gradient_spinner.dart';
 
 /// The filled accent button — `.btn-primary`. One per screen, on the action the screen is for.
 class PrimaryButton extends StatelessWidget {
@@ -57,31 +58,54 @@ class PrimaryButton extends StatelessWidget {
 
 /// The outlined button — `.btn-secondary`. Everything that is not the screen's main action.
 class SecondaryButton extends StatelessWidget {
-  const SecondaryButton({super.key, required this.label, required this.onPressed, this.tooltip});
+  const SecondaryButton({
+    super.key,
+    required this.label,
+    required this.onPressed,
+    this.tooltip,
+    this.busy = false,
+  });
 
   final String label;
   final VoidCallback? onPressed;
   final String? tooltip;
 
+  /// Replaces the label with a spinner and blocks presses — [PrimaryButton.busy] for a secondary
+  /// action. The label is kept in the layout, invisibly, so a button in a [Wrap] with a message
+  /// beside it holds its width and nothing to its right moves when the spinner comes and goes.
+  /// The border keeps its enabled colour for the same reason the spinner exists at all: a disabled
+  /// look says "you may not press this", where this state says "you did, and it is running".
+  final bool busy;
+
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
+    final enabled = onPressed != null && !busy;
+    final labelText = Text(
+      label.toUpperCase(),
+      style: AppTheme.display(
+        color: enabled ? palette.neonDim : palette.muted,
+        size: 10.9,
+        letterSpacing: 0.87,
+      ),
+    );
     final button = OutlinedButton(
-      onPressed: onPressed,
+      onPressed: enabled ? onPressed : null,
       style: OutlinedButton.styleFrom(
         foregroundColor: palette.neon,
-        side: BorderSide(color: onPressed == null ? palette.border.withValues(alpha: 0.5) : palette.border),
+        side: BorderSide(color: enabled || busy ? palette.border : palette.border.withValues(alpha: 0.5)),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(3)),
       ),
-      child: Text(
-        label.toUpperCase(),
-        style: AppTheme.display(
-          color: onPressed == null ? palette.muted : palette.neonDim,
-          size: 10.9,
-          letterSpacing: 0.87,
-        ),
-      ),
+      child: busy
+          ? Stack(
+              alignment: Alignment.center,
+              children: [
+                Opacity(opacity: 0, child: labelText),
+                GradientSpinner(color: palette.neon),
+              ],
+            )
+          : labelText,
     );
 
     return tooltip == null ? button : Tooltip(message: tooltip!, child: button);
