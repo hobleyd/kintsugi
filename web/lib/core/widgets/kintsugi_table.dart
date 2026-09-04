@@ -1,7 +1,19 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../theme/kintsugi_palette.dart';
 import 'panel.dart';
+
+/// The horizontal gutter every cell — header and body — is inset by.
+///
+/// 12 rather than the 18 the stylesheet used, because a column pays it twice and the Applications
+/// table has eight of them: those six pixels are 96px of the width budget that decides whether the
+/// table fits a 1512-wide display or scrolls sideways inside its panel.
+const _cellGutter = 12.0;
+
+/// What a sortable column's header spends on its sort arrow, beside the label.
+const _sortIconWidth = 18.0;
 
 /// One column of a [KintsugiTable].
 class TableColumnSpec {
@@ -63,14 +75,30 @@ class KintsugiTable extends StatelessWidget {
   final Widget? toolbar;
 
   /// A floor below which the table scrolls horizontally rather than compressing further.
+  ///
+  /// It is a floor and not a width: given more room than this the table takes it, so a column's
+  /// flex is a share of whatever the panel is. Set it from what the *cells* need — the widest
+  /// status chip, a version string, a timestamp — because below it the only thing between a
+  /// reader and the last column is a scrollbar drawn inside the panel.
   final double minWidth;
 
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
 
+    // Every column is floored at its own header label, and the table is floored at the sum of
+    // those — see [_labelFloor]. Both matter: the per-column floor is what stops a word being
+    // broken, and the total is what keeps the table wider than the floors add up to, because a
+    // [Table] narrower than its columns' minimums paints them outside itself rather than
+    // scrolling.
+    final floors = [for (final column in columns) _labelFloor(context, column)];
+    final floor = math.max(minWidth, floors.reduce((a, b) => a + b));
+
     final table = Table(
-      columnWidths: {for (var i = 0; i < columns.length; i++) i: columns[i].width},
+      columnWidths: {
+        for (var i = 0; i < columns.length; i++)
+          i: MaxColumnWidth(columns[i].width, FixedColumnWidth(floors[i])),
+      },
       defaultVerticalAlignment: TableCellVerticalAlignment.middle,
       children: [
         TableRow(
@@ -90,28 +118,27 @@ class KintsugiTable extends StatelessWidget {
         children: [
           if (toolbar != null)
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
+              padding: const EdgeInsets.symmetric(horizontal: _cellGutter, vertical: 14),
               decoration: BoxDecoration(
                 color: palette.accentWash(0.03),
                 border: Border(bottom: BorderSide(color: palette.border)),
               ),
               child: toolbar,
             ),
-          Scrollbar(
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: ConstrainedBox(
-                constraints: BoxConstraints(minWidth: minWidth),
-                child: LayoutBuilder(
-                  // The table needs a bounded width to lay flex columns out, and the horizontal
-                  // scroll view gives it an unbounded one. minWidth is the floor; beyond that the
-                  // table takes whatever the viewport offers.
-                  builder: (context, constraints) => SizedBox(
-                    width: constraints.maxWidth.isFinite && constraints.maxWidth > minWidth
-                        ? constraints.maxWidth
-                        : minWidth,
-                    child: table,
-                  ),
+          // The width is measured *outside* the scroll view and handed in, because a horizontal
+          // [SingleChildScrollView] gives its child an unbounded width by definition. Measuring
+          // it inside — which is what this did — reads `maxWidth` as infinity every time, so the
+          // table was laid out at exactly [minWidth] on every display: it scrolled where it
+          // should have and stayed narrow where it should have filled the panel, which is the
+          // half of the bug that looks like a wide window's worth of empty space beside a table
+          // whose last column is off the edge.
+          LayoutBuilder(
+            builder: (context, constraints) => Scrollbar(
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: SizedBox(
+                  width: math.max(floor, constraints.maxWidth),
+                  child: table,
                 ),
               ),
             ),
@@ -150,8 +177,8 @@ class KintsugiTableRow {
           for (var i = 0; i < columns.length; i++)
             Padding(
               padding: EdgeInsets.only(
-                left: i == 0 && isChild ? 40 : 18,
-                right: 18,
+                left: i == 0 && isChild ? _cellGutter + 22 : _cellGutter,
+                right: _cellGutter,
                 top: 14,
                 bottom: 14,
               ),
@@ -169,12 +196,43 @@ class KintsugiTableRow {
             // A Table has no column-span, so the panel goes in the first cell and every other
             // cell is empty. The panel's own width is then the first column's, which is why the
             // expanding column is always the widest one on a table that uses this.
-            Padding(padding: const EdgeInsets.all(18), child: expanded!),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: _cellGutter, vertical: 18),
+              child: expanded!,
+            ),
             for (var i = 1; i < columns.length; i++) const SizedBox.shrink(),
           ],
         ),
     ];
   }
+}
+
+/// The narrowest a column may be and still render its header label without breaking a word.
+///
+/// A [Table] hands a column its width and a `Text` cannot make a word narrower, so a column
+/// narrower than the longest word in its label force-breaks it: "ACTIONS" over a 90px icon column
+/// renders as "ACTION" above "S". The label may still wrap between words — that is what
+/// "Hosts Installed On" over a count badge is meant to do — so the floor is the widest *word*,
+/// not the whole label.
+///
+/// It is applied here, once, rather than as a minimum every screen has to remember for every
+/// column it declares, because that is precisely the coupling nothing would enforce: the
+/// Applications and Hosts tables both shipped an `Actions` column too narrow for the word
+/// "Actions". Below the floor the table scrolls sideways inside its panel, which is what this
+/// widget already does with a table too wide for its viewport.
+double _labelFloor(BuildContext context, TableColumnSpec column) {
+  final painter = TextPainter(
+    text: TextSpan(
+      text: column.label.toUpperCase(),
+      style: Theme.of(context).textTheme.labelLarge,
+    ),
+    textDirection: Directionality.of(context),
+  )..layout();
+  // minIntrinsicWidth is the width of the longest word — the part that cannot be wrapped away.
+  final widestWord = painter.minIntrinsicWidth;
+  painter.dispose();
+
+  return widestWord + (column.sortKey != null ? _sortIconWidth : 0) + _cellGutter * 2;
 }
 
 class _HeaderCell extends StatelessWidget {
@@ -192,8 +250,35 @@ class _HeaderCell extends StatelessWidget {
 
     Widget label = Row(
       mainAxisSize: MainAxisSize.min,
+      // Top, not centre: the sort arrow belongs beside the label's first line once the label
+      // wraps.
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(column.label.toUpperCase(), style: Theme.of(context).textTheme.labelLarge),
+        // Flexible, and wrapping. A header label is routinely wider than the column beneath it —
+        // "Hosts Installed On" sits over a count badge, "Actions" over a single icon — and a Row
+        // that cannot fit its child does not shrink it, it paints it straight over the next
+        // column. That is what the Applications header did: the hosts label ran across the
+        // platform one. The label is what a reader recognises the column by, so it wraps to a
+        // second line rather than being shortened to fit.
+        Flexible(
+          child: Text(
+            column.label.toUpperCase(),
+            // The cross-axis alignment below puts the *Row* on the right; this is what puts the
+            // wrapped lines inside it there too, so a two-line header still reads as one block
+            // over its right-aligned column.
+            textAlign: column.alignRight ? TextAlign.right : TextAlign.left,
+            // Two lines, then ellipsis. Both halves are load-bearing. Wrapping cannot break a
+            // single word, so a one-word label in a column narrower than it would still paint
+            // outside its box — and silently, because the Row fits and nothing is reported; the
+            // ellipsis makes that read as a truncated label rather than a collision. And the
+            // ellipsis needs an explicit maxLines: with none, Skia ellipsizes on the first line
+            // instead of wrapping, which turns "Hosts Installed On" into "Hosts Install…" rather
+            // than the two lines it should take.
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.labelLarge,
+          ),
+        ),
         if (sortable)
           Padding(
             padding: const EdgeInsets.only(left: 4),
@@ -217,14 +302,22 @@ class _HeaderCell extends StatelessWidget {
       );
     }
 
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-      child: Column(
-        crossAxisAlignment: column.alignRight ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-        children: [
-          label,
-          if (column.filter != null) ...[const SizedBox(height: 8), column.filter!],
-        ],
+    // Top-aligned, and per cell rather than by changing the table's `defaultVerticalAlignment`:
+    // only some header cells carry a filter control, so the row's height is set by those and the
+    // rest would otherwise float to the middle of it — which is why the Applications header read
+    // as three labels at one height and five at another. The body rows and the expanded panel
+    // still want the table's middle default, so this must not become a table-wide setting.
+    return TableCell(
+      verticalAlignment: TableCellVerticalAlignment.top,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: _cellGutter, vertical: 14),
+        child: Column(
+          crossAxisAlignment: column.alignRight ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+          children: [
+            label,
+            if (column.filter != null) ...[const SizedBox(height: 8), column.filter!],
+          ],
+        ),
       ),
     );
   }

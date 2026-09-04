@@ -416,6 +416,29 @@ would be new protocol for a UI that only reads. `core/bloc/polling.dart` is the 
 changed relative to the pages this replaced is what happens with the answer: a poll emits a state
 and the affected widgets rebuild, rather than calling `window.location.reload()`.
 
+**Every list is one `KintsugiTable`, and its header row is where the layout goes wrong.** Three
+things there are load-bearing and each of them shipped broken. A header label is routinely wider
+than the column beneath it — "Hosts Installed On" sits over a count badge, "Actions" over one icon
+— and a `Row` that cannot fit its child does not shrink it, it paints it over the next column, so
+the label is `Flexible` and wraps to a second line. `Table` centres a cell vertically by default,
+and only some header cells carry a filter control, so the labels of the ones that do not floated to
+the middle of the height those set; the header cells are `TableCell(verticalAlignment: top)`
+individually, **not** the table's `defaultVerticalAlignment`, because the body rows and the
+expanded instructions panel do want the middle default. And a `Text` cannot make a word narrower,
+so `_labelFloor` sizes every column to at least the longest *word* in its label — applied in the
+widget rather than left as a minimum each screen remembers per column, which is exactly the
+coupling nothing would have enforced.
+
+Two consequences worth holding onto. `minWidth` is a floor, not a width: the table takes the
+panel's full width when there is more of it, which means that width has to be measured **outside**
+the horizontal `SingleChildScrollView` — one gives its child an unbounded width by definition, so
+a `LayoutBuilder` inside reads `maxWidth` as infinity every time and the table lays out at exactly
+`minWidth` on every display. And set `minWidth` from what the *cells* need, because the panel's
+horizontal scrollbar is the only thing between a reader and the last column, and on web that
+scrollbar is not drawn until something scrolls. `test/presentation/table_header_layout_test.dart`
+pins all of it at a width narrow enough to force every case; none of them throws in a release
+build, and none is visible in a table whose labels happen to be short.
+
 **Enums cross the wire as names or as ordinals depending on the type, and that must not be
 "fixed".** `UpgradePathStatus`, `UpgradeMethod` and `ScriptApprovalPublishOutcome` carry converters
 and write their names; `HostStatus`, `AiProvider`, `AuthProvider`, `PatchingTimeUnit` and
