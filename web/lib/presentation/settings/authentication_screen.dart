@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
-import '../../core/di/injection.dart';
+import '../../core/di/locator.dart';
 import '../../core/widgets/alert_box.dart';
 import '../../core/widgets/buttons.dart';
 import '../../core/widgets/form_bits.dart';

@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
-import '../../../core/di/injection.dart';
+import '../../../core/di/locator.dart';
 import '../../../core/platform/page_navigator.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/theme/kintsugi_palette.dart';
@@ -248,6 +248,11 @@ class _Resizer extends StatelessWidget {
   Widget build(BuildContext context) => MouseRegion(
         cursor: SystemMouseCursors.resizeLeftRight,
         child: GestureDetector(
+          // Opaque, because the default defers to the child and the only painted child is the
+          // 1px line: a mouse-down anywhere else in the 10px gutter hit nothing, so the drag was
+          // accepted only on that exact pixel column. The MouseRegion above is opaque over the
+          // whole gutter, so the cursor said "resize" across nine pixels that did nothing.
+          behavior: HitTestBehavior.opaque,
           onHorizontalDragUpdate: (details) => onDrag(details.delta.dx),
           child: Container(
             width: 10,

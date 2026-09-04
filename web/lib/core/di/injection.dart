@@ -1,4 +1,3 @@
-import 'package:get_it/get_it.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../data/repositories/agent_package_repository_impl.dart';
@@ -22,8 +21,7 @@ import '../network/api_client.dart';
 import '../network/unauthorized_notifier.dart';
 import '../platform/browser_page_navigator.dart';
 import '../platform/page_navigator.dart';
-
-final locator = GetIt.instance;
+import 'locator.dart';
 
 /// The composition root: the only place a concrete implementation is named.
 ///

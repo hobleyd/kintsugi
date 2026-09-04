@@ -9,7 +9,8 @@ import 'package:kintsugi_web/core/widgets/text_bits.dart';
 /// `MaterialApp.builder`.
 ///
 /// `KintsugiApp` itself cannot be pumped here — it pulls in `core/di/injection.dart` and so
-/// `package:web`, which does not compile for the VM these tests run on. So the wiring is repeated
+/// `package:web`, which does not compile for the VM these tests run on (the screens themselves
+/// can be: they import only `core/di/locator.dart`). So the wiring is repeated
 /// rather than imported, but through the same `MaterialApp.router` and the same `builder`
 /// argument, because that placement is the part that can break silently: [SelectableRegion]
 /// asserts an [Overlay] ancestor and `builder` runs above the Navigator that would provide one,
