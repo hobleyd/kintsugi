@@ -26,6 +26,7 @@ public class UpgradePathStatusKeyTests
             HostCount: 3,
             UpToDateHostCount: 3 - updateAvailableHostCount,
             UpdateAvailableHostCount: updateAvailableHostCount,
+            HostNames: Array.Empty<string>(),
             HostNamesNeedingUpdate: Array.Empty<string>(),
             Script: script,
             ScriptSignature: scriptSignature);

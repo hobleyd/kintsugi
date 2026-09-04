@@ -20,6 +20,7 @@ class UpgradePathSummary extends Equatable {
     required this.hostCount,
     required this.upToDateHostCount,
     required this.updateAvailableHostCount,
+    required this.hostNames,
     required this.hostNamesNeedingUpdate,
     required this.script,
     required this.scriptSignature,
@@ -53,12 +54,24 @@ class UpgradePathSummary extends Equatable {
   final int upToDateHostCount;
   final int updateAvailableHostCount;
 
-  /// Which hosts are behind on *this* application specifically.
+  /// Which hosts resolved to *this* bucket.
   ///
-  /// Distinct from the application's own host list, and the distinction matters when the host and
-  /// status filters are combined: "Update Available" is fleet-wide (true if any host anywhere is
-  /// behind), so filtering on installation alone would surface applications the chosen host is
-  /// already current on just because some other host is not.
+  /// Distinct from `ApplicationRow.hostNames`, which is keyed on the application's name alone: an
+  /// application installed from Homebrew on a Mac and from winget on a PC is two rows here sharing
+  /// one application-level host list, so filtering the table on that list kept the `pm:Homebrew`
+  /// row on screen when a Windows host was chosen.
+  ///
+  /// Empty means the field was absent — the server always names at least one host for a row it
+  /// emits at all — which is what a bundle older or newer than the API it is talking to looks
+  /// like. `ApplicationFilters.matches` falls back to the application's own list for that reason.
+  final List<String> hostNames;
+
+  /// Which of those hosts are behind on *this* application specifically.
+  ///
+  /// Distinct from [hostNames] as well, and the distinction matters when the host and status
+  /// filters are combined: "Update Available" is fleet-wide (true if any host anywhere is behind),
+  /// so filtering on installation alone would surface applications the chosen host is already
+  /// current on just because some other host is not.
   final List<String> hostNamesNeedingUpdate;
 
   final String? script;
@@ -87,6 +100,7 @@ class UpgradePathSummary extends Equatable {
         hostCount,
         upToDateHostCount,
         updateAvailableHostCount,
+        hostNames,
         hostNamesNeedingUpdate,
         script,
         scriptSignature,

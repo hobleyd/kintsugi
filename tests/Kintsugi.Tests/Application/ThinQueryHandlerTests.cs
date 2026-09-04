@@ -100,7 +100,7 @@ public class ThinQueryHandlerTests
         var repository = new Mock<IUpgradePathRepository>();
         repository.Setup(r => r.GetSummariesAsync(It.IsAny<CancellationToken>())).ReturnsAsync(new[]
         {
-            new UpgradePathSummaryDto("Firefox", "macOS", UpgradePathStatus.Found, "128.0", UpgradeMethod.Script, null, null, null, null, null, DateTimeOffset.UtcNow, 3, 1, 2, Array.Empty<string>()),
+            new UpgradePathSummaryDto("Firefox", "macOS", UpgradePathStatus.Found, "128.0", UpgradeMethod.Script, null, null, null, null, null, DateTimeOffset.UtcNow, 3, 1, 2, Array.Empty<string>(), Array.Empty<string>()),
         });
 
         var result = await new GetUpgradePathSummariesQueryHandler(repository.Object).Handle(new GetUpgradePathSummariesQuery(), CancellationToken.None);

@@ -55,6 +55,7 @@ UpgradePathSummary upgradePathSummaryFromJson(Map<String, dynamic> json) => Upgr
       hostCount: (json['hostCount'] as num?)?.toInt() ?? 0,
       upToDateHostCount: (json['upToDateHostCount'] as num?)?.toInt() ?? 0,
       updateAvailableHostCount: (json['updateAvailableHostCount'] as num?)?.toInt() ?? 0,
+      hostNames: stringListFromJson(json['hostNames']),
       hostNamesNeedingUpdate: stringListFromJson(json['hostNamesNeedingUpdate']),
       script: json['script'] as String?,
       scriptSignature: json['scriptSignature'] as String?,
