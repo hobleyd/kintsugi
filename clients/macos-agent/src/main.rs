@@ -8,6 +8,7 @@ mod os_update;
 mod patch_cycle;
 mod policy;
 mod progress_window;
+mod queue;
 mod remote_control;
 mod remote_protocol;
 mod schedule;
@@ -119,11 +120,11 @@ fn main() -> Result<()> {
 }
 
 /// The root LaunchDaemon's job: registers this host and its installed applications (as it always
-/// has), then drains any pending OS-update request left by the `--agent` process — see
-/// `os_update::process_queue`. Runs once per invocation; launchd re-invokes it at boot and,
-/// hourly, at this host's own assigned check-in minute (see `checkin_schedule`) — plus, via the
-/// LaunchDaemon's `WatchPaths`, on demand whenever an OS-update request appears, since an install
-/// needs root and the OS-update `--agent` deliberately doesn't have that.
+/// has), then drains any pending request left by the `--agent` process — an OS update to install,
+/// or an AI-researched application script to run as root — see `queue::process_queue`. Runs once
+/// per invocation; launchd re-invokes it at boot and, hourly, at this host's own assigned check-in
+/// minute (see `checkin_schedule`) — plus, via the LaunchDaemon's `WatchPaths`, on demand whenever a
+/// request appears, since both of those need root and the `--agent` deliberately doesn't have that.
 fn run_daemon() -> Result<()> {
     let config = Config::load();
     logging::init(&config::daemon_log_path());
@@ -195,11 +196,21 @@ fn run_daemon() -> Result<()> {
     let _: serde_json::Value = post_with_retry(&client, &config.register_applications_url(), &applications_request)
         .context("failed to register installed applications")?;
 
-    // The one privileged step the (non-root) `--agent` process hands off here: installing a
-    // pending macOS software update. Cheap to check on every invocation — normally a no-op, since
-    // `WatchPaths` (see the LaunchDaemon plist) is what actually wakes this daemon promptly when
-    // a request is dropped, rather than this being polled on a schedule.
-    os_update::process_queue(&config::queue_dir());
+    // The privileged steps the (non-root) `--agent` process hands off here: installing a pending
+    // macOS software update, and running an AI-researched application's upgrade script, whose
+    // target in /Applications is routinely root-owned — see `queue`. Cheap to check on every
+    // invocation — normally a no-op, since `WatchPaths` (see the LaunchDaemon plist) is what
+    // actually wakes this daemon promptly when a request is dropped, rather than this being polled
+    // on a schedule.
+    queue::process_queue(
+        &config::queue_dir(),
+        &mut DaemonRequestHandler {
+            client: &client,
+            config: &config,
+            serial_number: &serial_number,
+            identity: agent_identity.as_ref(),
+        },
+    );
 
     // Last, and only after everything above has already succeeded: check whether a newer build of
     // this agent itself has been published, and install it in place if so — see `self_update`.
@@ -215,6 +226,70 @@ fn run_daemon() -> Result<()> {
     checkin_schedule::apply(&checkin_schedule_path, target_minute);
 
     Ok(())
+}
+
+/// The daemon's answers to the per-user process's requests — see `queue`. Holds what the requests
+/// deliberately do not carry: the authenticated client, and this host's identity with the pinned
+/// artifact-signing key every script is verified against.
+struct DaemonRequestHandler<'a> {
+    client: &'a reqwest::blocking::Client,
+    config: &'a Config,
+    serial_number: &'a str,
+    identity: Option<&'a identity::AgentIdentity>,
+}
+
+impl queue::RequestHandler for DaemonRequestHandler<'_> {
+    /// Runs one application's upgrade as root.
+    ///
+    /// The work list is re-fetched from the server here rather than trusted from the request, which
+    /// is the property that makes the queue safe: the request named an application, and everything
+    /// actually executed — the script, its signature, the identifier it's addressed by — comes from
+    /// the server and is verified against the pinned artifact-signing key. A request that names an
+    /// application with no signed, patchable upgrade path simply fails. So does one naming a row
+    /// `upgrade::runs_as_root` says belongs to the logged-in user: the per-user process never asks
+    /// for those, and Homebrew must not be run as root on anybody's say-so. Same shape as the
+    /// Windows service's `patch_application`.
+    fn patch_application(&mut self, application_name: &str) -> Result<()> {
+        let identity = self.identity.context("this agent has not enrolled an identity yet")?;
+
+        let status = upgrade::fetch_upgrade_statuses(self.client, self.config, self.serial_number)?
+            .into_iter()
+            .filter(|status| upgrade::is_patchable(status, identity))
+            .find(|status| status.application_name.eq_ignore_ascii_case(application_name))
+            .with_context(|| format!("'{application_name}' has no signed, patchable upgrade path"))?;
+
+        if !upgrade::runs_as_root(&status) {
+            anyhow::bail!(
+                "'{}' is managed by {} and runs as the logged-in user, not as root — refusing",
+                status.application_name,
+                status.package_manager.as_deref().unwrap_or("a package-manager command")
+            );
+        }
+
+        logging::info(&format!("attempting to patch {} (method {:?}) as root", status.application_name, status.method));
+        upgrade::patch_one(&status, identity)?;
+        logging::info(&format!("patched {} successfully", status.application_name));
+
+        match &status.latest_version {
+            Some(new_version) => {
+                upgrade::report_patch_result(self.client, self.config, self.serial_number, &status.application_name, new_version)
+            }
+            None => logging::warn(&format!(
+                "patched {} successfully, but no latest_version was known to report to the server",
+                status.application_name
+            )),
+        }
+
+        Ok(())
+    }
+
+    fn install_os_updates(&mut self) -> Result<()> {
+        os_update::install()?;
+        // Reported from here rather than by the per-user process, the same as the patch result
+        // above: this is the side that knows the install finished.
+        os_update::report_patched(self.client, self.config, self.serial_number);
+        Ok(())
+    }
 }
 
 /// The per-user LaunchAgent's job (`--agent`): runs continuously in the logged-in user's own

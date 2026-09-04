@@ -21,8 +21,9 @@
          out sharing the same minute before the daemon gets a chance to spread them out. -->
 
     <!-- Also run on demand whenever the per-user kintsugi-agent (kintsugiagent-ui, which never
-         runs as root) drops a request here for the one privileged step it can't do itself:
-         installing a macOS software update. See os_update::process_queue. -->
+         runs as root) drops a request here for a privileged step it can't do itself: installing a
+         macOS software update, or running an application's upgrade script against a root-owned
+         /Applications bundle. See queue::process_queue. -->
     <key>WatchPaths</key>
     <array>
         <string>/Library/Application Support/kintsugi-agent/queue</string>

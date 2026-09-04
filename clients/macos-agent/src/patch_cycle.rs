@@ -6,12 +6,12 @@ use crate::identity::AgentIdentity;
 use crate::logging;
 use crate::os_update;
 use crate::policy::PatchingPolicy;
+use crate::queue::{self, RequestKind};
 use crate::schedule::ScheduleState;
 use crate::status::{AgentStatus, StatusReporter};
 use crate::upgrade::{self, UpgradeStatus};
 
 const WARNING_PERIOD: Duration = Duration::from_secs(5 * 60);
-const OS_UPDATE_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 /// Everything a patch cycle would actually do, worked out up front — before showing any dialog —
 /// so a dialog only ever appears when there's real work behind it. See `plan`.
@@ -212,6 +212,12 @@ fn confirm_or_delay(
 /// frequent, low-risk case, while an OS update is the more disruptive one (likely to need a
 /// restart) best left until everything else is already current. Returns (succeeded, failed)
 /// counts across both.
+///
+/// Two of the three steps here run in the root daemon rather than this process — the OS update as
+/// always, and every AI-researched application script since `upgrade::runs_as_root` (a root-owned
+/// `/Applications` bundle cannot be replaced by the logged-in user). The daemon reports those
+/// results to the server itself, since it is the side that knows they succeeded; this process
+/// reports only what it ran, which is Homebrew.
 fn run_patches(
     client: &reqwest::blocking::Client,
     config: &Config,
@@ -234,11 +240,15 @@ fn run_patches(
         dialogs::notify("Kintsugi Patching", &format!("Patching {target}\n{}", dialogs::progress_bar(completed, total)));
         report(AgentStatus::Patching { current: target, completed, total });
 
-        logging::info(&format!("attempting to patch {} (method {:?})", app.application_name, app.method));
-        match upgrade::patch_one(app, identity) {
-            Ok(()) => {
-                succeeded += 1;
-                logging::info(&format!("patched {} successfully", app.application_name));
+        let outcome = if upgrade::runs_as_root(app) {
+            logging::info(&format!(
+                "attempting to patch {} (method {:?}) via the root daemon",
+                app.application_name, app.method
+            ));
+            patch_via_daemon(app)
+        } else {
+            logging::info(&format!("attempting to patch {} (method {:?})", app.application_name, app.method));
+            upgrade::patch_one(app, identity).map(|()| {
                 match &app.latest_version {
                     Some(new_version) => upgrade::report_patch_result(client, config, serial_number, &app.application_name, new_version),
                     None => logging::warn(&format!(
@@ -246,6 +256,13 @@ fn run_patches(
                         app.application_name
                     )),
                 }
+            })
+        };
+
+        match outcome {
+            Ok(()) => {
+                succeeded += 1;
+                logging::info(&format!("patched {} successfully", app.application_name));
             }
             Err(err) => {
                 failed += 1;
@@ -261,15 +278,14 @@ fn run_patches(
         report(AgentStatus::Patching { current, completed, total });
 
         logging::info("attempting to install macOS updates via the root daemon");
-        match os_update::install_via_daemon(&config::queue_dir(), OS_UPDATE_TIMEOUT) {
-            Ok(true) => {
+        match queue::submit(&config::queue_dir(), RequestKind::OsUpdate, "", queue::REQUEST_TIMEOUT) {
+            Ok(result) if result.success => {
                 succeeded += 1;
                 logging::info("macOS updates installed successfully");
-                os_update::report_patched(client, config, serial_number);
             }
-            Ok(false) => {
+            Ok(result) => {
                 failed += 1;
-                logging::error("macOS update install reported failure — see the daemon's own log");
+                logging::error(&format!("macOS update install failed: {}", result.output.trim()));
             }
             Err(err) => {
                 failed += 1;
@@ -279,4 +295,15 @@ fn run_patches(
     }
 
     (succeeded, failed)
+}
+
+/// Asks the root daemon to run this application's upgrade — by name only; the daemon fetches and
+/// verifies the script itself, see `queue`. The daemon's own log has the script's full output; what
+/// comes back here is its verdict and last word.
+fn patch_via_daemon(app: &UpgradeStatus) -> anyhow::Result<()> {
+    let result = queue::submit(&config::queue_dir(), RequestKind::AppPatch, &app.application_name, queue::REQUEST_TIMEOUT)?;
+    if !result.success {
+        anyhow::bail!("the root daemon reported: {}", result.output.trim());
+    }
+    Ok(())
 }

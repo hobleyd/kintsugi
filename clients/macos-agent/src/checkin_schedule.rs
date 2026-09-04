@@ -64,7 +64,7 @@ fn persist(path: &Path, minute: u8) {
 /// minute because this one is carrying more load than others.
 ///
 /// Safe to potentially restart the very job that's running this code only because it's always the
-/// last thing a check-in does: by this point registration, application reporting, the OS-update
+/// last thing a check-in does: by this point registration, application reporting, the request
 /// queue, and self-update have already finished, so there's nothing left for this invocation to
 /// do even if launchd tears it down right underneath it.
 pub fn apply(schedule_path: &Path, minute: u8) {
@@ -121,8 +121,9 @@ fn render_plist(minute: u8) -> String {
     </dict>
 
     <!-- Also run on demand whenever the per-user kintsugi-agent (kintsugiagent-ui, which never
-         runs as root) drops a request here for the one privileged step it can't do itself:
-         installing a macOS software update. See os_update::process_queue. -->
+         runs as root) drops a request here for a privileged step it can't do itself: installing a
+         macOS software update, or running an application's upgrade script against a root-owned
+         /Applications bundle. See queue::process_queue. -->
     <key>WatchPaths</key>
     <array>
         <string>{queue_dir}</string>

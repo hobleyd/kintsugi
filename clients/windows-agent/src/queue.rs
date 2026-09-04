@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 
 /// The privilege handoff between this agent's two halves, and the reason it exists at all.
 ///
-/// The macOS agent needs a handoff for exactly one thing — installing an OS update, which is the
-/// only step its per-user process isn't privileged enough to do — and everything else (fetching the
-/// work list, running an application's upgrade script) happens in that per-user process directly.
-/// On Windows neither of those is possible unprivileged:
+/// The macOS agent's handoff is partial: its per-user process holds this host's identity and runs
+/// Homebrew upgrades itself (Homebrew refuses to run as root), handing the daemon only what needs
+/// root — an OS update, and an AI-researched script against a root-owned `/Applications` bundle
+/// (see its `upgrade::runs_as_root`). On Windows nothing of that is possible unprivileged:
 ///
 /// - **Running an upgrade** writes to `%ProgramFiles%` and the machine-wide registry. `msiexec /qn`,
 ///   `winget upgrade` for a machine-scope package, and anything `choco` does all need elevation,

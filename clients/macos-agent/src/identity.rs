@@ -270,7 +270,7 @@ fn restrict_key_permissions(path: &Path) {
     if let Ok(metadata) = fs::metadata(path) {
         let mut permissions = metadata.permissions();
         // Owner (root, via the LaunchDaemon that enrolls) read/write, group (admin — see
-        // packaging/install.sh's identical pattern for the OS-update queue directory) read-only,
+        // packaging/install.sh's identical pattern for the request queue directory) read-only,
         // so the non-root --agent process (running as the logged-in admin user) can still use this
         // same identity without the private key being world-readable.
         permissions.set_mode(0o640);

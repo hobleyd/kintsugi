@@ -15,8 +15,11 @@ pub struct InstalledApp {
     /// for a formula/cask). Must match that app's own `name` exactly.
     #[serde(rename = "packageManager", skip_serializing_if = "Option::is_none")]
     pub package_manager: Option<String>,
-    /// The app bundle's `CFBundleIdentifier` (e.g. "com.example.MyApp").
-    /// Not available for Homebrew-sourced entries.
+    /// Whatever stably names this application: the app bundle's `CFBundleIdentifier` (e.g.
+    /// "com.example.MyApp"), or a Homebrew formula name / cask token. The backend's
+    /// `is_patchable` refuses to run a `Script` row without one, so leaving it unset is how an
+    /// entry says "do not try" — which is what a cask whose upgrade needs root gets, see
+    /// [`cask_requires_root`].
     #[serde(rename = "applicationIdentifier", skip_serializing_if = "Option::is_none")]
     pub application_identifier: Option<String>,
     /// The latest version available, when known independently of any
@@ -264,7 +267,9 @@ pub fn scan_homebrew() -> HomebrewScan {
             name: HOMEBREW_NAME.to_string(),
             version,
             package_manager: None,
-            application_identifier: None,
+            // Homebrew's own self-update row (`brew update && brew upgrade`) runs as the same user
+            // every formula does, so it is as patchable as they are.
+            application_identifier: Some("brew".to_string()),
             available_version: None,
             update_available: None,
         }),
@@ -273,8 +278,8 @@ pub fn scan_homebrew() -> HomebrewScan {
 
     let info = brew_installed_info(&brew, run_as.as_deref());
 
-    apps.extend(list_brew_packages(&brew, run_as.as_deref(), "--formula", &info.latest_versions));
-    apps.extend(list_brew_packages(&brew, run_as.as_deref(), "--cask", &info.latest_versions));
+    apps.extend(list_brew_packages(&brew, run_as.as_deref(), "--formula", &info));
+    apps.extend(list_brew_packages(&brew, run_as.as_deref(), "--cask", &info));
 
     HomebrewScan { apps, cask_app_bundle_names: info.cask_app_bundle_names }
 }
@@ -289,6 +294,10 @@ struct BrewInstalledInfo {
     /// Basenames (e.g. "Slack.app") of every app bundle an installed cask
     /// places under /Applications, read from each cask's `artifacts` list.
     cask_app_bundle_names: HashSet<String>,
+    /// Tokens of the installed casks whose `brew upgrade` would need root — see
+    /// [`cask_requires_root`]. These are reported without an
+    /// `application_identifier`, which is what keeps them off the patch list.
+    root_required_casks: HashSet<String>,
 }
 
 /// Basename of `path` if it names a top-level `/Applications/*.app` bundle,
@@ -328,6 +337,7 @@ fn brew_installed_info(brew: &Path, run_as: Option<&str>) -> BrewInstalledInfo {
     let empty = || BrewInstalledInfo {
         latest_versions: HashMap::new(),
         cask_app_bundle_names: HashSet::new(),
+        root_required_casks: HashSet::new(),
     };
 
     let output = match command.output() {
@@ -378,6 +388,37 @@ fn strings_in(value: &serde_json::Value) -> Vec<&str> {
     }
 }
 
+/// Whether upgrading this cask would make Homebrew reach for `sudo`, which the per-user process
+/// has no way to satisfy — no TTY, no `SUDO_ASKPASS` — and which `brew` itself gives no way
+/// around (it refuses to run as root at all). The failure is not clean: `Cask::Pkg#uninstall`
+/// pipes the old install's BOM into `sudo ... xargs rm`, sudo exits before reading it, and the
+/// only thing reported is `Error: <cask>: Broken pipe`, *after* the `uninstall` stanza's `quit`
+/// has already stopped the application. Every cycle then quits the app, fails, and leaves it
+/// stopped — which is what happened to `nextcloud`, so such a cask is reported with no
+/// `application_identifier` and never enters a patch cycle at all.
+///
+/// `brew upgrade` runs the cask's `uninstall` stanza and then installs the new artifacts, so both
+/// halves are read. Root is needed for a `pkg` or `installer` artifact (`installer -pkg` as root),
+/// and for an `uninstall` naming `pkgutil` (`pkgutil --forget` plus a root `rm` of the receipt's
+/// files), `kext`, `script`, or `launchctl` — the last because Homebrew removes
+/// `/Library/LaunchDaemons/<label>.plist` via sudo when it exists, and the JSON cannot say whether
+/// the label is a per-user agent or a system daemon. Erring towards "needs root" costs only what
+/// every cask cost before this existed (the row is not patched); erring the other way costs the
+/// quit-and-fail loop above.
+fn cask_requires_root(cask: &serde_json::Value) -> bool {
+    const ROOT_ARTIFACTS: [&str; 2] = ["pkg", "installer"];
+    const ROOT_UNINSTALL_KEYS: [&str; 4] = ["pkgutil", "kext", "script", "launchctl"];
+
+    cask["artifacts"].as_array().into_iter().flatten().any(|artifact| {
+        ROOT_ARTIFACTS.iter().any(|key| !artifact[key].is_null())
+            || artifact["uninstall"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|entry| ROOT_UNINSTALL_KEYS.iter().any(|key| !entry[key].is_null()))
+    })
+}
+
 /// The pure half of [`brew_installed_info`], split out so it can be exercised
 /// against captured `brew info --json=v2 --installed` output rather than only
 /// via a real (macOS-and-Homebrew-only) subprocess call — the same shape every
@@ -394,10 +435,16 @@ fn parse_brew_installed_info(json_text: &str) -> Result<BrewInstalledInfo> {
     }
 
     let mut cask_app_bundle_names = HashSet::new();
+    let mut root_required_casks = HashSet::new();
 
     for cask in json["casks"].as_array().into_iter().flatten() {
-        if let (Some(token), Some(latest)) = (cask["token"].as_str(), cask["version"].as_str()) {
-            latest_versions.insert(token.to_string(), latest.to_string());
+        if let Some(token) = cask["token"].as_str() {
+            if let Some(latest) = cask["version"].as_str() {
+                latest_versions.insert(token.to_string(), latest.to_string());
+            }
+            if cask_requires_root(cask) {
+                root_required_casks.insert(token.to_string());
+            }
         }
 
         for artifact in cask["artifacts"].as_array().into_iter().flatten() {
@@ -413,7 +460,7 @@ fn parse_brew_installed_info(json_text: &str) -> Result<BrewInstalledInfo> {
         }
     }
 
-    Ok(BrewInstalledInfo { latest_versions, cask_app_bundle_names })
+    Ok(BrewInstalledInfo { latest_versions, cask_app_bundle_names, root_required_casks })
 }
 
 /// Homebrew installs to a fixed prefix depending on CPU architecture
@@ -491,7 +538,13 @@ fn brew_own_version(brew: &Path, run_as: Option<&str>) -> Result<String> {
         .context("unexpected `brew --version` output format")
 }
 
-fn list_brew_packages(brew: &Path, run_as: Option<&str>, kind: &str, latest_versions: &HashMap<String, String>) -> Vec<InstalledApp> {
+/// Lists installed formulae (`kind` = `--formula`) or casks (`--cask`). Each entry carries its
+/// Homebrew name as its `application_identifier` — the server's `HomebrewUpgradeScript` reads the
+/// name from `--appName` and ignores `--appId`, but the backend's `is_patchable` requires an
+/// identifier before it will run any `Script` row, and a formula/cask has nothing more stable to
+/// offer than the token `brew upgrade` takes. The exception is a cask in
+/// `info.root_required_casks`, which is left without one on purpose — see [`cask_requires_root`].
+fn list_brew_packages(brew: &Path, run_as: Option<&str>, kind: &str, info: &BrewInstalledInfo) -> Vec<InstalledApp> {
     let mut command = brew_command(brew, run_as);
     command.args(["list", kind, "--versions"]);
 
@@ -510,7 +563,12 @@ fn list_brew_packages(brew: &Path, run_as: Option<&str>, kind: &str, latest_vers
         }
     };
 
-    String::from_utf8_lossy(&output.stdout)
+    parse_brew_list(&String::from_utf8_lossy(&output.stdout), info)
+}
+
+/// The pure half of [`list_brew_packages`].
+fn parse_brew_list(listing: &str, info: &BrewInstalledInfo) -> Vec<InstalledApp> {
+    listing
         .lines()
         .filter_map(|line| {
             // Each line is "<name> <version>" for casks, or
@@ -520,12 +578,17 @@ fn list_brew_packages(brew: &Path, run_as: Option<&str>, kind: &str, latest_vers
             let mut tokens = line.split_whitespace();
             let name = tokens.next()?.to_string();
             let version = tokens.last()?.to_string();
-            let available_version = latest_versions.get(&name).cloned();
+            let available_version = info.latest_versions.get(&name).cloned();
+            let application_identifier = if info.root_required_casks.contains(&name) {
+                None
+            } else {
+                Some(name.clone())
+            };
             Some(InstalledApp {
                 name,
                 version,
                 package_manager: Some(HOMEBREW_NAME.to_string()),
-                application_identifier: None,
+                application_identifier,
                 available_version,
                 update_available: None,
             })
@@ -538,10 +601,11 @@ mod tests {
     use super::*;
 
     /// Trimmed from real `brew info --json=v2 --installed` output on a Mac
-    /// running the fleet's own agent. Keeps the three shapes that matter: a
-    /// formula (for `latest_versions`), an `app` cask, and a `pkg` cask whose
-    /// `uninstall` stanza names a single path — which Homebrew writes as a
-    /// bare string rather than a one-element array.
+    /// running the fleet's own agent. Keeps the shapes that matter: a formula
+    /// (for `latest_versions`), an `app` cask, a `pkg` cask whose `pkg` stanza
+    /// is a bare string, and a `pkg` cask whose `uninstall` stanza names a
+    /// single path — which Homebrew writes as a bare string rather than a
+    /// one-element array.
     const BREW_INFO_JSON: &str = r#"{
       "formulae": [
         { "name": "jq", "versions": { "stable": "1.7.1" } }
@@ -568,7 +632,8 @@ mod tests {
                   ]
                 }
               ]
-            }
+            },
+            { "pkg": "MicrosoftTeams.pkg" }
           ]
         },
         {
@@ -597,6 +662,63 @@ mod tests {
 
         assert_eq!(info.latest_versions.get("jq").map(String::as_str), Some("1.7.1"));
         assert_eq!(info.latest_versions.get("nextcloud").map(String::as_str), Some("34.0.3"));
+    }
+
+    #[test]
+    fn parse_brew_installed_info_flags_casks_whose_upgrade_needs_root() {
+        let info = parse_brew_installed_info(BREW_INFO_JSON).expect("should parse");
+
+        // Both `pkg` casks — one by its `pkg` artifact (a bare string, so this is also the
+        // single-item shape), the other by that and its `pkgutil` uninstall. An `app` cask
+        // installs and uninstalls entirely as the user and stays patchable.
+        assert_eq!(
+            info.root_required_casks,
+            ["microsoft-teams", "nextcloud"].into_iter().map(str::to_string).collect::<HashSet<String>>()
+        );
+    }
+
+    #[test]
+    fn cask_requires_root_reads_every_root_reaching_stanza() {
+        let needs_root = |json: &str| cask_requires_root(&serde_json::from_str::<serde_json::Value>(json).unwrap());
+
+        assert!(needs_root(r#"{ "artifacts": [ { "installer": [ { "script": { "executable": "install.sh", "sudo": true } } ] } ] }"#));
+        assert!(needs_root(r#"{ "artifacts": [ { "uninstall": [ { "kext": "com.example.driver" } ] } ] }"#));
+        assert!(needs_root(r#"{ "artifacts": [ { "uninstall": [ { "script": { "executable": "uninstall.sh" } } ] } ] }"#));
+        assert!(needs_root(r#"{ "artifacts": [ { "uninstall": [ { "launchctl": "com.example.daemon" } ] } ] }"#));
+        // `quit`, `login_item` and `delete` of an /Applications bundle are all done as the user.
+        assert!(!needs_root(
+            r#"{ "artifacts": [ { "uninstall": [ { "quit": "com.example.App", "login_item": "App", "delete": "/Applications/App.app" } ] }, { "app": "App.app" } ] }"#
+        ));
+        assert!(!needs_root(r#"{ "artifacts": [] }"#));
+        assert!(!needs_root(r#"{}"#));
+    }
+
+    #[test]
+    fn parse_brew_list_reports_the_token_as_the_identifier_unless_root_is_needed() {
+        let info = parse_brew_installed_info(BREW_INFO_JSON).expect("should parse");
+
+        let apps = parse_brew_list("rectangle 1.100\nnextcloud 34.0.2\n", &info);
+
+        assert_eq!(apps.len(), 2);
+        assert_eq!(apps[0].name, "rectangle");
+        assert_eq!(apps[0].application_identifier.as_deref(), Some("rectangle"));
+        assert_eq!(apps[0].available_version.as_deref(), Some("1.100"));
+        assert_eq!(apps[0].package_manager.as_deref(), Some(HOMEBREW_NAME));
+        // The one row that must *not* look patchable: `is_patchable` requires an identifier, and
+        // the per-user process cannot upgrade a `pkg` cask — see `cask_requires_root`.
+        assert_eq!(apps[1].name, "nextcloud");
+        assert_eq!(apps[1].application_identifier, None);
+        assert_eq!(apps[1].available_version.as_deref(), Some("34.0.3"));
+    }
+
+    #[test]
+    fn parse_brew_list_takes_the_newest_of_several_formula_versions() {
+        let info = parse_brew_installed_info(BREW_INFO_JSON).expect("should parse");
+
+        let apps = parse_brew_list("jq 1.7 1.7.1\n", &info);
+
+        assert_eq!(apps[0].version, "1.7.1");
+        assert_eq!(apps[0].application_identifier.as_deref(), Some("jq"));
     }
 
     #[test]

@@ -1,10 +1,7 @@
-use std::fs;
-use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::config::Config;
 
@@ -18,9 +15,10 @@ pub struct OsUpdateStatus {
 
 /// `softwareupdate -l` doesn't require elevation and is safe to run from the (non-root) `--agent`
 /// process just to decide whether an OS-update step is even needed — only the actual install
-/// (`process_queue`, below) needs root, via the handoff queue. This is macOS's own standard way
-/// of telling whether an OS update is outstanding, the same one Windows (Windows Update) and
-/// Linux (the distro's package manager) each have their own equivalent of.
+/// (`install`, below) needs root, which the per-user process asks the daemon for through the
+/// handoff queue (`queue::RequestKind::OsUpdate`). This is macOS's own standard way of telling
+/// whether an OS update is outstanding, the same one Windows (Windows Update) and Linux (the
+/// distro's package manager) each have their own equivalent of.
 pub fn check() -> Result<OsUpdateStatus> {
     let output = Command::new("softwareupdate")
         .arg("-l")
@@ -167,60 +165,27 @@ mod tests {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct InstallResult {
-    success: bool,
-    output: String,
-}
+/// Installs every pending macOS update. Root only — this is the daemon's answer to an OS-update
+/// request (see `queue`), and it is always this same fixed command whatever the request said,
+/// which is what makes a forged request harmless.
+pub fn install() -> Result<()> {
+    let output = Command::new("softwareupdate")
+        .args(["-i", "-a"])
+        .output()
+        .context("failed to run softwareupdate -i -a")?;
 
-fn now_epoch() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()
-}
+    let combined = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    crate::logging::info(&format!(
+        "softwareupdate -i -a finished: success={} output={}",
+        output.status.success(),
+        combined.trim()
+    ));
 
-/// Drops a marker file into the handoff queue asking the root daemon to install pending macOS
-/// updates, and returns the path it will look for the matching result under.
-///
-/// Deliberately carries no instructions of its own (no script, no command) — the daemon always
-/// runs the same fixed `softwareupdate -i -a`, so a malicious or buggy request file can, at
-/// worst, trigger an OS update early, never arbitrary code as root.
-fn request_install(queue_dir: &Path) -> Result<PathBuf> {
-    fs::create_dir_all(queue_dir).with_context(|| format!("could not create queue directory {}", queue_dir.display()))?;
-
-    let request_path = queue_dir.join(format!("{}.os-update.request", now_epoch()));
-    fs::write(&request_path, b"").context("could not write install request")?;
-    Ok(request_path)
-}
-
-fn result_path_for(request_path: &Path) -> PathBuf {
-    request_path.with_extension("request.result.json")
-}
-
-/// Requests an OS-update install from the root daemon and blocks (polling) until it reports
-/// back, or `timeout` elapses. macOS updates can legitimately take a long time to download and
-/// install, so the caller should pass a generous timeout.
-pub fn install_via_daemon(queue_dir: &Path, timeout: Duration) -> Result<bool> {
-    let request_path = request_install(queue_dir)?;
-    let result_path = result_path_for(&request_path);
-
-    let started = Instant::now();
-    loop {
-        if let Ok(contents) = fs::read_to_string(&result_path) {
-            let result: InstallResult = serde_json::from_str(&contents).unwrap_or(InstallResult {
-                success: false,
-                output: contents,
-            });
-            let _ = fs::remove_file(&result_path);
-            crate::logging::info(&format!("OS update install result: success={} output={}", result.success, result.output.trim()));
-            return Ok(result.success);
-        }
-
-        if started.elapsed() >= timeout {
-            let _ = fs::remove_file(&request_path);
-            anyhow::bail!("timed out waiting for the root daemon to install OS updates");
-        }
-
-        std::thread::sleep(Duration::from_secs(5));
+    if !output.status.success() {
+        anyhow::bail!("softwareupdate -i -a exited with {}: {}", output.status, combined.trim());
     }
+
+    Ok(())
 }
 
 #[derive(Debug, Serialize)]
@@ -247,52 +212,5 @@ pub fn report_patched(client: &reqwest::blocking::Client, config: &Config, seria
         Err(err) => {
             crate::logging::warn(&format!("could not report the successful macOS update install to the server: {err:#}"));
         }
-    }
-}
-
-/// The root daemon's half of the handoff: run once per invocation (it's triggered on demand via
-/// `WatchPaths` on the queue directory — see the LaunchDaemon plist — so it doesn't need its own
-/// persistent loop). Processes every pending request found, oldest first, so a request dropped
-/// while the daemon was already mid-run isn't silently skipped.
-pub fn process_queue(queue_dir: &Path) {
-    let Ok(entries) = fs::read_dir(queue_dir) else {
-        return;
-    };
-
-    let mut requests: Vec<PathBuf> = entries
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "request"))
-        .collect();
-    requests.sort();
-
-    for request_path in requests {
-        crate::logging::info(&format!("processing OS update request: {}", request_path.display()));
-
-        let output = Command::new("softwareupdate").args(["-i", "-a"]).output();
-        let result = match output {
-            Ok(output) => InstallResult {
-                success: output.status.success(),
-                output: format!(
-                    "{}{}",
-                    String::from_utf8_lossy(&output.stdout),
-                    String::from_utf8_lossy(&output.stderr)
-                ),
-            },
-            Err(err) => InstallResult {
-                success: false,
-                output: format!("failed to run softwareupdate: {err}"),
-            },
-        };
-
-        crate::logging::info(&format!("OS update install finished: success={} output={}", result.success, result.output.trim()));
-
-        let result_path = result_path_for(&request_path);
-        if let Ok(json) = serde_json::to_string(&result) {
-            if let Err(err) = fs::write(&result_path, json) {
-                crate::logging::warn(&format!("could not write OS update result: {err}"));
-            }
-        }
-        let _ = fs::remove_file(&request_path);
     }
 }

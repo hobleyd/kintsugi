@@ -47,6 +47,32 @@ pub struct UpgradeStatus {
     pub script_signature: Option<String>,
     /// Same as `script_signature`, but over `command`.
     pub command_signature: Option<String>,
+    /// The package manager that owns this installation ("Homebrew"), or `None` for a standalone
+    /// application whose script was AI-researched. Decides *which process* runs a `Script` row —
+    /// see `runs_as_root`.
+    pub package_manager: Option<String>,
+}
+
+/// Whether this row's upgrade has to be run by the root daemon (through `queue`) rather than by the
+/// per-user process asking. The dividing line is who owns the installation:
+///
+/// - A **package-manager** row is Homebrew's, and Homebrew refuses to run as root outright
+///   ("Running Homebrew as root is extremely dangerous and no longer supported"); its installs are
+///   user-owned, so the logged-in user is the right — and only — process for it. A legacy
+///   `PackageManagerCommand` row is a bare `brew upgrade ...` for the same reason.
+/// - An **AI-researched** row (no package manager) installs into `/Applications` the way the
+///   server's prompt tells it to — replace the bundle in place, or `installer -pkg ... -target /` —
+///   and a bundle that arrived by MDM, `.pkg` or any installer that asked for a password is owned
+///   by `root:wheel`. Run as the user, the script's `rm` prints `Permission denied` for every file
+///   in the bundle and the old version stays; that is what took Ollama down on the fleet's own
+///   Macs. The prompt now writes these scripts *for* root (see
+///   `AiUpgradePathResearchClient.BuildScriptGenerationPrompt`), so this is also the only context
+///   they are tested in.
+///
+/// The daemon asks this same question before running a request (see `main::DaemonRequestHandler`)
+/// and refuses a Homebrew row, so a forged request cannot get `brew` run as root either.
+pub fn runs_as_root(status: &UpgradeStatus) -> bool {
+    status.method == UpgradeMethod::Script && status.package_manager.is_none()
 }
 
 /// Mirrors Kintsugi.Domain.Enums.UpgradeMethod. Deserializes from the backend's plain enum
@@ -151,14 +177,16 @@ fn verify_signed(identity: &AgentIdentity, content: &Option<String>, signature: 
     }
 }
 
-/// Runs the actual update for one already-selected (`is_patchable`) application: a
-/// package-manager command (e.g. `brew upgrade firefox`) for `Method::PackageManagerCommand`, run
-/// as whichever user this process itself runs as — deliberately never as root, since Homebrew
-/// refuses to run under root at all — or the generated script's `--update` mode for
-/// `Method::Script`. Re-verifies the signature right before running it, rather than trusting that
-/// the caller already checked via `is_patchable` — the one function that actually executes
-/// something is the one that shouldn't ever skip that check, even if every current caller happens
-/// to call it correctly.
+/// Runs the actual update for one already-selected (`is_patchable`) application, as whichever user
+/// this process itself runs as: a package-manager command (e.g. `brew upgrade firefox`) for
+/// `Method::PackageManagerCommand`, or the script's `--update` mode for `Method::Script`. Which
+/// process that is — the logged-in user for a Homebrew row, the root daemon for an AI-researched
+/// one — is `runs_as_root`'s decision, made by both callers (`patch_cycle::run_patches` and
+/// `main::DaemonRequestHandler`); this function does not check it, because it cannot tell which
+/// process it is in and the daemon's refusal has to happen before a request is trusted at all.
+/// Re-verifies the signature right before running it, rather than trusting that the caller already
+/// checked via `is_patchable` — the one function that actually executes something is the one that
+/// shouldn't ever skip that check, even if every current caller happens to call it correctly.
 pub fn patch_one(status: &UpgradeStatus, identity: &AgentIdentity) -> Result<()> {
     match status.method {
         UpgradeMethod::PackageManagerCommand => {
@@ -356,6 +384,52 @@ fn run_script(application_name: &str, script: &str, args: &[&str]) -> Result<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn status(method: UpgradeMethod, package_manager: Option<&str>) -> UpgradeStatus {
+        UpgradeStatus {
+            application_name: "Ollama".to_string(),
+            installed_version: "0.32.14".to_string(),
+            latest_version: Some("0.33.3".to_string()),
+            update_available: true,
+            method,
+            application_identifier: Some("com.electron.ollama".to_string()),
+            command: None,
+            notes: None,
+            script: Some("#!/bin/bash\n".to_string()),
+            script_signature: None,
+            command_signature: None,
+            package_manager: package_manager.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn an_ai_researched_script_runs_as_root() {
+        // The Ollama case: a root-owned /Applications bundle the logged-in user cannot replace.
+        assert!(runs_as_root(&status(UpgradeMethod::Script, None)));
+    }
+
+    #[test]
+    fn a_homebrew_script_stays_with_the_logged_in_user() {
+        // Homebrew refuses to run as root, so this must never reach the daemon.
+        assert!(!runs_as_root(&status(UpgradeMethod::Script, Some("Homebrew"))));
+    }
+
+    #[test]
+    fn a_legacy_package_manager_command_stays_with_the_logged_in_user() {
+        // A bare `brew upgrade <formula>`, whatever the server knows about its owner.
+        assert!(!runs_as_root(&status(UpgradeMethod::PackageManagerCommand, None)));
+    }
+
+    #[test]
+    fn a_status_without_the_package_manager_field_deserializes_as_standalone() {
+        // A server older than the field: the other agents' structs ignore unknown fields the same
+        // way, and an absent Option is None under serde without any attribute.
+        let json = r#"{"applicationName":"Ollama","installedVersion":"1","latestVersion":null,"updateAvailable":true,"method":"Script","applicationIdentifier":null,"command":null,"notes":null,"script":null,"scriptSignature":null,"commandSignature":null}"#;
+
+        let status: UpgradeStatus = serde_json::from_str(json).unwrap();
+
+        assert_eq!(status.package_manager, None);
+    }
 
     #[test]
     fn prepend_homebrew_prefixes_puts_both_prefixes_ahead_of_launchds_own_path() {

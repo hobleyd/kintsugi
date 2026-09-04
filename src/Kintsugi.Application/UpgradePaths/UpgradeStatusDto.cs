@@ -15,8 +15,17 @@ namespace Kintsugi.Application.UpgradePaths;
 /// re-asking the AI for every future version check. Null whenever no script exists — e.g. an
 /// unrecognized package manager, an unresolved path, or a platform script generation doesn't
 /// support yet.</param>
-/// <param name="ApplicationIdentifier">The installed application's CFBundleIdentifier, when known
-/// — the agent passes this as the script's required `--appId` argument.</param>
+/// <param name="ApplicationIdentifier">The installed application's identifier as its agent
+/// reported it — a CFBundleIdentifier for a standalone macOS bundle, the package manager's own
+/// token for a managed one — when known. The agent passes this as the script's required `--appId`
+/// argument.</param>
+/// <param name="PackageManager">The name of the package manager that owns this installation
+/// (<see cref="PackageManagerCatalog"/>'s names, e.g. "Homebrew"), or null for a standalone
+/// application whose upgrade path was AI-researched. The macOS agent decides *which process* runs
+/// a <see cref="UpgradeMethod.Script"/> row on this: a Homebrew script must run as the logged-in
+/// user (Homebrew refuses to run as root), while an AI-authored one installs into
+/// <c>/Applications</c> and is handed to the root daemon — see the macOS agent's
+/// <c>upgrade::runs_as_root</c> and <c>queue.rs</c>.</param>
 public record UpgradeStatusDto(
     string ApplicationName,
     string Hostname,
@@ -35,4 +44,5 @@ public record UpgradeStatusDto(
     string? Script = null,
     string? ApplicationIdentifier = null,
     string? ScriptSignature = null,
-    string? CommandSignature = null);
+    string? CommandSignature = null,
+    string? PackageManager = null);

@@ -38,7 +38,7 @@ struct AgentPackageInfo {
 ///
 /// Best-effort throughout: any failure (server unreachable, checksum/signature mismatch, ...) is
 /// logged and swallowed rather than propagated — a self-update failing should never make it look
-/// like the rest of this check-in (host/application registration, the OS-update queue) didn't
+/// like the rest of this check-in (host/application registration, the request queue) didn't
 /// already succeed.
 pub fn check_and_apply(
     client: &reqwest::blocking::Client,
@@ -201,7 +201,7 @@ fn extract_and_install(downloaded_path: &Path, extract_dir: &Path) -> Result<()>
 /// Restarts both launchd jobs that run this binary so the update actually takes effect: the root
 /// daemon (this process) and, for whichever user is at the console right now, the per-user menu
 /// bar agent. By the time this runs, `run_daemon` has already done its real work for this
-/// check-in (registration, the OS-update queue), so a kickstart failing here is logged, not fatal.
+/// check-in (registration, the request queue), so a kickstart failing here is logged, not fatal.
 ///
 /// Order matters: `launchctl kickstart -k` on the daemon's own job (`system/...`) restarts the
 /// very process running this code, so launchd can tear it down before it gets back from that call

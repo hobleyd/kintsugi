@@ -107,9 +107,10 @@ elif ! grep -q '^enrollment_token = "[^"]' "$CONFIG_DEST" 2>/dev/null; then
     echo "    until this host's config.toml has the current token — see daemon.log for confirmation."
 fi
 
-# Handoff directory for the one privileged step the per-user agent (below) can't do itself:
-# installing a macOS software update. root:admin 0770 so only an admin console user can drop a
-# request, and only root (the daemon) ever acts on one — see src/os_update.rs.
+# Handoff directory for the privileged steps the per-user agent (below) can't do itself: installing
+# a macOS software update, and running an application's upgrade script against a root-owned
+# /Applications bundle. root:admin 0770 so only an admin console user can drop a request, and only
+# root (the daemon) ever acts on one — see src/queue.rs.
 echo "Creating queue directory at ${QUEUE_DIR}..."
 mkdir -p "$QUEUE_DIR"
 chown root:admin "$QUEUE_DIR"

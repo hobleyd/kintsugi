@@ -1098,7 +1098,7 @@ original — then the others for what each platform forced to differ. The differ
 | Privileged half | root LaunchDaemon, re-invoked by launchd | resident service (`windows-service`) | systemd oneshot on a `.timer` |
 | Per-user half | LaunchAgent | logon-triggered task for `BUILTIN\Users` | systemd user unit, `graphical-session.target` |
 | Check-in schedule | rewrites its own plist, reloads launchd via a detached helper | computes its next wake in-process | rewrites its own `.timer`, `daemon-reload` |
-| Privilege handoff | queue, OS updates only | queue, everything | queue, everything |
+| Privilege handoff | queue: OS updates and AI-researched scripts; Homebrew stays per-user | queue, everything | queue, everything |
 | Inventory | `/Applications` bundles + Homebrew | uninstall registry (3 views) + winget + Chocolatey | Flatpak + Snap (not dpkg/rpm — see above) |
 | OS updates | `softwareupdate` | Windows Update Agent COM API, via PowerShell | apt / dnf / yum / zypper / pacman / apk |
 | Host identity | hardware serial, always present | SMBIOS serial, **often a placeholder** | DMI serial, **often a placeholder** |
@@ -1113,6 +1113,21 @@ Homebrew *refuses* to run as root and installs into a user-writable prefix. The 
 `root:root 1733` (a drop-box: anyone may write, only root may read or list), which is the Linux
 spelling of the macOS queue's `root:admin 0770` and needs no group — "local administrators" is
 `sudo` on Debian, `wheel` on Red Hat, and neither elsewhere.
+
+**macOS hands off by row, and `upgrade::runs_as_root` is the one place that decision lives.** The
+per-user process runs a Homebrew row itself — `brew` refuses to run as root and its installs are
+user-owned — and sends an AI-researched row (`UpgradeStatusDto.PackageManager` null) to the root
+daemon through the same queue OS updates use. It has to: the prompt tells those scripts to replace
+the bundle under `/Applications` or run `installer -pkg ... -target /`, and a bundle that arrived by
+MDM or any installer that asked for a password is `root:wheel`. Run as the logged-in user, the
+script's `rm` printed `Permission denied` for every file in `Ollama.app` and left the old version in
+place, while the log called it a script failure. The queue keeps its one security property in both
+directions — an app-patch request carries a name, the daemon re-fetches the row, verifies the
+signature and re-asks `runs_as_root` itself, so a forged request can neither run arbitrary code nor
+get `brew` run as root — and a request older than `queue::REQUEST_TIMEOUT` or from before the
+current boot is discarded unrun, because the process that would have shown progress for it is gone.
+The prompt now describes that context (root, a LaunchDaemon, no GUI session — quit the application
+via `launchctl asuser`, never relaunch it), so a script is generated for the process that runs it.
 
 **"No network call at all" includes the patching policy, and 0.5.0 got that wrong.**
 `/api/patching-policy` sits inside nginx's client-certificate regex, so there is no such thing as
@@ -1286,8 +1301,13 @@ by then — only the long-running per-user units get restarted.
 - A package-manager row is only patchable if the *agent* reported an `applicationIdentifier` for that
   installed application — `is_patchable` requires one for any `Script` row, and it comes from the
   `InstalledApplication`, not from the `UpgradePath` (which always has one, falling back to the
-  name). The Windows and Linux agents set it for every managed package; the macOS agent leaves it
-  unset for Homebrew formulae/casks, which is why those rows do not currently patch.
+  name). The Windows and Linux agents set it for every managed package; the macOS agent reports the
+  Homebrew token for every formula and cask **except** one whose upgrade would make `brew` reach for
+  `sudo` (`system_info::cask_requires_root`: a `pkg`/`installer` artifact, or a `pkgutil`, `kext`,
+  `script` or `launchctl` uninstall). Leaving the identifier off is deliberately how a row is kept out
+  of a patch cycle — the alternative is the Nextcloud loop, where every cycle quits the application,
+  fails inside `brew`, and leaves it stopped. Do not "fix" a Homebrew row that never patches by
+  adding an identifier server-side.
 - **"Is this installation behind" is answered by the agent's package manager first and a version
   comparison second, and the Linux agent is the only one that supplies the first answer.**
   `InstalledApp.update_available` (→ `ApplicationEntry.UpdateAvailable` →
@@ -1348,7 +1368,9 @@ by then — only the long-running per-user units get restarted.
   `check-run-command-as-root`), `as-console-user` immediately drops back to the console user,
   `SUDO_ASKPASS` still needs a real password, and `HOMEBREW_SUDO_THROUGH_SUDO_USER` is only
   passwordless if brew is already root. Root-requiring casks are therefore **not agent-patchable**;
-  do not try to route them through the root queue by having the daemon drive `brew`.
+  do not try to route them through the root queue by having the daemon drive `brew`. The macOS
+  agent's `system_info::cask_requires_root` is what keeps them off the patch list, by reporting
+  them without an `applicationIdentifier` — see the identifier bullet above.
 - A new server-side route needs a `location` in `nginx/default.conf` *above* the SPA fallback, or
   nginx answers it with `index.html` — a 200 containing markup rather than a 404, which is
   considerably harder to diagnose. The fallback is deliberately the last block in the file.
