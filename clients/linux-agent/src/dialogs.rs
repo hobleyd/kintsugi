@@ -172,6 +172,141 @@ pub fn confirm_patch(
     Ok(choice)
 }
 
+/// What the person at the keyboard said when asked to hand over control of this host.
+///
+/// **A separate type from [`ConfirmChoice`] on purpose, because a timeout means the opposite
+/// thing.** There, nobody answering means "they were not at the desk, so count it as a delay and
+/// patch later" — the user never refused, and patching happens regardless. Here, nobody answering
+/// means **nobody consented**, and the only safe reading of silence is refusal. Reusing that enum
+/// would have left the safe default one careless `match` arm away from handing an unattended desktop
+/// to whoever asked. Kept identical to the other two agents' `RemoteControlChoice`.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RemoteControlChoice {
+    Allow,
+    Deny,
+    /// The dialog dismissed itself. Treated exactly as [`Self::Deny`] by every caller, and kept
+    /// distinct only so the audit record can tell an empty desk from a deliberate refusal.
+    TimedOut,
+}
+
+const ALLOW_BUTTON: &str = "Allow";
+const DENY_BUTTON: &str = "Deny";
+const REMOTE_CONTROL_TITLE: &str = "Kintsugi Remote Control";
+
+/// Composes the consent dialog's text. Split out so the wording — the part somebody has to make a
+/// decision from — can be tested without a desktop.
+fn remote_control_message(requested_by: &str, restrictions: &[String]) -> String {
+    let mut message = format!(
+        "{requested_by} is asking to control this computer remotely.\n\n\
+         If you allow this, they will see your screen and be able to use your keyboard and mouse as \
+         though they were sitting here. You can end the session at any time from the Kintsugi icon \
+         in the notification area.\n"
+    );
+
+    if !restrictions.is_empty() {
+        message.push('\n');
+        for restriction in restrictions {
+            message.push_str(&format!("  \u{2022} {restriction}\n"));
+        }
+    }
+
+    message
+}
+
+/// Asks the host user to hand over control, and returns what they said.
+///
+/// **A missing dialog program is a refusal here, and that is the opposite of what `confirm_patch`
+/// does with one.** There, no zenity and no kdialog means "proceed rather than nag" — patching has
+/// to happen and there is nobody to ask. Here there is nothing to proceed with: consent that cannot
+/// be asked for has not been given, so a host with no dialog program simply cannot be remote
+/// controlled. That is the correct outcome and the administrator is told so.
+pub fn confirm_remote_control(
+    requested_by: &str,
+    restrictions: &[String],
+    timeout_seconds: u64,
+) -> Result<RemoteControlChoice> {
+    let tool = detect_dialog_tool()
+        .context("no dialog program (zenity or kdialog) is installed, so nobody can be asked for consent")?;
+    let message = remote_control_message(requested_by, restrictions);
+
+    crate::logging::info(&format!("asking the console user to approve remote control for {requested_by}"));
+
+    // The two tools are handled separately rather than through a shared exit-status mapper, because
+    // their safe defaults are reached in opposite ways and hiding that in one function is how it
+    // would eventually get "simplified" into a hole.
+    let choice = match &tool {
+        // zenity can be told to make Cancel the default (`--default-cancel`), so the labels sit the
+        // natural way round: OK is Allow, Cancel is Deny. Exit 0 is Allow, 5 is its own timeout,
+        // and everything else — including the window being closed and a markup parse failure — is a
+        // refusal.
+        DialogTool::Zenity(path) => {
+            let status = run_for_status(
+                path,
+                &[
+                    "--question",
+                    // As confirm_patch: the requester's name comes from the server and zenity parses
+                    // --text as Pango markup by default, so a name containing `&` would fail the
+                    // parse and exit non-zero — which here would read as a refusal nobody made.
+                    "--no-markup",
+                    "--default-cancel",
+                    &format!("--title={REMOTE_CONTROL_TITLE}"),
+                    &format!("--text={message}"),
+                    &format!("--ok-label={ALLOW_BUTTON}"),
+                    &format!("--cancel-label={DENY_BUTTON}"),
+                    &format!("--timeout={timeout_seconds}"),
+                ],
+            )?;
+
+            match status {
+                Some(0) => RemoteControlChoice::Allow,
+                Some(5) => RemoteControlChoice::TimedOut,
+                _ => RemoteControlChoice::Deny,
+            }
+        }
+
+        // kdialog has no way to make No the default button for `--yesno`, so the labels are
+        // **reversed**: Deny is the Yes button. That makes the default action, and therefore
+        // Return, a refusal — and it keeps the fallback safe as well, since exit 0 (Yes) is Deny and
+        // every unexpected status falls through to Deny too. Labelling them the natural way round
+        // would mean Return granted a session to whoever asked.
+        DialogTool::KDialog(path) => {
+            let status = run_with_timeout(
+                path,
+                &[
+                    "--title",
+                    REMOTE_CONTROL_TITLE,
+                    "--yes-label",
+                    DENY_BUTTON,
+                    "--no-label",
+                    ALLOW_BUTTON,
+                    "--yesno",
+                    &message,
+                ],
+                timeout_seconds,
+            )?;
+
+            match status {
+                // 1 is the No button, which this dialog labels Allow.
+                Some(1) => RemoteControlChoice::Allow,
+                // coreutils' `timeout` uses 124 when it has to kill the command.
+                Some(124) => RemoteControlChoice::TimedOut,
+                _ => RemoteControlChoice::Deny,
+            }
+        }
+    };
+
+    crate::logging::info(&format!(
+        "console user chose: {}",
+        match choice {
+            RemoteControlChoice::Allow => "allow remote control",
+            RemoteControlChoice::Deny => "deny remote control",
+            RemoteControlChoice::TimedOut => "timed out (treated as a refusal)",
+        }
+    ));
+
+    Ok(choice)
+}
+
 /// Maps a confirm dialog's exit status onto a choice. zenity uses 5 for its own `--timeout`;
 /// `timeout(1)` uses 124 for the kdialog path. Anything else that isn't a clean 0 is a decline,
 /// which includes the user closing the window — the conservative reading, since a closed window
@@ -311,6 +446,26 @@ pub fn progress_bar(completed: usize, total: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remote_control_message_names_who_is_asking_and_how_to_stop_it() {
+        let message = remote_control_message("admin@example.com", &[]);
+
+        assert!(message.contains("admin@example.com is asking to control this computer"), "{message}");
+        assert!(message.contains("keyboard and mouse"), "{message}");
+        // Somebody who regrets allowing it needs to know there is a way out.
+        assert!(message.contains("notification area"), "{message}");
+    }
+
+    #[test]
+    fn remote_control_message_lists_what_the_session_cannot_do() {
+        let message = remote_control_message(
+            "admin@example.com",
+            &["This host is running Wayland.".to_string()],
+        );
+
+        assert!(message.contains("\u{2022} This host is running Wayland."), "{message}");
+    }
+
     use super::*;
 
     #[test]

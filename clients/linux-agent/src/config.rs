@@ -92,6 +92,27 @@ pub const TIMER_UNIT: &str = "kintsugi-agent.timer";
 pub const QUEUE_PATH_UNIT: &str = "kintsugi-agent-queue.path";
 pub const UI_UNIT: &str = "kintsugi-agent-ui.service";
 
+/// The resident root unit that holds the remote control socket.
+///
+/// A **fourth** systemd unit, and the only long-running root one. The others are a oneshot on a
+/// timer, a oneshot on a path watch, and the per-user process; none of them can hold a standing
+/// connection, and remote control needs one because the server has to be able to reach the host
+/// within seconds rather than at the next hourly check-in.
+///
+/// It deliberately does **not** take `lock.rs`'s advisory flock. That lock exists to stop two
+/// package-manager runs colliding on the dpkg lock, and this unit never installs anything — it
+/// relays bytes. Taking the lock would mean a remote session blocked an unattended patch cycle for
+/// its whole duration.
+/// The Wayland capture and input backend, installed beside the agent binary.
+///
+/// Named in one place because three of them have to agree: `wayland_backend::helper_path` looks for
+/// it, `self_update` installs it out of the archive under this name, and `packaging/install.sh`
+/// writes it there. It is optional — an archive built without libpipewire carries no such entry, and
+/// an X11 fleet is unaffected.
+pub const WAYLAND_BACKEND_BINARY: &str = "kintsugi-agent-wayland";
+
+pub const REMOTE_CONTROL_UNIT: &str = "kintsugi-agent-remote.service";
+
 #[derive(Debug, Deserialize, Default)]
 struct FileConfig {
     api_base_url: Option<String>,
@@ -147,6 +168,30 @@ impl Config {
 
     pub fn register_host_url(&self) -> String {
         format!("{}/api/host", self.api_base_url.trim_end_matches('/'))
+    }
+
+    /// The remote control socket's address.
+    ///
+    /// One path for both sockets — the standing control one (no `session_id`) and a session's media
+    /// one (with) — because nginx gates this route with an exact match on a single path segment and
+    /// tells the two apart by query string. See nginx/default.conf and RemoteControlController.
+    ///
+    /// The scheme is rewritten because `api_base_url` is an HTTP address and tungstenite will not
+    /// accept one: it requires `ws`/`wss` and refuses the request outright rather than assuming.
+    pub fn remote_control_url(&self, serial_number: &str, session_id: Option<&str>) -> String {
+        let base = self.api_base_url.trim_end_matches('/');
+        let base = match base.split_once("://") {
+            Some(("https", rest)) => format!("wss://{rest}"),
+            Some(("http", rest)) => format!("ws://{rest}"),
+            // Already a socket scheme, or something unrecognised — passed through so a
+            // misconfiguration fails at connect time with the address in the message.
+            _ => base.to_string(),
+        };
+
+        match session_id {
+            Some(session_id) => format!("{base}/api/remote-control?serialNumber={serial_number}&sessionId={session_id}"),
+            None => format!("{base}/api/remote-control?serialNumber={serial_number}"),
+        }
     }
 
     pub fn register_applications_url(&self) -> String {
@@ -234,6 +279,18 @@ pub fn queue_service_unit_path() -> PathBuf {
 
 pub fn queue_path_unit_path() -> PathBuf {
     PathBuf::from(QUEUE_PATH_UNIT_PATH)
+}
+
+pub fn remote_control_unit_path() -> PathBuf {
+    PathBuf::from("/etc/systemd/system").join(REMOTE_CONTROL_UNIT)
+}
+
+/// The local channel between the root service and the per-user process — see `remote_ipc`.
+///
+/// Inside the state directory, which is `0711`: traverse-only, so an unprivileged process can reach
+/// this known path and still cannot list what else is in there (the identity, notably).
+pub fn remote_control_socket_path() -> PathBuf {
+    state_dir().join("remote-control.sock")
 }
 
 pub fn ui_unit_path() -> PathBuf {

@@ -1,6 +1,6 @@
 [package]
 name = "kintsugi-agent"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Background agent that registers this Linux host with the patching system's host inventory."
@@ -51,8 +51,27 @@ sha2 = "0.10"
 # there is nothing to link and nothing to install: on a desktop the icon appears, and on a
 # headless server the session bus simply isn't there and `spawn()` returns an error this agent
 # treats as non-fatal (see tray_menu::run).
+# Remote control's transport, and its dependencies are the other two agents' for the same reasons.
+# Blocking, because this agent is threads-and-blocking-calls throughout; rustls because this socket
+# presents the same client certificate the HTTP client does.
+tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-native-roots"] }
+rustls-pemfile = "2"
+rustls-native-certs = "0.8"
+
+# X11, for remote control's screen capture (GetImage, XFIXES) and input (XTEST).
+#
+# x11rb rather than the x11/libxcb bindings, and this is the load-bearing choice on this platform:
+# x11rb speaks the X11 wire protocol in pure Rust and parses the authority cookie itself, so it links
+# no C library. libX11 or libxcb would, which would reintroduce a libc floor for the whole fleet and
+# break the statically linked musl release CI ships — see the note on that in this file and the
+# module comment in screen_capture.rs. There is no Wayland path for the same reason: the portal route
+# needs PipeWire, which is C.
+x11rb = { version = "0.14", default-features = false, features = ["xtest", "xfixes"] }
+
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+# "jpeg" alongside "png": png is the tray icon, jpeg is every remote control frame. Also brings
+# imageops, which is what downscales a captured screen — see screen_capture::downscale.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [profile.release]
 opt-level = "z"

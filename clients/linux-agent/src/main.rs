@@ -2,6 +2,7 @@ mod checkin_schedule;
 mod config;
 mod dialogs;
 mod identity;
+mod input_injection;
 mod lock;
 mod logging;
 mod os_update;
@@ -9,7 +10,14 @@ mod patch_cycle;
 mod policy;
 mod progress_window;
 mod queue;
+mod backend;
+mod remote_control;
+mod remote_ipc;
+mod remote_protocol;
+mod remote_session;
+mod wayland_backend;
 mod schedule;
+mod screen_capture;
 mod self_removal;
 mod self_update;
 mod status;
@@ -123,7 +131,39 @@ fn main() -> Result<()> {
         return run_queue_service();
     }
 
+    if args.iter().any(|arg| arg == "--remote-control") {
+        return run_remote_control_service();
+    }
+
     run_daemon()
+}
+
+/// The resident root unit (`kintsugi-agent-remote.service`): holds the remote control sockets.
+///
+/// The fourth root entry point and the only long-running one. The other three cannot hold a standing
+/// connection — two are oneshots and the third is the per-user process, which has no identity — and
+/// remote control needs one, because the server has to reach the host within seconds rather than at
+/// the next hourly check-in.
+///
+/// **It takes no lock.** `lock.rs` exists so a queue-triggered patch cannot land inside an
+/// unattended cycle and deadlock two `apt-get` runs on the dpkg lock. This unit installs nothing, so
+/// holding that lock would only mean a remote session blocked patching for as long as somebody was
+/// watching.
+fn run_remote_control_service() -> Result<()> {
+    let config = Config::load();
+    logging::init(&config::daemon_log_path());
+
+    let serial_number = system_info::serial_number().context("could not determine this machine's identifier")?;
+
+    logging::info(&format!(
+        "kintsugi-agent (--remote-control) starting; api_base_url={} serial_number={serial_number}",
+        config.api_base_url
+    ));
+
+    // Never returns. systemd restarts the unit if it does.
+    remote_control::run(config, serial_number);
+
+    Ok(())
 }
 
 /// The root service's job (`kintsugi-agent.service`, driven by `kintsugi-agent.timer`): registers
@@ -509,6 +549,16 @@ fn run_ui_agent() -> Result<()> {
 
     let (patch_now_tx, patch_now_rx) = mpsc::channel();
     let report: Box<StatusReporter> = Box::new(tray_menu::report_status);
+
+    // A third thread, for the display half of remote control: the consent dialog, the screen capture
+    // and the input injection, all of which need this session's display and none of which the root
+    // side can do. It talks to the root agent over a unix socket rather than to the server, because
+    // this process still holds no identity — see `remote_ipc`.
+    //
+    // It returns immediately on a session it cannot serve (Wayland, or no display), which is what
+    // leaves the host reporting as unreachable rather than offering a session that would show a
+    // black screen.
+    std::thread::spawn(remote_session::run);
 
     std::thread::spawn(move || run_scheduler(current_policy, state, queue_dir, policy_cache_path, patch_now_rx, report));
 

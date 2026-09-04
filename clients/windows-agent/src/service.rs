@@ -385,6 +385,21 @@ pub fn run_loop(shutdown: Arc<AtomicBool>) {
         Config::load().api_base_url
     ));
 
+    // Remote control gets a thread of its own, and it is the only standing outbound connection this
+    // agent has. Everything else here is a request the service makes when it has something to say;
+    // remote control is the one case where the *server* needs to reach the host, and an hourly
+    // check-in cannot carry "somebody would like to see your screen now".
+    //
+    // Separate from this loop because it spends its life blocked on a pipe and then on sockets,
+    // whereas this loop spends its life asleep on a two-second timer. Sharing one would mean a
+    // session request waiting for the next tick, and a frame stream inside the queue's poll.
+    {
+        let remote_config = Config::load();
+        let remote_serial = agent.serial_number.clone();
+        let remote_shutdown = shutdown.clone();
+        std::thread::spawn(move || crate::remote_control::run(remote_config, remote_serial, remote_shutdown));
+    }
+
     // Runs immediately at startup — the counterpart to the macOS LaunchDaemon's RunAtLoad, and what
     // makes a freshly installed agent appear in the fleet within seconds rather than within an hour.
     let mut next_check_in_at = now_epoch();

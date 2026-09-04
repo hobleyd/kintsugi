@@ -2,12 +2,16 @@ mod checkin_schedule;
 mod config;
 mod dialogs;
 mod identity;
+mod input_injection;
 mod logging;
 mod os_update;
 mod patch_cycle;
 mod policy;
 mod progress_window;
+mod remote_control;
+mod remote_protocol;
 mod schedule;
+mod screen_capture;
 mod self_removal;
 mod self_update;
 mod status;
@@ -260,10 +264,29 @@ fn run_ui_agent() -> Result<()> {
     let (patch_now_tx, patch_now_rx) = mpsc::channel();
     let report: Box<StatusReporter> = Box::new(tray_menu::report_status);
 
+    // Set by the menu bar's "End Remote Session" and cleared by whoever acts on it. Shared rather
+    // than a channel because the click has to be meaningful whether or not a session is running at
+    // that instant — see tray_menu's handler.
+    let end_remote_session = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // A third thread, and the reason it is separate from the scheduler: it spends its whole life
+    // blocked on a socket, whereas the scheduler spends its whole life asleep on a timer. Sharing
+    // one would mean a session request waiting up to a minute for the next tick, which defeats the
+    // point of holding a socket at all.
+    //
+    // This is the only part of this agent that holds a *standing* connection to the server.
+    // Everything else — check-in, policy, patch results — is a request the agent makes when it has
+    // something to say. Remote control is the one case where the server needs to reach the host,
+    // and an hourly check-in cannot carry "somebody would like to see your screen now".
+    let remote_control_config = config.clone();
+    let remote_control_serial = serial_number.clone();
+    let remote_control_flag = end_remote_session.clone();
+    std::thread::spawn(move || remote_control::run(remote_control_config, remote_control_serial, remote_control_flag));
+
     std::thread::spawn(move || run_scheduler(client, config, current_policy, state, serial_number, agent_identity, policy_cache_path, patch_now_rx, report));
 
     // Blocks for the rest of the process's life — this call never returns normally.
-    tray_menu::run(patch_now_tx)
+    tray_menu::run(patch_now_tx, end_remote_session)
 }
 
 /// The background half of `run_ui_agent` — see its doc comment for why this is a separate

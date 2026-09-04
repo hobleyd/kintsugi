@@ -162,6 +162,44 @@ pub fn to_reqwest_identity(identity: &AgentIdentity) -> Result<reqwest::Identity
 /// when not — which is enough to reach `/api/host/enroll` (the one route that doesn't require a
 /// certificate) but nothing else; nginx rejects every other agent route without one. See
 /// nginx/default.conf.
+/// Builds a rustls `ClientConfig` presenting this host's certificate, for the one thing that cannot
+/// go through `reqwest`: the remote control WebSocket.
+///
+/// `reqwest` does all of this internally for a `reqwest::Identity`, but it does not speak WebSocket,
+/// and `tungstenite` wants a `ClientConfig` rather than a PEM buffer. Same certificate, same key,
+/// same trust source (the Windows root store, via rustls-native-certs, which is what
+/// `rustls-tls-native-roots` gives the HTTP client and what an enterprise's internal CA is deployed
+/// into) — so a host that can check in can also open this socket, and one that cannot fails both the
+/// same way.
+pub fn to_rustls_client_config(identity: &AgentIdentity) -> Result<std::sync::Arc<rustls::ClientConfig>> {
+    let native = rustls_native_certs::load_native_certs();
+    let mut roots = rustls::RootCertStore::empty();
+    for certificate in native.certs {
+        // Individually, ignoring failures: a Windows root store routinely contains certificates
+        // rustls declines to parse, and one of those must not stop the other few hundred loading.
+        let _ = roots.add(certificate);
+    }
+
+    if roots.is_empty() {
+        anyhow::bail!("no trusted root certificates could be loaded from this host's own certificate store");
+    }
+
+    let certificate_chain = rustls_pemfile::certs(&mut identity.certificate_pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .context("could not parse this host's certificate")?;
+
+    let private_key = rustls_pemfile::private_key(&mut identity.private_key_pem.as_bytes())
+        .context("could not parse this host's private key")?
+        .context("this host's key file contains no private key")?;
+
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(certificate_chain, private_key)
+        .context("could not build a TLS configuration from this host's certificate and key")?;
+
+    Ok(std::sync::Arc::new(config))
+}
+
 pub fn build_client(timeout: std::time::Duration, identity: Option<&AgentIdentity>) -> Result<reqwest::blocking::Client> {
     let mut builder = reqwest::blocking::Client::builder().timeout(timeout);
     if let Some(identity) = identity {

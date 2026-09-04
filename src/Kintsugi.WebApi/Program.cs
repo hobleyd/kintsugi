@@ -10,6 +10,7 @@ using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Infrastructure;
 using Kintsugi.Infrastructure.Persistence;
 using Kintsugi.WebApi.Middleware;
+using Kintsugi.WebApi.RemoteControl;
 using Kintsugi.WebApi.Security;
 using Kintsugi.WebApi.UpgradePathScanning;
 using Kintsugi.WebApi.Vanta;
@@ -95,6 +96,14 @@ builder.Services.AddSingleton<VantaSyncCoordinator>();
 builder.Services.AddSingleton<IVantaSyncCoordinator>(sp => sp.GetRequiredService<VantaSyncCoordinator>());
 builder.Services.AddHostedService<VantaSyncBackgroundService>();
 
+// Remote control's live half: which hosts are reachable right now, and the relay that joins an
+// administrator's browser socket to an agent's. Registered the same two ways as the coordinators
+// above and for the same reason — the controllers need the socket plumbing, the Application
+// handlers need only the narrow view — but it is not a hosted service: there is no clock and no
+// queue here, only connections that exist while someone is holding them open.
+builder.Services.AddSingleton<RemoteControlSessionBroker>();
+builder.Services.AddSingleton<IRemoteControlSessionBroker>(sp => sp.GetRequiredService<RemoteControlSessionBroker>());
+
 builder.Services.AddSwaggerGen(options =>
 {
     options.SwaggerDoc("v1", new OpenApiInfo
@@ -139,6 +148,15 @@ app.UseSwaggerUI(options =>
 });
 
 app.UseAuthentication();
+
+// Both remote control routes upgrade to WebSocket, and nothing else in this application does.
+//
+// After authentication, not before. It makes no functional difference — UseWebSockets does not
+// short-circuit, so the pipeline reaches UseAuthentication either way — but the viewer's socket is
+// gated by [RequireAdminSession], which reads HttpContext.User, and that is populated here. Putting
+// the upgrade first left the ordering looking like it mattered and being defended by an argument
+// about filters rather than about the claims principal. This way there is nothing to argue.
+app.UseWebSockets();
 
 // There is deliberately no redirecting sign-in gate here any more, and it is worth saying why so
 // one does not come back.

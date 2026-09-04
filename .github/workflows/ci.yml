@@ -102,6 +102,12 @@ jobs:
             runner: windows-latest
           - agent: linux-agent
             runner: ubuntu-latest
+          # Not an agent, but the same shape: the Wayland capture and input backend the Linux agent
+          # starts for a remote session. It needs the PipeWire development package, which is the
+          # only reason this entry carries an `apt` field and the other three do not.
+          - agent: linux-agent-wayland
+            runner: ubuntu-latest
+            apt: libpipewire-0.3-dev
     steps:
       - uses: actions/checkout@v4
 
@@ -116,6 +122,12 @@ jobs:
             clients/${{ matrix.agent }}/target
           key: ${{ runner.os }}-cargo-${{ matrix.agent }}-${{ hashFiles(format('clients/{0}/Cargo.lock', matrix.agent), format('clients/{0}/Cargo.toml', matrix.agent)) }}
           restore-keys: ${{ runner.os }}-cargo-${{ matrix.agent }}-
+
+      - name: Install build dependencies
+        if: matrix.apt != ''
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ${{ matrix.apt }}
 
       - name: Test
         working-directory: clients/${{ matrix.agent }}
@@ -291,10 +303,59 @@ jobs:
               exit 1
           fi
 
+      # The Wayland backend, built in a Debian 12 container rather than on the runner, and that
+      # container choice is load-bearing in both directions.
+      #
+      # It links libpipewire, so unlike the agent it cannot be a static musl build and it does have a
+      # libc floor — it is the only binary in this fleet that does. Built on this runner (Ubuntu
+      # 24.04, glibc 2.39) the result needs GLIBC_2.39 and starts on almost nothing. Built on Debian
+      # 12 (glibc 2.36) it needs no symbol newer than GLIBC_2.34, which reaches Ubuntu 22.04, RHEL 9,
+      # Debian 12 and Fedora 35 — checked, not assumed.
+      #
+      # Going *older* than Debian 12 does not work and is not a matter of trying harder: Ubuntu
+      # 22.04's libpipewire is 0.3.48, and libspa 0.10 fails to compile against those headers
+      # outright (seven errors about struct fields that do not exist yet). 0.3.65 is the floor the
+      # crate imposes, and Debian 12 is the oldest widely-deployed distribution that has it.
+      #
+      # A host below either floor is not a broken agent: the backend fails to start, the agent
+      # reports Wayland capture as unavailable with the reason in the journal, and X11 hosts,
+      # patching, inventory and everything else are untouched.
+      - name: Build the Wayland backend on Debian 12
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD/clients/linux-agent-wayland":/w -w /w debian:12 bash -c '
+                  set -euo pipefail
+                  apt-get update -qq
+                  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                      curl build-essential pkg-config clang libpipewire-0.3-dev >/dev/null
+                  curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable >/dev/null
+                  . "$HOME/.cargo/env"
+                  cargo build --release --locked
+              '
+          # The container writes target/ as root through the mount, so the later steps could not
+          # read it otherwise.
+          sudo chown -R "$(id -u):$(id -g)" clients/linux-agent-wayland/target
+
+      # Asserted rather than trusted, exactly as the agent's static build is. A backend needing a
+      # newer glibc than the fleet has fails on the oldest host, months later, and reports only that
+      # remote control is unavailable — the quietest failure this pair has.
+      - name: Assert the Wayland backend's libc floor
+        working-directory: clients/linux-agent-wayland
+        run: |
+          set -euo pipefail
+          highest="$(objdump -T target/release/kintsugi-agent-wayland \
+              | grep -o 'GLIBC_[0-9.]*' | sort -V | tail -1)"
+          echo "highest glibc symbol required: $highest"
+          if [[ "$(printf '%s\nGLIBC_2.34\n' "$highest" | sort -V | tail -1)" != "GLIBC_2.34" ]]; then
+              echo "The Wayland backend requires $highest, which is newer than the GLIBC_2.34 floor this is built for." >&2
+              exit 1
+          fi
+
       - name: Package
         run: |
           clients/linux-agent/packaging/publish-release.sh \
               --binary "$PWD/clients/linux-agent/target/x86_64-unknown-linux-musl/release/kintsugi-agent" \
+              --wayland-binary "$PWD/clients/linux-agent-wayland/target/release/kintsugi-agent-wayland" \
               --output-dir "$PWD/dist"
 
       - name: Publish release
@@ -304,4 +365,4 @@ jobs:
         run: |
           gh release create "linux-agent-v${VERSION}" dist/*.tar.gz \
               --title "Linux agent v${VERSION}" \
-              --notes "Statically linked (musl, x86_64) kintsugi-agent build for Linux, from ${GITHUB_SHA}."
+              --notes "Statically linked (musl, x86_64) kintsugi-agent build for Linux, from ${GITHUB_SHA}. Includes kintsugi-agent-wayland, which links libpipewire and needs glibc 2.34 or newer."

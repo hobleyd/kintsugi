@@ -101,6 +101,31 @@ impl Config {
         format!("{}/api/host", self.api_base_url.trim_end_matches('/'))
     }
 
+    /// The remote control socket's address.
+    ///
+    /// One path for both sockets — the standing control one (no `session_id`) and a session's media
+    /// one (with) — because nginx gates this route with an exact match on a single path segment and
+    /// tells the two apart by query string. See nginx/default.conf and RemoteControlController.
+    ///
+    /// The scheme is rewritten because `api_base_url` is an HTTP address and tungstenite will not
+    /// accept one: it requires `ws`/`wss` and refuses the request outright rather than assuming.
+    pub fn remote_control_url(&self, serial_number: &str, session_id: Option<&str>) -> String {
+        let base = self.api_base_url.trim_end_matches('/');
+        let base = match base.split_once("://") {
+            Some(("https", rest)) => format!("wss://{rest}"),
+            Some(("http", rest)) => format!("ws://{rest}"),
+            // Already a socket scheme, or something unrecognised — passed through so a
+            // misconfiguration fails at connect time with the address in the message, rather than
+            // being silently rewritten into a different one.
+            _ => base.to_string(),
+        };
+
+        match session_id {
+            Some(session_id) => format!("{base}/api/remote-control?serialNumber={serial_number}&sessionId={session_id}"),
+            None => format!("{base}/api/remote-control?serialNumber={serial_number}"),
+        }
+    }
+
     pub fn register_applications_url(&self) -> String {
         format!("{}/api/applications", self.api_base_url.trim_end_matches('/'))
     }

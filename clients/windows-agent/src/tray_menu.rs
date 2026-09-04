@@ -75,6 +75,7 @@ static MENU_TEXT: Mutex<(String, String)> = Mutex::new((String::new(), String::n
 /// scheduler blocks on HTTP calls, five-minute warnings, and modal dialogs, and a message loop that
 /// stops being pumped for that long makes the icon stop responding to clicks. So the scheduler runs
 /// on a background thread and the UI keeps this one, exactly as on macOS.
+
 pub fn run(patch_now_tx: Sender<()>) -> Result<()> {
     let _ = PATCH_NOW_TX.set(patch_now_tx);
 
@@ -274,6 +275,10 @@ fn show_menu(hwnd: HWND) {
         AppendMenuW(menu, MF_STRING | MF_GRAYED, MENU_ID_PROGRESS, progress_text.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
 
+        // No remote-session entry here, deliberately. The session helper shows its own banner (see
+        // session_banner), which is both more visible and — being a SYSTEM-owned window — something
+        // user-level malware cannot click or close. Two indicators would be two sources of truth
+        // that could disagree about whether a session is running.
         let patch_now_text = wide("Patch Now");
         let patch_now_flags = if patch_now_enabled { MF_STRING } else { MF_STRING | MF_GRAYED };
         AppendMenuW(menu, patch_now_flags, MENU_ID_PATCH_NOW, patch_now_text.as_ptr());

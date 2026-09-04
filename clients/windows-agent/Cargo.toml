@@ -1,6 +1,6 @@
 [package]
 name = "kintsugi-agent"
-version = "0.5.3"
+version = "0.6.0"
 edition = "2021"
 description = "Background agent that registers this PC with the patching system's host inventory."
 
@@ -40,6 +40,18 @@ sha2 = "0.10"
 # system_info::scan_installed_programs.
 winreg = "0.52"
 
+# Remote control's transport, and its dependencies are the macOS agent's for the same reasons.
+# Blocking, because this agent is threads-and-blocking-calls throughout; rustls rather than
+# native-tls, because this socket presents the same client certificate the HTTP client does and
+# schannel would require it to live in a Windows certificate store (see the reqwest note above).
+tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-native-roots"] }
+rustls-pemfile = "2"
+rustls-native-certs = "0.8"
+# JPEG-encoding screen tiles. The tray icon and the progress window are drawn with GDI directly, so
+# unlike the macOS agent this is the only thing here that needs an image codec at all — hence jpeg
+# alone, with no png.
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+
 [target.'cfg(windows)'.dependencies]
 # The Service Control Manager plumbing for the SYSTEM half of this agent (see service.rs) — the
 # Windows counterpart to the macOS agent's LaunchDaemon plist.
@@ -60,8 +72,25 @@ features = [
     "Win32_System_Com",
     "Win32_System_Console",
     "Win32_System_LibraryLoader",
+    # ConnectNamedPipe is declared in terms of OVERLAPPED, so it is gated on this even though the
+    # pipe here is used without overlapped I/O — see the note in remote_ipc on why.
+    "Win32_System_IO",
+    # CreateNamedPipeW and friends: the channel between the service (which holds this host's
+    # identity) and the tray process (which holds the desktop) — see remote_ipc.
+    "Win32_System_Pipes",
+    # WTSGetActiveConsoleSessionId and WTSQueryUserToken: which session owns the screen, and whether
+    # anybody is logged into it — the service's reachability test, and where it launches the session
+    # helper.
+    "Win32_System_RemoteDesktop",
+    # OpenInputDesktop/SetThreadDesktop, which is what lets the session helper follow Windows onto
+    # the secure desktop when a UAC prompt appears. See remote_desktop.rs.
+    "Win32_System_StationsAndDesktops",
     "Win32_System_Threading",
+    # PIPE_ACCESS_DUPLEX and WRITE_DAC.
+    "Win32_Storage_FileSystem",
     "Win32_UI_Controls",
+    # SendInput, for the remote keyboard and mouse.
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ]

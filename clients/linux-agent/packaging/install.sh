@@ -44,6 +44,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 BIN_DEST="/usr/local/bin/kintsugi-agent"
+WAYLAND_BIN_DEST="/usr/local/bin/kintsugi-agent-wayland"
 CONFIG_DIR="/etc/kintsugi-agent"
 CONFIG_DEST="${CONFIG_DIR}/config.toml"
 STATE_DIR="/var/lib/kintsugi-agent"
@@ -57,6 +58,7 @@ TIMER_UNIT="kintsugi-agent.timer"
 QUEUE_SERVICE_UNIT="kintsugi-agent-queue.service"
 QUEUE_PATH_UNIT="kintsugi-agent-queue.path"
 UI_UNIT="kintsugi-agent-ui.service"
+REMOTE_CONTROL_UNIT="kintsugi-agent-remote.service"
 
 PREBUILT_BIN="$SCRIPT_DIR/kintsugi-agent"
 if [[ -f "$PREBUILT_BIN" ]]; then
@@ -76,6 +78,18 @@ fi
 
 echo "Installing binary to ${BIN_DEST}..."
 install -o root -g root -m 755 "$SRC_BIN" "$BIN_DEST"
+
+# The Wayland backend, if this archive carries one. Optional on purpose — see publish-release.sh:
+# it links libpipewire and so cannot be the static musl build the agent is, and an archive without
+# it is a perfectly good install for an X11 fleet. Installed beside the agent because that is the
+# first place `wayland_backend::helper_path` looks.
+PREBUILT_WAYLAND_BIN="$SCRIPT_DIR/kintsugi-agent-wayland"
+if [[ -f "$PREBUILT_WAYLAND_BIN" ]]; then
+    echo "Installing the Wayland backend to ${WAYLAND_BIN_DEST}..."
+    install -o root -g root -m 755 "$PREBUILT_WAYLAND_BIN" "$WAYLAND_BIN_DEST"
+else
+    echo "No Wayland backend in this package; remote control will work on X11 sessions only."
+fi
 
 echo "Installing config to ${CONFIG_DEST}..."
 install -d -o root -g root -m 755 "$CONFIG_DIR"
@@ -139,7 +153,7 @@ echo "Creating request queue at ${QUEUE_DIR}..."
 install -d -o root -g root -m 1733 "$QUEUE_DIR"
 
 echo "Installing systemd units..."
-for unit in "$SERVICE_UNIT" "$TIMER_UNIT" "$QUEUE_SERVICE_UNIT" "$QUEUE_PATH_UNIT"; do
+for unit in "$SERVICE_UNIT" "$TIMER_UNIT" "$QUEUE_SERVICE_UNIT" "$QUEUE_PATH_UNIT" "$REMOTE_CONTROL_UNIT"; do
     install -o root -g root -m 644 "$SCRIPT_DIR/$unit" "${SYSTEM_UNIT_DIR}/$unit"
 done
 install -d -o root -g root -m 755 "$USER_UNIT_DIR"
@@ -152,6 +166,12 @@ systemctl daemon-reload
 # armed from here on rather than only after the next reboot.
 systemctl enable --now "$TIMER_UNIT"
 systemctl enable --now "$QUEUE_PATH_UNIT"
+
+# The remote control channel. Resident rather than triggered, because it holds a standing socket the
+# server reaches this host through — see the unit file for why none of the other three could. It
+# starts immediately and does nothing at all until a per-user agent connects to it, so enabling it on
+# a host with no graphical session costs an idle listening socket and nothing else.
+systemctl enable --now "$REMOTE_CONTROL_UNIT"
 
 # --global enables the per-user unit for every user's systemd manager, present and future, without
 # needing to know who they are. It starts for each of them when their graphical session comes up.

@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+    A PPPC (Privacy Preferences Policy Control) profile granting the Kintsugi agent the two
+    permissions remote control needs, so a support session works without anyone visiting the Mac.
+
+    ============================================================================================
+    READ THIS FIRST: this profile cannot be used as it stands, and the reason is not a placeholder
+    address. It is that CodeRequirement below has to match a real code signature, and the agent
+    this repository builds does not have one.
+    ============================================================================================
+
+    Every PPPC entry needs a CodeRequirement, and macOS checks it against the binary's signature
+    before honouring the grant. `cargo build --release` produces an *ad-hoc, linker-signed* binary
+    whose designated requirement is a bare `cdhash` — a hash of that exact build:
+
+        $ codesign -d -r- /usr/local/bin/kintsugi-agent
+        # designated => cdhash H"f10e7c9be0903bbe7c9184d53bbc054febb4d4ad"
+
+    A profile written against that hash would work until the next agent release and then silently
+    stop, because `self_update` replaces the binary unattended and the new build hashes differently.
+    The symptom would be remote control quietly failing across the fleet on an upgrade, with
+    `icacls`-style tooling reporting the profile as installed and correct.
+
+    So there is a prerequisite: **the agent has to be signed with a Developer ID Application
+    certificate**, which nothing in `publish-release.sh` or CI currently does. Once it is, its
+    designated requirement becomes stable across builds and the two placeholders below can be
+    filled in for real:
+
+        $ codesign --force --options runtime \
+              --sign "Developer ID Application: YOUR ORG (TEAMID)" \
+              /path/to/kintsugi-agent
+        $ codesign -d -r- /path/to/kintsugi-agent     # <- paste into CodeRequirement
+
+    Until then, remote control needs a human at each Mac to grant both permissions by hand — which
+    is the cost the own-capture-stack design accepted, and the thing this profile exists to remove.
+
+    ---------------------------------------------------------------------------------------------
+
+    Two more things worth knowing before deploying this.
+
+    **The path is the per-user LaunchAgent's, and that is the right one.** Remote control lives
+    entirely in the `--agent` process (see clients/macos-agent/src/remote_control.rs): the screen
+    and keyboard belong to a logged-in GUI session, which the root LaunchDaemon does not have. Both
+    jobs run the same binary at the same path, so one entry covers it.
+
+    **Screen Recording via PPPC has a history.** `kTCCServiceAccessibility` has been grantable by
+    MDM for a long time and is dependable. `kTCCServiceScreenCapture` was, for several macOS
+    releases, only ever settable to *denied* by a profile — Apple permits granting it from macOS 11
+    onwards, and only for a device enrolled in user-approved MDM. Verify it actually takes effect on
+    the macOS versions in your fleet rather than assuming: the agent checks
+    `CGPreflightScreenCaptureAccess` and falls back to prompting the logged-in user, so a profile
+    that silently does not apply looks like an unexplained prompt rather than an error.
+
+    Deliver this with your MDM. Copy it to kintsugi-remote-control.mobileconfig, fill in the
+    Developer ID requirement, and give it your own PayloadOrganization and fresh PayloadUUIDs
+    (`uuidgen`) — a profile reusing another's UUID replaces it.
+-->
+<plist version="1.0">
+<dict>
+    <key>PayloadType</key>
+    <string>Configuration</string>
+    <key>PayloadVersion</key>
+    <integer>1</integer>
+    <key>PayloadIdentifier</key>
+    <string>au.com.sharpblue.kintsugiagent.remote-control</string>
+    <key>PayloadUUID</key>
+    <string>REPLACE-WITH-A-FRESH-UUID-0001</string>
+    <key>PayloadDisplayName</key>
+    <string>Kintsugi Remote Control</string>
+    <key>PayloadDescription</key>
+    <string>Allows the Kintsugi agent to share this Mac's screen and accept remote keyboard and mouse input, once its user has consented to a session.</string>
+    <key>PayloadOrganization</key>
+    <string>REPLACE WITH YOUR ORGANISATION</string>
+
+    <!-- Not removable by the user: the point of the profile is that a support session does not
+         depend on someone having left it in place. This does not weaken the consent model — every
+         session is still refused unless the person at the keyboard allows it (see
+         dialogs::confirm_remote_control), and they can end one at any time from the menu bar. What
+         this grants is the *ability* to capture and inject, not the permission to do it. -->
+    <key>PayloadRemovalDisallowed</key>
+    <true/>
+
+    <key>PayloadContent</key>
+    <array>
+        <dict>
+            <key>PayloadType</key>
+            <string>com.apple.TCC.configuration-profile-policy</string>
+            <key>PayloadVersion</key>
+            <integer>1</integer>
+            <key>PayloadIdentifier</key>
+            <string>au.com.sharpblue.kintsugiagent.remote-control.tcc</string>
+            <key>PayloadUUID</key>
+            <string>REPLACE-WITH-A-FRESH-UUID-0002</string>
+            <key>PayloadDisplayName</key>
+            <string>Privacy Preferences Policy Control</string>
+            <key>PayloadOrganization</key>
+            <string>REPLACE WITH YOUR ORGANISATION</string>
+
+            <key>Services</key>
+            <dict>
+                <!-- Keyboard and mouse injection: CGEventPost. Without this, every event this
+                     agent posts is dropped silently — no error and no return code — so a session
+                     shows the screen perfectly and simply ignores the mouse. See
+                     clients/macos-agent/src/input_injection.rs. -->
+                <key>Accessibility</key>
+                <array>
+                    <dict>
+                        <key>Identifier</key>
+                        <string>/usr/local/bin/kintsugi-agent</string>
+                        <key>IdentifierType</key>
+                        <string>path</string>
+                        <key>CodeRequirement</key>
+                        <string>REPLACE WITH THE OUTPUT OF: codesign -d -r- /usr/local/bin/kintsugi-agent</string>
+                        <key>Allowed</key>
+                        <true/>
+                    </dict>
+                </array>
+
+                <!-- Screen capture: ScreenCaptureKit. Without this the stream produces either
+                     nothing or a desktop picture with every window missing, which reads as a broken
+                     agent rather than a missing permission. See
+                     clients/macos-agent/src/screen_capture.rs, and the note above about how far back
+                     MDM can actually grant this one. -->
+                <key>ScreenCapture</key>
+                <array>
+                    <dict>
+                        <key>Identifier</key>
+                        <string>/usr/local/bin/kintsugi-agent</string>
+                        <key>IdentifierType</key>
+                        <string>path</string>
+                        <key>CodeRequirement</key>
+                        <string>REPLACE WITH THE OUTPUT OF: codesign -d -r- /usr/local/bin/kintsugi-agent</string>
+                        <key>Allowed</key>
+                        <true/>
+                    </dict>
+                </array>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>

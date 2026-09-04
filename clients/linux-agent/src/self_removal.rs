@@ -67,6 +67,10 @@ fn stop_user_agents() {
 fn disable_units() {
     run_systemctl(&["disable", "--now", config::TIMER_UNIT]);
     run_systemctl(&["disable", "--now", config::QUEUE_PATH_UNIT]);
+    // The remote control unit is resident and `Restart=always`, so unlike the two above it would
+    // otherwise still be running — and holding a socket to the server — after its binary was
+    // deleted. `--now` is what actually stops it.
+    run_systemctl(&["disable", "--now", config::REMOTE_CONTROL_UNIT]);
 }
 
 /// Everything on disk this agent ever wrote, across both the root service and the per-user
@@ -78,6 +82,7 @@ fn remove_files() {
     remove_path(&config::queue_service_unit_path());
     remove_path(&config::queue_path_unit_path());
     remove_path(&config::ui_unit_path());
+    remove_path(&config::remote_control_unit_path());
     remove_path(&config::installed_binary_path());
     // Config lives under /etc and mutable state under /var/lib — see `config` for why they're
     // split. Identity, queue, daemon log, check-in schedule and staged scripts are all under the
