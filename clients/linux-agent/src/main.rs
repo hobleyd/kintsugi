@@ -80,6 +80,10 @@ struct RegisterHostRequest {
     operating_system_update_available: Option<bool>,
     #[serde(rename = "operatingSystemLatestVersion", skip_serializing_if = "Option::is_none")]
     operating_system_latest_version: Option<String>,
+    /// This build's own version, so the Hosts screen can show which agent release each host is
+    /// running — mirrors `CreateHostCommand.AgentVersion`. Always sent: the agent always knows it.
+    #[serde(rename = "agentVersion")]
+    agent_version: &'static str,
 }
 
 /// Mirrors the backend's `CreateHostResult` — see
@@ -245,6 +249,7 @@ fn run_daemon() -> Result<()> {
         ip_address,
         operating_system_update_available: os_update_status.as_ref().map(|s| s.available),
         operating_system_latest_version: os_update_status.and_then(|s| s.latest_version),
+        agent_version: env!("CARGO_PKG_VERSION"),
     };
     let host_response: RegisterHostResponse = post_with_retry(&client, &config.register_host_url(), &host_request)
         .context("failed to register host")?;

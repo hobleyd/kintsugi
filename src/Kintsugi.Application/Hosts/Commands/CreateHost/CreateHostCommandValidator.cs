@@ -12,5 +12,6 @@ public class CreateHostCommandValidator : AbstractValidator<CreateHostCommand>
         RuleFor(x => x.OperatingSystem).MaximumLength(255);
         RuleFor(x => x.IpAddress).MaximumLength(45);
         RuleFor(x => x.OperatingSystemLatestVersion).MaximumLength(64);
+        RuleFor(x => x.AgentVersion).MaximumLength(64);
     }
 }

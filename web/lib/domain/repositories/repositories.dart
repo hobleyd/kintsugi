@@ -33,6 +33,13 @@ abstract interface class SessionRepository {
   void signOut();
 }
 
+abstract interface class ServerInfoRepository {
+  /// This server build's version, from `GET /api/admin/server`. Gated like every other
+  /// browser-driven route, which is why it is not a field on [Session]: that bootstrap call is
+  /// anonymous, and a build version should wait until the caller has signed in.
+  Future<String> version();
+}
+
 abstract interface class HostRepository {
   Future<List<HostSummary>> list();
 

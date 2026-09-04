@@ -18,6 +18,7 @@ public class HostConfiguration : IEntityTypeConfiguration<Host>
         builder.Property(h => h.IpAddress).HasMaxLength(45);
         builder.Property(h => h.Status).HasConversion<string>().HasMaxLength(32);
         builder.Property(h => h.OperatingSystemLatestVersion).HasMaxLength(64);
+        builder.Property(h => h.AgentVersion).HasMaxLength(64);
 
         builder.HasIndex(h => h.Hostname).IsUnique();
         builder.HasIndex(h => h.SerialNumber).IsUnique();

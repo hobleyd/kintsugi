@@ -4,6 +4,7 @@ import '../../data/repositories/agent_package_repository_impl.dart';
 import '../../data/repositories/application_repository_impl.dart';
 import '../../data/repositories/host_repository_impl.dart';
 import '../../data/repositories/remote_control_repository_impl.dart';
+import '../../data/repositories/server_info_repository_impl.dart';
 import '../../data/repositories/session_repository_impl.dart';
 import '../../data/repositories/settings_repository_impl.dart';
 import '../../data/repositories/upgrade_path_repository_impl.dart';
@@ -13,6 +14,7 @@ import '../../domain/usecases/application_usecases.dart';
 import '../../domain/usecases/client_usecases.dart';
 import '../../domain/usecases/host_usecases.dart';
 import '../../domain/usecases/remote_control_usecases.dart';
+import '../../domain/usecases/server_info_usecases.dart';
 import '../../domain/usecases/session_usecases.dart';
 import '../../domain/usecases/settings_usecases.dart';
 import '../../domain/usecases/upgrade_path_usecases.dart';
@@ -47,6 +49,7 @@ Future<void> configureDependencies() async {
 
   locator
     ..registerSingleton<SessionRepository>(SessionRepositoryImpl(api, locator<PageNavigator>()))
+    ..registerSingleton<ServerInfoRepository>(ServerInfoRepositoryImpl(api))
     ..registerSingleton<HostRepository>(HostRepositoryImpl(api))
     ..registerSingleton<RemoteControlRepository>(RemoteControlRepositoryImpl(api))
     ..registerSingleton<ApplicationRepository>(ApplicationRepositoryImpl(api))
@@ -64,6 +67,7 @@ Future<void> configureDependencies() async {
 
 void _registerUseCases() {
   final session = locator<SessionRepository>();
+  final server = locator<ServerInfoRepository>();
   final hosts = locator<HostRepository>();
   final applications = locator<ApplicationRepository>();
   final upgradePaths = locator<UpgradePathRepository>();
@@ -80,6 +84,7 @@ void _registerUseCases() {
     ..registerSingleton(ReadSession(session))
     ..registerSingleton(SignIn(session))
     ..registerSingleton(SignOut(session))
+    ..registerSingleton(GetServerVersion(server))
     ..registerSingleton(GetHosts(hosts))
     ..registerSingleton(RequestHostRemoval(hosts))
     ..registerSingleton(RequestRemoteControlSession(remoteControl))

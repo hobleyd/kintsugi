@@ -6,6 +6,10 @@ namespace Kintsugi.Application.Hosts.Commands.CreateHost;
 // CheckInMinute: the minute-of-hour (0-59) this host currently checks in on — see
 // clients/macos-agent/src/checkin_schedule.rs. Fed to ICheckInLoadBalancer so the response can
 // tell the host to move to a different minute if this one is overloaded.
+//
+// AgentVersion: the reporting agent's own build version (CARGO_PKG_VERSION, sent by every
+// agent's RegisterHostRequest). Optional only so that agents predating the field still check in;
+// current builds always send it.
 public record CreateHostCommand(
     string Hostname,
     string SerialNumber,
@@ -13,7 +17,8 @@ public record CreateHostCommand(
     string? OperatingSystem = null,
     string? IpAddress = null,
     bool? OperatingSystemUpdateAvailable = null,
-    string? OperatingSystemLatestVersion = null) : IRequest<CreateHostResult>, IAgentScopedRequest;
+    string? OperatingSystemLatestVersion = null,
+    string? AgentVersion = null) : IRequest<CreateHostResult>, IAgentScopedRequest;
 
 /// <summary>
 /// <paramref name="SuggestedCheckInMinute"/> is only ever non-null when

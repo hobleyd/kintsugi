@@ -21,6 +21,16 @@ void main() {
       expect(unchecked.operatingSystemUpdateAvailable, isNull);
       expect(current.operatingSystemUpdateAvailable, isFalse);
     });
+
+    test('reads agentVersion, and leaves it null when the server omits it', () {
+      final reported = hostFromJson({'id': 'a', 'hostname': 'alpha', 'status': 1, 'agentVersion': '0.6.1'});
+      final unreported = hostFromJson({'id': 'a', 'hostname': 'alpha', 'status': 1});
+
+      // Null is "this agent has never reported a version" — a host whose agent predates the
+      // field — and the screen shows nothing under the status chip rather than an empty bracket.
+      expect(reported.agentVersion, '0.6.1');
+      expect(unreported.agentVersion, isNull);
+    });
   });
 
   group('upgradePathSummaryFromJson', () {

@@ -12,6 +12,7 @@ class HostSummary extends Equatable {
     required this.ipAddress,
     required this.status,
     required this.lastSeenUtc,
+    required this.agentVersion,
     required this.operatingSystemUpdateAvailable,
     required this.operatingSystemLatestVersion,
     required this.appUpdatesAvailableCount,
@@ -30,6 +31,12 @@ class HostSummary extends Equatable {
   final String? ipAddress;
   final HostStatus status;
   final DateTime? lastSeenUtc;
+
+  /// The version the host's agent reported on its last check-in, mirroring
+  /// `HostDto.AgentVersion`. Null when the agent predates the field and has never reported one —
+  /// the server keeps whatever it last heard rather than clearing it, so null means "never", not
+  /// "not this time".
+  final String? agentVersion;
 
   /// Tri-state on purpose: null is "not checked", which is a different thing from "up to date"
   /// and has to read differently on screen.
@@ -51,6 +58,7 @@ class HostSummary extends Equatable {
         ipAddress,
         status,
         lastSeenUtc,
+        agentVersion,
         operatingSystemUpdateAvailable,
         operatingSystemLatestVersion,
         appUpdatesAvailableCount,

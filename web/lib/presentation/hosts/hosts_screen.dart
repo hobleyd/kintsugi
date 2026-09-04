@@ -101,12 +101,27 @@ class _HostsView extends StatelessWidget {
               )
             : CountBadge(host.appUpdatesAvailableCount),
         host.ipAddress == null ? const NoValue() : Text(host.ipAddress!),
-        Wrap(
-          spacing: 6,
-          runSpacing: 4,
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            StatusChip(host.status.label, statusKey: host.status.key),
-            if (host.removalRequested) const StatusChip('Removing', statusKey: 'update-available'),
+            Wrap(
+              spacing: 6,
+              runSpacing: 4,
+              children: [
+                StatusChip(host.status.label, statusKey: host.status.key),
+                if (host.removalRequested)
+                  const StatusChip('Removing', statusKey: 'update-available'),
+              ],
+            ),
+            // The agent's own version sits under the status rather than in its own column: it is
+            // a property of the same check-in the chip summarises, and a column for a string that
+            // is null on every host predating `HostDto.AgentVersion` would mostly show dashes.
+            // Same arrangement `_OsUpdateCell` uses for the latest OS version.
+            if (host.agentVersion != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: HintText('(${host.agentVersion})'),
+              ),
           ],
         ),
         LocalTimestamp(host.lastSeenUtc),

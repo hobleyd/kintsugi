@@ -2,11 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/di/locator.dart';
 import '../../core/router/app_router.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/theme/kintsugi_palette.dart';
 import '../../core/theme/theme_cubit.dart';
+import '../../domain/usecases/server_info_usecases.dart';
 import '../session/session_bloc.dart';
+import 'server_version_cubit.dart';
 
 /// The sidebar and the page beside it — what `_Layout.cshtml` was.
 ///
@@ -20,15 +23,22 @@ class AppShell extends StatelessWidget {
   final Widget child;
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-        body: DecoratedBox(
-          decoration: BoxDecoration(gradient: _backgroundWash(context)),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              _Sidebar(location: location),
-              Expanded(child: child),
-            ],
+  Widget build(BuildContext context) => BlocProvider(
+        // Provided here rather than in main.dart beside SessionBloc: the route it reads is gated,
+        // so it must not be asked for until the router has decided this browser may use the app —
+        // which is exactly when this shell is first built. The ShellRoute keeps this element
+        // across navigations, so the version is fetched once per page load, not once per screen.
+        create: (_) => ServerVersionCubit(locator<GetServerVersion>()),
+        child: Scaffold(
+          body: DecoratedBox(
+            decoration: BoxDecoration(gradient: _backgroundWash(context)),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _Sidebar(location: location),
+                Expanded(child: child),
+              ],
+            ),
           ),
         ),
       );
@@ -79,74 +89,80 @@ class _Sidebar extends StatelessWidget {
           // scrolls when it is not, which is what stops a short window clipping the log-out
           // button off with no way back to it.
           constraints: BoxConstraints(minHeight: MediaQuery.sizeOf(context).height - 32),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const _Brand(),
-              // startsWith, not equality, because /hosts/{id}/remote is a Hosts route: a remote
-              // control session leaving nothing highlighted in the sidebar reads as having
-              // navigated out of the app.
-              _NavLink(
-                label: 'Hosts',
-                path: Routes.hosts,
-                selected: location == Routes.hosts || location.startsWith('${Routes.hosts}/'),
-              ),
-              const SizedBox(height: 8),
-              _NavLink(
-                label: 'Applications',
-                path: Routes.applications,
-                selected: location == Routes.applications,
-              ),
-              const SizedBox(height: 8),
-              _NavLink(label: 'Sync', path: Routes.clients, selected: inSync),
-              // Alphabetical by label. Keep it that way when adding one — the list is a lookup,
-              // not a workflow, so there is no order to it a reader could otherwise predict.
-              _SubNav(
-                children: [
-                  _SubNavLink(label: 'Clients', path: Routes.clients, selected: location == Routes.clients),
-                  _SubNavLink(
-                    label: 'Upgrade Scripts',
-                    path: Routes.upgradeScripts,
-                    selected: location == Routes.upgradeScripts,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              _NavLink(label: 'Settings', path: Routes.settingsAiAgent, selected: inSettings),
-              _SubNav(
-                children: [
-                  _SubNavLink(
-                    label: 'AI Agent',
-                    path: Routes.settingsAiAgent,
-                    selected: location == Routes.settingsAiAgent,
-                  ),
-                  _SubNavLink(
-                    label: 'Authentication',
-                    path: Routes.settingsAuthentication,
-                    selected: location == Routes.settingsAuthentication,
-                  ),
-                  _SubNavLink(
-                    label: 'GitHub',
-                    path: Routes.settingsGitHub,
-                    selected: location == Routes.settingsGitHub,
-                  ),
-                  _SubNavLink(
-                    label: 'Patching Policy',
-                    path: Routes.settingsPatchingPolicy,
-                    selected: location == Routes.settingsPatchingPolicy,
-                  ),
-                  // Alphabetical by label, and Vanta lands last. This subnav is a lookup rather
-                  // than a workflow, so there is no other order a reader could predict.
-                  _SubNavLink(
-                    label: 'Vanta',
-                    path: Routes.settingsVanta,
-                    selected: location == Routes.settingsVanta,
-                  ),
-                ],
-              ),
-              const Expanded(child: SizedBox(height: 24)),
-              const _SidebarFooter(),
-            ],
+          // A scroll view hands its child an unbounded height, and a Column holding an Expanded
+          // cannot lay out under one: an assertion on every frame in debug, and whatever RenderFlex
+          // makes of infinity in the release bundle. IntrinsicHeight turns "at least the viewport"
+          // into an exact height the spacer below can fill.
+          child: IntrinsicHeight(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const _Brand(),
+                // startsWith, not equality, because /hosts/{id}/remote is a Hosts route: a remote
+                // control session leaving nothing highlighted in the sidebar reads as having
+                // navigated out of the app.
+                _NavLink(
+                  label: 'Hosts',
+                  path: Routes.hosts,
+                  selected: location == Routes.hosts || location.startsWith('${Routes.hosts}/'),
+                ),
+                const SizedBox(height: 8),
+                _NavLink(
+                  label: 'Applications',
+                  path: Routes.applications,
+                  selected: location == Routes.applications,
+                ),
+                const SizedBox(height: 8),
+                _NavLink(label: 'Sync', path: Routes.clients, selected: inSync),
+                // Alphabetical by label. Keep it that way when adding one — the list is a lookup,
+                // not a workflow, so there is no order to it a reader could otherwise predict.
+                _SubNav(
+                  children: [
+                    _SubNavLink(label: 'Clients', path: Routes.clients, selected: location == Routes.clients),
+                    _SubNavLink(
+                      label: 'Upgrade Scripts',
+                      path: Routes.upgradeScripts,
+                      selected: location == Routes.upgradeScripts,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                _NavLink(label: 'Settings', path: Routes.settingsAiAgent, selected: inSettings),
+                _SubNav(
+                  children: [
+                    _SubNavLink(
+                      label: 'AI Agent',
+                      path: Routes.settingsAiAgent,
+                      selected: location == Routes.settingsAiAgent,
+                    ),
+                    _SubNavLink(
+                      label: 'Authentication',
+                      path: Routes.settingsAuthentication,
+                      selected: location == Routes.settingsAuthentication,
+                    ),
+                    _SubNavLink(
+                      label: 'GitHub',
+                      path: Routes.settingsGitHub,
+                      selected: location == Routes.settingsGitHub,
+                    ),
+                    _SubNavLink(
+                      label: 'Patching Policy',
+                      path: Routes.settingsPatchingPolicy,
+                      selected: location == Routes.settingsPatchingPolicy,
+                    ),
+                    // Alphabetical by label, and Vanta lands last. This subnav is a lookup rather
+                    // than a workflow, so there is no other order a reader could predict.
+                    _SubNavLink(
+                      label: 'Vanta',
+                      path: Routes.settingsVanta,
+                      selected: location == Routes.settingsVanta,
+                    ),
+                  ],
+                ),
+                const Expanded(child: SizedBox(height: 24)),
+                const _SidebarFooter(),
+              ],
+            ),
           ),
         ),
       ),
@@ -154,31 +170,43 @@ class _Sidebar extends StatelessWidget {
   }
 }
 
+/// The logo, the name and, once it has arrived, the server's version beneath it.
 class _Brand extends StatelessWidget {
   const _Brand();
 
   @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.only(top: 24, bottom: 24),
-        child: Column(
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(10),
-              child: Image.asset('assets/img/logo-nav.png'),
+  Widget build(BuildContext context) {
+    final version = context.watch<ServerVersionCubit>().state;
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 24, bottom: 24),
+      child: Column(
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: Image.asset('assets/img/logo-nav.png'),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'KINTSUGI',
+            style: AppTheme.display(
+              color: context.palette.neon,
+              size: 20,
+              weight: FontWeight.w900,
+              letterSpacing: 1.6,
             ),
-            const SizedBox(height: 10),
+          ),
+          if (version != null) ...[
+            const SizedBox(height: 4),
             Text(
-              'KINTSUGI',
-              style: AppTheme.display(
-                color: context.palette.neon,
-                size: 20,
-                weight: FontWeight.w900,
-                letterSpacing: 1.6,
-              ),
+              'v$version',
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: context.palette.muted),
             ),
           ],
-        ),
-      );
+        ],
+      ),
+    );
+  }
 }
 
 class _NavLink extends StatelessWidget {

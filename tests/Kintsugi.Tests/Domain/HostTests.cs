@@ -110,6 +110,27 @@ public class HostTests
     }
 
     [Fact]
+    public void Reregister_RecordsTheReportedAgentVersion()
+    {
+        var host = new Host("host-1", "SERIAL-1", agentVersion: "0.6.0");
+
+        host.Reregister("host-1", null, null, agentVersion: "0.6.1");
+
+        Assert.Equal("0.6.1", host.AgentVersion);
+    }
+
+    [Fact]
+    public void Reregister_WithNoAgentVersion_KeepsThePreviouslyReportedOne()
+    {
+        // An agent predating the field omits it; that must read as "not reported", not "none".
+        var host = new Host("host-1", "SERIAL-1", agentVersion: "0.6.1");
+
+        host.Reregister("host-1", null, null, agentVersion: null);
+
+        Assert.Equal("0.6.1", host.AgentVersion);
+    }
+
+    [Fact]
     public void Reregister_RejectsAMissingHostname()
     {
         var host = new Host("host-1", "SERIAL-1");

@@ -6,6 +6,13 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <!-- The server's own version, shown under the Kintsugi name in the admin UI's sidebar via
+         AdminServerController. Bump it here on a release; nothing else declares it. The SDK would
+         otherwise append "+<commit>" to the informational version on any build inside a git
+         checkout, which the Docker build (no .git copied in) never sees - so the suffix is turned
+         off to keep the two builds reporting the same string. -->
+    <Version>1.0.0</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
   <ItemGroup>

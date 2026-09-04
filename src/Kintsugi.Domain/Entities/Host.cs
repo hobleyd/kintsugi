@@ -21,6 +21,11 @@ public class Host : BaseEntity
     /// available, or the reporting agent couldn't determine a version for it.</summary>
     public string? OperatingSystemLatestVersion { get; private set; }
 
+    /// <summary>The version of the agent binary that last checked in, as it reports itself
+    /// (each agent's <c>RegisterHostRequest.agent_version</c>, from <c>CARGO_PKG_VERSION</c>).
+    /// Null until a release that reports one has checked in; older agents omit the field.</summary>
+    public string? AgentVersion { get; private set; }
+
     /// <summary>Set once an admin has asked for this host to be removed — the next check-in's
     /// response tells the agent to uninstall itself completely from the host machine. See
     /// <see cref="RequestRemoval"/> and <see cref="DeletedAtUtc"/>.</summary>
@@ -41,7 +46,8 @@ public class Host : BaseEntity
         string? operatingSystem = null,
         string? ipAddress = null,
         bool? operatingSystemUpdateAvailable = null,
-        string? operatingSystemLatestVersion = null)
+        string? operatingSystemLatestVersion = null,
+        string? agentVersion = null)
     {
         if (string.IsNullOrWhiteSpace(hostname))
         {
@@ -59,6 +65,7 @@ public class Host : BaseEntity
         IpAddress = ipAddress;
         OperatingSystemUpdateAvailable = operatingSystemUpdateAvailable;
         OperatingSystemLatestVersion = operatingSystemLatestVersion;
+        AgentVersion = agentVersion;
     }
 
     public void RecordHeartbeat(HostStatus status)
@@ -73,7 +80,8 @@ public class Host : BaseEntity
         string? operatingSystem,
         string? ipAddress,
         bool? operatingSystemUpdateAvailable = null,
-        string? operatingSystemLatestVersion = null)
+        string? operatingSystemLatestVersion = null,
+        string? agentVersion = null)
     {
         if (string.IsNullOrWhiteSpace(hostname))
         {
@@ -108,6 +116,13 @@ public class Host : BaseEntity
             // A definitive "nothing pending" clears any previously reported target version too,
             // rather than leaving e.g. "15.1" displayed once the host is already caught up.
             OperatingSystemLatestVersion = null;
+        }
+
+        // Same null-means-not-reported rule: an older agent that never sends the field must not
+        // erase the version a newer build reported before a downgrade or reinstall.
+        if (agentVersion is not null)
+        {
+            AgentVersion = agentVersion;
         }
 
         RecordHeartbeat(HostStatus.Online);

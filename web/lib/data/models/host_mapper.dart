@@ -16,6 +16,7 @@ HostSummary hostFromJson(Map<String, dynamic> json) => HostSummary(
         HostStatus.unknown,
       ),
       lastSeenUtc: dateTimeFromJson(json['lastSeenUtc']),
+      agentVersion: json['agentVersion'] as String?,
       operatingSystemUpdateAvailable: json['operatingSystemUpdateAvailable'] as bool?,
       operatingSystemLatestVersion: json['operatingSystemLatestVersion'] as String?,
       appUpdatesAvailableCount: (json['appUpdatesAvailableCount'] as num?)?.toInt() ?? 0,

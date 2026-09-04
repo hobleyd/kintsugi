@@ -76,6 +76,25 @@ public class CreateHostCommandHandlerTests
     }
 
     [Fact]
+    public async Task Handle_PassesTheAgentVersionThrough_OnBothCreateAndReregister()
+    {
+        _hostRepository.Setup(r => r.GetBySerialNumberAsync("SERIAL-1", It.IsAny<CancellationToken>())).ReturnsAsync((Host?)null);
+
+        var created = await CreateHandler().Handle(
+            new CreateHostCommand("host-1", "SERIAL-1", AgentVersion: "0.6.0"), CancellationToken.None);
+
+        Assert.Equal("0.6.0", created.Host.AgentVersion);
+
+        var existing = new Host("host-1", "SERIAL-1", agentVersion: "0.6.0");
+        _hostRepository.Setup(r => r.GetBySerialNumberAsync("SERIAL-1", It.IsAny<CancellationToken>())).ReturnsAsync(existing);
+
+        var reregistered = await CreateHandler().Handle(
+            new CreateHostCommand("host-1", "SERIAL-1", AgentVersion: "0.6.1"), CancellationToken.None);
+
+        Assert.Equal("0.6.1", reregistered.Host.AgentVersion);
+    }
+
+    [Fact]
     public async Task Handle_PassesTheSerialNumberAndReportedCheckInMinuteToTheLoadBalancer()
     {
         _hostRepository.Setup(r => r.GetBySerialNumberAsync("SERIAL-1", It.IsAny<CancellationToken>())).ReturnsAsync((Host?)null);
