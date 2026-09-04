@@ -64,15 +64,15 @@ void main() {
               onSort: (_) {},
               toolbar: const Row(children: [Expanded(child: HintText('Search and filter from the column headers below.'))]),
               rows: [
-                KintsugiTableRow(cells: [
-                  const Text('Calibre Agent'),
-                  const CountBadge(1),
-                  const HintText('macOS'),
-                  const HintText('Not checked yet'),
-                  const HintText('—'),
-                  const HintText('No reliable information found.'),
-                  const NoValue(),
-                  const Icon(Icons.expand_more),
+                const KintsugiTableRow(cells: [
+                  Text('Calibre Agent'),
+                  CountBadge(1),
+                  HintText('macOS'),
+                  HintText('Not checked yet'),
+                  HintText('—'),
+                  HintText('No reliable information found.'),
+                  NoValue(),
+                  Icon(Icons.expand_more),
                 ]),
                 KintsugiTableRow(cells: [
                   const Text('Google Chrome'),
