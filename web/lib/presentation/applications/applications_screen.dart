@@ -184,7 +184,7 @@ class _ApplicationsTable extends StatelessWidget {
       ),
       TableColumnSpec(
         label: 'Hosts Installed On',
-        width: const FixedColumnWidth(170),
+        width: const FixedColumnWidth(150),
         alignRight: true,
         sortKey: 'hosts',
         filter: KintsugiDropdown<String>(
@@ -198,7 +198,7 @@ class _ApplicationsTable extends StatelessWidget {
       const TableColumnSpec(label: 'Platform', width: FlexColumnWidth(1), sortKey: 'platform'),
       TableColumnSpec(
         label: 'Status',
-        width: const FixedColumnWidth(180),
+        width: const FixedColumnWidth(160),
         sortKey: 'status',
         filter: KintsugiDropdown<String>(
           value: state.filters.statusKey,
@@ -211,14 +211,27 @@ class _ApplicationsTable extends StatelessWidget {
       const TableColumnSpec(label: 'Latest', width: FlexColumnWidth(0.9), sortKey: 'latest'),
       const TableColumnSpec(label: 'Upgrade', width: FlexColumnWidth(1.2)),
       const TableColumnSpec(label: 'Checked', width: FlexColumnWidth(1), sortKey: 'checked'),
-      const TableColumnSpec(label: 'Actions', width: FixedColumnWidth(90)),
+      // 110 rather than the 90 this started as, which is what one 34px icon needs and not what
+      // the word "ACTIONS" over it does. `KintsugiTable` floors a column at its own label either
+      // way; the number here says so out loud rather than being quietly overridden.
+      const TableColumnSpec(label: 'Actions', width: FixedColumnWidth(110)),
     ];
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         KintsugiTable(
-          minWidth: 1400,
+          // Eight columns, and the widest table in the product. 1100 rather than the 1400 this
+          // started as, which was 226px wider than the panel on a 1512-point display — so the
+          // last two columns were reachable only by finding the panel's own horizontal scrollbar,
+          // which on web is not drawn until something scrolls. Two things paid for the
+          // difference: the 12px cell gutter costs 96px less across eight columns, and the table
+          // now takes the panel's full width rather than laying out at exactly this figure, so
+          // every column is wider than this arithmetic whenever the window allows. What is left
+          // is a real floor — below 1100 the expanded instructions panel, which is laid out in
+          // the first column, stops being usable, and the version and timestamp columns start
+          // wrapping their one value onto two lines.
+          minWidth: 1100,
           columns: columns,
           sort: state.sort == null
               ? null
