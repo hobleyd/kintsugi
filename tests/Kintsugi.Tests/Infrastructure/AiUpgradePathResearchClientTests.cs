@@ -100,6 +100,68 @@ public class AiUpgradePathResearchClientTests
     }
 
     [Fact]
+    public async Task GenerateScriptAsync_WhenTheSentinelCarriesAReason_ReturnsNotFoundQuotingIt()
+    {
+        var handler = new QueueingHandler(_ => AnthropicTextResponse("NO_RELIABLE_METHOD: the application is distributed only inside one organisation and publishes no release catalog."));
+        var client = CreateClient(handler);
+
+        var result = await client.GenerateScriptAsync(AnthropicSettings, Request(), CancellationToken.None);
+
+        Assert.Equal(UpgradePathStatus.NotFound, result.Status);
+        Assert.Null(result.Script);
+        Assert.Contains("publishes no release catalog", result.Notes);
+        Assert.DoesNotContain("NO_RELIABLE_METHOD", result.Notes);
+    }
+
+    /// <summary>The failure this guards: a model that explains instead of writing a script (or
+    /// using the sentinel) used to have its explanation shellchecked, then handed back to itself as
+    /// a buggy script, so the operator saw "SC1011: This apostrophe terminated the single quoted
+    /// string" and never the reason. The explanation is the answer; it goes in the note, and no
+    /// second call is made.</summary>
+    [Fact]
+    public async Task GenerateScriptAsync_WhenTheModelExplainsInsteadOfWritingAScript_ReturnsNotFoundQuotingTheExplanation()
+    {
+        const string prose = "I'm not able to write this script. NightMail appears to be an internal application with\nno public download location or release catalog, so there is nothing for --update-version to query.";
+        var handler = new QueueingHandler(_ => AnthropicTextResponse(prose));
+        var client = CreateClient(handler);
+
+        var result = await client.GenerateScriptAsync(AnthropicSettings, Request(), CancellationToken.None);
+
+        Assert.Equal(UpgradePathStatus.NotFound, result.Status);
+        Assert.Null(result.Script);
+        Assert.Contains("internal application with no public download location", result.Notes);
+        Assert.Single(handler.Requests);
+    }
+
+    [Fact]
+    public async Task GenerateScriptAsync_WhenTheFixAttemptIsAnExplanation_ThrowsQuotingIt()
+    {
+        const string missingContractTokens = "#!/bin/bash\nset -euo pipefail\necho \"1.0.0\"\n";
+        var handler = new QueueingHandler(
+            _ => AnthropicTextResponse(missingContractTokens),
+            _ => AnthropicTextResponse("I'm not going to produce this script. The findings describe a contract the application cannot meet."));
+        var client = CreateClient(handler);
+
+        var ex = await Assert.ThrowsAsync<ExternalServiceException>(() => client.GenerateScriptAsync(AnthropicSettings, Request(), CancellationToken.None));
+        Assert.Contains("declined to correct", ex.Message);
+        Assert.Contains("contract the application cannot meet", ex.Message);
+        Assert.DoesNotContain("shellcheck", ex.Message);
+    }
+
+    [Fact]
+    public async Task GenerateScriptAsync_TakesTheFencedBlock_WhenTheModelWroteProseAroundIt()
+    {
+        var wrapped = $"Here is the script you asked for:\n\n```bash\n{ValidScript}```\n\nLet me know if you need anything else.";
+        var handler = new QueueingHandler(_ => AnthropicTextResponse(wrapped));
+        var client = CreateClient(handler);
+
+        var result = await client.GenerateScriptAsync(AnthropicSettings, Request(), CancellationToken.None);
+
+        Assert.Equal(UpgradePathStatus.Found, result.Status);
+        Assert.Equal(ValidScript.Trim(), result.Script);
+    }
+
+    [Fact]
     public async Task GenerateScriptAsync_StripsAMarkdownCodeFence_ThatTheModelWrappedTheScriptIn()
     {
         var fenced = $"```bash\n{ValidScript}```";

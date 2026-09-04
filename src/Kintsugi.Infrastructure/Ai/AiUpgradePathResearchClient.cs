@@ -84,19 +84,33 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
 
         var text = await AskProviderWithSearchAsync(settings, request, hostingSiteContext, cancellationToken);
 
-        if (IsNoReliableMethodSentinel(text))
+        if (TryReadNoReliableMethod(text, out var reason))
         {
-            _logger.LogInformation("The model reported no reliable upgrade method for {ApplicationName} ({Platform})", request.ApplicationName, request.Platform);
-            return new UpgradePathScriptResult(UpgradePathStatus.NotFound, null, "The AI could not determine a reliable way to check for or install updates to this application.");
+            _logger.LogInformation("The model reported no reliable upgrade method for {ApplicationName} ({Platform}): {Reason}", request.ApplicationName, request.Platform, reason ?? "(no reason given)");
+            return new UpgradePathScriptResult(UpgradePathStatus.NotFound, null, NoReliableMethodNote(reason));
         }
-
-        var script = CleanScriptText(text)
-            ?? throw new ExternalServiceException("The model's response did not contain a usable script.");
 
         // bash for macOS, PowerShell for Windows — the same choice BuildScriptGenerationPrompt made
         // when it asked for the script, so the validator can never be checking a script against the
         // wrong language's rules.
         var language = ScriptLanguages.For(request.Platform);
+
+        var script = CleanScriptText(text)
+            ?? throw new ExternalServiceException("The model's response did not contain a usable script.");
+
+        // A model that has nothing to offer does not always use the sentinel: it explains instead,
+        // in prose. Fed to shellcheck, that prose "fails validation" on an apostrophe in its first
+        // sentence, the fix prompt then hands the model its own explanation back as a buggy script,
+        // and what reaches the operator is shellcheck's opinion of English — with the model's actual
+        // reason nowhere. That shipped: an in-house application with no public distribution came
+        // back as "CHECK FAILED ... SC1011: This apostrophe terminated the single quoted string".
+        // A prose answer is the sentinel's meaning without its spelling, so it is treated as one,
+        // carrying the model's own words so the operator can read why.
+        if (!LooksLikeScript(script, language))
+        {
+            _logger.LogWarning("The model answered with an explanation rather than a script for {ApplicationName} ({Platform}): {Text}", request.ApplicationName, request.Platform, script);
+            return new UpgradePathScriptResult(UpgradePathStatus.NotFound, null, $"The AI did not produce a script for this application. It said: {SummarizeForNote(script)}");
+        }
 
         var (isValid, errors) = await ValidateScriptAsync(script, language, cancellationToken);
         if (isValid)
@@ -109,6 +123,14 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
 
         var fixedScript = CleanScriptText(await AskProviderRawAsync(settings, BuildScriptFixPrompt(request, script, errors!), cancellationToken))
             ?? throw new ExternalServiceException("The model's fix attempt did not contain a usable script.");
+
+        // Same check on the repair: a model that disputes the findings answers in prose too, and the
+        // useful thing to report is what it said, not what shellcheck made of it.
+        if (!LooksLikeScript(fixedScript, language))
+        {
+            _logger.LogWarning("The model answered the fix prompt for {ApplicationName} ({Platform}) with an explanation rather than a script: {Text}", request.ApplicationName, request.Platform, fixedScript);
+            throw new ExternalServiceException($"The model declined to correct the generated script. It said: {SummarizeForNote(fixedScript)}");
+        }
 
         var (fixedIsValid, fixedErrors) = await ValidateScriptAsync(fixedScript, language, cancellationToken);
         if (!fixedIsValid)
@@ -614,8 +636,87 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
 
     private const string NoReliableMethodSentinel = "NO_RELIABLE_METHOD";
 
-    private static bool IsNoReliableMethodSentinel(string text) =>
-        text.Trim().Equals(NoReliableMethodSentinel, StringComparison.Ordinal);
+    /// <summary>
+    /// Recognises the model's "no reliable method" answer. The prompt asks for the sentinel alone, or
+    /// followed on the same line by a short reason; anything after the sentinel — same line or not —
+    /// is taken as that reason, since a model that has typed the sentinel and then kept going is
+    /// explaining itself, not writing a script. The sentinel must be the first thing in the response:
+    /// an explanation that mentions it in passing is prose, and <see cref="LooksLikeScript"/> handles
+    /// prose.
+    /// </summary>
+    private static bool TryReadNoReliableMethod(string text, out string? reason)
+    {
+        var trimmed = text.Trim();
+        if (!trimmed.StartsWith(NoReliableMethodSentinel, StringComparison.Ordinal))
+        {
+            reason = null;
+            return false;
+        }
+
+        var rest = trimmed[NoReliableMethodSentinel.Length..];
+        // "NO_RELIABLE_METHODS" or similar is a different word, not the sentinel plus a reason.
+        if (rest.Length > 0 && !char.IsWhiteSpace(rest[0]) && rest[0] != ':' && rest[0] != '-' && rest[0] != '—' && rest[0] != '.')
+        {
+            reason = null;
+            return false;
+        }
+
+        var explanation = rest.TrimStart(' ', '\t', '\r', '\n', ':', '-', '—', '.').Trim();
+        reason = explanation.Length == 0 ? null : SummarizeForNote(explanation);
+        return true;
+    }
+
+    private static string NoReliableMethodNote(string? reason) =>
+        reason is null
+            ? "The AI could not determine a reliable way to check for or install updates to this application."
+            : $"The AI could not determine a reliable way to check for or install updates to this application. It said: {reason}";
+
+    /// <summary>
+    /// Whether what came back is plausibly the script that was asked for, as opposed to the model
+    /// explaining why it wrote none. Judged on the first line only, because that is where the two
+    /// never overlap: both prompts fix the opening line (`#!/bin/bash`; `Set-StrictMode`, or the
+    /// header comment models put above it), and an explanation opens with a sentence. Anything this
+    /// lets through still has to pass <see cref="ValidateScriptAsync"/>; the point is to stop an
+    /// explanation getting that far, where the only thing reported about it is what shellcheck
+    /// thought of its punctuation.
+    /// </summary>
+    private static bool LooksLikeScript(string script, ScriptLanguage language)
+    {
+        var firstLine = script.AsSpan().TrimStart();
+        var newline = firstLine.IndexOf('\n');
+        if (newline >= 0)
+        {
+            firstLine = firstLine[..newline];
+        }
+
+        firstLine = firstLine.TrimEnd();
+
+        return language switch
+        {
+            ScriptLanguage.PowerShell =>
+                firstLine.StartsWith("#")
+                || firstLine.StartsWith("$")
+                || firstLine.StartsWith("[")
+                || firstLine.StartsWith("Set-StrictMode", StringComparison.OrdinalIgnoreCase)
+                || firstLine.StartsWith("param", StringComparison.OrdinalIgnoreCase)
+                || firstLine.StartsWith("using ", StringComparison.OrdinalIgnoreCase)
+                || firstLine.StartsWith("function ", StringComparison.OrdinalIgnoreCase),
+            // A shebang, not merely a comment: a markdown heading is `# ` too, and an explanation is
+            // far more likely to open with one than a bash script is to omit the shebang the prompt
+            // demands.
+            _ => firstLine.StartsWith("#!")
+        };
+    }
+
+    /// <summary>Collapses a model's explanation to one line short enough for
+    /// <c>UpgradePath.Notes</c> (2000 characters) with the fixed wording around it. The full text is
+    /// in the log.</summary>
+    private static string SummarizeForNote(string text)
+    {
+        const int maxLength = 600;
+        var oneLine = Regex.Replace(text.Trim(), @"\s+", " ");
+        return oneLine.Length <= maxLength ? oneLine : oneLine[..maxLength].TrimEnd() + "…";
+    }
 
     private static string ResolvePrompt(UpgradePathScriptGenerationRequest request, string? hostingSiteContext) =>
         string.IsNullOrWhiteSpace(request.PromptOverride) ? BuildScriptGenerationPrompt(request, hostingSiteContext) : request.PromptOverride;
@@ -797,7 +898,11 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
                 doesn't.
               """
             : """
-              `--update` mode — this one DOES run on the managed Mac itself, so macOS tools are fine here:
+              `--update` mode — this one DOES run on the managed Mac itself, so macOS tools are fine here.
+              It runs as root, from a LaunchDaemon, outside any GUI session (see the macOS agent's
+              `queue.rs`): /Applications is writable whoever owns the existing bundle, `installer` works,
+              but `$HOME` is root's, nothing user-specific is reachable, and an Apple event sent from
+              here does not reach the logged-in user's applications:
               - Re-run the same latest-version check as `--update-version` internally.
               - Determine the currently installed version (e.g. via `defaults read
                 /Applications/<appName>.app/Contents/Info.plist CFBundleShortVersionString`), and
@@ -807,11 +912,14 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
               - If already at or above the latest version, print a message and exit 0 without
                 downloading or changing anything (idempotent).
               - If the application is currently running, quit it gracefully before replacing it —
-                already-authorized, so this can be automatic. Use
-                `osascript -e "tell application \"<appName>\" to quit"`, then poll for the process to
-                actually exit for a bounded grace period (e.g. up to 15s, checking every second via
-                `pgrep -x`), and only as a last-resort fallback after that grace period use `pkill -x`
-                if it's still running — never skip straight to a hard kill.
+                already-authorized, so this can be automatic. Send the quit into the console user's
+                session, since this script is not in it:
+                `launchctl asuser "$(stat -f %u /dev/console)" osascript -e "tell application \"<appName>\" to quit"`,
+                then poll for the process to actually exit for a bounded grace period (e.g. up to 15s,
+                checking every second via `pgrep -x`), and only as a last-resort fallback after that
+                grace period use `pkill -x` if it's still running — never skip straight to a hard kill.
+                Do not relaunch the application afterwards: anything `open`ed from here would run as
+                root in the wrong session.
               - Download the current release into a directory made with `mktemp -d`, cleaned up via a
                 `trap` covering both success and failure. Prefer a stable "latest" URL pattern (e.g.
                 GitHub's `.../releases/latest/download/<asset-filename>`, which resolves to whatever
@@ -888,7 +996,7 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
               - `--appName` and `--appId` are always both required, along with exactly one of
                 `--update-version` or `--update` (in either order).
               - No interactive prompts of any kind anywhere in the script — it always runs unattended,
-                typically as root or an admin user (for `--update`) or on a plain Linux server (for
+                as root from a LaunchDaemon (for `--update`) or on a plain Linux server (for
                 `--update-version`).
               """;
 
@@ -928,7 +1036,12 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
             GitHub, GitLab, or a similar site.
 
             If you cannot find a reliable way to check for or install updates to this application at
-            all, respond with ONLY this exact line and nothing else: {{NoReliableMethodSentinel}}
+            all — or you are declining to write the script for any other reason — respond with ONLY
+            this exact line and nothing else: {{NoReliableMethodSentinel}}
+            You may follow it, on the same line, with a colon and one short sentence saying why (for
+            example, that the application is distributed only within one organisation and publishes
+            no release catalog). Never answer with an explanation in place of a script: anything that
+            is not that line is treated as the script itself and checked as one.
 
             {{scriptIntro}}
 
@@ -1303,17 +1416,23 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
 
     /// <summary>Models sometimes wrap output in a markdown code fence despite being told not to —
     /// stripped defensively rather than persisting a script that literally begins with
-    /// "```bash".</summary>
+    /// "```bash". The fence need not be the first thing in the response: "Here is the script:"
+    /// above it and a paragraph of notes below it are the same habit, and the fenced block is the
+    /// script in every one of those cases. The block ends at the first closing fence rather than the
+    /// last, since a script containing three backticks is far less likely than a model appending a
+    /// second fenced example after it. A response with no fence at all is returned whole, for
+    /// <see cref="LooksLikeScript"/> to judge.</summary>
     private static string? CleanScriptText(string text)
     {
         var trimmed = text.Trim();
 
-        if (trimmed.StartsWith("```", StringComparison.Ordinal))
+        var openingFenceIndex = trimmed.IndexOf("```", StringComparison.Ordinal);
+        if (openingFenceIndex >= 0)
         {
-            var firstNewline = trimmed.IndexOf('\n');
+            var firstNewline = trimmed.IndexOf('\n', openingFenceIndex);
             trimmed = firstNewline >= 0 ? trimmed[(firstNewline + 1)..] : "";
 
-            var closingFenceIndex = trimmed.LastIndexOf("```", StringComparison.Ordinal);
+            var closingFenceIndex = trimmed.IndexOf("```", StringComparison.Ordinal);
             if (closingFenceIndex >= 0)
             {
                 trimmed = trimmed[..closingFenceIndex];
