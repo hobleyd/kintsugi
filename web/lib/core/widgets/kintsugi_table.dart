@@ -93,24 +93,49 @@ class KintsugiTable extends StatelessWidget {
     // scrolling.
     final floors = [for (final column in columns) _labelFloor(context, column)];
     final floor = math.max(minWidth, floors.reduce((a, b) => a + b));
+    final columnWidths = {
+      for (var i = 0; i < columns.length; i++)
+        i: MaxColumnWidth(columns[i].width, FixedColumnWidth(floors[i])),
+    };
 
-    final table = Table(
-      columnWidths: {
-        for (var i = 0; i < columns.length; i++)
-          i: MaxColumnWidth(columns[i].width, FixedColumnWidth(floors[i])),
-      },
-      defaultVerticalAlignment: TableCellVerticalAlignment.middle,
-      children: [
-        TableRow(
-          decoration: BoxDecoration(
-            color: palette.accentWash(0.05),
-            border: Border(bottom: BorderSide(color: palette.border)),
-          ),
-          children: [for (final column in columns) _HeaderCell(column: column, sort: sort, onSort: onSort)],
+    Table segment(List<TableRow> tableRows) => Table(
+          columnWidths: columnWidths,
+          defaultVerticalAlignment: TableCellVerticalAlignment.middle,
+          children: tableRows,
+        );
+
+    // A [Table] has no column-span, so an expanded panel cannot be a row of it. The first cut
+    // put the panel in the first cell with every other cell empty, which handed it the first
+    // column's width — under 200px at the Applications table's floor — and the instructions
+    // panel, which needs two 200px columns before it can lay out at all, threw on every display.
+    // In a release build that is a plain grey box. So the rows are split into one [Table] per
+    // run of ordinary rows, and each panel is a full-width sibling between two of them. The
+    // segments line up because every column width is a [FixedColumnWidth] or a
+    // [FlexColumnWidth] resolved against the same total; an [IntrinsicColumnWidth], which sizes
+    // to the cells it happens to contain, would break that alignment and is not used anywhere.
+    final segments = <Widget>[];
+    var pending = <TableRow>[
+      TableRow(
+        decoration: BoxDecoration(
+          color: palette.accentWash(0.05),
+          border: Border(bottom: BorderSide(color: palette.border)),
         ),
-        for (final row in rows) ...row.build(context, columns),
-      ],
-    );
+        children: [for (final column in columns) _HeaderCell(column: column, sort: sort, onSort: onSort)],
+      ),
+    ];
+    for (final row in rows) {
+      pending.add(row.build(context, columns));
+      final expanded = row.buildExpanded(context);
+      if (expanded != null) {
+        segments
+          ..add(segment(pending))
+          ..add(expanded);
+        pending = [];
+      }
+    }
+    if (pending.isNotEmpty) segments.add(segment(pending));
+
+    final table = Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: segments);
 
     return KintsugiPanel(
       child: Column(
@@ -166,13 +191,8 @@ class KintsugiTableRow {
   /// Content shown across the full width of the table directly under this row.
   final Widget? expanded;
 
-  List<TableRow> build(BuildContext context, List<TableColumnSpec> columns) {
-    final palette = context.palette;
-    final border = Border(bottom: BorderSide(color: palette.accentWash(0.12)));
-
-    return [
-      TableRow(
-        decoration: BoxDecoration(border: border),
+  TableRow build(BuildContext context, List<TableColumnSpec> columns) => TableRow(
+        decoration: BoxDecoration(border: _border(context)),
         children: [
           for (var i = 0; i < columns.length; i++)
             Padding(
@@ -188,23 +208,24 @@ class KintsugiTableRow {
               ),
             ),
         ],
+      );
+
+  /// The [expanded] panel as a full-width strip, or null when this row has none. [KintsugiTable]
+  /// places it between two [Table] segments rather than inside one — see its build for why.
+  Widget? buildExpanded(BuildContext context) {
+    if (expanded == null) return null;
+    return Container(
+      decoration: BoxDecoration(
+        border: _border(context),
+        color: context.palette.accentWash(0.03),
       ),
-      if (expanded != null)
-        TableRow(
-          decoration: BoxDecoration(border: border, color: palette.accentWash(0.03)),
-          children: [
-            // A Table has no column-span, so the panel goes in the first cell and every other
-            // cell is empty. The panel's own width is then the first column's, which is why the
-            // expanding column is always the widest one on a table that uses this.
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: _cellGutter, vertical: 18),
-              child: expanded!,
-            ),
-            for (var i = 1; i < columns.length; i++) const SizedBox.shrink(),
-          ],
-        ),
-    ];
+      padding: const EdgeInsets.symmetric(horizontal: _cellGutter, vertical: 18),
+      child: expanded,
+    );
   }
+
+  Border _border(BuildContext context) =>
+      Border(bottom: BorderSide(color: context.palette.accentWash(0.12)));
 }
 
 /// The narrowest a column may be and still render its header label without breaking a word.

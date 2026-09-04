@@ -38,6 +38,7 @@ void main() {
   Future<void> pumpTable(
     WidgetTester tester, {
     bool withChildRow = false,
+    Widget? expanded,
     double viewport = 900,
     // A declared floor, as every screen using this widget declares one. It matters that it is not
     // zero: the horizontal scroll view hands the table an unbounded width, so a table with no
@@ -65,8 +66,9 @@ void main() {
               sort: const TableSort('name'),
               onSort: (_) {},
               rows: [
-                const KintsugiTableRow(
-                  cells: [
+                KintsugiTableRow(
+                  expanded: expanded,
+                  cells: const [
                     Text('Microsoft Visual Studio Code'),
                     Text('12'),
                     Text('pm:Homebrew'),
@@ -190,5 +192,54 @@ void main() {
     final row = tester.getRect(find.text('pm:Homebrew'));
     final tall = tester.getRect(find.byIcon(Icons.expand_more));
     expect(row.center.dy, closeTo(tall.center.dy, 1));
+  });
+
+  testWidgets('gives an expanded panel the full width of the table, not the first column\'s',
+      (tester) async {
+    // A [Table] has no column-span, and the first cut put the panel in the first cell with the
+    // rest empty — so the Applications screen's instructions panel, which needs two 200px
+    // columns before it can lay out at all, was handed a ~190px column and threw. A build
+    // exception is a plain grey box in a release build, which is exactly what was reported.
+    await pumpTable(
+      tester,
+      viewport: 1400,
+      expanded: LayoutBuilder(
+        key: const ValueKey('panel'),
+        builder: (_, constraints) => SizedBox(
+          height: 40,
+          child: Text('width ${constraints.maxWidth.round()}'),
+        ),
+      ),
+    );
+
+    expect(tester.takeException(), isNull);
+    final panel = tester.getRect(find.byKey(const ValueKey('panel')));
+    final table = tester.getRect(find.byType(KintsugiTable));
+    // Less the cell gutter on each side and the panel's own 1px border.
+    expect(panel.width, closeTo(table.width - 24, 4));
+    // And beneath the row it belongs to, not beside it.
+    expect(panel.top, greaterThan(tester.getRect(find.text('12')).bottom));
+  });
+
+  testWidgets('keeps the rows below an expanded panel aligned with the rows above it',
+      (tester) async {
+    // The panel is spliced in as a sibling between two [Table]s, so the column boundaries of
+    // the second have to land where the first's did or every row under an open panel jogs
+    // sideways. They do because every column width resolves against the same total; this is
+    // what would catch an [IntrinsicColumnWidth] creeping in.
+    await pumpTable(
+      tester,
+      withChildRow: true,
+      expanded: const SizedBox(height: 40, child: Text('panel')),
+    );
+
+    expect(find.byType(Table), findsNWidgets(2));
+    final above = tester.getRect(find.text('pm:Homebrew').first).left;
+    final below = tester.getRect(find.text('pm:Homebrew').last).left;
+    expect(below, closeTo(above, 0.01));
+    // The indent is the child row's own, so compare the parent's cell edge instead.
+    final parentName = tester.getRect(find.text('Microsoft Visual Studio Code')).left;
+    final childName = tester.getRect(find.text('Google Chrome')).left;
+    expect(childName - parentName, closeTo(22, 0.01));
   });
 }

@@ -228,9 +228,9 @@ class _ApplicationsTable extends StatelessWidget {
           // difference: the 12px cell gutter costs 96px less across eight columns, and the table
           // now takes the panel's full width rather than laying out at exactly this figure, so
           // every column is wider than this arithmetic whenever the window allows. What is left
-          // is a real floor — below 1100 the expanded instructions panel, which is laid out in
-          // the first column, stops being usable, and the version and timestamp columns start
-          // wrapping their one value onto two lines.
+          // is a real floor — below 1100 the version and timestamp columns start wrapping their
+          // one value onto two lines. The expanded instructions panel does not bear on it: it is
+          // spliced in at the table's full width, not laid out in a column.
           minWidth: 1100,
           columns: columns,
           sort: state.sort == null
