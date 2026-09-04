@@ -27,6 +27,7 @@
 //! `remote_ipc::PipeConnection`). A 10ms poll costs nothing next to what it avoids.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -40,6 +41,7 @@ use crate::identity::{self, AgentIdentity};
 use crate::logging;
 use crate::remote_ipc::{self, FrameReader, IpcFrame, IpcMessage, PipeConnection, PipeListener};
 use crate::remote_protocol::{parse_server_message, AgentMessage, ConsentOutcome, ServerMessage};
+use crate::session_launcher::{console_session_with_user, SessionHelper};
 
 /// How long the relay waits between polls of its three channels.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -61,18 +63,38 @@ const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(60);
 /// nothing to retry against.
 const CONSENT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How often the service asks Windows whether there is still a console session with a user in it.
+///
+/// Also how long a freshly logged-in host waits before becoming reachable. Two seconds is
+/// imperceptible next to the time it takes somebody to sign in and open a browser, and it is two
+/// syscalls.
+const SESSION_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How long to wait for a launched helper to connect to the pipe.
+///
+/// Generous: the helper's only work before connecting is process startup, but that is on a host
+/// which may be busy installing something.
+const HELPER_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long the accept thread waits after a failed accept before trying again, so a persistent
+/// failure logs at a readable rate rather than spinning.
+const ACCEPT_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
 type Socket = WebSocket<MaybeTlsStream<std::net::TcpStream>>;
 
-/// Runs for the life of the service. Never returns until `shutdown` is set between connections.
+/// Runs for the life of the service. Never returns until `shutdown` is set.
 ///
-/// A note on stopping: this thread spends most of its life blocked in `PipeListener::accept`, which
-/// the Service Control Manager's stop cannot interrupt. That is deliberate rather than overlooked —
-/// the service's own `run_loop` returns promptly, `windows-service` reports STOPPED, and the process
-/// exits, taking this thread with it. Making the accept interruptible would mean overlapped I/O and
-/// an event object for no behavioural gain.
+/// # Reachability follows the console session now, not a connected process
+///
+/// It used to follow the tray process holding the pipe. With capture in a helper that exists only
+/// while a session runs, that signal is gone, so the service asks Windows directly:
+/// [`console_session_with_user`] answers "is there a console session with somebody logged into it",
+/// which is the same question as "is there a screen to share and somebody to ask". The control
+/// socket is held open exactly while the answer is yes, so a host with nobody logged in reports as
+/// unreachable — the same behaviour as before, arrived at more directly.
 pub fn run(config: Config, serial_number: String, shutdown: Arc<AtomicBool>) {
     let listener = match PipeListener::create() {
-        Ok(listener) => listener,
+        Ok(listener) => Arc::new(listener),
         Err(err) => {
             // Not fatal to the service: everything else it does still works, and remote control is
             // the only thing lost. Reported loudly because nothing else will explain why the Hosts
@@ -82,20 +104,39 @@ pub fn run(config: Config, serial_number: String, shutdown: Arc<AtomicBool>) {
         }
     };
 
+    // One accept thread for the service's whole life, rather than an accept per session.
+    //
+    // `ConnectNamedPipe` blocks with no timeout, so calling it from the relay loop would stall the
+    // control socket whenever a helper failed to start. Blocking forever is fine on a thread whose
+    // only job is to block: it sits in the accept between sessions, hands over the connection when
+    // a helper appears, and goes back to waiting.
+    let (connection_tx, connection_rx) = mpsc::channel::<(PipeConnection, u32)>();
+    {
+        let listener = listener.clone();
+        std::thread::spawn(move || loop {
+            match listener.accept() {
+                Ok(accepted) => {
+                    if connection_tx.send(accepted).is_err() {
+                        return;
+                    }
+                }
+                Err(err) => {
+                    logging::warn(&format!("could not accept a remote control client: {err:#}"));
+                    std::thread::sleep(ACCEPT_RETRY_INTERVAL);
+                }
+            }
+        });
+    }
+
     let mut backoff = INITIAL_RECONNECT_BACKOFF;
 
     while !shutdown.load(Ordering::SeqCst) {
-        let pipe = match listener.accept() {
-            Ok(pipe) => pipe,
-            Err(err) => {
-                logging::warn(&format!("could not accept a remote control pipe client: {err:#}"));
-                std::thread::sleep(backoff);
-                backoff = (backoff * 2).min(MAX_RECONNECT_BACKOFF);
-                continue;
-            }
+        let Some(session) = console_session_with_user() else {
+            // Nobody logged in. Not an error and not worth backing off over — it is the ordinary
+            // state of a server, and the moment somebody signs in the socket opens.
+            std::thread::sleep(SESSION_POLL_INTERVAL);
+            continue;
         };
-
-        logging::info("the console session's tray process connected for remote control");
 
         // Re-read from disk each time rather than taking an identity once. The service starts before
         // enrollment has necessarily happened, and it outlives a re-enrollment.
@@ -103,7 +144,7 @@ pub fn run(config: Config, serial_number: String, shutdown: Arc<AtomicBool>) {
         // `load` returns a Result here, unlike the macOS agent's: on Windows an identity that
         // cannot be *read* is told apart from one that does not exist, because the two need
         // completely different fixes and conflating them once had this agent re-enrolling on every
-        // check-in forever. Both mean no remote control, but they are logged differently.
+        // check-in forever.
         let identity = match identity::load(&config::identity_dir()) {
             Ok(Some(identity)) => identity,
             Ok(None) => {
@@ -122,9 +163,9 @@ pub fn run(config: Config, serial_number: String, shutdown: Arc<AtomicBool>) {
             }
         };
 
-        match relay(&config, &serial_number, &identity, pipe, &shutdown) {
+        match relay(&config, &serial_number, &identity, session, &connection_rx, &shutdown) {
             Ok(()) => {
-                logging::info("the remote control connection closed; waiting for the tray process again");
+                logging::info("the remote control socket closed; reconnecting");
                 backoff = INITIAL_RECONNECT_BACKOFF;
             }
             Err(err) => {
@@ -139,19 +180,41 @@ pub fn run(config: Config, serial_number: String, shutdown: Arc<AtomicBool>) {
     }
 }
 
-/// Everything in flight for one tray connection.
+/// Everything in flight for one control socket.
 struct Relay {
     control: Socket,
     session: Option<Socket>,
     session_id: Option<String>,
     reader: FrameReader,
+    /// The pipe to the session helper, and the helper itself. Both exist only while a session is
+    /// running, and they are torn down together — a helper without a pipe is capturing to nowhere,
+    /// and a pipe without a helper is a dead file handle.
+    pipe: Option<PipeConnection>,
+    helper: Option<SessionHelper>,
+}
+
+impl Relay {
+    /// Stops the helper and drops its pipe.
+    ///
+    /// Dropping the pipe is what releases the listener's instance for the next session — see
+    /// `PipeConnection`'s `Drop`, which disconnects without closing.
+    fn end_session(&mut self) {
+        self.session = None;
+        self.session_id = None;
+        self.pipe = None;
+
+        if let Some(helper) = self.helper.take() {
+            helper.stop();
+        }
+    }
 }
 
 fn relay(
     config: &Config,
     serial_number: &str,
     identity: &AgentIdentity,
-    mut pipe: PipeConnection,
+    console_session: u32,
+    connections: &Receiver<(PipeConnection, u32)>,
     shutdown: &Arc<AtomicBool>,
 ) -> Result<()> {
     let url = config.remote_control_url(serial_number, None);
@@ -168,44 +231,90 @@ fn relay(
         },
     )?;
 
-    let mut relay = Relay { control, session: None, session_id: None, reader: FrameReader::new() };
+    let mut relay = Relay {
+        control,
+        session: None,
+        session_id: None,
+        reader: FrameReader::new(),
+        pipe: None,
+        helper: None,
+    };
+
+    let mut next_session_check = Instant::now() + SESSION_POLL_INTERVAL;
 
     while !shutdown.load(Ordering::SeqCst) {
-        // 1. The server, to the tray.
+        // 0. Has the user logged out from under us? Checked on a timer rather than every pass —
+        //    it is two syscalls and it cannot change between frames in any way that matters.
+        if Instant::now() >= next_session_check {
+            next_session_check = Instant::now() + SESSION_POLL_INTERVAL;
+            if console_session_with_user() != Some(console_session) {
+                logging::info("the console session ended; closing the remote control socket");
+                relay.end_session();
+                return Ok(());
+            }
+        }
+
+        // 1. The server, to the helper.
         match read_text(&mut relay.control)? {
             SocketRead::Message(text) => {
-                if let Some(message) = handle_server_message(&text, &mut pipe, &mut relay)? {
-                    logging::info(&format!("remote control: {message}"));
+                if let Some(line) =
+                    handle_server_message(&text, console_session, connections, &mut relay)?
+                {
+                    logging::info(&format!("remote control: {line}"));
                 }
             }
-            SocketRead::Closed => return Ok(()),
+            SocketRead::Closed => {
+                relay.end_session();
+                return Ok(());
+            }
             SocketRead::Idle => {}
         }
 
-        // 2. The tray, to the server or to the viewer.
-        let chunk = pipe.read_available().context("the tray process's pipe closed")?;
-        if !chunk.is_empty() {
-            relay.reader.push(&chunk);
+        // 2. The helper, to the server or to the viewer.
+        if relay.pipe.is_some() {
+            let chunk = match relay.pipe.as_mut().expect("checked").read_available() {
+                Ok(chunk) => chunk,
+                Err(err) => {
+                    // The helper has gone — it exited, or was killed. That ends the session rather
+                    // than the socket: the host is still reachable and can be asked again.
+                    logging::info(&format!("the session helper disconnected: {err:#}"));
+                    let session_id = relay.session_id.clone().unwrap_or_default();
+                    relay.end_session();
+                    queue(
+                        &mut relay.control,
+                        &AgentMessage::SessionEnded {
+                            session_id,
+                            reason: "the host's session helper stopped".to_string(),
+                        },
+                    )?;
+                    Vec::new()
+                }
+            };
+
+            if !chunk.is_empty() {
+                relay.reader.push(&chunk);
+            }
+
+            while let Some(frame) = relay.reader.next_frame()? {
+                handle_helper_frame(frame, config, serial_number, identity, &mut relay)?;
+            }
         }
 
-        while let Some(frame) = relay.reader.next_frame()? {
-            handle_tray_frame(frame, config, serial_number, identity, &mut relay)?;
-        }
-
-        // 3. The viewer's input, to the tray.
+        // 3. The viewer's input, to the helper.
         if let Some(session) = relay.session.as_mut() {
             match read_text(session)? {
                 SocketRead::Message(json) => {
-                    write_pipe(&mut pipe, &IpcMessage::ViewerInput { json })?;
+                    if let Some(pipe) = relay.pipe.as_mut() {
+                        write_pipe(pipe, &IpcMessage::ViewerInput { json })?;
+                    }
                 }
                 SocketRead::Closed => {
-                    let session_id = relay.session_id.clone().unwrap_or_default();
                     logging::info("the viewer disconnected");
-                    relay.session = None;
-                    relay.session_id = None;
-                    write_pipe(
-                        &mut pipe,
-                        &IpcMessage::SessionEnded {
+                    let session_id = relay.session_id.clone().unwrap_or_default();
+                    relay.end_session();
+                    queue(
+                        &mut relay.control,
+                        &AgentMessage::SessionEnded {
                             session_id,
                             reason: "the viewer disconnected".to_string(),
                         },
@@ -225,11 +334,50 @@ fn relay(
         std::thread::sleep(POLL_INTERVAL);
     }
 
+    relay.end_session();
     Ok(())
 }
 
-/// Forwards one server message to the tray. Returns a line worth logging, if any.
-fn handle_server_message(text: &str, pipe: &mut PipeConnection, relay: &mut Relay) -> Result<Option<String>> {
+/// Launches the session helper and waits for it to connect.
+///
+/// The process id is checked against the one just launched. That is a stronger guarantee than the
+/// old console-session test and it composes with the pipe's ACL, which admits nothing below SYSTEM
+/// or Administrators — so an unexpected process cannot be on the other end, and if somehow one is,
+/// it is refused rather than handed a session.
+fn start_session_helper(
+    console_session: u32,
+    connections: &Receiver<(PipeConnection, u32)>,
+) -> Result<(PipeConnection, SessionHelper)> {
+    let helper = SessionHelper::launch(console_session)?;
+
+    loop {
+        let (pipe, client_pid) = connections
+            .recv_timeout(HELPER_CONNECT_TIMEOUT)
+            .map_err(|_| anyhow!("the session helper did not connect within {HELPER_CONNECT_TIMEOUT:?}"))?;
+
+        if client_pid == helper.pid() {
+            return Ok((pipe, helper));
+        }
+
+        // A connection from something that is not the helper we launched. Dropped, and the wait
+        // resumes rather than failing: the pipe's ACL means this can only be another SYSTEM or
+        // Administrator process, most plausibly a helper left over from a session that has just
+        // ended, and treating a stale one as fatal would lose the session that is starting.
+        logging::warn(&format!(
+            "ignoring a remote control connection from pid {client_pid}; expecting the helper at pid {}",
+            helper.pid()
+        ));
+        drop(pipe);
+    }
+}
+
+/// Forwards one server message onward, launching the helper if this is a new request.
+fn handle_server_message(
+    text: &str,
+    console_session: u32,
+    connections: &Receiver<(PipeConnection, u32)>,
+    relay: &mut Relay,
+) -> Result<Option<String>> {
     let message = match parse_server_message(text) {
         Ok(Some(message)) => message,
         // A newer server mentioning something this build has never heard of. Logged and ignored,
@@ -240,28 +388,59 @@ fn handle_server_message(text: &str, pipe: &mut PipeConnection, relay: &mut Rela
 
     match message {
         ServerMessage::SessionRequested { session_id, requested_by, consent_timeout_seconds } => {
+            if relay.helper.is_some() {
+                // One session per host, which the server also enforces. Refusing is the answer that
+                // cannot go wrong.
+                queue(
+                    &mut relay.control,
+                    &AgentMessage::Consent { session_id, outcome: ConsentOutcome::Denied },
+                )?;
+                return Ok(Some("refused a second session on a host already in one".to_string()));
+            }
+
             let line = format!("session {session_id} requested by {requested_by}");
-            write_pipe(
-                pipe,
-                &IpcMessage::SessionRequested { session_id, requested_by, consent_timeout_seconds },
-            )?;
+
+            match start_session_helper(console_session, connections) {
+                Ok((mut pipe, helper)) => {
+                    write_pipe(
+                        &mut pipe,
+                        &IpcMessage::SessionRequested {
+                            session_id,
+                            requested_by,
+                            consent_timeout_seconds,
+                        },
+                    )?;
+                    relay.pipe = Some(pipe);
+                    relay.helper = Some(helper);
+                }
+                Err(err) => {
+                    // Nothing was captured and nobody was asked, so this is reported as a refusal
+                    // rather than left to time out — the administrator gets an answer and the audit
+                    // record says the host could not ask.
+                    logging::error(&format!("could not start a remote control session: {err:#}"));
+                    queue(
+                        &mut relay.control,
+                        &AgentMessage::Consent { session_id, outcome: ConsentOutcome::Denied },
+                    )?;
+                    return Ok(Some(format!("{line}, but the session helper would not start: {err:#}")));
+                }
+            }
+
             Ok(Some(line))
         }
 
         ServerMessage::SessionEnded { session_id, reason } => {
-            // Dropped before the tray is told, so a frame arriving in the same pass has nowhere to
-            // go rather than being written to a socket the server has finished with.
-            relay.session = None;
-            relay.session_id = None;
-            let line = format!("the server ended session {session_id}: {reason}");
-            write_pipe(pipe, &IpcMessage::SessionEnded { session_id, reason })?;
-            Ok(Some(line))
+            // The helper is stopped rather than asked to stop: it holds no lock and is mid-way
+            // through nothing but a screen capture, and killing it is what guarantees the capture
+            // has actually ceased.
+            relay.end_session();
+            Ok(Some(format!("the server ended session {session_id}: {reason}")))
         }
     }
 }
 
-/// Acts on one message from the tray.
-fn handle_tray_frame(
+/// Acts on one message from the session helper.
+fn handle_helper_frame(
     frame: IpcFrame,
     config: &Config,
     serial_number: &str,
@@ -337,10 +516,10 @@ fn handle_tray_frame(
             Ok(())
         }
 
-        // The three service-to-tray variants, which the tray never sends back. Ignored rather than
-        // fatal, so a version skew between the two halves cannot take the relay down.
+        // The three service-to-helper variants, which the helper never sends back. Ignored rather
+        // than fatal, so a version skew between the two halves cannot take the relay down.
         IpcFrame::Json(other) => {
-            logging::warn(&format!("ignoring an unexpected message from the tray process: {other:?}"));
+            logging::warn(&format!("ignoring an unexpected message from the session helper: {other:?}"));
             Ok(())
         }
     }

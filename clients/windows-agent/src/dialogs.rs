@@ -62,8 +62,8 @@ fn remote_control_message(requested_by: &str, restrictions: &[String]) -> String
     let mut message = format!(
         "{requested_by} is asking to control this computer remotely.\r\n\r\n\
          If you allow this, they will see your screen and be able to use your keyboard and mouse as \
-         though they were sitting here. You can end the session at any time from the Kintsugi icon \
-         in the notification area.\r\n"
+         though they were sitting here. A bar will appear at the top of the screen for as long as \
+         the session lasts, with an \"End session\" button you can press at any time.\r\n"
     );
 
     if !restrictions.is_empty() {
@@ -447,8 +447,11 @@ mod tests {
 
         assert!(message.contains("admin@example.com is asking to control this computer"), "{message}");
         assert!(message.contains("keyboard and mouse"), "{message}");
-        // Somebody who regrets allowing it needs to know there is a way out.
-        assert!(message.contains("notification area"), "{message}");
+        // Somebody who regrets allowing it needs to know there is a way out, and it has to name the
+        // thing that actually exists — the tray item this used to point at is gone, replaced by the
+        // session helper's own banner.
+        assert!(message.contains("End session"), "{message}");
+        assert!(message.contains("top of the screen"), "{message}");
     }
 
     #[test]

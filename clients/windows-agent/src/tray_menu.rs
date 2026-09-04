@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Mutex, OnceLock};
 
@@ -36,7 +36,6 @@ const MENU_ID_STATUS: usize = 100;
 const MENU_ID_PROGRESS: usize = 101;
 const MENU_ID_PATCH_NOW: usize = 102;
 const MENU_ID_VERSION: usize = 103;
-const MENU_ID_END_REMOTE_SESSION: usize = 104;
 
 /// The tray window's handle, published for the *other* threads that need to poke the UI.
 ///
@@ -60,21 +59,6 @@ static PENDING_NOTIFICATIONS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new
 /// is a plain function pointer with no room for state.
 static PATCH_NOW_TX: OnceLock<Sender<()>> = OnceLock::new();
 
-/// Who is currently controlling this host, if anybody.
-///
-/// **The only thing on screen that says a session is happening, which makes it part of the security
-/// model rather than a nicety.** Somebody who allowed a session — or who walks up to a machine where
-/// one is running — has to be able to see whose it is and end it without finding an administrator.
-///
-/// A `Mutex<Option<String>>` rather than a channel because the menu is rebuilt from scratch on every
-/// right-click (see `show_menu`), so this only ever needs reading, never signalling.
-static REMOTE_SESSION: Mutex<Option<String>> = Mutex::new(None);
-
-/// Set by "End Remote Session" and cleared by whoever acts on it. A flag rather than a channel for
-/// the same reason the macOS agent uses one: the click has to be meaningful whether or not a session
-/// is running at that instant.
-static END_REMOTE_SESSION: AtomicBool = AtomicBool::new(false);
-
 /// Whether "Patch Now" is currently selectable — greyed out mid-cycle, the same way the macOS
 /// agent's menu item is, so a second cycle can't be started on top of a running one.
 static PATCH_NOW_ENABLED: AtomicIsize = AtomicIsize::new(1);
@@ -91,20 +75,6 @@ static MENU_TEXT: Mutex<(String, String)> = Mutex::new((String::new(), String::n
 /// scheduler blocks on HTTP calls, five-minute warnings, and modal dialogs, and a message loop that
 /// stops being pumped for that long makes the icon stop responding to clicks. So the scheduler runs
 /// on a background thread and the UI keeps this one, exactly as on macOS.
-/// Shows or hides the remote-session block in the tray menu. Safe to call from any thread.
-///
-/// Unlike the macOS agent this needs no marshalling onto a UI thread: the Windows menu is built on
-/// demand when the icon is clicked, so setting a value is the whole of it.
-pub fn report_remote_session(requested_by: Option<String>) {
-    if let Ok(mut held) = REMOTE_SESSION.lock() {
-        *held = requested_by;
-    }
-}
-
-/// Whether the person at the keyboard has asked for the session to end, clearing the request.
-pub fn take_end_remote_session_request() -> bool {
-    END_REMOTE_SESSION.swap(false, Ordering::SeqCst)
-}
 
 pub fn run(patch_now_tx: Sender<()>) -> Result<()> {
     let _ = PATCH_NOW_TX.set(patch_now_tx);
@@ -305,16 +275,10 @@ fn show_menu(hwnd: HWND) {
         AppendMenuW(menu, MF_STRING | MF_GRAYED, MENU_ID_PROGRESS, progress_text.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
 
-        // Directly under the status lines and above "Patch Now": while a session is running it is
-        // the most important thing in this menu.
-        if let Some(requested_by) = REMOTE_SESSION.lock().ok().and_then(|held| held.clone()) {
-            let session_text = wide(&format!("Remote session: {requested_by}"));
-            AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, session_text.as_ptr());
-            let end_text = wide("End Remote Session");
-            AppendMenuW(menu, MF_STRING, MENU_ID_END_REMOTE_SESSION, end_text.as_ptr());
-            AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
-        }
-
+        // No remote-session entry here, deliberately. The session helper shows its own banner (see
+        // session_banner), which is both more visible and — being a SYSTEM-owned window — something
+        // user-level malware cannot click or close. Two indicators would be two sources of truth
+        // that could disagree about whether a session is running.
         let patch_now_text = wide("Patch Now");
         let patch_now_flags = if patch_now_enabled { MF_STRING } else { MF_STRING | MF_GRAYED };
         AppendMenuW(menu, patch_now_flags, MENU_ID_PATCH_NOW, patch_now_text.as_ptr());
@@ -366,12 +330,6 @@ unsafe extern "system" fn tray_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
             0
         }
         WM_COMMAND => {
-            if (wparam & 0xFFFF) as usize == MENU_ID_END_REMOTE_SESSION {
-                crate::logging::info("\"End Remote Session\" clicked in the notification area");
-                END_REMOTE_SESSION.store(true, Ordering::SeqCst);
-                return 0;
-            }
-
             if (wparam & 0xFFFF) as usize == MENU_ID_PATCH_NOW {
                 logging::info("\"Patch Now\" clicked in the notification area");
                 match PATCH_NOW_TX.get().map(|tx| tx.send(())) {

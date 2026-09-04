@@ -813,34 +813,63 @@ hold the identity, cannot reach a desktop at all because of session 0 isolation.
 this alone.
 
 So Windows splits it, and `remote_ipc` is the boundary: the **service** holds both WebSockets and
-relays bytes, the **tray process** asks the user and does the capture and the input, and a named pipe
-joins them. The rejected alternative was handing the certificate and key to the tray so it could
-behave like macOS — that would put the fleet private key in the address space of a process running as
-whoever is logged in, which is precisely what the identity directory's ACL exists to prevent.
+relays bytes, a **session helper** does the asking, the capturing and the input, and a named pipe
+joins them. The rejected alternative was handing the certificate and key to a per-user process so it
+could behave like macOS — that would put the fleet private key in the address space of a process
+running as whoever is logged in, which is precisely what the identity directory's ACL exists to
+prevent.
 
-Three things about that pipe are load-bearing. It is **not** the existing `queue.rs`: a queue entry is
-a file in a drop-box polled every two seconds, which is right for "run this patch" and hopeless for a
-frame stream — but the queue's security property is kept, in that **a pipe message never carries
-anything executable** either. Its DACL admits Local System, Administrators and `IU` (interactive
-users) and nothing else, with no `WRITE_DAC` and no `FILE_CREATE_PIPE_INSTANCE`, so a logged-in user
-can neither widen it nor stand up a rival instance and impersonate the service. And because `IU`
-admits *every* interactive session, `PipeListener::accept` additionally checks the client's session
-against `WTSGetActiveConsoleSessionId` and refuses anything else — which stops a second logged-in
-session or a service account standing in for the console user, though not an attacker already running
-code as that user, who can read their screen directly anyway.
+**The helper runs as SYSTEM inside the user's session, and both halves of that are load-bearing.**
+The first cut put this work in the tray process, and it could not answer a UAC prompt — the single
+most common thing a support session needs. Two separate Windows rules stood in the way. `SendInput`
+cannot reach a window at higher integrity than the sender, so an elevated installer could be watched
+and not clicked. And a UAC prompt is drawn on a *different desktop object* (`Winlogon`), which a
+thread attached to `Default` can neither read nor write — so the screen froze on the last frame until
+somebody answered at the machine.
 
-**Windows reachability follows the pipe, not the service.** The control socket exists only while a
-console-session tray is connected. That is the correct semantics rather than a shortcut: with nobody
-logged in there is no screen and nobody to ask, so the host is genuinely unreachable and the server
-says so — the same answer macOS gives, arrived at differently.
+`session_launcher` therefore duplicates the **service's own** token, moves the copy into the console
+session with `SetTokenInformation(TokenSessionId)` — which needs `SE_TCB_NAME`, so only SYSTEM can do
+it — and launches the helper with it. `WTSQueryUserToken` is deliberately *not* used to build that
+token: it would give the user's own token and a medium-integrity process, back where the tray was.
+`remote_desktop` then keeps the capture thread attached to whichever desktop has input, following
+Windows onto the secure desktop and back.
 
-**Two things Windows remote control cannot do, and neither is a bug.** `SendInput` from the tray
-process runs at medium integrity, so UIPI refuses input aimed at an already-elevated window; and the
-UAC secure desktop cannot be captured or injected into by any ordinary process, so the picture
-freezes on the last frame until a prompt is answered at the machine. Both would need a permanently
-elevated input-injecting helper in every logged-in session, which is a much bigger thing to justify
-than the gap it closes. The consent dialog lists both up front rather than letting them be discovered
-mid-call.
+**Reading "a SYSTEM process doing input injection" as a step backwards gets it exactly wrong.** It is
+a net improvement on three counts. It exists only while a session runs, spawned by the one process
+holding this host's identity and only after the server asked. The pipe now has no interactive user on
+either end, so its ACL grants Local System and Administrators and **nothing else** — which deletes,
+rather than mitigates, the attack the tray design had to reason about, where a local process races to
+answer a consent request and feeds the operator a fabricated screen. And the consent dialog is now a
+SYSTEM-owned window, so UIPI works in our favour: user-level malware can neither click it nor
+suppress it.
+
+**`install.ps1` pinning `obj= LocalSystem` is now load-bearing twice over.** It was already needed so
+the service could read the identity directory; it is now also what makes `SE_TCB_NAME` available, and
+without it the helper cannot be launched into the session at all. A hardening baseline that moves the
+service to a virtual account breaks remote control specifically, and the error names the privilege.
+
+**Thread layout in the helper is dictated by one rule**: `SetThreadDesktop` refuses a thread that
+owns any window. So the capture-and-input thread creates none and can follow desktops; the consent
+dialog and the session banner each get their own thread and attach once. The capture must also be
+**rebuilt** on a desktop switch — its device contexts belong to the desktop they were made on, and a
+stale one yields frames of the desktop the user is no longer looking at.
+
+**The indicator moved from the tray to a banner, and that is an upgrade.** A `SYSTEM`-owned bar at
+the top of the screen with an "End session" button is visible without being looked for, where a tray
+item has to be clicked to be found — and UIPI stops a medium-integrity process clicking it *or
+closing it to hide that a session is running*. The tray's remote-session entries were removed rather
+than kept alongside, so there is one source of truth about whether a session exists.
+
+**Windows reachability now follows the console session, not a connected process.** With capture in a
+helper that exists only during a session, "a tray is connected" is gone as a signal, so the service
+asks Windows: `console_session_with_user` is `WTSGetActiveConsoleSessionId` plus a
+`WTSQueryUserToken` probe, and the control socket is held open exactly while the answer is yes. A
+locked screen still counts, which is correct — the consent dialog appears on the lock screen, and if
+nobody is there it times out and is recorded as a timeout.
+
+**One restriction is left on Windows and no process can fix it.** While the secure desktop has input,
+only that prompt is usable — that is what a secure desktop is *for*. The consent dialog says so, and
+the elevated-window wording it used to carry is gone, because that gap actually closed.
 
 **Windows captures with GDI, not Desktop Duplication, and Remote Desktop is why.** DXGI Desktop
 Duplication is the modern API and gives dirty rectangles for free, but `DuplicateOutput` returns
@@ -1039,7 +1068,7 @@ original — then the others for what each platform forced to differ. The differ
 | OS updates | `softwareupdate` | Windows Update Agent COM API, via PowerShell | apt / dnf / yum / zypper / pacman / apk |
 | Host identity | hardware serial, always present | SMBIOS serial, **often a placeholder** | DMI serial, **often a placeholder** |
 | Nobody logged in | nothing patches | nothing patches | root service patches unattended — see below |
-| Remote control | per-user process, consent + capture + input | service holds the socket, tray does the rest, named pipe between | resident root unit holds the socket, per-user process does the rest, unix socket between; X11 via XTEST, Wayland via a separate portal/PipeWire binary |
+| Remote control | per-user process, consent + capture + input | service holds the socket, a **SYSTEM session helper** does the rest, named pipe between | resident root unit holds the socket, per-user process does the rest, unix socket between; X11 via XTEST, Wayland via a separate portal/PipeWire binary |
 
 **Linux borrows its architecture from Windows, not macOS, and for the same forcing reason.** Every
 upgrade it can perform (`apt-get`, `dnf`, `flatpak update --system`, `snap refresh`) requires root,
@@ -1287,6 +1316,10 @@ by then — only the long-running per-user units get restarted.
   is `ByteData`'s default on the reading side; get it wrong and the picture still draws, just
   scrambled. `web/test/data/remote_control_mapper_test.dart` asserts the exact bytes the agent's own
   test emits, and is the only check that exists.
+- `session_launcher::HELPER_ARGUMENT` and the `--remote-session-helper` arm in `main` are the same
+  string in two places. Rename one and the helper starts, fails to recognise its own mode, runs an
+  ordinary check-in instead, and the session times out having produced no frame — with nothing in
+  either log saying why.
 - All three agents' `remote_protocol.rs` are copies of one another and must stay so. `diff` any two
   and exactly one line should differ outside the module comment — the cross-reference naming
   `virtual_key_for_hid`, `scan_code_for_hid` or `xtest_keycode_for_hid`, because the three platforms

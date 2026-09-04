@@ -10,12 +10,15 @@ mod policy;
 mod progress_window;
 mod queue;
 mod remote_control;
+mod remote_desktop;
 mod remote_ipc;
 mod remote_protocol;
 mod remote_session;
 mod schedule;
 mod screen_capture;
 mod self_removal;
+mod session_banner;
+mod session_launcher;
 mod self_update;
 mod service;
 mod status;
@@ -60,6 +63,12 @@ fn main() -> Result<()> {
     std::panic::set_hook(Box::new(|info| logging::error(&format!("panic: {info}"))));
 
     let args: Vec<String> = std::env::args().collect();
+
+    // The session helper, launched by the service as SYSTEM into the logged-in session — never run
+    // by hand. Checked before --agent because it is the most privileged mode and the most specific.
+    if args.iter().any(|arg| arg == "--remote-session-helper") {
+        return run_remote_session_helper();
+    }
 
     if args.iter().any(|arg| arg == "--agent") {
         return run_ui_agent();
@@ -156,6 +165,35 @@ fn run_service_inner() -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The remote control session helper (`--remote-session-helper`).
+// ---------------------------------------------------------------------------------------------
+
+/// One remote control session, then exit.
+///
+/// Launched by the service as SYSTEM inside the logged-in session — see `session_launcher` for why
+/// it cannot be the user's own token and `remote_desktop` for what the privilege buys. Not a mode
+/// anyone should run by hand: without the service on the other end of the pipe it connects to
+/// nothing and exits.
+///
+/// Logs to the service's own log rather than a per-user one. It runs as SYSTEM, so it has no user
+/// state directory to write to, and a session's story is more useful interleaved with the service's
+/// than in a file of its own.
+fn run_remote_session_helper() -> Result<()> {
+    hide_console_window();
+    logging::init(&config::service_log_path());
+    logging::info("kintsugi-agent (--remote-session-helper) starting");
+
+    let result = remote_session::run();
+
+    match &result {
+        Ok(()) => logging::info("the remote control session helper is exiting"),
+        Err(err) => logging::error(&format!("the remote control session helper failed: {err:#}")),
+    }
+
+    result
+}
+
+// ---------------------------------------------------------------------------------------------
 // The per-user half (`--agent`) — the counterpart to the macOS agent's LaunchAgent.
 // ---------------------------------------------------------------------------------------------
 
@@ -200,16 +238,6 @@ fn run_ui_agent() -> Result<()> {
 
     let (patch_now_tx, patch_now_rx) = mpsc::channel();
     let report: Box<StatusReporter> = Box::new(tray_menu::report_status);
-
-    // A third thread, for the desktop half of remote control: the consent dialog, the screen
-    // capture and the input injection, all of which need this session and none of which the service
-    // can do (session 0 isolation). It talks to the service over a named pipe rather than to the
-    // server, because this process still holds no identity — see `remote_ipc`.
-    //
-    // Separate from the scheduler because it spends its life polling a pipe at 10ms while the
-    // scheduler sleeps on a minute-long timer, and separate from the UI thread because a session
-    // must not stall the notification area's message pump.
-    std::thread::spawn(remote_session::run);
 
     std::thread::spawn(move || run_scheduler(current_policy, state, policy_cache_path, patch_now_rx, report));
 
