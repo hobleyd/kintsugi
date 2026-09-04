@@ -87,6 +87,10 @@ cd clients/windows-agent && cargo test
 # container (see below), which is a real Linux build rather than a cross-compile.
 cd clients/linux-agent && cargo build --release
 cd clients/linux-agent && cargo test
+
+# The Linux agent's Wayland backend, which is its own crate because it links libpipewire (see
+# "Couplings"). Needs libpipewire-0.3-dev >= 0.3.65 — debian:12 or newer, not ubuntu:22.04.
+cd clients/linux-agent-wayland && cargo test
 ```
 
 There is no `IDesignTimeDbContextFactory`, so `dotnet ef` resolves the connection string from
@@ -173,6 +177,34 @@ image needs nothing added. Every output-parsing function — `flatpak list`, `sn
 serial screening, `apt-get --just-print upgrade` and the four other package managers' listings —
 takes a `&str` and has tests against captured real output, for exactly the reason the Windows
 `winget list` parser does.
+
+**Verifying the Wayland backend actually captures.** `cargo test` checks the framing, the pod and
+the slot semantics; none of that says whether PipeWire will hand over a frame, and every way of
+getting that wrong fails as a stream that connects and delivers nothing. The negotiation needs no
+compositor — any PipeWire producer exercises the same code — so the cheap decisive test is:
+
+```bash
+# in a container with pipewire, wireplumber, gstreamer1.0-pipewire and libpipewire-0.3-dev
+pipewire & wireplumber & sleep 2
+# mode=provide is load-bearing: in its default mode pipewiresink looks for somewhere to render and
+# publishes nothing, so there is no node to target.
+gst-launch-1.0 -q videotestsrc pattern=smpte is-live=true \
+    ! video/x-raw,format=BGRx,width=640,height=480,framerate=30/1 ! pipewiresink mode=provide &
+sleep 3
+NODE=$(pw-dump | ... Stream/Output/Video ...)
+cargo run --example capture-node -- "$NODE" > frames.bin   # then decode the framing
+```
+
+A real compositor is only needed to exercise the *portal*, which is a separate question and worth
+standing up once: `debian:trixie-slim` with `sway pipewire wireplumber xdg-desktop-portal
+xdg-desktop-portal-wlr`, `WLR_BACKENDS=headless WLR_RENDERER=pixman`, `XDG_CURRENT_DESKTOP=sway`
+(without which the frontend matches no backend and every request fails with no detail), and
+`~/.config/xdg-desktop-portal-wlr/config` naming an `output_name` before the portal starts — it
+otherwise looks for slurp or wofi to ask a human. That environment confirms the ScreenCast/no-
+RemoteDesktop split wlroots really has, which is the view-only path. It does *not* deliver frames:
+sway's headless output has no DRM device, so the GLES2 renderer will not initialise and pixman's
+screencopy never offers the portal a format. `grim` working there while the portal does not is how to
+tell that apart from a bug in this code.
 
 **Verifying a server-written upgrade script actually works.** `dotnet test` only asserts the shape
 of the text; it never runs it. The scripts' `--update-version` mode is a few lines of `curl` against
@@ -828,18 +860,84 @@ oneshot on a path watch, and the per-user unit holds no identity — so remote c
 `apt-get` runs deadlocking on the dpkg lock, this unit installs nothing, and holding it would mean a
 remote session blocked patching for as long as somebody was watching.
 
-The second is **X11 only, with Wayland refused rather than half-supported**. Capturing a Wayland
-session means the `xdg-desktop-portal` ScreenCast interface, which hands back a PipeWire node — and
-PipeWire is a C library. This agent links none, which is the only reason CI can ship a statically
-linked musl binary with no libc floor at all. Linking PipeWire would reintroduce that floor for the
-whole fleet to add remote control on part of it. So capture is `x11rb` (pure Rust, no libxcb) and
-input is XTEST, and a Wayland host reports as unreachable with a reason.
+The second is **two capture and input backends, chosen at session start**, because X11 and Wayland
+share nothing here. `backend.rs` picks one; everything downstream — `FrameEncoder`, the tiles,
+`remote_ipc`, the server, the viewer — is identical either way.
 
-**The Wayland check runs before the display check, and that ordering is the whole point.** Most
-Wayland sessions also run XWayland and *do* set `DISPLAY`, so an X11 connection succeeds — and then
-the root window is not the compositor's output, so `GetImage` returns black or a desktop containing
-only X11 clients. A plausible-looking wrong picture is far worse than an error, so
-`screen_capture::unavailable_reason` tests for Wayland first.
+**Wayland needs a fourth binary, and that is the whole design.** Capture goes through
+`xdg-desktop-portal`'s ScreenCast interface, which hands back a PipeWire node — and `libpipewire` is
+a C library. The agent links none, which is the only reason CI ships a statically linked musl binary
+with no libc floor at all; linking PipeWire would reintroduce that floor for the whole fleet in order
+to add remote control on part of it. So the PipeWire half lives in `clients/linux-agent-wayland`,
+a separate binary shipped in the same archive and started only for the duration of a session. It
+holds no identity, makes no network call and knows nothing about consent — it captures pixels and
+injects input, and every security decision stays in the process holding the fleet private key.
+
+**It is started by the per-user process, not the root service, and that is forced.** The portal is
+per-user in every respect that matters: `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR` and
+`DBUS_SESSION_BUS_ADDRESS` all name the logged-in user's session, and the portal keys its permission
+store by uid. A helper launched by the root service would be asking *root's* compositor for *root's*
+grant, and there is not one. `kintsugi-agent-ui.service` already has all three variables from
+systemd, so it inherits them by not clearing them — and capture already lived there, so nothing about
+the architecture moves.
+
+Raw frames are large (8 MB at 1920x1080) and cross exactly one boundary, the helper's stdout;
+encoding stays in the per-user process, so what goes over `remote_ipc` is the same few tens of
+kilobytes of JPEG tiles the X11 path sends.
+
+**A Wayland host may be watchable and not drivable, and the viewer has to say so.** Capture and input
+are one portal session — `NotifyPointerMotionAbsolute` names the stream it is positioning within, and
+the portal only accepts a stream from the same session — but `RemoteDesktop` is optional and
+**wlroots does not implement it**, so Sway, Hyprland and river hosts get ScreenCast alone. The
+negotiation falls back to capture-only and reports `canControlInput: false`, which is what that flag
+on the wire exists for. Without it an operator sees a live picture that ignores the mouse and
+concludes the session is broken. Do not "fix" this by writing to `/dev/uinput` as root: that bypasses
+the portal's consent entirely, which is the thing the portal exists to enforce.
+
+**The Wayland check runs before the X11 one, and that ordering is the whole point.** Most Wayland
+sessions also run XWayland and *do* set `DISPLAY`, so an X11 connection succeeds — and then the root
+window is not the compositor's output, so `GetImage` returns black or a desktop containing only X11
+clients. A plausible-looking wrong picture is far worse than an error, so `backend::is_wayland_session`
+is asked first and `screen_capture::unavailable_reason` is now X11's alone.
+
+**The host user is asked twice, deliberately.** Once by the agent (`dialogs::confirm_remote_control`,
+which names the administrator) and once by the portal (which names only the application). Neither can
+go: the agent's is the only one that can say *who* is asking, and the portal's is the compositor's own
+security boundary. The portal's uses `PersistMode::ExplicitlyRevoked` with a stored restore token so
+it is asked once per host rather than once per session; the agent's is asked every time and must
+never be persisted.
+
+**Three PipeWire mistakes that each fail silently, all found by running it rather than reading it.**
+`clients/linux-agent-wayland/examples/capture-node.rs` streams any PipeWire node with the real
+capture module, so the negotiation can be exercised against `gst-launch-1.0 videotestsrc ...
+pipewiresink mode=provide` with no compositor involved. It is an example rather than a flag on the
+binary because a `--node-id` switch would be a way to point the shipped helper at a stream the portal
+never granted. What it caught:
+
+- **Without `StreamFlags::AUTOCONNECT` no link is ever created.** With a target node id it means
+  "link to *that* node", not "pick something"; without it the stream sits in `Paused` forever and
+  nothing errors. It is the *session manager* that acts on it, so a host with no wireplumber cannot
+  capture either.
+- **Capping the framerate in the format request breaks negotiation outright.** Asking for a range of
+  0/1 to 8/1 reads as the tidy way to want fewer frames, and has no intersection with a producer
+  publishing at a fixed 30/1 — the result is `Error("no more input formats")` and a session with no
+  picture. Advertise the widest rate that could arrive and drop frames in the process callback, which
+  is what `MAX_FRAMES_PER_SECOND` now does. Note there are then **two** rate gates in series and only
+  one is authoritative: `DEFAULT_MAX_FPS` in the agent decides the session's rate on both backends,
+  and the helper's cap is a bandwidth ceiling deliberately set *above* it. Setting the two equal is
+  worse than either — two free-running 8 Hz gates beat against each other and the session runs below
+  8 with jitter.
+- **`PW_KEY_TARGET_OBJECT` is not where a portal node id goes.** It matches an object *name* or an
+  `object.serial`; the portal hands out a global node id, and setting the property to one gives
+  `Error("no target node available")`. The deprecated `target_id` argument to `pw_stream_connect` is
+  the only thing that takes it.
+
+Two more that are quieter still: the format pod deliberately advertises **no**
+`SPA_FORMAT_VIDEO_modifier`, because advertising one lets the compositor hand back DMA-BUF, which
+`MAP_BUFFERS` does not map and whose frames would all be silently dropped. And the helper normalises
+RGBx/RGBA to BGRA itself rather than putting the pixel format on the wire, because the wire promises
+BGRA and a consumer getting that decision wrong produces a sharp picture with the reds and blues
+exchanged — which reads as a display-profile problem rather than a byte-order one.
 
 **On Linux a host that cannot be controlled never connects at all.** The per-user process checks
 `unavailable_reason` once and, if there is one, never opens the local socket — so the root unit never
@@ -941,7 +1039,7 @@ original — then the others for what each platform forced to differ. The differ
 | OS updates | `softwareupdate` | Windows Update Agent COM API, via PowerShell | apt / dnf / yum / zypper / pacman / apk |
 | Host identity | hardware serial, always present | SMBIOS serial, **often a placeholder** | DMI serial, **often a placeholder** |
 | Nobody logged in | nothing patches | nothing patches | root service patches unattended — see below |
-| Remote control | per-user process, consent + capture + input | service holds the socket, tray does the rest, named pipe between | resident root unit holds the socket, per-user process does the rest, unix socket between; **X11 only** |
+| Remote control | per-user process, consent + capture + input | service holds the socket, tray does the rest, named pipe between | resident root unit holds the socket, per-user process does the rest, unix socket between; X11 via XTEST, Wayland via a separate portal/PipeWire binary |
 
 **Linux borrows its architecture from Windows, not macOS, and for the same forcing reason.** Every
 upgrade it can perform (`apt-get`, `dnf`, `flatpak update --system`, `snap refresh`) requires root,
@@ -1194,6 +1292,31 @@ by then — only the long-running per-user units get restarted.
   `virtual_key_for_hid`, `scan_code_for_hid` or `xtest_keycode_for_hid`, because the three platforms
   reach the same positional key through differently-named APIs. Anything else in that diff is drift,
   and since the server relays the media protocol without parsing it, nothing else would notice.
+- **`kintsugi-agent-wayland` is the one binary in this fleet with a libc floor**, and it is the
+  price of Wayland support. It links `libpipewire`, so it cannot be the static musl build the agent
+  is. CI builds it in a **debian:12** container and asserts the result needs no symbol newer than
+  `GLIBC_2.34` (Ubuntu 22.04, RHEL 9, Debian 12, Fedora 35 and up). Going older does not work:
+  Ubuntu 22.04's libpipewire is 0.3.48 and `libspa` 0.10 does not compile against those headers at
+  all, so **libpipewire 0.3.65 is the floor the crate imposes** and Debian 12 is the oldest
+  widely-deployed distribution that has it. A host below either floor is not a broken agent — the
+  backend fails to start, the agent reports Wayland capture unavailable with the reason in the
+  journal, and X11 hosts, patching and inventory are untouched. Keep that degradation graceful; the
+  failure it replaces is a session that connects and never paints.
+- The Wayland backend is **optional in the archive**. `publish-release.sh` packages it only if it was
+  built (or passed with `--wayland-binary`) and warns loudly when it was not; `install.sh` installs
+  it if present; `self_update` installs it beside the agent if the new archive carries one, so a host
+  first installed from an X11-only package gains Wayland support on its next update without a
+  reinstall. The name lives in `config::WAYLAND_BACKEND_BINARY` because three places have to agree on
+  it.
+- `input_injection::evdev_keycode_for_hid` is the base table and `xtest_keycode_for_hid` is that plus
+  `EVDEV_KEYCODE_OFFSET`. XTEST wants the offset form; the portal's `NotifyKeyboardKeycode` wants the
+  raw kernel code. Getting it backwards types a key eight positions along the physical keyboard —
+  wrong letters on Wayland hosts only, which reads as a broken keymap on the host rather than a bug
+  in the agent. A test asserts the two agree for every usage.
+- The helper's stdio protocol (`clients/linux-agent-wayland/src/wire.rs` and the agent's
+  `wayland_backend.rs`) is another hand-mirrored pair, like the Rust structs against the C# DTOs. It
+  needs no version negotiation, and only because the two are shipped in one archive and replaced
+  together by `self_update` — do not give the helper a separate release cadence without adding one.
 - **The Linux agent compiles on macOS, and that is worth not breaking.** It is a Linux program, but
   `cargo build` on a Mac is the fastest way to check a change before waiting on a container — and the
   one place remote control needed a Linux-only facility (`libc::ucred`/`SO_PEERCRED`, for the peer

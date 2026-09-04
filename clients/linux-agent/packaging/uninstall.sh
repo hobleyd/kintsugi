@@ -10,6 +10,7 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 BIN_DEST="/usr/local/bin/kintsugi-agent"
+WAYLAND_BIN_DEST="/usr/local/bin/kintsugi-agent-wayland"
 CONFIG_DIR="/etc/kintsugi-agent"
 STATE_DIR="/var/lib/kintsugi-agent"
 SYSTEM_UNIT_DIR="/etc/systemd/system"
@@ -48,7 +49,9 @@ rm -f "${SYSTEM_UNIT_DIR}/${SERVICE_UNIT}" \
       "${SYSTEM_UNIT_DIR}/${QUEUE_PATH_UNIT}" \
       "${SYSTEM_UNIT_DIR}/${REMOTE_CONTROL_UNIT}" \
       "${USER_UNIT_DIR}/${UI_UNIT}"
-rm -f "$BIN_DEST"
+# Both binaries. The Wayland backend is only present on hosts installed from a package that
+# carried one, and `rm -f` on an absent path is a no-op, so there is nothing to test for.
+rm -f "$BIN_DEST" "$WAYLAND_BIN_DEST"
 
 systemctl daemon-reload
 

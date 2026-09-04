@@ -2,6 +2,8 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../core/widgets/alert_box.dart';
+
 import '../../domain/entities/remote_control_session.dart';
 import 'remote_control_bloc.dart';
 
@@ -37,12 +39,26 @@ class _RemoteScreenViewState extends State<RemoteScreenView> {
     super.dispose();
   }
 
+  /// Whether this host will take input at all — see [RemoteDisplayGeometry.canControlInput].
+  bool get _canControl => widget.geometry.canControlInput;
+
   @override
   Widget build(BuildContext context) => Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _buildKeyCombinationBar(context),
-          const SizedBox(height: 12),
+          // Everything about driving the host is hidden on a view-only session rather than shown
+          // and inert: a key-combination bar whose buttons do nothing is worse than no bar.
+          if (_canControl) ...[
+            _buildKeyCombinationBar(context),
+            const SizedBox(height: 12),
+          ] else ...[
+            const AlertBox.info(
+              'This host can be watched but not controlled. Its desktop is running Wayland with a '
+              'compositor that allows screen sharing and not remote input, so the keyboard and '
+              'mouse are unavailable for this session.',
+            ),
+            const SizedBox(height: 12),
+          ],
           Center(
             child: AspectRatio(
               aspectRatio: widget.geometry.imageWidth / widget.geometry.imageHeight,
@@ -53,8 +69,10 @@ class _RemoteScreenViewState extends State<RemoteScreenView> {
           ),
           const SizedBox(height: 8),
           Text(
-            'Click the screen to give it the keyboard. Some combinations — ⌘W, ⌘Q, ⌘Tab — are '
-            'claimed by this browser and cannot be forwarded; use the buttons above for those.',
+            _canControl
+                ? 'Click the screen to give it the keyboard. Some combinations — ⌘W, ⌘Q, ⌘Tab — are '
+                    'claimed by this browser and cannot be forwarded; use the buttons above for those.'
+                : 'View only — nothing you type or click is sent to this host.',
             style: Theme.of(context).textTheme.bodySmall,
           ),
         ],
@@ -82,8 +100,9 @@ class _RemoteScreenViewState extends State<RemoteScreenView> {
         child: MouseRegion(
           // The host's own cursor is in the picture (the agent captures it), so a second one drawn
           // by this browser on top would be two pointers moving together — confusing, and it hides
-          // the one that matters.
-          cursor: SystemMouseCursors.none,
+          // the one that matters. On a view-only session there is no remote pointer to follow, so
+          // the browser's own is left alone rather than hiding it for nothing.
+          cursor: _canControl ? SystemMouseCursors.none : SystemMouseCursors.basic,
           child: CustomPaint(
             painter: _RemoteScreenPainter(tiles: widget.tiles, geometry: widget.geometry),
             child: const SizedBox.expand(),
@@ -110,6 +129,7 @@ class _RemoteScreenViewState extends State<RemoteScreenView> {
       );
 
   void _sendPointer(RemotePointerAction action, Offset local, Size size, int buttons) {
+    if (!_canControl) return;
     if (size.width <= 0 || size.height <= 0) return;
 
     // Clamped rather than dropped: a drag that leaves the picture should hold at the edge, which is
@@ -122,6 +142,7 @@ class _RemoteScreenViewState extends State<RemoteScreenView> {
   }
 
   void _onPointerSignal(PointerSignalEvent event) {
+    if (!_canControl) return;
     if (event is! PointerScrollEvent) return;
 
     final size = context.size;
@@ -139,6 +160,10 @@ class _RemoteScreenViewState extends State<RemoteScreenView> {
   }
 
   KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
+    // Ignored rather than handled on a view-only session, so the app's own shortcuts and Tab
+    // traversal keep working instead of being swallowed by a screen that cannot use them.
+    if (!_canControl) return KeyEventResult.ignored;
+
     // The *physical* key, never the character: a virtual keycode names a position on the keyboard
     // and the host applies its own layout to it. See `input_injection::virtual_key_for_hid`.
     final usage = event.physicalKey.usbHidUsage;

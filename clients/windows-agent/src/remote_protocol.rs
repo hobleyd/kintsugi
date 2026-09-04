@@ -173,16 +173,49 @@ pub struct DisplayInfo {
     pub image_width: u32,
     #[serde(rename = "imageHeight")]
     pub image_height: u32,
+
+    /// Whether this session can accept keyboard and mouse, or is view-only.
+    ///
+    /// **Not a nicety — it is the difference between a limitation and an apparent fault.** Some
+    /// hosts can be watched and not driven, and without being told, an operator sees a live picture
+    /// that ignores the mouse and concludes the session is broken. The viewer says "view only" and
+    /// hides the input hints instead.
+    ///
+    /// True on macOS and Windows in normal operation. The case it exists for is Linux under Wayland:
+    /// a compositor may implement the portal's ScreenCast interface (so it can be captured) without
+    /// RemoteDesktop (so it cannot be driven) — wlroots-based ones commonly do — and there is no way
+    /// to know until the portal session is negotiated.
+    #[serde(rename = "canControlInput")]
+    pub can_control_input: bool,
 }
 
 impl DisplayInfo {
+    /// Allowed to be unused, and that is deliberate rather than an oversight: this module is kept
+    /// byte-identical across all three agents, and the Linux one now always states
+    /// `can_control_input` because it is the only agent that can capture a host it cannot drive.
+    /// Diverging the file to silence one warning would cost the property that makes a change to the
+    /// protocol a three-way diff anyone can check.
+    #[allow(dead_code)]
     pub fn new(point_width: f64, point_height: f64, image_width: u32, image_height: u32) -> Self {
+        Self::with_input(point_width, point_height, image_width, image_height, true)
+    }
+
+    /// As [`Self::new`], but stating explicitly whether input works. Only the Wayland backend needs
+    /// this; everything else is a session that can be driven.
+    pub fn with_input(
+        point_width: f64,
+        point_height: f64,
+        image_width: u32,
+        image_height: u32,
+        can_control_input: bool,
+    ) -> Self {
         Self {
             message_type: "display",
             point_width,
             point_height,
             image_width,
             image_height,
+            can_control_input,
         }
     }
 }
@@ -424,6 +457,24 @@ mod tests {
             serde_json::to_string(&message).unwrap(),
             r#"{"type":"hello","agentVersion":"0.5.3","consoleUser":"david"}"#
         );
+    }
+
+    #[test]
+    fn display_info_defaults_to_a_session_that_can_be_driven() {
+        // Every backend but Wayland can inject, so the common constructor must not make callers
+        // remember to say so.
+        let info = DisplayInfo::new(1512.0, 982.0, 1512, 982);
+
+        assert!(info.can_control_input);
+    }
+
+    #[test]
+    fn display_info_carries_the_view_only_flag_under_the_name_the_viewer_reads() {
+        // The viewer keys on this exact name and the server relays the message without parsing it,
+        // so a rename here is a viewer that silently treats every session as drivable.
+        let json = serde_json::to_string(&DisplayInfo::with_input(1.0, 2.0, 1, 2, false)).unwrap();
+
+        assert!(json.contains(r#""canControlInput":false"#), "{json}");
     }
 
     #[test]

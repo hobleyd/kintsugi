@@ -75,6 +75,9 @@ RemoteScreenUpdate? remoteTextUpdateFromJson(String text) {
         pointHeight: pointHeight,
         imageWidth: imageWidth,
         imageHeight: imageHeight,
+        // Absent means true: an agent from before this field existed could always be driven, and
+        // defaulting the other way would make every older host look view-only.
+        canControlInput: decoded['canControlInput'] != false,
       );
 
     default:

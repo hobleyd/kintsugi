@@ -64,23 +64,39 @@ const BUTTON_WHEEL_RIGHT: u8 = 7;
 /// How many pixels of browser scroll make one wheel click. A browser reports wheel deltas in pixels
 /// and a trackpad reports small ones continuously; treating every pixel as a click would make a
 /// gentle two-finger scroll fly down a page.
-const PIXELS_PER_CLICK: f64 = 100.0;
+pub(crate) const PIXELS_PER_CLICK: f64 = 100.0;
 
 /// The most wheel clicks one scroll message may turn into.
 ///
 /// X11 has no scroll *amount* — each click is a discrete button press — so a large delta becomes a
 /// burst of round trips to the X server. Without a cap, one flick of a high-resolution trackpad
 /// could queue hundreds and stall the session loop for a visible moment.
-const MAX_WHEEL_CLICKS: u32 = 10;
+pub(crate) const MAX_WHEEL_CLICKS: u32 = 10;
 
 /// Maps a USB HID keyboard usage code to an X11 keycode.
+///
+/// The evdev code plus [`EVDEV_KEYCODE_OFFSET`], which is what XTEST wants. The Wayland path wants
+/// the evdev code *un*-offset — see [`evdev_keycode_for_hid`] — so the two are kept as one table and
+/// one addition rather than two tables that could disagree by eight.
+pub fn xtest_keycode_for_hid(hid: u32) -> Option<u8> {
+    // F13-F20 are above 190, so evdev + 8 still fits in a u8 — but only just, and a keycode is a
+    // u8 in the protocol. Checked rather than assumed so a future addition above 247 fails here
+    // instead of wrapping into an unrelated key.
+    evdev_keycode_for_hid(hid)?.checked_add(EVDEV_KEYCODE_OFFSET)
+}
+
+/// Maps a USB HID keyboard usage code to a **kernel evdev** code.
 ///
 /// `hid` is accepted as the full 32-bit value Flutter reports (`0x0007_0004` for A) as well as the
 /// bare usage (`0x04`); anything outside the keyboard usage page returns `None` and is ignored.
 ///
-/// The table is HID usage to *kernel evdev code*; the X11 offset is added at the end, once, so the
-/// values below can be checked against `linux/input-event-codes.h` directly.
-pub fn xtest_keycode_for_hid(hid: u32) -> Option<u8> {
+/// The values below can be checked against `linux/input-event-codes.h` directly, which is the whole
+/// reason this is the base rather than the X11 form. Two callers want different ends of it: XTEST
+/// needs the offset added (above), and xdg-desktop-portal's `NotifyKeyboardKeycode` wants exactly
+/// this — see `wire.rs` in `clients/linux-agent-wayland`. Adding the offset for the portal would
+/// type a key eight positions along the physical keyboard, which on a QWERTY layout turns `a` into
+/// `f` and looks like a broken keymap rather than a broken constant.
+pub fn evdev_keycode_for_hid(hid: u32) -> Option<u8> {
     // Flutter encodes the usage page in the high 16 bits. Page 0x0007 is keyboard/keypad; page
     // 0x000C is consumer control (volume, brightness), which the kernel does have codes for but
     // which no keymap binds to a position.
@@ -224,10 +240,7 @@ pub fn xtest_keycode_for_hid(hid: u32) -> Option<u8> {
         _ => return None,
     };
 
-    // F13-F20 are above 190, so evdev + 8 still fits in a u8 — but only just, and a keycode is a
-    // u8 in the protocol. Checked rather than assumed so a future addition above 247 fails here
-    // instead of wrapping into an unrelated key.
-    evdev.checked_add(EVDEV_KEYCODE_OFFSET)
+    Some(evdev)
 }
 
 /// Posts the remote pointer and keyboard into this host's X session.
@@ -513,6 +526,36 @@ mod tests {
                 assert!(keycode >= EVDEV_KEYCODE_OFFSET, "usage {usage:#x} mapped below the offset");
             }
         }
+    }
+
+    #[test]
+    fn the_portal_form_is_the_xtest_form_less_the_offset_for_every_key() {
+        // The two are one table and one addition, and this is what keeps them that way. If they ever
+        // become separate tables, a key that disagrees by eight types a letter eight positions along
+        // the physical keyboard — a wrong letter on Wayland hosts only, which reads as a keymap
+        // problem on the host rather than a bug here.
+        for usage in 0x00u32..=0xFF {
+            match (evdev_keycode_for_hid(usage), xtest_keycode_for_hid(usage)) {
+                (Some(evdev), Some(xtest)) => assert_eq!(
+                    u32::from(evdev) + u32::from(EVDEV_KEYCODE_OFFSET),
+                    u32::from(xtest),
+                    "usage {usage:#x}"
+                ),
+                (None, None) => {}
+                (evdev, xtest) => {
+                    panic!("usage {usage:#x} mapped to {evdev:?} for the portal and {xtest:?} for XTEST")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_portal_gets_the_kernel_code_that_input_event_codes_h_names() {
+        // Spot-checked against linux/input-event-codes.h rather than derived, because the whole
+        // point of the un-offset form is that it can be read straight out of that header: KEY_A is
+        // 30, KEY_ENTER is 28. XTEST's 38 and 36 are the same keys plus eight.
+        assert_eq!(evdev_keycode_for_hid(0x0007_0004), Some(30));
+        assert_eq!(evdev_keycode_for_hid(0x0007_0028), Some(28));
     }
 
     #[test]

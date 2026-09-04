@@ -46,18 +46,19 @@ use crate::wire::{self, FormatMessage};
 
 /// The most frames a second to pass on to the agent.
 ///
-/// Matched to the agent's X11 path (`DEFAULT_MAX_FPS` in the Linux agent's `screen_capture.rs`), and
-/// it matters more here than there: every frame is a full-screen copy into the slot and then again
-/// down a pipe, so 1920×1080 at 30 fps is a quarter of a gigabyte a second of pure copying for
-/// pictures the agent will mostly throw away.
+/// **There are two rate gates in this pipeline and this is not the authoritative one.** The agent
+/// polls `WaylandBackend::capture` on its own schedule, set by `DEFAULT_MAX_FPS` in the Linux
+/// agent's `screen_capture.rs`, and that is what decides the rate of the session — the same constant
+/// that decides it on the X11 path, so there is one number to tune and it is that one.
 ///
-/// **Enforced here rather than in the format request, and that distinction is not cosmetic.** The
-/// first version asked for a framerate range of 0/1 to 8/1, which looks like the tidier way to do
-/// it — let the producer send fewer frames rather than discarding them. But a producer publishing at
-/// a *fixed* rate has nothing in that range to agree to, and the result is not a slower stream: it
-/// is `Error("no more input formats")` and a session that never shows a single frame. Advertise the
-/// widest rate that could possibly arrive, then drop what is not wanted.
-const MAX_FRAMES_PER_SECOND: u32 = 8;
+/// This one is a *bandwidth ceiling*, and it is deliberately set above the agent's rate rather than
+/// equal to it. Every frame accepted here is a full-screen copy into the slot and another down a
+/// pipe, so an uncapped 60 fps stream would be half a gigabyte a second of copying for pictures the
+/// agent will not ask for. But setting it *equal* to the agent's 8 is worse than either: two
+/// free-running 8 Hz gates in series beat against each other, so a frame landing just after a poll
+/// waits a whole extra interval and the session runs visibly below 8 with jitter. Headroom means
+/// the agent's poll always finds something fresh, and the beat disappears.
+const MAX_FRAMES_PER_SECOND: u32 = 15;
 
 /// The rate the format request nominates as preferred, and the ceiling it will accept.
 ///
@@ -229,6 +230,16 @@ pub fn stream_node(
             state.format = Some(NegotiatedFormat {
                 width: size.width,
                 height: size.height,
+                // Whether red and blue need exchanging on the way out. The wire promises BGRA and
+                // this is the only place that knows what actually arrived — leaving it to the agent
+                // would mean putting the pixel format on the wire and giving every consumer the same
+                // decision to get wrong. The symptom of skipping it is not subtle but is easy to
+                // misattribute: a perfectly sharp picture with the reds and blues exchanged, which
+                // reads as a display-profile problem rather than a byte-order one.
+                swap_red_and_blue: matches!(
+                    info.format(),
+                    VideoFormat::RGBx | VideoFormat::RGBA
+                ),
                 // The real stride comes off each buffer's own chunk — it is a property of the
                 // buffer, not of the format, and a compositor may pad differently per buffer.
                 // Recorded here only as the fallback for a chunk reporting none.
@@ -289,8 +300,13 @@ pub fn stream_node(
                 return;
             }
 
+            let mut pixels = bytes[..available].to_vec();
+            if format.swap_red_and_blue {
+                swap_red_and_blue(&mut pixels);
+            }
+
             listener_slot.put(Frame {
-                bytes: bytes[..available].to_vec(),
+                bytes: pixels,
                 format: FormatMessage {
                     width: format.width,
                     height: format.height,
@@ -371,6 +387,7 @@ struct NegotiatedFormat {
     width: u32,
     height: u32,
     fallback_stride: u32,
+    swap_red_and_blue: bool,
 }
 
 /// Drains the slot to stdout until the stream finishes or the agent goes away.
@@ -471,6 +488,18 @@ fn enum_format_pod() -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// Exchanges the first and third byte of every four, turning RGBx/RGBA into BGRx/BGRA in place.
+///
+/// The fourth byte is left alone: it is either alpha, which does not move, or padding, which nothing
+/// reads. Chunked rather than indexed so the bounds check happens once per pixel instead of twice,
+/// and so a buffer whose length is not a multiple of four — a truncated final row — is simply left
+/// with its tail untouched rather than panicking.
+fn swap_red_and_blue(pixels: &mut [u8]) {
+    for pixel in pixels.chunks_exact_mut(4) {
+        pixel.swap(0, 2);
+    }
+}
+
 fn fixed(key: FormatProperties, value: Value) -> Property {
     Property { key: key.as_raw(), flags: PropertyFlags::empty(), value }
 }
@@ -530,6 +559,25 @@ mod tests {
 
         assert_eq!(slot.take().expect("the pending frame").bytes, vec![9]);
         assert!(slot.take().is_none());
+    }
+
+    #[test]
+    fn swapping_red_and_blue_leaves_green_and_the_fourth_byte_alone() {
+        // Opaque red as RGBA becomes opaque red as BGRA: the bytes move, the colour does not.
+        let mut pixels = vec![0xFF, 0x00, 0x00, 0xFF, 0x11, 0x22, 0x33, 0x44];
+        swap_red_and_blue(&mut pixels);
+
+        assert_eq!(pixels, vec![0x00, 0x00, 0xFF, 0xFF, 0x33, 0x22, 0x11, 0x44]);
+    }
+
+    #[test]
+    fn a_trailing_partial_pixel_is_left_alone_rather_than_panicking() {
+        // A stride the buffer does not quite fill would otherwise be an index out of bounds inside
+        // the capture callback, which takes the whole session down.
+        let mut pixels = vec![1, 2, 3, 4, 9, 9];
+        swap_red_and_blue(&mut pixels);
+
+        assert_eq!(pixels, vec![3, 2, 1, 4, 9, 9]);
     }
 
     #[test]

@@ -85,6 +85,7 @@ class RemoteDisplayGeometry extends RemoteScreenUpdate {
     required this.pointHeight,
     required this.imageWidth,
     required this.imageHeight,
+    this.canControlInput = true,
   });
 
   final double pointWidth;
@@ -92,8 +93,19 @@ class RemoteDisplayGeometry extends RemoteScreenUpdate {
   final int imageWidth;
   final int imageHeight;
 
+  /// Whether this host will accept keyboard and mouse, or can only be watched.
+  ///
+  /// **Worth saying out loud, because otherwise it looks like a fault.** A view-only session shows a
+  /// live picture that ignores the mouse, which reads as broken rather than restricted. It happens
+  /// on Linux under Wayland, where a compositor may implement the portal's ScreenCast interface
+  /// without RemoteDesktop.
+  ///
+  /// Defaults to true so an older agent — which sends no such field — is treated as drivable, which
+  /// is what every agent before this was.
+  final bool canControlInput;
+
   @override
-  List<Object?> get props => [pointWidth, pointHeight, imageWidth, imageHeight];
+  List<Object?> get props => [pointWidth, pointHeight, imageWidth, imageHeight, canControlInput];
 }
 
 /// One JPEG-encoded rectangle of the host's screen, in image pixel coordinates.

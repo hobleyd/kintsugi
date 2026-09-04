@@ -97,8 +97,19 @@ pub struct DisplayGeometry {
 }
 
 impl DisplayGeometry {
-    pub fn to_display_info(self) -> DisplayInfo {
-        DisplayInfo::new(self.point_width, self.point_height, self.image_width, self.image_height)
+    /// Takes `can_control_input` rather than assuming it, unlike the macOS and Windows agents whose
+    /// equivalent has nothing to say: on those two, input either works or there was no session. This
+    /// agent is the one that can genuinely capture a host it cannot drive — a Wayland compositor
+    /// offering the portal's ScreenCast interface without RemoteDesktop — so the answer has to come
+    /// from whichever backend started. See `DisplayInfo::can_control_input`.
+    pub fn to_display_info(self, can_control_input: bool) -> DisplayInfo {
+        DisplayInfo::with_input(
+            self.point_width,
+            self.point_height,
+            self.image_width,
+            self.image_height,
+            can_control_input,
+        )
     }
 }
 
@@ -108,17 +119,9 @@ impl DisplayGeometry {
 /// administrator sees it as the reason a session ended, and the wording has to be enough for them to
 /// know whether to stop trying.
 pub fn unavailable_reason() -> Option<String> {
-    // Wayland first — see the module note on why testing DISPLAY first would produce a wrong
-    // picture rather than an error.
-    let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
-    if session_type.eq_ignore_ascii_case("wayland") || std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        return Some(
-            "this host is running a Wayland session, which the agent cannot capture — remote control \
-             needs an X11 session"
-                .to_string(),
-        );
-    }
-
+    // X11 only. Wayland is checked *before* this is ever called — see `backend::is_wayland_session`
+    // and the note there on why the order matters: an X11 check that passes first would capture a
+    // Wayland session's Xwayland root window, which is a plausible-looking picture of nothing.
     if std::env::var_os("DISPLAY").is_none() {
         return Some("this host has no graphical display to share".to_string());
     }
@@ -299,7 +302,7 @@ fn blend(source: u32, destination: u8, inverse_alpha: u32) -> u8 {
 /// per-channel and order-independent — the result comes back in the same order it went in. Naming
 /// the channels correctly would mean a full channel swap before and after, for no difference in the
 /// output.
-fn downscale(frame: &Frame, width: u32, height: u32) -> Frame {
+pub(crate) fn downscale(frame: &Frame, width: u32, height: u32) -> Frame {
     let Some(source) =
         image::ImageBuffer::<image::Rgba<u8>, _>::from_raw(frame.width, frame.height, frame.bgra.clone())
     else {

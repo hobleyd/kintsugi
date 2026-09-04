@@ -100,6 +100,35 @@ void main() {
       expect(geometry.imageWidth, 1600);
     });
 
+    test('a session is drivable unless the agent says otherwise', () {
+      // An agent from before this field existed could always be driven, so an absent flag has to
+      // mean true — defaulting the other way would make every older host look view-only.
+      final geometry = remoteTextUpdateFromJson(jsonEncode({
+            'type': 'display',
+            'pointWidth': 1.0,
+            'pointHeight': 2.0,
+            'imageWidth': 1,
+            'imageHeight': 2,
+          }))! as RemoteDisplayGeometry;
+
+      expect(geometry.canControlInput, isTrue);
+    });
+
+    test('a view-only session is reported as one', () {
+      // The case this exists for: a Wayland compositor with ScreenCast but no RemoteDesktop. Without
+      // the flag the viewer shows a live picture that ignores the mouse, which reads as a fault.
+      final geometry = remoteTextUpdateFromJson(jsonEncode({
+            'type': 'display',
+            'pointWidth': 1.0,
+            'pointHeight': 2.0,
+            'imageWidth': 1,
+            'imageHeight': 2,
+            'canControlInput': false,
+          }))! as RemoteDisplayGeometry;
+
+      expect(geometry.canControlInput, isFalse);
+    });
+
     test('drops a geometry with a zero in it', () {
       // Every pointer conversion divides by these, so a zero would be a crash per mouse move.
       expect(

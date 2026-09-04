@@ -29,12 +29,12 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use crate::dialogs::{self, RemoteControlChoice};
-use crate::input_injection::InputInjector;
+use crate::backend::{self, Backend};
 use crate::logging;
 use crate::remote_ipc::{self, FrameReader, IpcConnection, IpcFrame, IpcMessage};
 use crate::remote_protocol::{parse_viewer_input, ConsentOutcome, ViewerInput};
 use crate::screen_capture::{
-    self, FrameEncoder, ScreenCapture, DEFAULT_JPEG_QUALITY, DEFAULT_MAX_FPS, DEFAULT_MAX_IMAGE_WIDTH,
+    FrameEncoder, DEFAULT_JPEG_QUALITY, DEFAULT_MAX_FPS, DEFAULT_MAX_IMAGE_WIDTH,
 };
 use crate::tray_menu;
 
@@ -57,13 +57,13 @@ pub fn run() {
     // - **No display at all** never gets here. `main::has_a_display` exits the whole process 0 when
     //   neither DISPLAY nor WAYLAND_DISPLAY is set, which is the case this agent already guards
     //   against for a process started before the desktop exported them.
-    // - **Wayland** does get here, and will not become X11 while this process lives. A session type
-    //   change means a new session, and the unit is `PartOf=graphical-session.target`, so systemd
-    //   stops it with the old one.
+    // - **A session type change** cannot happen under this process either: it means a new session,
+    //   and the unit is `PartOf=graphical-session.target`, so systemd stops it with the old one.
+    //   So an X11 host stays X11 and a Wayland host stays Wayland for as long as this runs.
     //
     // So the only way to reach this line is a session that genuinely cannot be captured for as long
     // as it exists, and re-checking on a timer would burn a wakeup to reach the same answer forever.
-    if let Some(reason) = screen_capture::unavailable_reason() {
+    if let Some(reason) = backend::unavailable_reason() {
         logging::info(&format!("remote control is not available on this session: {reason}"));
         return;
     }
@@ -94,8 +94,8 @@ pub fn run() {
 /// Everything in flight for one running session.
 struct ActiveSession {
     session_id: String,
-    capture: ScreenCapture,
-    injector: InputInjector,
+    /// Capture and input together, because on Wayland they are one process — see `backend`.
+    backend: Backend,
     encoder: FrameEncoder,
     /// When the next frame is due. A deadline rather than a sleep, so the time spent capturing and
     /// encoding comes out of the interval instead of being added to it — which matters more here
@@ -142,9 +142,10 @@ fn serve(mut ipc: IpcConnection) -> Result<()> {
                 session.next_frame_at = Instant::now() + frame_interval;
 
                 // `None` is a frame to skip rather than a failure: a `GetImage` can fail
-                // transiently while the screen is being reconfigured, and the right response is to
-                // try again next tick rather than end somebody's session.
-                if let Some(frame) = session.capture.capture() {
+                // transiently while the screen is being reconfigured, and on Wayland it simply means
+                // no new frame has arrived from the helper since the last tick — a still desktop
+                // produces none at all. The right response to both is to try again next tick.
+                if let Some(frame) = session.backend.capture() {
                     for tile in session.encoder.encode_changes(&frame) {
                         ipc.write_all(&remote_ipc::encode_tile(&tile))
                             .context("could not send a screen tile to the root agent")?;
@@ -181,16 +182,22 @@ fn handle(
 
             match start(&session_id, &requested_by) {
                 Ok(session) => {
+                    // Sent only now, and only from a started session, because `can_control_input`
+                    // is not knowable until the portal has answered. Announcing the geometry any
+                    // earlier would mean claiming a Wayland host was drivable and then finding out
+                    // it was not, with nothing on the wire able to correct it.
+                    let geometry = session.backend.geometry();
+                    let display = geometry.to_display_info(session.backend.can_control_input());
                     write(ipc, &IpcMessage::DisplayInfo {
-                        json: serde_json::to_string(&session.capture.geometry.to_display_info())
-                            .context("could not describe the display")?,
+                        json: serde_json::to_string(&display).context("could not describe the display")?,
                     })?;
                     *active = Some(session);
                 }
                 Err(err) => {
                     // Consent was given and capture or input failed anyway — an X server without
-                    // XTEST reaches here. The administrator is told why rather than left watching a
-                    // blank screen.
+                    // XTEST reaches here, as does a Wayland compositor whose portal refused, or one
+                    // whose permission dialog nobody answered. The administrator is told why rather
+                    // than left watching a blank screen.
                     logging::error(&format!("could not start a remote control session: {err:#}"));
                     write(ipc, &IpcMessage::EndedByHost { session_id, reason: format!("{err:#}") })?;
                 }
@@ -211,7 +218,7 @@ fn handle(
                         session.encoder.set_quality(quality);
                     }
                 }
-                other => session.injector.apply(&other),
+                other => session.backend.apply(&other),
             }
 
             Ok(())
@@ -272,12 +279,12 @@ fn restrictions() -> Vec<String> {
 }
 
 fn start(session_id: &str, requested_by: &str) -> Result<ActiveSession> {
-    let capture = ScreenCapture::start(DEFAULT_MAX_IMAGE_WIDTH)?;
-
-    // Created before the session is announced, because this is the call that fails on an X server
-    // without XTEST — and a session that can be seen but not driven is worse than one that refused,
-    // since nothing on screen would explain it.
-    let injector = InputInjector::new()?;
+    // Capture *and* input, both before the session is announced. On X11 this is the call that fails
+    // on a server without XTEST; on Wayland it is where the portal is negotiated and where the
+    // compositor's own dialog is answered. Either way a session that can be seen but not driven has
+    // to be a *deliberate* view-only one, reported as such — not a half-started session with
+    // nothing on screen explaining it.
+    let backend = Backend::start(DEFAULT_MAX_IMAGE_WIDTH)?;
 
     // Only now does anything appear in the notification area, because only now is anything actually
     // being watched.
@@ -286,8 +293,7 @@ fn start(session_id: &str, requested_by: &str) -> Result<ActiveSession> {
 
     Ok(ActiveSession {
         session_id: session_id.to_string(),
-        capture,
-        injector,
+        backend,
         encoder: FrameEncoder::new(DEFAULT_JPEG_QUALITY),
         next_frame_at: Instant::now(),
         started: Instant::now(),
@@ -301,7 +307,7 @@ fn start(session_id: &str, requested_by: &str) -> Result<ActiveSession> {
 /// Alt would otherwise leave this host's own user with Alt stuck down and nothing on screen
 /// explaining why every keystroke has become a menu shortcut.
 fn finish(mut session: ActiveSession) {
-    session.injector.release_all();
+    session.backend.release_all();
     tray_menu::report_remote_session(None);
 
     logging::info(&format!(
@@ -310,7 +316,8 @@ fn finish(mut session: ActiveSession) {
         session.started.elapsed().as_secs()
     ));
 
-    // Both X connections close in Drop, which happens here.
+    // The X connections close in Drop, which happens here — as does killing the Wayland helper,
+    // which is what stops the compositor still capturing for a session that has ended.
 }
 
 fn write(ipc: &mut IpcConnection, message: &IpcMessage) -> Result<()> {

@@ -223,6 +223,8 @@ fn extract_and_install(downloaded_path: &Path, extract_dir: &Path) -> Result<()>
 
     logging::info(&format!("installed new kintsugi-agent binary at {}", installed_path.display()));
 
+    install_wayland_backend(extract_dir, &installed_path);
+
     // Kept before the extract directory is deleted, and only that one file: it is the sole thing in
     // the bundle besides the binary that a host might be *missing* rather than merely have an older
     // copy of — see restart_remote_control_unit. Best-effort, because failing to stage it must not
@@ -230,6 +232,54 @@ fn extract_and_install(downloaded_path: &Path, extract_dir: &Path) -> Result<()>
     stage_remote_control_unit(extract_dir);
 
     Ok(())
+}
+
+/// Installs the Wayland backend beside the agent, if this package carries one.
+///
+/// Optional in both directions, and each is a real case. A package built without libpipewire has no
+/// backend to install and an X11 fleet neither notices nor cares; a host installed from such a
+/// package and later updated from one that does have it gains Wayland support with no reinstall.
+///
+/// Best-effort, deliberately: the agent binary has already been replaced by the time this runs, and
+/// failing the whole update because the *optional* half could not be written would turn a host that
+/// merely cannot do Wayland capture into a host that never updates again. What it costs when it
+/// fails is one sentence in the log and a Wayland session reported as unavailable — which is the
+/// same thing that host had a moment ago.
+///
+/// Renamed over the target for the same reason as the agent itself: Unix unlinks a file some process
+/// is still executing, so a backend replaced mid-session keeps serving that session from the old
+/// inode and the next session gets the new one.
+fn install_wayland_backend(extract_dir: &Path, installed_agent: &Path) {
+    let extracted = extract_dir.join(config::WAYLAND_BACKEND_BINARY);
+    if !extracted.is_file() {
+        return;
+    }
+
+    let Some(destination) = installed_agent.parent().map(|dir| dir.join(config::WAYLAND_BACKEND_BINARY))
+    else {
+        return;
+    };
+
+    let staged = destination.with_extension("new");
+    let installed = fs::copy(&extracted, &staged)
+        .and_then(|_| fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)))
+        .and_then(|()| fs::rename(&staged, &destination));
+
+    match installed {
+        Ok(()) => logging::info(&format!(
+            "installed new {} at {}",
+            config::WAYLAND_BACKEND_BINARY,
+            destination.display()
+        )),
+        Err(error) => {
+            let _ = fs::remove_file(&staged);
+            logging::warn(&format!(
+                "could not install {} ({error}); remote control will work on X11 sessions only \
+                 until the next update",
+                config::WAYLAND_BACKEND_BINARY
+            ));
+        }
+    }
 }
 
 /// Copies the archive's remote control unit somewhere that outlives the extract directory.

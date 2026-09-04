@@ -44,6 +44,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 BIN_DEST="/usr/local/bin/kintsugi-agent"
+WAYLAND_BIN_DEST="/usr/local/bin/kintsugi-agent-wayland"
 CONFIG_DIR="/etc/kintsugi-agent"
 CONFIG_DEST="${CONFIG_DIR}/config.toml"
 STATE_DIR="/var/lib/kintsugi-agent"
@@ -77,6 +78,18 @@ fi
 
 echo "Installing binary to ${BIN_DEST}..."
 install -o root -g root -m 755 "$SRC_BIN" "$BIN_DEST"
+
+# The Wayland backend, if this archive carries one. Optional on purpose — see publish-release.sh:
+# it links libpipewire and so cannot be the static musl build the agent is, and an archive without
+# it is a perfectly good install for an X11 fleet. Installed beside the agent because that is the
+# first place `wayland_backend::helper_path` looks.
+PREBUILT_WAYLAND_BIN="$SCRIPT_DIR/kintsugi-agent-wayland"
+if [[ -f "$PREBUILT_WAYLAND_BIN" ]]; then
+    echo "Installing the Wayland backend to ${WAYLAND_BIN_DEST}..."
+    install -o root -g root -m 755 "$PREBUILT_WAYLAND_BIN" "$WAYLAND_BIN_DEST"
+else
+    echo "No Wayland backend in this package; remote control will work on X11 sessions only."
+fi
 
 echo "Installing config to ${CONFIG_DEST}..."
 install -d -o root -g root -m 755 "$CONFIG_DIR"

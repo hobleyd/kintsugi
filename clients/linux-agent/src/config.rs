@@ -103,6 +103,14 @@ pub const UI_UNIT: &str = "kintsugi-agent-ui.service";
 /// package-manager runs colliding on the dpkg lock, and this unit never installs anything — it
 /// relays bytes. Taking the lock would mean a remote session blocked an unattended patch cycle for
 /// its whole duration.
+/// The Wayland capture and input backend, installed beside the agent binary.
+///
+/// Named in one place because three of them have to agree: `wayland_backend::helper_path` looks for
+/// it, `self_update` installs it out of the archive under this name, and `packaging/install.sh`
+/// writes it there. It is optional — an archive built without libpipewire carries no such entry, and
+/// an X11 fleet is unaffected.
+pub const WAYLAND_BACKEND_BINARY: &str = "kintsugi-agent-wayland";
+
 pub const REMOTE_CONTROL_UNIT: &str = "kintsugi-agent-remote.service";
 
 #[derive(Debug, Deserialize, Default)]
