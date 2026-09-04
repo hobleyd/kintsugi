@@ -79,7 +79,7 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
         // than leaving it to chance. Skipped when the prompt itself is being overridden, since the
         // override replaces the prompt this context would have been woven into.
         var hostingSiteContext = string.IsNullOrWhiteSpace(request.PromptOverride)
-            ? await BuildHostingSiteContextAsync(request.ApplicationIdentifier, cancellationToken)
+            ? await BuildHostingSiteContextAsync(request.ApplicationName, request.ApplicationIdentifier, cancellationToken)
             : null;
 
         var text = await AskProviderWithSearchAsync(settings, request, hostingSiteContext, cancellationToken);
@@ -541,35 +541,71 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
     }
 
     /// <summary>
-    /// Searches GitHub and GitLab's public repository-search APIs for the application's bundle
-    /// identifier, so the model is handed concrete candidate repositories up front instead of
-    /// relying entirely on its own (provider-dependent, sometimes absent) web search to think to
-    /// check code-hosting sites. Best-effort: any failure (network, rate limiting, either site
-    /// being unreachable) is swallowed and simply omits that site's results, since this is an
-    /// enrichment step, not something worth failing the whole research request over.
+    /// Searches GitHub and GitLab's public repository-search APIs for the application, so the model
+    /// is handed concrete candidate repositories up front instead of relying entirely on its own
+    /// (provider-dependent, sometimes absent) web search to think to check code-hosting sites.
+    /// Best-effort: any failure (network, rate limiting, either site being unreachable) is swallowed
+    /// and simply omits that site's results, since this is an enrichment step, not something worth
+    /// failing the whole research request over.
+    ///
+    /// The identifier is searched first and the application's name only if that finds nothing on
+    /// that site. The identifier is the disambiguator — a Flathub repository is literally named
+    /// <c>flathub/org.mozilla.firefox</c> — but a macOS bundle ID is rarely written into a
+    /// repository's name, description or README, while the repository is usually named after the
+    /// application. <c>au.com.sharpblue.nightmail</c> matched nothing; <c>NightMail</c> was the
+    /// repository with its releases, second in the list, and the model got neither and declined to
+    /// write the script. Name-only, without an identifier, is still not searched: a name like
+    /// "Mail" or "Terminal" alone returns nothing but noise, and the prompt has nothing to
+    /// disambiguate it with either.
     /// </summary>
-    private async Task<string?> BuildHostingSiteContextAsync(string? applicationIdentifier, CancellationToken cancellationToken)
+    private async Task<string?> BuildHostingSiteContextAsync(string applicationName, string? applicationIdentifier, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(applicationIdentifier))
         {
             return null;
         }
 
+        var terms = new List<string> { applicationIdentifier };
+        if (!string.IsNullOrWhiteSpace(applicationName) && !applicationName.Equals(applicationIdentifier, StringComparison.OrdinalIgnoreCase))
+        {
+            terms.Add(applicationName);
+        }
+
         var sections = new List<string>();
 
-        var gitHubResults = await SearchGitHubAsync(applicationIdentifier, cancellationToken);
-        if (gitHubResults is { Count: > 0 })
+        var gitHubResults = await FirstWithResultsAsync(terms, SearchGitHubAsync, cancellationToken);
+        if (gitHubResults is not null)
         {
             sections.Add("GitHub repositories:\n" + JsonSerializer.Serialize(gitHubResults, ModelResultJsonOptions));
         }
 
-        var gitLabResults = await SearchGitLabAsync(applicationIdentifier, cancellationToken);
-        if (gitLabResults is { Count: > 0 })
+        var gitLabResults = await FirstWithResultsAsync(terms, SearchGitLabAsync, cancellationToken);
+        if (gitLabResults is not null)
         {
             sections.Add("GitLab projects:\n" + JsonSerializer.Serialize(gitLabResults, ModelResultJsonOptions));
         }
 
         return sections.Count > 0 ? string.Join("\n\n", sections) : null;
+    }
+
+    /// <summary>The first term's results that are non-empty, in the order given; null when none are.
+    /// Later terms are not searched once one has answered, which bounds the calls per application at
+    /// two per site — the search APIs are rate-limited and a fleet scan covers hundreds of rows.</summary>
+    private static async Task<List<HostingRepoResult>?> FirstWithResultsAsync(
+        IReadOnlyList<string> terms,
+        Func<string, CancellationToken, Task<List<HostingRepoResult>?>> search,
+        CancellationToken cancellationToken)
+    {
+        foreach (var term in terms)
+        {
+            var results = await search(term, cancellationToken);
+            if (results is { Count: > 0 })
+            {
+                return results;
+            }
+        }
+
+        return null;
     }
 
     private async Task<List<HostingRepoResult>?> SearchGitHubAsync(string applicationIdentifier, CancellationToken cancellationToken)
@@ -747,8 +783,8 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
 
 
                 Candidate repositories found by searching GitHub and GitLab for this application's
-                identifier (a name match doesn't guarantee it's the right project — verify relevance,
-                e.g. via its description or README, before relying on it):
+                identifier, or failing that its name (a name match doesn't guarantee it's the right
+                project — verify relevance, e.g. via its description or README, before relying on it):
                 {{hostingSiteContext}}
 
                 """;

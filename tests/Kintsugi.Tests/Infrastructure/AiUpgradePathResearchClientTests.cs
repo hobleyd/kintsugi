@@ -161,6 +161,48 @@ public class AiUpgradePathResearchClientTests
         Assert.Equal(ValidScript.Trim(), result.Script);
     }
 
+    /// <summary>GitHub's repository search matched nothing for the bundle ID
+    /// <c>au.com.sharpblue.nightmail</c> and found <c>hobleyd/nightmail</c> — releases and all — for
+    /// the name, so the model got no candidates and declined to write the script. The name is
+    /// searched when the identifier finds nothing, and what it finds reaches the prompt.</summary>
+    [Fact]
+    public async Task GenerateScriptAsync_WhenTheIdentifierMatchesNoRepository_SearchesTheNameAndHandsTheModelWhatItFound()
+    {
+        static HttpResponseMessage GitHubResults(params object[] items) =>
+            new(HttpStatusCode.OK) { Content = JsonContent.Create(new { items }) };
+        static HttpResponseMessage GitLabResults() =>
+            new(HttpStatusCode.OK) { Content = JsonContent.Create(Array.Empty<object>()) };
+
+        // Captured in the responder: the client disposes each request once it has been sent, so the
+        // body is unreadable by the time the test gets to handler.Requests.
+        string? prompt = null;
+        var handler = new QueueingHandler(
+            _ => GitHubResults(),                                                       // identifier
+            _ => GitHubResults(new { full_name = "hobleyd/nightmail", html_url = "https://github.com/hobleyd/nightmail", description = "An email client", stargazers_count = 0 }), // name
+            _ => GitLabResults(),                                                       // identifier
+            _ => GitLabResults(),                                                       // name
+            request =>
+            {
+                prompt = request.Content!.ReadAsStringAsync().GetAwaiter().GetResult();
+                return AnthropicTextResponse(ValidScript);
+            });
+        var client = CreateClient(handler);
+
+        var result = await client.GenerateScriptAsync(
+            AnthropicSettings,
+            new UpgradePathScriptGenerationRequest("NightMail", "macOS", Array.Empty<string>(), "au.com.sharpblue.nightmail"),
+            CancellationToken.None);
+
+        Assert.Equal(UpgradePathStatus.Found, result.Status);
+
+        var searches = handler.Requests.Where(r => r.RequestUri!.Host is "api.github.com" or "gitlab.com").Select(r => Uri.UnescapeDataString(r.RequestUri!.Query)).ToList();
+        Assert.Equal(4, searches.Count);
+        Assert.Contains("au.com.sharpblue.nightmail", searches[0]);
+        Assert.Contains("NightMail", searches[1]);
+
+        Assert.Contains("hobleyd/nightmail", prompt);
+    }
+
     [Fact]
     public async Task GenerateScriptAsync_StripsAMarkdownCodeFence_ThatTheModelWrappedTheScriptIn()
     {
