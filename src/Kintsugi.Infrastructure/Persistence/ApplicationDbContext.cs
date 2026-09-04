@@ -22,6 +22,7 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
     public DbSet<ApprovedScript> ApprovedScripts => Set<ApprovedScript>();
     public DbSet<GitHubSettings> GitHubSettings => Set<GitHubSettings>();
     public DbSet<VantaSettings> VantaSettings => Set<VantaSettings>();
+    public DbSet<RemoteControlSession> RemoteControlSessions => Set<RemoteControlSession>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
