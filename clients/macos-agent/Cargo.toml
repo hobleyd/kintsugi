@@ -1,6 +1,6 @@
 [package]
 name = "kintsugi-agent"
-version = "0.5.3"
+version = "0.6.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Background agent that registers this Mac with the patching system's host inventory."
