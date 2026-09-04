@@ -248,14 +248,26 @@ class _RemoteScreenPainter extends CustomPainter {
     // setting rather than a sampling choice.
     final paint = Paint()..filterQuality = FilterQuality.medium;
 
-    for (final tile in tiles.values) {
-      canvas.drawImageRect(
-        tile.image,
-        Rect.fromLTWH(0, 0, tile.image.width.toDouble(), tile.image.height.toDouble()),
-        Rect.fromLTWH(tile.x * scaleX, tile.y * scaleY, tile.width * scaleX, tile.height * scaleY),
-        paint,
-      );
+    // The full frame first, then the partial tiles over it. Explicit rather than trusting the
+    // map's insertion order: a partial tile is re-inserted (and so moved to the end) whenever its
+    // region changes, and a painter that depended on ordering would be one refactor away from
+    // drawing the full frame over the newer tiles.
+    final fullFrame = tiles[RemoteControlState.fullFrameKey];
+    if (fullFrame != null) _drawTile(canvas, fullFrame, scaleX, scaleY, paint);
+
+    for (final entry in tiles.entries) {
+      if (entry.key == RemoteControlState.fullFrameKey) continue;
+      _drawTile(canvas, entry.value, scaleX, scaleY, paint);
     }
+  }
+
+  static void _drawTile(Canvas canvas, RemoteControlTileImage tile, double scaleX, double scaleY, Paint paint) {
+    canvas.drawImageRect(
+      tile.image,
+      Rect.fromLTWH(0, 0, tile.image.width.toDouble(), tile.image.height.toDouble()),
+      Rect.fromLTWH(tile.x * scaleX, tile.y * scaleY, tile.width * scaleX, tile.height * scaleY),
+      paint,
+    );
   }
 
   @override

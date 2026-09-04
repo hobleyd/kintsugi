@@ -103,13 +103,24 @@ final class RemoteControlState extends Equatable {
   final RemoteControlSession? session;
   final RemoteDisplayGeometry? geometry;
 
-  /// Decoded tiles, keyed by their top-left corner.
+  /// Decoded tiles, keyed by their top-left corner — except the full frame, which sits under
+  /// [RemoteControlState.fullFrameKey] (see there for why).
   ///
   /// Kept as a map of live tiles rather than composited into one offscreen image, which is what
   /// lets a repaint be a handful of `drawImageRect` calls with no surface to allocate or read back.
   /// The map is bounded by the tile grid — a few dozen entries — because a new tile for a position
   /// replaces the one there.
   final Map<int, RemoteControlTileImage> tiles;
+
+  /// Where the full frame lives in [tiles].
+  ///
+  /// Not `_tileKey(0, 0)`, deliberately. The agent sends a whole-image tile at (0, 0) and later
+  /// 256px tiles for whatever changed — and the top-left of those is *also* at (0, 0). Keyed by
+  /// position alone, the first cursor pass through that corner replaced the full frame with one
+  /// 256px square and disposed the rest of the picture, leaving the dark ground everywhere the host
+  /// had not changed since. Negative, because a position key packs two `u16`s and is never
+  /// negative.
+  static const int fullFrameKey = -1;
 
   final bool connecting;
   final String? error;
@@ -199,6 +210,10 @@ class RemoteControlBloc extends Bloc<RemoteControlEvent, RemoteControlState>
   /// on the host changes that region again.
   final Map<int, int> _newestSequence = {};
 
+  /// The sequence number of the full frame on screen. A partial tile encoded *before* it describes
+  /// pixels the full frame has already superseded, so it is dropped rather than painted on top.
+  int _fullFrameSequence = -1;
+
   Future<void> _onRequested(RemoteControlRequested event, Emitter<RemoteControlState> emit) async {
     emit(state.copyWith(connecting: true, clearError: true));
 
@@ -266,19 +281,14 @@ class RemoteControlBloc extends Bloc<RemoteControlEvent, RemoteControlState>
     // Every tile position is meaningless under new geometry, so they go. The agent sends a full
     // frame straight after a geometry change for exactly this reason.
     _newestSequence.clear();
+    _fullFrameSequence = -1;
+    for (final stale in state.tiles.values) {
+      stale.image.dispose();
+    }
     emit(state.copyWith(geometry: event.geometry, tiles: const {}));
   }
 
   void _onTileDecoded(RemoteControlTileDecoded event, Emitter<RemoteControlState> emit) {
-    final newest = _newestSequence[event.key];
-    if (newest != null && newest > event.tile.sequence) {
-      event.tile.image.dispose();
-      return;
-    }
-    _newestSequence[event.key] = event.tile.sequence;
-
-    final tiles = Map<int, RemoteControlTileImage>.of(state.tiles);
-
     // A tile covering the whole image is a full frame; everything else on screen is now stale, and
     // keeping it would leave the old picture showing through wherever the new one is smaller.
     final geometry = state.geometry;
@@ -288,16 +298,29 @@ class RemoteControlBloc extends Bloc<RemoteControlEvent, RemoteControlState>
         event.tile.width >= geometry.imageWidth &&
         event.tile.height >= geometry.imageHeight;
 
+    final key = isFullFrame ? RemoteControlState.fullFrameKey : event.key;
+    final sequence = event.tile.sequence;
+
+    final newest = _newestSequence[key];
+    if ((newest != null && newest > sequence) || (!isFullFrame && sequence < _fullFrameSequence)) {
+      event.tile.image.dispose();
+      return;
+    }
+    _newestSequence[key] = sequence;
+
+    final tiles = Map<int, RemoteControlTileImage>.of(state.tiles);
+
     if (isFullFrame) {
+      _fullFrameSequence = sequence;
       for (final stale in tiles.values) {
         stale.image.dispose();
       }
       tiles.clear();
     } else {
-      tiles.remove(event.key)?.image.dispose();
+      tiles.remove(key)?.image.dispose();
     }
 
-    tiles[event.key] = event.tile;
+    tiles[key] = event.tile;
     emit(state.copyWith(tiles: tiles));
   }
 

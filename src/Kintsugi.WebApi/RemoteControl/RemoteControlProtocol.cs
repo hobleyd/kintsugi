@@ -35,6 +35,7 @@ public static class RemoteControlProtocol
     public const string HelloType = "hello";
 
     /// <summary>Server to agent: put the consent dialog up.</summary>
+    [method: JsonConstructor]
     public sealed record SessionRequested(
         [property: JsonPropertyName("type")] string Type,
         [property: JsonPropertyName("sessionId")] Guid SessionId,
@@ -49,6 +50,14 @@ public static class RemoteControlProtocol
 
     /// <summary>Server to agent: stop capturing. Also sent agent to server, when the person at the
     /// keyboard ends the session from the menu bar.</summary>
+    /// <remarks>
+    /// The attribute is load-bearing: with two constructors System.Text.Json cannot choose one and
+    /// throws on deserialization — which happened inside <c>ReceiveControlMessagesAsync</c> every time
+    /// an agent reported a session ending, tearing down that host's control socket and leaving it
+    /// "unreachable" until its reconnect backoff elapsed. <see cref="SessionRequested"/> is only ever
+    /// serialized today, and carries the same attribute so it does not become the same trap.
+    /// </remarks>
+    [method: JsonConstructor]
     public sealed record SessionEnded(
         [property: JsonPropertyName("type")] string Type,
         [property: JsonPropertyName("sessionId")] Guid SessionId,
