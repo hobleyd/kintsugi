@@ -47,7 +47,10 @@ class _HostsView extends StatelessWidget {
       const TableColumnSpec(label: 'IP Address', width: FlexColumnWidth(1)),
       const TableColumnSpec(label: 'Status', width: FixedColumnWidth(140)),
       const TableColumnSpec(label: 'Last Seen', width: FlexColumnWidth(1)),
-      const TableColumnSpec(label: 'Actions', width: FixedColumnWidth(90)),
+      // Two icons now (Connect and Remove), so wider than the 110 that fitted one plus the header
+      // word "ACTIONS". `KintsugiTable` floors the width at the header's own — this is comfortably
+      // above it either way.
+      const TableColumnSpec(label: 'Actions', width: FixedColumnWidth(150)),
     ];
 
     return PageScaffold(
@@ -107,11 +110,34 @@ class _HostsView extends StatelessWidget {
           ],
         ),
         LocalTimestamp(host.lastSeenUtc),
-        IconActionButton(
-          icon: Icons.delete_outline,
-          danger: true,
-          tooltip: 'Remove host',
-          onPressed: state.removingId == host.id ? null : () => _confirmRemoval(context, host),
+        Wrap(
+          spacing: 4,
+          children: [
+            IconActionButton(
+              icon: Icons.desktop_windows_outlined,
+              tooltip: 'Connect to this host',
+              // Offered whatever the host's status says, deliberately. "Online" here means the host
+              // checked in within the last interval — up to an hour ago — whereas remote control
+              // additionally needs an agent holding a socket right now, which means somebody logged
+              // in. Only the server can answer that, and it answers by returning a session already
+              // marked unreachable, which the remote-control screen explains. Disabling the button
+              // on a stale status would hide a working host instead.
+              onPressed: host.removalRequested
+                  ? null
+                  : () => context.go(
+                        Uri(
+                          path: Routes.remoteControl(host.id),
+                          queryParameters: {'hostname': host.hostname},
+                        ).toString(),
+                      ),
+            ),
+            IconActionButton(
+              icon: Icons.delete_outline,
+              danger: true,
+              tooltip: 'Remove host',
+              onPressed: state.removingId == host.id ? null : () => _confirmRemoval(context, host),
+            ),
+          ],
         ),
       ];
 

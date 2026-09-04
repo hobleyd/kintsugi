@@ -25,6 +25,13 @@
 # *oldest* distribution you support (or in a container of it) — this script does not pick a target
 # for you.
 #
+# That note applies with full force to kintsugi-agent-wayland, and *only* to it once CI is doing the
+# building: the agent itself is statically linked against musl there, so it has no libc floor at all,
+# while the Wayland backend links libpipewire and therefore glibc and cannot. It is the one binary in
+# this fleet with a floor. The consequence is confined rather than fatal — a host whose glibc is too
+# old fails to exec it, the agent reports Wayland capture as unavailable, and everything else keeps
+# working — but it is the reason CI builds that one on the oldest distribution it can.
+#
 # CI builds the binary itself — a universal one on macOS, a static musl one on Linux, neither of
 # which a plain `cargo build --release` on the build host produces — and has no route to anyone's
 # server. So both halves of this script are separable: --binary packages an already-built binary
@@ -38,6 +45,7 @@ set -euo pipefail
 API_BASE_URL="${AGENT_API_BASE_URL:-https://kintsugi.example.com:8443}"
 RELEASE_NOTES=""
 PREBUILT_BINARY=""
+PREBUILT_WAYLAND_BINARY=""
 OUTPUT_DIR=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -54,6 +62,11 @@ while [[ $# -gt 0 ]]; do
         --binary)
             [[ $# -ge 2 ]] || { echo "--binary requires a value" >&2; exit 1; }
             PREBUILT_BINARY="$2"
+            shift 2
+            ;;
+        --wayland-binary)
+            [[ $# -ge 2 ]] || { echo "--wayland-binary requires a value" >&2; exit 1; }
+            PREBUILT_WAYLAND_BINARY="$2"
             shift 2
             ;;
         --output-dir)
@@ -87,16 +100,44 @@ else
 fi
 [[ -f "$BUILT_BIN" ]] || { echo "Expected build output not found at $BUILT_BIN" >&2; exit 1; }
 
+# The Wayland backend, which is a *separate binary and deliberately optional*.
+#
+# It links libpipewire, so unlike the agent it cannot be a static musl build and it needs the
+# PipeWire development package to compile — which is why this does not fail when it is missing. An
+# archive without it installs and runs exactly as before; the agent reports Wayland hosts as
+# unreachable with a sentence saying the backend is not installed, and X11 hosts are unaffected.
+# Publishing a silently Wayland-less package is a real cost, so it says so loudly.
+WAYLAND_DIR="$(dirname "$PROJECT_DIR")/linux-agent-wayland"
+if [[ -n "$PREBUILT_WAYLAND_BINARY" ]]; then
+    BUILT_WAYLAND_BIN="$PREBUILT_WAYLAND_BINARY"
+    [[ -f "$BUILT_WAYLAND_BIN" ]] || { echo "No Wayland backend at $BUILT_WAYLAND_BIN" >&2; exit 1; }
+elif [[ -d "$WAYLAND_DIR" ]] && pkg-config --exists libpipewire-0.3 2>/dev/null; then
+    echo "Building kintsugi-agent-wayland (release)..."
+    (cd "$WAYLAND_DIR" && cargo build --release)
+    BUILT_WAYLAND_BIN="$WAYLAND_DIR/target/release/kintsugi-agent-wayland"
+else
+    BUILT_WAYLAND_BIN=""
+    echo "WARNING: no PipeWire development package here, so the Wayland backend is not being" >&2
+    echo "         built or packaged. Hosts running a Wayland session will report remote control" >&2
+    echo "         as unavailable. Install libpipewire-0.3-dev (or pass --wayland-binary)." >&2
+fi
+
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 cp "$BUILT_BIN" "$WORK_DIR/kintsugi-agent"
+ARCHIVE_ENTRIES=(kintsugi-agent)
+if [[ -n "$BUILT_WAYLAND_BIN" ]]; then
+    cp "$BUILT_WAYLAND_BIN" "$WORK_DIR/kintsugi-agent-wayland"
+    ARCHIVE_ENTRIES+=(kintsugi-agent-wayland)
+fi
 cp "$SCRIPT_DIR/config.toml" "$WORK_DIR/config.toml"
 cp "$SCRIPT_DIR/kintsugi-agent.service" "$WORK_DIR/kintsugi-agent.service"
 cp "$SCRIPT_DIR/kintsugi-agent.timer" "$WORK_DIR/kintsugi-agent.timer"
 cp "$SCRIPT_DIR/kintsugi-agent-queue.service" "$WORK_DIR/kintsugi-agent-queue.service"
 cp "$SCRIPT_DIR/kintsugi-agent-queue.path" "$WORK_DIR/kintsugi-agent-queue.path"
 cp "$SCRIPT_DIR/kintsugi-agent-ui.service" "$WORK_DIR/kintsugi-agent-ui.service"
+cp "$SCRIPT_DIR/kintsugi-agent-remote.service" "$WORK_DIR/kintsugi-agent-remote.service"
 cp "$SCRIPT_DIR/install.sh" "$WORK_DIR/install.sh"
 cp "$SCRIPT_DIR/uninstall.sh" "$WORK_DIR/uninstall.sh"
 chmod 755 "$WORK_DIR/install.sh" "$WORK_DIR/uninstall.sh"
@@ -107,10 +148,10 @@ ARCHIVE_PATH="$WORK_DIR/$ARCHIVE_NAME"
 # "kintsugi-agent", "install.sh", etc. — what both install.sh's own instructions and
 # self_update.rs's extraction expect, rather than being nested under a temp-dir path.
 tar -czf "$ARCHIVE_PATH" -C "$WORK_DIR" \
-    kintsugi-agent config.toml \
+    "${ARCHIVE_ENTRIES[@]}" config.toml \
     kintsugi-agent.service kintsugi-agent.timer \
     kintsugi-agent-queue.service kintsugi-agent-queue.path \
-    kintsugi-agent-ui.service \
+    kintsugi-agent-ui.service kintsugi-agent-remote.service \
     install.sh uninstall.sh
 
 # --output-dir stops here: the archive is the deliverable, and there is no server to send it to.

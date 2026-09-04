@@ -1,0 +1,50 @@
+[package]
+name = "kintsugi-agent-wayland"
+version = "0.6.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Wayland screen-capture and input backend for the Kintsugi Linux agent."
+
+[[bin]]
+name = "kintsugi-agent-wayland"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# The xdg-desktop-portal client. Pure Rust over zbus — no C library — which is why the *input* half
+# of Wayland support could have lived in the agent itself. It is here instead because the portal
+# requires one session to cover both capture and input: injecting pointer motion references a stream
+# belonging to the same session that produced it.
+# default-features off, then the two portal interfaces named explicitly. Not tidiness: the default
+# set pulls in GTK and every other portal in the spec, and this binary wants neither a toolkit nor
+# 30 unused D-Bus proxies. `async-io` rather than `tokio`, since there is no async runtime here to
+# share — see the thread note in main.rs.
+ashpd = { version = "0.13", default-features = false, features = [
+    "async-io",
+    "screencast",
+    "remote_desktop",
+] }
+
+# And the reason this crate exists at all. libpipewire is a C library, so anything linking it gains a
+# glibc floor and a hard runtime dependency on libpipewire-0.3.so.0 — which the agent must not have,
+# because its statically-linked musl build is what lets it run on the oldest host in a fleet. Keeping
+# PipeWire in a separate binary confines both to machines running a Wayland compositor, which have
+# libpipewire installed by definition.
+# `v0_3_44` for one constant: PW_KEY_TARGET_OBJECT, which is how a stream names the node it wants.
+# The `target_id` argument to `pw_stream_connect` was deprecated in that release and is ignored, so
+# without this feature there is no way to target a node at all — see the note in capture.rs. 0.3.44
+# is from 2022 and predates every distribution that ships a Wayland portal, so requiring it costs
+# nothing.
+pipewire = { version = "0.10", features = ["v0_3_44"] }
+
+# The portal calls are async and everything else here is not. One blocking executor for the handful
+# of round trips at startup is far less machinery than making the whole binary async.
+pollster = "0.4"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

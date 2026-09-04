@@ -13,6 +13,7 @@ import '../entities/agent_package.dart';
 import '../entities/application.dart';
 import '../entities/enums.dart';
 import '../entities/host.dart';
+import '../entities/remote_control_session.dart';
 import '../entities/session.dart';
 import '../entities/settings.dart';
 import '../entities/upgrade_path.dart';
@@ -38,6 +39,21 @@ abstract interface class HostRepository {
   /// Asks the fleet to remove a host. The agent is told to uninstall itself completely on its
   /// next check-in; the host record survives until it confirms.
   Future<void> requestRemoval(String id);
+}
+
+abstract interface class RemoteControlRepository {
+  /// Asks a host's agent to put the consent dialog in front of whoever is sitting at it. Returns at
+  /// once — the answer arrives through [session], which the screen polls.
+  Future<RemoteControlSession> request(String hostId);
+
+  /// One session's current state, or null if the server has never heard of it.
+  Future<RemoteControlSession?> session(String id);
+
+  /// Hangs up: closes both sockets and stops the agent capturing.
+  Future<void> end(String id);
+
+  /// Opens the media channel for a session whose consent has been granted.
+  RemoteControlStream openStream(String sessionId);
 }
 
 abstract interface class ApplicationRepository {

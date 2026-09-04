@@ -83,7 +83,14 @@ class _Sidebar extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               const _Brand(),
-              _NavLink(label: 'Hosts', path: Routes.hosts, selected: location == Routes.hosts),
+              // startsWith, not equality, because /hosts/{id}/remote is a Hosts route: a remote
+              // control session leaving nothing highlighted in the sidebar reads as having
+              // navigated out of the app.
+              _NavLink(
+                label: 'Hosts',
+                path: Routes.hosts,
+                selected: location == Routes.hosts || location.startsWith('${Routes.hosts}/'),
+              ),
               const SizedBox(height: 8),
               _NavLink(
                 label: 'Applications',
