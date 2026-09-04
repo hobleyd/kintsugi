@@ -189,7 +189,11 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Full history and tags, for the release notes: .github/scripts/agent-release-notes.sh lists
+      # the commits since this platform's previous release tag.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # A universal binary, so one published package runs natively on both Apple Silicon and Intel
       # Macs. The Clients page holds exactly one "macos" package, so a single-architecture build
@@ -224,9 +228,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.plan-release.outputs.macos-version }}
         run: |
+          .github/scripts/agent-release-notes.sh macos "$VERSION" \
+              "Universal (arm64 + x86_64) kintsugi-agent build for macOS, from ${GITHUB_SHA}." > notes.md
           gh release create "macos-agent-v${VERSION}" dist/*.tar.gz \
               --title "macOS agent v${VERSION}" \
-              --notes "Universal (arm64 + x86_64) kintsugi-agent build for macOS, from ${GITHUB_SHA}."
+              --notes-file notes.md
 
   release-windows:
     name: Release Windows agent
@@ -237,6 +243,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Build
         working-directory: clients/windows-agent
@@ -258,9 +266,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.plan-release.outputs.windows-version }}
         run: |
+          .github/scripts/agent-release-notes.sh windows "$VERSION" \
+              "kintsugi-agent build for Windows (x86_64), from ${GITHUB_SHA}." > notes.md
           gh release create "windows-agent-v${VERSION}" dist/*.tar.gz \
               --title "Windows agent v${VERSION}" \
-              --notes "kintsugi-agent build for Windows (x86_64), from ${GITHUB_SHA}."
+              --notes-file notes.md
 
   release-linux:
     name: Release Linux agent
@@ -271,6 +281,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # Statically linked against musl, not the runner's glibc. A glibc binary only starts on a
       # glibc at least as new as the one it was linked against, and this runner's is far newer than
@@ -366,6 +378,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.plan-release.outputs.linux-version }}
         run: |
+          .github/scripts/agent-release-notes.sh linux "$VERSION" \
+              "Statically linked (musl, x86_64) kintsugi-agent build for Linux, from ${GITHUB_SHA}. Includes kintsugi-agent-wayland, which links libpipewire and needs glibc 2.34 or newer." > notes.md
           gh release create "linux-agent-v${VERSION}" dist/*.tar.gz \
               --title "Linux agent v${VERSION}" \
-              --notes "Statically linked (musl, x86_64) kintsugi-agent build for Linux, from ${GITHUB_SHA}. Includes kintsugi-agent-wayland, which links libpipewire and needs glibc 2.34 or newer."
+              --notes-file notes.md

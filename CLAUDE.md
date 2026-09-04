@@ -110,7 +110,11 @@ Releasing an agent: bump `version` in that agent's `Cargo.toml` **and regenerate
 then merge to `main`. CI (`.github/workflows/ci.yml`) runs every test suite, then builds and tags a
 GitHub Release per agent whose version isn't already released — `macos-agent-v0.5.0` and so on, one
 `.tar.gz` asset each. It never POSTs to a server; the server pulls, via the Clients screen's
-"Refresh clients" (below).
+"Refresh clients" (below). The release body is written by `.github/scripts/agent-release-notes.sh`:
+one line per commit since that platform's previous release tag that touched the agent's own tree
+(plus `clients/linux-agent-wayland` for Linux), which is what the Clients screen shows under each
+row as "release notes for every newer build" — so a commit subject on an agent change is read by the
+administrator deciding whether to roll it out, not only by the next developer.
 
 **The lock file is half the bump, and forgetting it fails after the merge rather than before it.**
 A crate's own version is recorded in its `Cargo.lock` as well as its `Cargo.toml`, and every cargo
