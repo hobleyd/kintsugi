@@ -104,7 +104,7 @@ public class GitHubScriptApprovalSourceClient : IScriptApprovalSourceClient
     /// <summary>
     /// Pulls every well-formed approval entry out of a repository tarball. A pure function over the
     /// archive bytes so it can be tested against a hand-built one, for the same reason
-    /// <c>GitHubAgentPackageSourceClient.ParseLatestReleases</c> takes a raw JSON string and every
+    /// <c>GitHubAgentPackageSourceClient.ParseReleases</c> takes a raw JSON string and every
     /// agent's package-manager output parser takes a plain <c>&amp;str</c>.
     ///
     /// A malformed entry is skipped with a reason rather than failing the whole import: one bad

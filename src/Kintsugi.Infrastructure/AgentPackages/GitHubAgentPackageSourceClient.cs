@@ -1,6 +1,5 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using Kintsugi.Application.AgentPackages;
 using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Infrastructure.ScriptApproval;
 
@@ -37,7 +36,7 @@ public class GitHubAgentPackageSourceClient : IAgentPackageSourceClient
         ScriptApprovalGitHubHeaders.ApplyStaticHeaders(_httpClient);
     }
 
-    public async Task<IReadOnlyList<AgentPackageSourceRelease>> GetLatestReleasesAsync(CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<AgentPackageSourceRelease>> GetReleasesAsync(CancellationToken cancellationToken)
     {
         // Read per call, not captured in the constructor: both the repository and the token are
         // editable on the GitHub settings page now, so a captured value would ignore every edit
@@ -69,7 +68,7 @@ public class GitHubAgentPackageSourceClient : IAgentPackageSourceClient
                 $"Listing releases from {settings.AgentPackageRepository} took longer than {MetadataTimeout.TotalSeconds:0} seconds.");
         }
 
-        return ParseLatestReleases(json);
+        return ParseReleases(json);
     }
 
     public async Task<Stream> DownloadAsync(AgentPackageSourceRelease release, CancellationToken cancellationToken)
@@ -90,10 +89,14 @@ public class GitHubAgentPackageSourceClient : IAgentPackageSourceClient
     }
 
     /// <summary>
-    /// Picks the newest release for each platform out of a GitHub releases listing. Pulled out as
-    /// a pure function over the raw JSON so it can be tested against a captured real payload,
-    /// rather than only against whatever GitHub happens to be serving — the same reason each
-    /// agent's package-manager output parsers take a plain string.
+    /// Reads every agent build out of a GitHub releases listing, in the order GitHub lists them
+    /// (newest-created first). Pulled out as a pure function over the raw JSON so it can be tested
+    /// against a captured real payload, rather than only against whatever GitHub happens to be
+    /// serving — the same reason each agent's package-manager output parsers take a plain string.
+    ///
+    /// Every version rather than the newest per platform: the Clients screen lists the release notes
+    /// of each build between what is published and what is upstream, and picking one per platform
+    /// for the import is <c>AgentPackageReleases.LatestPerPlatform</c>'s job over this same list.
     ///
     /// Drafts are skipped (nothing has actually been published yet); pre-releases are not, so a
     /// deliberate pre-release tag is still installable. A release whose tag doesn't match
@@ -101,7 +104,7 @@ public class GitHubAgentPackageSourceClient : IAgentPackageSourceClient
     /// treated as an error — this repository is free to publish releases that have nothing to do
     /// with agent builds.
     /// </summary>
-    public static IReadOnlyList<AgentPackageSourceRelease> ParseLatestReleases(string json)
+    public static IReadOnlyList<AgentPackageSourceRelease> ParseReleases(string json)
     {
         using var document = JsonDocument.Parse(json);
         if (document.RootElement.ValueKind != JsonValueKind.Array)
@@ -109,32 +112,18 @@ public class GitHubAgentPackageSourceClient : IAgentPackageSourceClient
             return Array.Empty<AgentPackageSourceRelease>();
         }
 
-        var newestPerPlatform = new Dictionary<string, AgentPackageSourceRelease>(StringComparer.OrdinalIgnoreCase);
+        var releases = new List<AgentPackageSourceRelease>();
 
         foreach (var element in document.RootElement.EnumerateArray())
         {
             var release = ToRelease(element);
-            if (release is null)
+            if (release is not null)
             {
-                continue;
-            }
-
-            // GitHub returns newest-created first, but "created most recently" and "highest
-            // version" are not the same thing once a patch is backported or a release is re-cut,
-            // and the version is what everything downstream keys on. IsHigherThan, not IsNewer:
-            // only a provably higher version displaces the incumbent, so two versions that can't
-            // be ordered against each other (a pre-release tag beside its final release) fall back
-            // to GitHub's newest-created-first order instead of to whichever was listed second.
-            if (!newestPerPlatform.TryGetValue(release.Platform, out var incumbent)
-                || AgentPackageVersion.IsHigherThan(release.Version, incumbent.Version))
-            {
-                newestPerPlatform[release.Platform] = release;
+                releases.Add(release);
             }
         }
 
-        return newestPerPlatform.Values
-            .OrderBy(r => r.Platform, StringComparer.OrdinalIgnoreCase)
-            .ToList();
+        return releases;
     }
 
     private static AgentPackageSourceRelease? ToRelease(JsonElement element)

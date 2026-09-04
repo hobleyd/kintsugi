@@ -36,6 +36,12 @@ AgentPackageSourceRow sourceRowFromJson(Map<String, dynamic> json) => AgentPacka
       availableVersion: json['availableVersion'] as String? ?? '',
       publishedVersion: json['publishedVersion'] as String?,
       isNewer: json['isNewer'] as bool? ?? false,
+      newerReleases: listFromJson(json['newerReleases'], releaseNotesFromJson),
+    );
+
+AgentPackageReleaseNotes releaseNotesFromJson(Map<String, dynamic> json) => AgentPackageReleaseNotes(
+      version: json['version'] as String? ?? '',
+      releaseNotes: json['releaseNotes'] as String?,
     );
 
 AgentPackageImportResult importResultFromJson(Map<String, dynamic> json) => AgentPackageImportResult(

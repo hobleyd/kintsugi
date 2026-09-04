@@ -63,12 +63,14 @@ class AgentPackageSourceStatus extends Equatable {
   List<Object?> get props => [sourceDescription, platforms, unavailableReason];
 }
 
+/// One platform's standing against the upstream repository. Mirrors `AgentPackageSourceStatusRow`.
 class AgentPackageSourceRow extends Equatable {
   const AgentPackageSourceRow({
     required this.platform,
     required this.availableVersion,
     required this.publishedVersion,
     required this.isNewer,
+    required this.newerReleases,
   });
 
   final String platform;
@@ -80,8 +82,27 @@ class AgentPackageSourceRow extends Equatable {
 
   final bool isNewer;
 
+  /// Every upstream build newer than [publishedVersion], highest first — what the row's expander
+  /// lists. Empty when the platform is up to date, so an expanded up-to-date row says so rather
+  /// than showing nothing.
+  final List<AgentPackageReleaseNotes> newerReleases;
+
   @override
-  List<Object?> get props => [platform, availableVersion, publishedVersion, isNewer];
+  List<Object?> get props => [platform, availableVersion, publishedVersion, isNewer, newerReleases];
+}
+
+/// One upstream build's release notes. Mirrors `AgentPackageReleaseNotesDto`.
+class AgentPackageReleaseNotes extends Equatable {
+  const AgentPackageReleaseNotes({required this.version, required this.releaseNotes});
+
+  final String version;
+
+  /// Null when the GitHub release has an empty body — shown as such, because "no notes were
+  /// written" is information about the build and a blank panel is not.
+  final String? releaseNotes;
+
+  @override
+  List<Object?> get props => [version, releaseNotes];
 }
 
 /// What happened to one platform during a refresh. Mirrors `AgentPackageImportResultDto`.

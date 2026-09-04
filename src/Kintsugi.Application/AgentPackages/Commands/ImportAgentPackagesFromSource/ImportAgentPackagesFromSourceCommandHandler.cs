@@ -28,10 +28,13 @@ public class ImportAgentPackagesFromSourceCommandHandler
         ImportAgentPackagesFromSourceCommand request,
         CancellationToken cancellationToken)
     {
-        var releases = await _sourceClient.GetLatestReleasesAsync(cancellationToken);
+        // One build per platform out of the whole listing: importing every intermediate version
+        // would only publish archives no agent will ever download, since self_update reads the
+        // latest package and nothing else.
+        var releases = AgentPackageReleases.LatestPerPlatform(await _sourceClient.GetReleasesAsync(cancellationToken));
         var results = new List<AgentPackageImportResultDto>();
 
-        foreach (var release in releases.OrderBy(r => r.Platform, StringComparer.OrdinalIgnoreCase))
+        foreach (var release in releases)
         {
             results.Add(await ImportOneAsync(release, request.ApiBaseUrl, cancellationToken));
         }

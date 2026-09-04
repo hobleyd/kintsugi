@@ -35,25 +35,30 @@ public class GitHubAgentPackageSourceClientTests
     private static string Listing(params string[] releases) => $"[{string.Join(",", releases)}]";
 
     [Fact]
-    public void ParseLatestReleases_ReadsOneReleasePerPlatform()
+    public void ParseReleases_ReadsEveryAgentBuildInListingOrder()
     {
+        // Every version, not one per platform: the Clients screen lists the release notes of each
+        // build between what is published and what is upstream, and AgentPackageReleases picks the
+        // newest per platform for the import out of this same list.
         var json = Listing(
-            Release("macos-agent-v0.5.0", "kintsugi-agent-macos-0.5.0.tar.gz"),
+            Release("macos-agent-v0.6.0", "kintsugi-agent-macos-0.6.0.tar.gz"),
             Release("windows-agent-v0.5.0", "kintsugi-agent-windows-0.5.0.tar.gz"),
+            Release("macos-agent-v0.5.0", "kintsugi-agent-macos-0.5.0.tar.gz"),
             Release("linux-agent-v0.5.0", "kintsugi-agent-linux-0.5.0.tar.gz"));
 
-        var releases = GitHubAgentPackageSourceClient.ParseLatestReleases(json);
+        var releases = GitHubAgentPackageSourceClient.ParseReleases(json);
 
-        Assert.Equal(new[] { "linux", "macos", "windows" }, releases.Select(r => r.Platform));
-        Assert.All(releases, r => Assert.Equal("0.5.0", r.Version));
+        Assert.Equal(
+            new[] { ("macos", "0.6.0"), ("windows", "0.5.0"), ("macos", "0.5.0"), ("linux", "0.5.0") },
+            releases.Select(r => (r.Platform, r.Version)));
     }
 
     [Fact]
-    public void ParseLatestReleases_CarriesTheAssetNameAndDownloadUrl()
+    public void ParseReleases_CarriesTheAssetNameDownloadUrlAndNotes()
     {
         var json = Listing(Release("macos-agent-v0.5.0", "kintsugi-agent-macos-0.5.0.tar.gz"));
 
-        var release = Assert.Single(GitHubAgentPackageSourceClient.ParseLatestReleases(json));
+        var release = Assert.Single(GitHubAgentPackageSourceClient.ParseReleases(json));
 
         Assert.Equal("kintsugi-agent-macos-0.5.0.tar.gz", release.FileName);
         Assert.Equal(
@@ -63,55 +68,19 @@ public class GitHubAgentPackageSourceClientTests
     }
 
     [Fact]
-    public void ParseLatestReleases_PicksTheHighestVersion_NotTheFirstListed()
-    {
-        // GitHub returns newest-created first, but "created most recently" and "highest version"
-        // are not the same thing once a release is re-cut, and the version is what everything
-        // downstream keys on.
-        var json = Listing(
-            Release("linux-agent-v0.4.9", "kintsugi-agent-linux-0.4.9.tar.gz"),
-            Release("linux-agent-v0.10.0", "kintsugi-agent-linux-0.10.0.tar.gz"),
-            Release("linux-agent-v0.9.0", "kintsugi-agent-linux-0.9.0.tar.gz"));
-
-        var release = Assert.Single(GitHubAgentPackageSourceClient.ParseLatestReleases(json));
-
-        Assert.Equal("0.10.0", release.Version);
-    }
-
-    [Theory]
-    [InlineData("macos-agent-v0.5.0", "macos-agent-v0.5.0-rc1")]
-    [InlineData("macos-agent-v0.5.0-rc1", "macos-agent-v0.5.0")]
-    public void ParseLatestReleases_UnorderableVersions_PickTheSameOneWhicheverOrderTheyreListedIn(
-        string firstTag, string secondTag)
-    {
-        // "0.5.0" and "0.5.0-rc1" can't be ordered against each other, and the permissive
-        // "different means newer" rule would answer yes in both directions — so whichever GitHub
-        // listed second would win, and the selected build would depend on listing order rather
-        // than on the versions. Selection uses IsHigherThan, which falls back to GitHub's
-        // newest-created-first order instead.
-        var json = Listing(
-            Release(firstTag, "kintsugi-agent-macos.tar.gz"),
-            Release(secondTag, "kintsugi-agent-macos.tar.gz"));
-
-        var release = Assert.Single(GitHubAgentPackageSourceClient.ParseLatestReleases(json));
-
-        Assert.Equal(firstTag, $"macos-agent-v{release.Version}");
-    }
-
-    [Fact]
-    public void ParseLatestReleases_SkipsDrafts()
+    public void ParseReleases_SkipsDrafts()
     {
         var json = Listing(
             Release("macos-agent-v0.6.0", "kintsugi-agent-macos-0.6.0.tar.gz", draft: true),
             Release("macos-agent-v0.5.0", "kintsugi-agent-macos-0.5.0.tar.gz"));
 
-        var release = Assert.Single(GitHubAgentPackageSourceClient.ParseLatestReleases(json));
+        var release = Assert.Single(GitHubAgentPackageSourceClient.ParseReleases(json));
 
         Assert.Equal("0.5.0", release.Version);
     }
 
     [Fact]
-    public void ParseLatestReleases_IgnoresReleasesThatArentAgentBuilds()
+    public void ParseReleases_IgnoresReleasesThatArentAgentBuilds()
     {
         // This repository is free to publish releases of its own that have nothing to do with the
         // agents; a tag that doesn't match the shape ci.yml creates is not an error.
@@ -119,13 +88,13 @@ public class GitHubAgentPackageSourceClientTests
             Release("v1.2.3", "kintsugi-server-1.2.3.tar.gz"),
             Release("macos-agent-v0.5.0", "kintsugi-agent-macos-0.5.0.tar.gz"));
 
-        var release = Assert.Single(GitHubAgentPackageSourceClient.ParseLatestReleases(json));
+        var release = Assert.Single(GitHubAgentPackageSourceClient.ParseReleases(json));
 
         Assert.Equal("macos", release.Platform);
     }
 
     [Fact]
-    public void ParseLatestReleases_IgnoresAReleaseWithNoTarGzAsset()
+    public void ParseReleases_IgnoresAReleaseWithNoTarGzAsset()
     {
         // A release whose build job failed part way can exist with no usable asset, and offering
         // it on the Clients page would only produce a refresh that fails at download time.
@@ -133,22 +102,22 @@ public class GitHubAgentPackageSourceClientTests
             Release("macos-agent-v0.6.0", "checksums.txt"),
             Release("macos-agent-v0.5.0", "kintsugi-agent-macos-0.5.0.tar.gz"));
 
-        var release = Assert.Single(GitHubAgentPackageSourceClient.ParseLatestReleases(json));
+        var release = Assert.Single(GitHubAgentPackageSourceClient.ParseReleases(json));
 
         Assert.Equal("0.5.0", release.Version);
     }
 
     [Fact]
-    public void ParseLatestReleases_BlankBody_ComesBackAsNoReleaseNotes()
+    public void ParseReleases_BlankBody_ComesBackAsNoReleaseNotes()
     {
         var json = Listing(Release("macos-agent-v0.5.0", "kintsugi-agent-macos-0.5.0.tar.gz", body: "   "));
 
-        var release = Assert.Single(GitHubAgentPackageSourceClient.ParseLatestReleases(json));
+        var release = Assert.Single(GitHubAgentPackageSourceClient.ParseReleases(json));
 
         Assert.Null(release.ReleaseNotes);
     }
 
     [Fact]
-    public void ParseLatestReleases_EmptyListing_ReturnsNothing() =>
-        Assert.Empty(GitHubAgentPackageSourceClient.ParseLatestReleases("[]"));
+    public void ParseReleases_EmptyListing_ReturnsNothing() =>
+        Assert.Empty(GitHubAgentPackageSourceClient.ParseReleases("[]"));
 }

@@ -41,7 +41,7 @@ public class ImportAgentPackagesFromSourceCommandHandlerTests
             notes);
 
     private void SourceHas(params AgentPackageSourceRelease[] releases) =>
-        _sourceClient.Setup(c => c.GetLatestReleasesAsync(It.IsAny<CancellationToken>())).ReturnsAsync(releases);
+        _sourceClient.Setup(c => c.GetReleasesAsync(It.IsAny<CancellationToken>())).ReturnsAsync(releases);
 
     [Fact]
     public async Task Handle_DownloadsRewritesAndPublishesEachPlatform()

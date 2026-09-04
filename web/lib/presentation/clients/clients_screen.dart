@@ -79,7 +79,7 @@ class _ClientsView extends StatelessWidget {
         else if (view.packages.isEmpty)
           const EmptyPanel('No client packages have been published yet.')
         else
-          _PackagesTable(view: view),
+          _PackagesTable(view: view, expandedPlatform: state.expandedPlatform),
       ],
     );
   }
@@ -159,13 +159,16 @@ class _ClientsView extends StatelessWidget {
 }
 
 class _PackagesTable extends StatelessWidget {
-  const _PackagesTable({required this.view});
+  const _PackagesTable({required this.view, required this.expandedPlatform});
 
   final ClientsView view;
+  final String? expandedPlatform;
 
   @override
   Widget build(BuildContext context) => KintsugiTable(
-        minWidth: 940,
+        // 940 plus the chevron column. The release-notes panel does not bear on it, being spliced
+        // in at the table's full width rather than laid out in a column.
+        minWidth: 1050,
         columns: const [
           TableColumnSpec(label: 'Platform', width: FlexColumnWidth(0.8)),
           TableColumnSpec(label: 'Version', width: FlexColumnWidth(0.8)),
@@ -174,33 +177,113 @@ class _PackagesTable extends StatelessWidget {
           TableColumnSpec(label: 'Published', width: FlexColumnWidth(1)),
           TableColumnSpec(label: 'Notes', width: FlexColumnWidth(1.4)),
           TableColumnSpec(label: 'Download', width: FixedColumnWidth(150)),
+          // 110 for the same reason the Applications table's Actions column is: one 34px icon
+          // needs 90, and the label over it does not fit in that. `KintsugiTable` floors the
+          // column at its label either way; the number says so rather than being overridden.
+          TableColumnSpec(label: 'Release Notes', width: FixedColumnWidth(110)),
         ],
         rows: [
           for (final package in view.packages)
             KintsugiTableRow(
-              cells: [
-                Text(package.platform),
-                Text(package.version),
-                _AvailableCell(row: view.sourceStatus.rowFor(package.platform)),
-                HintText(formatFileSize(package.fileSizeBytes)),
-                LocalTimestamp(package.publishedUtc),
-                package.releaseNotes == null ? const NoValue() : HintText(package.releaseNotes!),
-                SecondaryButton(
-                  label: 'Download',
-                  // A link the browser follows, not a request: the response is a file, and the
-                  // route is anonymous by design so an enrolled agent's own self-update can reach
-                  // it before it has proven anything.
-                  onPressed: () => _download(AgentPackageRepositoryImpl.downloadUrl(package.platform)),
-                ),
-              ],
+              cells: _cells(context, package),
+              expanded: expandedPlatform == package.platform
+                  ? _NewerReleasesPanel(
+                      package: package,
+                      row: view.sourceStatus.rowFor(package.platform),
+                      sourceStatus: view.sourceStatus,
+                    )
+                  : null,
             ),
         ],
       );
+
+  List<Widget> _cells(BuildContext context, AgentPackage package) {
+    final expanded = expandedPlatform == package.platform;
+    return [
+      Text(package.platform),
+      Text(package.version),
+      _AvailableCell(row: view.sourceStatus.rowFor(package.platform)),
+      HintText(formatFileSize(package.fileSizeBytes)),
+      LocalTimestamp(package.publishedUtc),
+      package.releaseNotes == null ? const NoValue() : HintText(package.releaseNotes!),
+      SecondaryButton(
+        label: 'Download',
+        // A link the browser follows, not a request: the response is a file, and the
+        // route is anonymous by design so an enrolled agent's own self-update can reach
+        // it before it has proven anything.
+        onPressed: () => _download(AgentPackageRepositoryImpl.downloadUrl(package.platform)),
+      ),
+      IconActionButton(
+        icon: expanded ? Icons.expand_less : Icons.expand_more,
+        tooltip: expanded ? 'Hide release notes' : 'Release notes for newer builds',
+        onPressed: () => context.read<ClientsBloc>().add(ClientsRowExpansionToggled(package.platform)),
+      ),
+    ];
+  }
 
   /// Navigating to the URL rather than fetching it, because the response is a file with a
   /// Content-Disposition header and the browser is the right thing to handle that. The page stays
   /// where it is — the navigation resolves into a download, not a document.
   static void _download(String url) => locator<PageNavigator>().go(url);
+}
+
+/// The release notes of every upstream build newer than the one published in this row, highest
+/// first — what a host on the published version would pick up on its next self-update, read
+/// before pressing "Refresh clients" rather than after.
+///
+/// Always says something. The list being empty has three different causes and the reader needs
+/// to know which: the platform is up to date, the upstream check failed (its reason is already in
+/// the notice above the table, but a blank panel would read as "no notes"), or the upstream
+/// repository has no release for this platform at all.
+class _NewerReleasesPanel extends StatelessWidget {
+  const _NewerReleasesPanel({
+    required this.package,
+    required this.row,
+    required this.sourceStatus,
+  });
+
+  final AgentPackage package;
+  final AgentPackageSourceRow? row;
+  final AgentPackageSourceStatus sourceStatus;
+
+  @override
+  Widget build(BuildContext context) {
+    final source = row;
+    if (sourceStatus.unavailableReason != null) {
+      return HintText(
+        'Could not check ${sourceStatus.sourceDescription} for builds newer than v${package.version}: '
+        '${sourceStatus.unavailableReason}',
+      );
+    }
+    if (source == null) {
+      return HintText('${sourceStatus.sourceDescription} has no ${package.platform} release.');
+    }
+    if (source.newerReleases.isEmpty) {
+      return HintText('v${package.version} is the newest ${package.platform} build in ${sourceStatus.sourceDescription}.');
+    }
+
+    final textTheme = Theme.of(context).textTheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        HintText(
+          '${source.newerReleases.length == 1 ? 'One build' : '${source.newerReleases.length} builds'} newer than '
+          'v${package.version} in ${sourceStatus.sourceDescription}. "Refresh clients" publishes the newest.',
+        ),
+        for (final release in source.newerReleases) ...[
+          const SizedBox(height: 14),
+          Text('v${release.version}', style: textTheme.titleSmall),
+          const SizedBox(height: 4),
+          // Plain text, as GitHub's body arrives. The Notes column beside it renders the published
+          // build's notes the same way, and a markdown renderer would be a dependency for a few
+          // bullet points.
+          release.releaseNotes == null
+              ? const HintText('No release notes were written for this build.')
+              : Text(release.releaseNotes!, style: textTheme.bodyMedium),
+        ],
+      ],
+    );
+  }
 }
 
 class _AvailableCell extends StatelessWidget {

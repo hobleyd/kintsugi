@@ -20,9 +20,12 @@ public class GetAgentPackageSourceStatusQueryHandlerTests
         new(_sourceClient.Object, _repository.Object, FakeGitHubSettings.Provider());
 
     private void SourceHas(params (string Platform, string Version)[] releases) =>
-        _sourceClient.Setup(c => c.GetLatestReleasesAsync(It.IsAny<CancellationToken>()))
+        SourceHasWithNotes(releases.Select(r => (r.Platform, r.Version, (string?)null)).ToArray());
+
+    private void SourceHasWithNotes(params (string Platform, string Version, string? Notes)[] releases) =>
+        _sourceClient.Setup(c => c.GetReleasesAsync(It.IsAny<CancellationToken>()))
             .ReturnsAsync(releases
-                .Select(r => new AgentPackageSourceRelease(r.Platform, r.Version, "f.tar.gz", "https://example/f.tar.gz", null))
+                .Select(r => new AgentPackageSourceRelease(r.Platform, r.Version, "f.tar.gz", "https://example/f.tar.gz", r.Notes))
                 .ToList());
 
     private void PublishedHere(params (string Platform, string Version)[] packages) =>
@@ -44,6 +47,29 @@ public class GetAgentPackageSourceStatusQueryHandlerTests
         Assert.Equal("0.5.0", row.PublishedVersion);
         Assert.True(row.IsNewer);
         Assert.True(status.HasNewVersions);
+    }
+
+    [Fact]
+    public async Task Handle_RowCarriesEveryNewerBuildsNotes_AndOnlyOneRowPerPlatform()
+    {
+        // The listing holds every version; the row is still one per platform, keyed on the newest,
+        // and what the expander shows is everything between it and what is published here.
+        SourceHasWithNotes(
+            ("macos", "0.7.0", "Seventh."),
+            ("macos", "0.6.0", "Sixth."),
+            ("macos", "0.5.0", "Published already."),
+            ("linux", "0.5.0", null));
+        PublishedHere(("macos", "0.5.0"), ("linux", "0.5.0"));
+
+        var status = await CreateHandler().Handle(new GetAgentPackageSourceStatusQuery(), CancellationToken.None);
+
+        Assert.Equal(new[] { "linux", "macos" }, status.Platforms.Select(r => r.Platform));
+        var macos = status.Platforms.Single(r => r.Platform == "macos");
+        Assert.Equal("0.7.0", macos.AvailableVersion);
+        Assert.Equal(
+            new[] { ("0.7.0", "Seventh."), ("0.6.0", "Sixth.") },
+            macos.NewerReleases.Select(r => (r.Version, r.ReleaseNotes!)));
+        Assert.Empty(status.Platforms.Single(r => r.Platform == "linux").NewerReleases);
     }
 
     [Fact]
@@ -76,7 +102,7 @@ public class GetAgentPackageSourceStatusQueryHandlerTests
         // This runs on every Clients page load, and the packages already published here are
         // installable whether or not GitHub is reachable — so the failure must arrive as data the
         // page can render beside the working downloads, not as an exception that replaces them.
-        _sourceClient.Setup(c => c.GetLatestReleasesAsync(It.IsAny<CancellationToken>()))
+        _sourceClient.Setup(c => c.GetReleasesAsync(It.IsAny<CancellationToken>()))
             .ThrowsAsync(new TimeoutException("Listing releases took longer than 10 seconds."));
 
         var status = await CreateHandler().Handle(new GetAgentPackageSourceStatusQuery(), CancellationToken.None);
@@ -92,7 +118,7 @@ public class GetAgentPackageSourceStatusQueryHandlerTests
     {
         // The catch-all above must not swallow the request having gone away — that would turn a
         // cancelled page load into a full upstream call charged against GitHub's rate limit.
-        _sourceClient.Setup(c => c.GetLatestReleasesAsync(It.IsAny<CancellationToken>()))
+        _sourceClient.Setup(c => c.GetReleasesAsync(It.IsAny<CancellationToken>()))
             .ThrowsAsync(new OperationCanceledException());
 
         await Assert.ThrowsAsync<OperationCanceledException>(

@@ -20,8 +20,24 @@ final class ClientsRefreshRequested extends ClientsEvent {
   const ClientsRefreshRequested();
 }
 
+/// Opens the release-notes panel under one platform's row, or closes it if it is already open.
+final class ClientsRowExpansionToggled extends ClientsEvent {
+  const ClientsRowExpansionToggled(this.platform);
+
+  final String platform;
+
+  @override
+  List<Object?> get props => [platform];
+}
+
 final class ClientsState extends Equatable {
-  const ClientsState({this.view, this.loading = true, this.refreshing = false, this.error});
+  const ClientsState({
+    this.view,
+    this.loading = true,
+    this.refreshing = false,
+    this.error,
+    this.expandedPlatform,
+  });
 
   final ClientsView? view;
   final bool loading;
@@ -32,8 +48,13 @@ final class ClientsState extends Equatable {
   /// response, alongside everything else the screen needs.
   final String? error;
 
+  /// The platform whose row is showing its newer builds' release notes, or null for none. One at
+  /// a time, like the Applications screen's instructions panel: the panel is spliced across the
+  /// table's full width, and two open at once is a page of notes with the table lost between them.
+  final String? expandedPlatform;
+
   @override
-  List<Object?> get props => [view, loading, refreshing, error];
+  List<Object?> get props => [view, loading, refreshing, error, expandedPlatform];
 }
 
 /// The Clients screen.
@@ -48,6 +69,13 @@ class ClientsBloc extends Bloc<ClientsEvent, ClientsState> {
         super(const ClientsState()) {
     on<ClientsRequested>(_onRequested);
     on<ClientsRefreshRequested>(_onRefresh);
+    on<ClientsRowExpansionToggled>((event, emit) => emit(ClientsState(
+          view: state.view,
+          loading: state.loading,
+          refreshing: state.refreshing,
+          error: state.error,
+          expandedPlatform: state.expandedPlatform == event.platform ? null : event.platform,
+        )));
   }
 
   final GetClientsView _getClientsView;
@@ -63,13 +91,30 @@ class ClientsBloc extends Bloc<ClientsEvent, ClientsState> {
   }
 
   Future<void> _onRefresh(ClientsRefreshRequested event, Emitter<ClientsState> emit) async {
-    emit(ClientsState(view: state.view, loading: false, refreshing: true));
+    // The expanded row survives the refresh: what it lists shrinks to nothing once the import
+    // lands, and "up to date" under a row that read "two builds behind" a moment ago is the
+    // confirmation the person who pressed the button is looking for.
+    emit(ClientsState(
+      view: state.view,
+      loading: false,
+      refreshing: true,
+      expandedPlatform: state.expandedPlatform,
+    ));
     try {
       // The refresh returns the whole screen's state, so there is no follow-up read and no moment
       // where the import results sit beside the packages they just replaced.
-      emit(ClientsState(view: await _refreshClients(), loading: false));
+      emit(ClientsState(
+        view: await _refreshClients(),
+        loading: false,
+        expandedPlatform: state.expandedPlatform,
+      ));
     } on ApiException catch (error) {
-      emit(ClientsState(view: state.view, loading: false, error: error.message));
+      emit(ClientsState(
+        view: state.view,
+        loading: false,
+        error: error.message,
+        expandedPlatform: state.expandedPlatform,
+      ));
     }
   }
 }

@@ -9,7 +9,7 @@ namespace Kintsugi.Tests.ScriptApproval;
 
 /// <summary>
 /// Exercises the corpus reader against archives built here, rather than against whatever GitHub
-/// happens to be serving — the same reason <c>GitHubAgentPackageSourceClient.ParseLatestReleases</c>
+/// happens to be serving — the same reason <c>GitHubAgentPackageSourceClient.ParseReleases</c>
 /// takes a raw JSON string and every agent's package-manager parser takes a plain string.
 /// </summary>
 public class ApprovedScriptCorpusReaderTests

@@ -11,11 +11,16 @@ namespace Kintsugi.Application.Common.Interfaces;
 /// </summary>
 public interface IAgentPackageSourceClient
 {
-
-    /// <summary>The newest release available for each platform, at most one per platform. A
-    /// platform with no release at all is simply absent rather than an error — nothing has been
-    /// built for it yet.</summary>
-    Task<IReadOnlyList<AgentPackageSourceRelease>> GetLatestReleasesAsync(CancellationToken cancellationToken);
+    /// <summary>Every agent release upstream, all platforms and all versions, in the order the
+    /// source lists them (GitHub: newest-created first). A platform with no release at all is
+    /// simply absent rather than an error — nothing has been built for it yet.
+    ///
+    /// Every version rather than the newest per platform, because the Clients screen shows what a
+    /// host would pick up between the version published here and the newest one upstream — the
+    /// release notes of each build in between, not only the last. Callers that want one build per
+    /// platform (the import) narrow it with <c>AgentPackageReleases.LatestPerPlatform</c>, so the
+    /// listing is fetched once and read two ways.</summary>
+    Task<IReadOnlyList<AgentPackageSourceRelease>> GetReleasesAsync(CancellationToken cancellationToken);
 
     /// <summary>Downloads one release's archive. The returned stream is positioned at 0 and owned
     /// by the caller.</summary>
@@ -23,9 +28,9 @@ public interface IAgentPackageSourceClient
 }
 
 /// <summary>
-/// One platform's newest available build upstream. <paramref name="Platform"/> is the agent-package
-/// namespace ("macos"/"windows"/"linux"), which is deliberately separate from
-/// <c>PlatformBucket</c>'s upgrade-path buckets.
+/// One agent build upstream. <paramref name="Platform"/> is the agent-package namespace
+/// ("macos"/"windows"/"linux"), which is deliberately separate from <c>PlatformBucket</c>'s
+/// upgrade-path buckets.
 /// </summary>
 public record AgentPackageSourceRelease(
     string Platform,

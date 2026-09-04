@@ -32,7 +32,7 @@ public class GetAgentPackageSourceStatusQueryHandler
         IReadOnlyList<AgentPackageSourceRelease> releases;
         try
         {
-            releases = await _sourceClient.GetLatestReleasesAsync(cancellationToken);
+            releases = await _sourceClient.GetReleasesAsync(cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -47,7 +47,7 @@ public class GetAgentPackageSourceStatusQueryHandler
         var published = await _repository.GetLatestPerPlatformAsync(cancellationToken);
         var publishedByPlatform = published.ToDictionary(p => p.Platform, p => p.Version, StringComparer.OrdinalIgnoreCase);
 
-        var rows = releases
+        var rows = AgentPackageReleases.LatestPerPlatform(releases)
             .Select(release =>
             {
                 publishedByPlatform.TryGetValue(release.Platform, out var publishedVersion);
@@ -55,9 +55,11 @@ public class GetAgentPackageSourceStatusQueryHandler
                     release.Platform,
                     release.Version,
                     publishedVersion,
-                    AgentPackageVersion.IsNewer(release.Version, publishedVersion));
+                    AgentPackageVersion.IsNewer(release.Version, publishedVersion),
+                    AgentPackageReleases.NewerThan(releases, release.Platform, publishedVersion)
+                        .Select(r => new AgentPackageReleaseNotesDto(r.Version, r.ReleaseNotes))
+                        .ToList());
             })
-            .OrderBy(row => row.Platform, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
         return new AgentPackageSourceStatusDto(settings.AgentPackageRepository, rows, UnavailableReason: null);

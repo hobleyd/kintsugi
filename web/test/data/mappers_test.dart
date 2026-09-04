@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kintsugi_web/data/models/agent_package_mapper.dart';
 import 'package:kintsugi_web/data/models/host_mapper.dart';
 import 'package:kintsugi_web/data/models/settings_mapper.dart';
 import 'package:kintsugi_web/data/models/upgrade_path_mapper.dart';
@@ -210,6 +211,39 @@ void main() {
       expect(status.completedUtc, isNotNull);
       expect(status.componentCount, 3);
       expect(status.packageCount, 7);
+    });
+  });
+
+  group('sourceRowFromJson', () {
+    test('reads every newer release with its notes, in the order the server ranked them', () {
+      final row = sourceRowFromJson(const {
+        'platform': 'macos',
+        'availableVersion': '0.7.0',
+        'publishedVersion': '0.5.0',
+        'isNewer': true,
+        'newerReleases': [
+          {'version': '0.7.0', 'releaseNotes': 'Seventh.'},
+          {'version': '0.6.0', 'releaseNotes': null},
+        ],
+      });
+
+      // The server sorts highest first; the client keeps that order rather than re-deriving it,
+      // which would be a second version comparison free to disagree with AgentPackageReleases.
+      expect(row.newerReleases.map((r) => r.version), ['0.7.0', '0.6.0']);
+      expect(row.newerReleases.first.releaseNotes, 'Seventh.');
+      expect(row.newerReleases.last.releaseNotes, isNull);
+    });
+
+    test('an up-to-date platform has an empty list rather than a missing one', () {
+      final row = sourceRowFromJson(const {
+        'platform': 'linux',
+        'availableVersion': '0.5.0',
+        'publishedVersion': '0.5.0',
+        'isNewer': false,
+        'newerReleases': <Object>[],
+      });
+
+      expect(row.newerReleases, isEmpty);
     });
   });
 }

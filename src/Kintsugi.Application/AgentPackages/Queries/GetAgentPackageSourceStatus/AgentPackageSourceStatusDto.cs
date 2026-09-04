@@ -16,8 +16,19 @@ public record AgentPackageSourceStatusDto(
     public bool HasNewVersions => Platforms.Any(p => p.IsNewer);
 }
 
+/// <param name="NewerReleases">Every upstream build newer than <paramref name="PublishedVersion"/>,
+/// highest first, with its release notes — what the Clients screen shows when a row is expanded.
+/// Empty when the platform is up to date. <paramref name="AvailableVersion"/> is always its first
+/// entry whenever <paramref name="IsNewer"/> is true.</param>
 public record AgentPackageSourceStatusRow(
     string Platform,
     string AvailableVersion,
     string? PublishedVersion,
-    bool IsNewer);
+    bool IsNewer,
+    IReadOnlyList<AgentPackageReleaseNotesDto> NewerReleases);
+
+/// <summary>One upstream build's release notes, as GitHub holds them. Not truncated the way
+/// <c>ImportAgentPackagesFromSourceCommandHandler</c> truncates the copy it stores: nothing here
+/// is persisted, and a note cut off mid-sentence is worse than a long one on a screen that exists
+/// to show it.</summary>
+public record AgentPackageReleaseNotesDto(string Version, string? ReleaseNotes);
