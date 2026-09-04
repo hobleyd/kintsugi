@@ -6,6 +6,7 @@ import '../../core/network/api_exception.dart';
 import '../../domain/entities/application.dart';
 import '../../domain/entities/upgrade_path.dart';
 import '../../domain/usecases/application_usecases.dart';
+import '../../domain/usecases/upgrade_path_usecases.dart';
 
 /// One row of the flattened table: an application-and-platform pairing, or an application with no
 /// researched path at all.
@@ -152,6 +153,32 @@ final class ApplicationRowExpansionToggled extends ApplicationsEvent {
   List<Object?> get props => [rowKey];
 }
 
+/// Re-runs one row's script to see whether a newer version has been released — the per-row form of
+/// the "Check for Updates" button, and like it, no AI call.
+final class ApplicationUpdateCheckRequested extends ApplicationsEvent {
+  const ApplicationUpdateCheckRequested(this.row);
+
+  final ApplicationTableRow row;
+
+  @override
+  List<Object?> get props => [row];
+}
+
+/// What the most recent per-row version check reported, shown above the table.
+///
+/// Shown there rather than in the row because the row's own columns cannot say "unchanged": a
+/// check that succeeded and found nothing new leaves Latest exactly as it was, which without this
+/// looks identical to the icon having done nothing.
+class UpdateCheckNotice extends Equatable {
+  const UpdateCheckNotice({required this.message, required this.success});
+
+  final String message;
+  final bool success;
+
+  @override
+  List<Object?> get props => [message, success];
+}
+
 final class ApplicationsState extends Equatable {
   const ApplicationsState({
     this.overview = const ApplicationOverview.empty(),
@@ -160,6 +187,8 @@ final class ApplicationsState extends Equatable {
     this.expandedRowKey,
     this.loading = true,
     this.error,
+    this.checkingRowKeys = const {},
+    this.checkNotice,
   });
 
   final ApplicationOverview overview;
@@ -173,6 +202,13 @@ final class ApplicationsState extends Equatable {
 
   final bool loading;
   final String? error;
+
+  /// Rows whose version check is in flight, by [ApplicationTableRow.key]. A set rather than one
+  /// key because each check is a synchronous round trip of up to 30 seconds and nothing stops a
+  /// reader pressing a second row's icon while the first is still running.
+  final Set<String> checkingRowKeys;
+
+  final UpdateCheckNotice? checkNotice;
 
   /// Every row the response produced, before filtering, with children flattened in directly after
   /// their parent so the nesting survives a sort.
@@ -227,8 +263,11 @@ final class ApplicationsState extends Equatable {
     String? expandedRowKey,
     bool? loading,
     String? error,
+    Set<String>? checkingRowKeys,
+    UpdateCheckNotice? checkNotice,
     bool clearError = false,
     bool clearExpanded = false,
+    bool clearCheckNotice = false,
   }) =>
       ApplicationsState(
         overview: overview ?? this.overview,
@@ -237,20 +276,26 @@ final class ApplicationsState extends Equatable {
         expandedRowKey: clearExpanded ? null : (expandedRowKey ?? this.expandedRowKey),
         loading: loading ?? this.loading,
         error: clearError ? null : (error ?? this.error),
+        checkingRowKeys: checkingRowKeys ?? this.checkingRowKeys,
+        checkNotice: clearCheckNotice ? null : (checkNotice ?? this.checkNotice),
       );
 
   @override
-  List<Object?> get props => [overview, filters, sort, expandedRowKey, loading, error];
+  List<Object?> get props =>
+      [overview, filters, sort, expandedRowKey, loading, error, checkingRowKeys, checkNotice];
 }
 
 class ApplicationsBloc extends Bloc<ApplicationsEvent, ApplicationsState>
     with Polling<ApplicationsEvent, ApplicationsState> {
   ApplicationsBloc({
     required GetApplicationOverview getOverview,
+    required CheckApplicationUpdate checkUpdate,
     ApplicationFilters initialFilters = const ApplicationFilters(),
   })  : _getOverview = getOverview,
+        _checkUpdate = checkUpdate,
         super(ApplicationsState(filters: initialFilters)) {
     on<ApplicationsRequested>(_onRequested);
+    on<ApplicationUpdateCheckRequested>(_onUpdateCheckRequested);
     on<ApplicationsFiltersChanged>((event, emit) => emit(state.copyWith(
           filters: event.filters,
           // A panel spliced under a row that a filter change may have hidden is stranded, so it
@@ -274,6 +319,7 @@ class ApplicationsBloc extends Bloc<ApplicationsEvent, ApplicationsState>
   }
 
   final GetApplicationOverview _getOverview;
+  final CheckApplicationUpdate _checkUpdate;
 
   static ApplicationFilters _normalizeHostFilter(
     ApplicationFilters filters,
@@ -313,5 +359,51 @@ class ApplicationsBloc extends Bloc<ApplicationsEvent, ApplicationsState>
       // an error because one background refresh missed.
       emit(state.copyWith(loading: false, error: error.message));
     }
+  }
+
+  Future<void> _onUpdateCheckRequested(
+    ApplicationUpdateCheckRequested event,
+    Emitter<ApplicationsState> emit,
+  ) async {
+    final row = event.row;
+    if (state.checkingRowKeys.contains(row.key)) return;
+
+    emit(state.copyWith(
+      checkingRowKeys: {...state.checkingRowKeys, row.key},
+      clearCheckNotice: true,
+    ));
+
+    final label = '${row.application.name} on ${row.platform}';
+    UpdateCheckNotice notice;
+    try {
+      final result = await _checkUpdate(
+        applicationName: row.application.name,
+        platform: row.platform,
+      );
+      notice = UpdateCheckNotice(
+        success: result.success,
+        message: switch (result) {
+          UpdateCheckResult(success: true, versionChanged: true) =>
+            '$label: a newer version was found.',
+          UpdateCheckResult(success: true) =>
+            '$label: no newer version; the latest known version is unchanged.',
+          UpdateCheckResult(note: final note?) => '$label: $note',
+          _ => '$label: the version check failed.',
+        },
+      );
+    } on ApiException catch (error) {
+      notice = UpdateCheckNotice(message: '$label: ${error.message}', success: false);
+    }
+
+    // Read `state` afresh: a poll or another row's check may have emitted meanwhile, and this
+    // handler runs concurrently with both.
+    emit(state.copyWith(
+      checkingRowKeys: {...state.checkingRowKeys}..remove(row.key),
+      checkNotice: notice,
+    ));
+
+    // The result carries no version. The row's Latest and Checked columns come from the overview,
+    // so it is re-read now rather than left to the next 60-second poll.
+    add(const ApplicationsRequested(showSpinner: false));
   }
 }

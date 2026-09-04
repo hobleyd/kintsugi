@@ -69,6 +69,9 @@ abstract interface class UpgradePathRepository {
 
   Future<UpdateCheckStatus> updateCheckStatus();
 
+  /// Re-runs one row's script in its `--update-version` mode, synchronously. No AI call.
+  Future<UpdateCheckResult> checkUpdate({required String applicationName, required String platform});
+
   /// Starts an AI refresh for one application.
   Future<RunStarted<UpgradePathRefreshStatus>> startRefresh({
     required String applicationName,

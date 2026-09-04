@@ -292,6 +292,33 @@ class UpdateCheckStatus extends Equatable {
       [isRunning, total, completed, updated, unchanged, failed, startedUtc, completedUtc, faultReason];
 }
 
+/// The outcome of re-checking one row's version. Mirrors `CheckApplicationUpdateResult`.
+///
+/// Carries no version: the row's `latestVersion` and `checkedUtc` arrive with the next overview,
+/// which is the one source the table draws them from. This says only whether the script answered
+/// and whether the answer moved — a row whose check succeeded but changed nothing is exactly the
+/// case that would otherwise look like the button did nothing.
+class UpdateCheckResult extends Equatable {
+  const UpdateCheckResult({
+    required this.applicationName,
+    required this.platform,
+    required this.success,
+    required this.versionChanged,
+    required this.note,
+  });
+
+  final String applicationName;
+  final String platform;
+  final bool success;
+  final bool versionChanged;
+
+  /// Why the check did not succeed. Null on success.
+  final String? note;
+
+  @override
+  List<Object?> get props => [applicationName, platform, success, versionChanged, note];
+}
+
 /// Progress of a single application's AI refresh. Mirrors `UpgradePathRefreshStatusDto`.
 class UpgradePathRefreshStatus extends Equatable {
   const UpgradePathRefreshStatus({

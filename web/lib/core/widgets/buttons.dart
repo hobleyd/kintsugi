@@ -96,6 +96,7 @@ class IconActionButton extends StatelessWidget {
     required this.onPressed,
     required this.tooltip,
     this.danger = false,
+    this.busy = false,
   });
 
   final IconData icon;
@@ -105,14 +106,28 @@ class IconActionButton extends StatelessWidget {
   /// Red rather than accent-coloured, for the one action that cannot be undone from here.
   final bool danger;
 
+  /// Replaces the icon with a spinner and blocks presses — [PrimaryButton.busy] for a table row.
+  /// The spinner is drawn *as* the button's icon rather than beside it, so a row that swaps
+  /// between the two moves nothing: Material 3 lays an `IconButton` out at 40px whatever
+  /// [constraints] below say, and a stand-in sized to that figure would drift with the theme.
+  final bool busy;
+
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
+    final color = danger ? palette.red : palette.neonDim;
     return IconButton(
-      onPressed: onPressed,
+      onPressed: busy ? null : onPressed,
       tooltip: tooltip,
-      icon: Icon(icon, size: 18),
-      color: danger ? palette.red : palette.neonDim,
+      icon: busy
+          ? SizedBox(
+              width: 14,
+              height: 14,
+              child: CircularProgressIndicator(strokeWidth: 2, color: color),
+            )
+          : Icon(icon, size: 18),
+      color: color,
+      disabledColor: busy ? color : null,
       hoverColor: (danger ? palette.red : palette.neon).withValues(alpha: 0.1),
       constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
       padding: EdgeInsets.zero,

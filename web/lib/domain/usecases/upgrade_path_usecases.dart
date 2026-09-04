@@ -36,6 +36,17 @@ class GetUpdateCheckStatus {
   Future<UpdateCheckStatus> call() => _repository.updateCheckStatus();
 }
 
+/// Re-checks one row's version by running its own script — the per-row form of [StartUpdateCheck],
+/// and like it, no AI call.
+class CheckApplicationUpdate {
+  const CheckApplicationUpdate(this._repository);
+
+  final UpgradePathRepository _repository;
+
+  Future<UpdateCheckResult> call({required String applicationName, required String platform}) =>
+      _repository.checkUpdate(applicationName: applicationName, platform: platform);
+}
+
 class GetUpgradePathPrompt {
   const GetUpgradePathPrompt(this._repository);
 

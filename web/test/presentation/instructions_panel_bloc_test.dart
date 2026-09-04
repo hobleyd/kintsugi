@@ -75,6 +75,19 @@ class FakeUpgradePathRepository implements UpgradePathRepository {
 
   @override
   Future<UpdateCheckStatus> updateCheckStatus() async => const UpdateCheckStatus.idle();
+
+  @override
+  Future<UpdateCheckResult> checkUpdate({
+    required String applicationName,
+    required String platform,
+  }) async =>
+      UpdateCheckResult(
+        applicationName: applicationName,
+        platform: platform,
+        success: true,
+        versionChanged: false,
+        note: null,
+      );
 }
 
 UpgradePathResult result({

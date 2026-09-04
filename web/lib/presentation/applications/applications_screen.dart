@@ -49,6 +49,7 @@ class ApplicationsScreen extends StatelessWidget {
           BlocProvider(
             create: (_) => ApplicationsBloc(
               getOverview: locator<GetApplicationOverview>(),
+              checkUpdate: locator<CheckApplicationUpdate>(),
               initialFilters: ApplicationFilters(
                 statusKey: statusOptions.containsKey(initialStatusKey) ? initialStatusKey! : 'all',
                 // Held as given and matched case-insensitively when filtering: a query parameter
@@ -119,6 +120,8 @@ class _ApplicationsView extends StatelessWidget {
         ),
         const SizedBox(height: 20),
         if (state.error != null) AlertBox.error(state.error!),
+        if (state.checkNotice case final notice?)
+          notice.success ? AlertBox.success(notice.message) : AlertBox.error(notice.message),
         if (state.loading && state.overview.applications.isEmpty)
           const _LoadingPanel()
         else if (state.overview.applications.isEmpty)
@@ -289,7 +292,7 @@ class _ApplicationsTable extends StatelessWidget {
       path == null ? const NoValue() : HintText(path.platform),
       _StatusCell(row: row),
       HintText(path?.latestVersion ?? '—'),
-      _UpgradeCell(row: row),
+      _UpgradeCell(row: row, checking: state.checkingRowKeys.contains(row.key)),
       path == null ? const NoValue() : LocalTimestamp(path.checkedUtc),
       IconActionButton(
         icon: expanded ? Icons.expand_less : Icons.expand_more,
@@ -327,9 +330,12 @@ class _StatusCell extends StatelessWidget {
 
 /// The Upgrade column, which shows a different thing per upgrade method.
 class _UpgradeCell extends StatelessWidget {
-  const _UpgradeCell({required this.row});
+  const _UpgradeCell({required this.row, required this.checking});
 
   final ApplicationTableRow row;
+
+  /// Whether this row's version check is in flight, which swaps the Refresh icon for a spinner.
+  final bool checking;
 
   @override
   Widget build(BuildContext context) {
@@ -344,14 +350,31 @@ class _UpgradeCell extends StatelessWidget {
       UpgradeMethod.packageManagerCommand when path.command != null => CodeText(path.command!),
       UpgradeMethod.manualSteps when path.instructions != null =>
         _ManualSteps(instructions: path.instructions!),
-      UpgradeMethod.script when path.script != null => LinkText(
-          label: 'View script',
-          onTap: () => showScriptDialog(
-            context,
-            applicationName: row.application.name,
-            platform: path.platform,
-            script: path.script!,
-          ),
+      UpgradeMethod.script when path.script != null => Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconActionButton(
+              icon: Icons.description_outlined,
+              tooltip: 'View script',
+              onPressed: () => showScriptDialog(
+                context,
+                applicationName: row.application.name,
+                platform: path.platform,
+                script: path.script!,
+              ),
+            ),
+            // The per-row form of "Check for Updates": runs this one script's --update-version on
+            // the server, synchronously, and no AI is involved. The Latest and Checked columns
+            // move when the overview is re-read; the notice above the table says what happened
+            // when they do not.
+            IconActionButton(
+              icon: Icons.refresh,
+              tooltip: checking ? 'Checking for a new version' : 'Check for a new version',
+              busy: checking,
+              onPressed: () =>
+                  context.read<ApplicationsBloc>().add(ApplicationUpdateCheckRequested(row)),
+            ),
+          ],
         ),
       _ => HintText(path.notes ?? 'No reliable information found.'),
     };

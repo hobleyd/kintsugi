@@ -2,6 +2,7 @@ using MediatR;
 using Microsoft.AspNetCore.Mvc;
 using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Application.UpgradePaths;
+using Kintsugi.Application.UpgradePaths.Commands.CheckApplicationUpdate;
 using Kintsugi.Application.UpgradePaths.Commands.SaveUpgradePath;
 using Kintsugi.Application.UpgradePaths.Commands.SignUpgradePathScript;
 using Kintsugi.Application.UpgradePaths.Commands.StartUpdateCheck;
@@ -100,6 +101,22 @@ public class UpgradePathsController : ControllerBase
         Ok(await _sender.Send(new GetUpdateCheckStatusQuery(), cancellationToken));
 
     /// <summary>
+    /// Re-checks one (application, platform) row by running its script's own <c>--update-version</c>
+    /// mode — the single unit of work <see cref="StartUpdateCheck"/> fans out fleet-wide, exposed on
+    /// its own for the Applications page's per-row Refresh icon. Synchronous, unlike the fleet-wide
+    /// run: one script is bounded by <c>AiUpgradePathResearchClient.ScriptCheckTimeout</c> (30s),
+    /// which sits inside nginx's 60s <c>proxy_read_timeout</c> on <c>/api</c>, so there is nothing
+    /// to poll for. The handler never throws — a script that answers nothing comes back as
+    /// <c>success: false</c> with a note, which is what the row shows.
+    /// </summary>
+    // Admin-gated: spawns an interpreter over stored script content.
+    [HttpPost("check-update")]
+    [RequireAdminSession]
+    [ProducesResponseType(typeof(CheckApplicationUpdateResult), StatusCodes.Status200OK)]
+    public async Task<ActionResult<CheckApplicationUpdateResult>> CheckUpdate([FromBody] CheckUpgradePathUpdateRequest request, CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(new CheckApplicationUpdateCommand(request.ApplicationName, request.Platform), cancellationToken));
+
+    /// <summary>
     /// Starts a background refresh for one application — either a single platform, or every
     /// platform it's installed on when <see cref="RefreshUpgradePathRequest.Platform"/> is omitted.
     /// Returns immediately; poll <see cref="GetRefreshStatus"/> for progress and the eventual
@@ -187,6 +204,8 @@ public class UpgradePathsController : ControllerBase
 }
 
 public record RefreshUpgradePathRequest(string ApplicationName, string? Platform, string? Instructions = null);
+
+public record CheckUpgradePathUpdateRequest(string ApplicationName, string Platform);
 
 public record SignUpgradePathScriptRequest(string ApplicationName, string Platform);
 

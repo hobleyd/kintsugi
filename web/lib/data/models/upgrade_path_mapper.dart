@@ -130,6 +130,15 @@ UpdateCheckStatus updateCheckStatusFromJson(Map<String, dynamic> json) => Update
       faultReason: json['faultReason'] as String?,
     );
 
+/// Reads a `CheckApplicationUpdateResult`.
+UpdateCheckResult updateCheckResultFromJson(Map<String, dynamic> json) => UpdateCheckResult(
+      applicationName: json['applicationName'] as String? ?? '',
+      platform: json['platform'] as String? ?? '',
+      success: json['success'] as bool? ?? false,
+      versionChanged: json['versionChanged'] as bool? ?? false,
+      note: json['note'] as String?,
+    );
+
 /// Reads a `UpgradePathRefreshStatusDto`, flattening its nested `RefreshUpgradePathResult`.
 ///
 /// The nesting is not reproduced in the entity because nothing on screen needs the distinction:

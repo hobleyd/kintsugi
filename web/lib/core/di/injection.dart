@@ -91,6 +91,7 @@ void _registerUseCases() {
     ..registerSingleton(GetUpgradePathScanStatus(upgradePaths))
     ..registerSingleton(StartUpdateCheck(upgradePaths))
     ..registerSingleton(GetUpdateCheckStatus(upgradePaths))
+    ..registerSingleton(CheckApplicationUpdate(upgradePaths))
     ..registerSingleton(GetUpgradePathPrompt(upgradePaths))
     ..registerSingleton(StartUpgradePathRefresh(upgradePaths))
     ..registerSingleton(GetUpgradePathRefreshStatus(upgradePaths))
