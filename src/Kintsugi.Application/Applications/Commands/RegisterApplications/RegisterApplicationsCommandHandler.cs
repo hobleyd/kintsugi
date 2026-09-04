@@ -46,7 +46,7 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
                 continue;
             }
 
-            var entity = new InstalledApplication(host.Id, entry.Name, entry.Version, entry.ApplicationIdentifier);
+            var entity = new InstalledApplication(host.Id, entry.Name, entry.Version, entry.ApplicationIdentifier, entry.UpdateAvailable);
             entitiesByName[entry.Name] = entity;
             newlyReported.Add(entity);
         }
@@ -84,13 +84,20 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
     /// A package-manager-managed entry that reports its own <see cref="ApplicationEntry.AvailableVersion"/>
     /// (straight from that manager's catalog) is authoritative — seed or refresh that application's
     /// <see cref="UpgradePath"/> directly from it rather than waiting on a separate AI research scan
-    /// to (re-)discover the same information less reliably. Stored under the same
+    /// to (re-)discover the same information less reliably. An entry whose manager reports a
+    /// pending update <em>without</em> a version (<see cref="ApplicationEntry.UpdateAvailable"/>
+    /// true, <see cref="ApplicationEntry.AvailableVersion"/> null — Flatpak on a host whose
+    /// appstream cache has nothing to say) seeds the row too, since the row is what makes the
+    /// installation patchable at all: the agent's <c>is_patchable</c> runs nothing but a signed
+    /// Script row, and the Hosts screen counts nothing that has no row to resolve to. Such a row
+    /// keeps whatever <see cref="UpgradePath.LatestVersion"/> it already had rather than having it
+    /// erased by a report that simply did not know one.
+    /// Stored under the same
     /// <see cref="PlatformBucket.ForPackageManager"/> bucket and <see cref="UpgradeMethod.Script"/>
     /// shape <c>ResearchApplicationUpgradePathCommandHandler</c> uses (never the real per-host OS
     /// platform, and never <see cref="UpgradeMethod.PackageManagerCommand"/>) — otherwise this row
     /// would never match the key the scan planner and the Applications page's per-row panel both
-    /// look it up by, and an agent would never recognize it as patchable (see the agents' own
-    /// <c>is_patchable</c>, which only trusts a signed <see cref="UpgradeMethod.Script"/> row).
+    /// look it up by, and an agent would never recognize it as patchable.
     /// An entry naming a manager this system doesn't recognize is left entirely alone here: there
     /// is no script to write for it, and the scan is what resolves it to NotFound with a note.
     /// A row with no signature yet (brand new, or never reviewed) inherits one automatically the
@@ -121,7 +128,8 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
 
         foreach (var entry in applications)
         {
-            if (string.IsNullOrEmpty(entry.PackageManager) || string.IsNullOrEmpty(entry.AvailableVersion) || !seen.Add(entry.Name))
+            var reportsUpdate = !string.IsNullOrEmpty(entry.AvailableVersion) || entry.UpdateAvailable == true;
+            if (string.IsNullOrEmpty(entry.PackageManager) || !reportsUpdate || !seen.Add(entry.Name))
             {
                 continue;
             }
@@ -181,7 +189,7 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
             else
             {
                 existing.Update(
-                    UpgradePathStatus.Found, entry.AvailableVersion, UpgradeMethod.Script,
+                    UpgradePathStatus.Found, entry.AvailableVersion ?? existing.LatestVersion, UpgradeMethod.Script,
                     downloadUrl: null, command: null, instructions: null, sourceUrl: null, notes: null,
                     script: script, applicationIdentifier: applicationIdentifier);
 

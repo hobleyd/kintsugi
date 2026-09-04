@@ -1288,6 +1288,29 @@ by then — only the long-running per-user units get restarted.
   `InstalledApplication`, not from the `UpgradePath` (which always has one, falling back to the
   name). The Windows and Linux agents set it for every managed package; the macOS agent leaves it
   unset for Homebrew formulae/casks, which is why those rows do not currently patch.
+- **"Is this installation behind" is answered by the agent's package manager first and a version
+  comparison second, and the Linux agent is the only one that supplies the first answer.**
+  `InstalledApp.update_available` (→ `ApplicationEntry.UpdateAvailable` →
+  `InstalledApplication.UpdateAvailable`) is what `flatpak remote-ls --updates` / `snap refresh
+  --list` said about exactly this installation; `UpgradePathRepository.InstallationUpdateStatus`
+  takes it whenever present and only otherwise compares `LatestVersion` against the installed
+  version. It exists because the comparison is wrong for both Linux managers in ways that all read
+  as "current": both ship rebuilds under an unchanged version string, and Flatpak prints a version
+  in `remote-ls` only when the host's *cached* appstream data holds one — a cache nothing on a fleet
+  host refreshes, since the agent is the thing that would run `flatpak update`. Worse, with that
+  column empty flatpak's table printer drops the trailing tab too, so the line is the bare
+  application id, and a parser requiring two columns (as `parse_flatpak_updates` did) discards the
+  update entirely. That is how a Linux host with pending updates showed 0 app updates. Verified
+  against Flatpak 1.14.10 in a container: `org.gnome.Calculator` alone before `flatpak update
+  --appstream`, `org.gnome.Calculator\t50.0` after. Three things follow. The verdict is
+  `Option<bool>` and a failed listing must stay `None` — an empty map would tell the server every
+  app is current. A verdict of `true` with no version still seeds the `pm:` row
+  (`UpsertPackageManagerUpgradePathsAsync`), or the installation is neither counted nor
+  patchable, and it must not erase a `LatestVersion` the row already had from `--update-version`.
+  And a `ReportPatchResult` clears the verdict along with recording the new version, or the host
+  stays counted as behind until its next inventory report. macOS and Windows leave the field
+  `None` on purpose: `brew outdated`, winget's Available column and `choco outdated` only ever name
+  a package whose version string changed, so there `available_version` already is the verdict.
 - **nginx loads the fleet CA's public certificate at startup and exits without it, so the API has
   to create that file before the first agent exists.** `Program.cs` calls
   `EnsureAgentFleetCaExists` for exactly this reason. `CaService` generates the CA lazily, on the

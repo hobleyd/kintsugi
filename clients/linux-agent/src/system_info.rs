@@ -28,6 +28,18 @@ pub struct InstalledApp {
     /// `RegisterApplicationsCommandHandler.UpsertPackageManagerUpgradePathsAsync`).
     #[serde(rename = "availableVersion", skip_serializing_if = "Option::is_none")]
     pub available_version: Option<String>,
+    /// The manager's own verdict on whether this installation has an update pending —
+    /// `Some(true)` when `flatpak remote-ls --updates` / `snap refresh --list` names it,
+    /// `Some(false)` when that listing ran and did not, `None` when the listing failed and the
+    /// verdict is unknown. Carried separately from `available_version` because the verdict is
+    /// the reliable half and the version is the optional one: Flatpak knows an update is pending
+    /// from the remote's commit alone and prints a version only when the host's appstream cache
+    /// happens to hold one, and both managers ship rebuilds under an unchanged version string.
+    /// A server comparing version strings would call every one of those "current"; the server
+    /// (`UpgradePathRepository.ComputeUpdateAvailable`) takes this verdict over its comparison
+    /// whenever it is present.
+    #[serde(rename = "updateAvailable", skip_serializing_if = "Option::is_none")]
+    pub update_available: Option<bool>,
 }
 
 /// Returns the machine's local hostname (e.g. "web-01.example.com").
@@ -238,25 +250,38 @@ pub fn scan_flatpak() -> Vec<InstalledApp> {
                 package_manager: None,
                 application_identifier: Some("flatpak".to_string()),
                 available_version: None,
+                // Flatpak itself is a distribution package, updated by `os_update` with the rest
+                // of the OS; nothing here can say whether a newer one is pending.
+                update_available: None,
             }),
             None => crate::logging::warn(&format!("unexpected `flatpak --version` output format: {stdout:?}")),
         },
         Err(err) => crate::logging::warn(&format!("could not determine Flatpak's own version: {err:#}")),
     }
 
-    let available = match run_capturing(&flatpak, &["remote-ls", "--system", "--updates", "--columns=application,version"]) {
-        Ok(stdout) => parse_flatpak_updates(&stdout),
+    // Refreshing the appstream cache first is what makes the version column below ever say
+    // anything: `remote-ls` reads versions from the host's *cached* appstream data and never
+    // fetches it, and on a fleet host nothing else fetches it either — `flatpak update` would, but
+    // this agent is the thing that runs `flatpak update`, and only once a pending update has been
+    // noticed. Best-effort: the verdict does not depend on it (see `parse_flatpak_updates`).
+    if let Err(err) = run_capturing(&flatpak, &["update", "--system", "--appstream", "--noninteractive"]) {
+        crate::logging::warn(&format!("could not refresh Flatpak appstream data: {err:#}"));
+    }
+
+    let pending = match run_capturing(&flatpak, &["remote-ls", "--system", "--updates", "--columns=application,version"]) {
+        Ok(stdout) => Some(parse_flatpak_updates(&stdout)),
         Err(err) => {
             // Best-effort, exactly like `brew info` on macOS: this only enriches entries the
-            // listing below already reports, so a failure here costs an available-version column,
-            // not the scan.
+            // listing below already reports, so a failure here costs the update verdict and the
+            // available-version column, not the scan. `None` rather than an empty map, because
+            // "the listing failed" must reach the server as "unknown" and not as "nothing pending".
             crate::logging::warn(&format!("could not list available Flatpak updates: {err:#}"));
-            HashMap::new()
+            None
         }
     };
 
     match run_capturing(&flatpak, &["list", "--system", "--app", "--columns=name,application,version"]) {
-        Ok(stdout) => apps.extend(parse_flatpak_list(&stdout, &available)),
+        Ok(stdout) => apps.extend(parse_flatpak_list(&stdout, pending.as_ref())),
         Err(err) => crate::logging::warn(&format!("could not list installed Flatpak applications: {err:#}")),
     }
 
@@ -274,17 +299,34 @@ fn parse_flatpak_version(stdout: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Parses `flatpak remote-ls --updates --columns=application,version` into application-id ->
-/// available-version. Only applications with an update pending appear at all, so an id missing
-/// from this map simply has no newer version known.
-fn parse_flatpak_updates(stdout: &str) -> HashMap<String, String> {
+/// What a manager's own update listing said: every application id with an update pending, mapped
+/// to the newer version when the listing printed one. An id absent from the map has nothing
+/// pending *as far as that listing is concerned*, which is only meaningful when the listing ran —
+/// callers pass `None` for a listing that failed.
+type PendingUpdates = HashMap<String, Option<String>>;
+
+/// Parses `flatpak remote-ls --updates --columns=application,version`. Only applications with an
+/// update pending appear at all, so being listed *is* the verdict; the version is a bonus.
+///
+/// The version column is routinely missing, and its absence must not drop the row. `remote-ls`
+/// reads versions from the host's cached appstream data, and when that cache has never been
+/// fetched the column is empty — and flatpak's table printer then omits the trailing tab as well,
+/// so the line is the bare application id. Requiring both columns (which this used to do) made
+/// every pending update on such a host vanish from the report, and the Hosts screen showed 0 app
+/// updates for a machine `flatpak remote-ls --updates` had plenty to say about. Verified against
+/// Flatpak 1.14.10: `org.gnome.Calculator` alone before `flatpak update --appstream`, then
+/// `org.gnome.Calculator\t50.0` after it.
+fn parse_flatpak_updates(stdout: &str) -> PendingUpdates {
     stdout
         .lines()
         .filter_map(|line| {
             let mut columns = line.split('\t');
             let application = columns.next()?.trim();
-            let version = columns.next()?.trim();
-            (!application.is_empty() && !version.is_empty()).then(|| (application.to_string(), version.to_string()))
+            if application.is_empty() {
+                return None;
+            }
+            let version = columns.next().map(str::trim).filter(|version| !version.is_empty());
+            Some((application.to_string(), version.map(str::to_string)))
         })
         .collect()
 }
@@ -293,7 +335,10 @@ fn parse_flatpak_updates(stdout: &str) -> HashMap<String, String> {
 /// name legitimately contains spaces, so nothing else would do), and an application with no
 /// version recorded — which happens for some remotes — is reported as "unknown" rather than
 /// dropped, matching how the macOS agent treats a bundle with no version string.
-fn parse_flatpak_list(stdout: &str, available: &HashMap<String, String>) -> Vec<InstalledApp> {
+///
+/// `pending` is `None` when the update listing failed, which leaves every entry's verdict unknown
+/// rather than declaring the whole installation current.
+fn parse_flatpak_list(stdout: &str, pending: Option<&PendingUpdates>) -> Vec<InstalledApp> {
     stdout
         .lines()
         .filter_map(|line| {
@@ -311,7 +356,8 @@ fn parse_flatpak_list(stdout: &str, available: &HashMap<String, String>) -> Vec<
                 version: if version.is_empty() { "unknown".to_string() } else { version.to_string() },
                 package_manager: Some(FLATPAK_NAME.to_string()),
                 application_identifier: Some(application.to_string()),
-                available_version: available.get(application).cloned(),
+                available_version: pending.and_then(|pending| pending.get(application).cloned().flatten()),
+                update_available: pending.map(|pending| pending.contains_key(application)),
             })
         })
         .collect()
@@ -326,6 +372,20 @@ pub fn scan_snap() -> Vec<InstalledApp> {
 
     let mut apps = Vec::new();
 
+    // Asked first so snapd's own row below can carry its verdict too: snapd ships as the "snapd"
+    // snap and turns up in this listing like any other.
+    let pending = match run_capturing(&snap, &["refresh", "--list"]) {
+        Ok(stdout) => Some(parse_snap_table(&stdout)),
+        Err(err) => {
+            // Same reasoning as the Flatpak listing: a failure costs the verdict and the
+            // available-version column, not the scan, and reaches the server as "unknown".
+            crate::logging::warn(&format!("could not list available snap refreshes: {err:#}"));
+            None
+        }
+    };
+    let verdict_for = |name: &str| pending.as_ref().map(|pending| pending.contains_key(name));
+    let available_for = |name: &str| pending.as_ref().and_then(|pending| pending.get(name).cloned());
+
     match run_capturing(&snap, &["version"]) {
         Ok(stdout) => match parse_snap_version(&stdout) {
             Some(version) => apps.push(InstalledApp {
@@ -335,20 +395,13 @@ pub fn scan_snap() -> Vec<InstalledApp> {
                 // "snapd" rather than "snap": snapd ships as a snap of that name and refreshes
                 // itself like any other, so this is the id its own upgrade script needs.
                 application_identifier: Some("snapd".to_string()),
-                available_version: None,
+                available_version: available_for("snapd"),
+                update_available: verdict_for("snapd"),
             }),
             None => crate::logging::warn(&format!("unexpected `snap version` output format: {stdout:?}")),
         },
         Err(err) => crate::logging::warn(&format!("could not determine snapd's version: {err:#}")),
     }
-
-    let available = match run_capturing(&snap, &["refresh", "--list"]) {
-        Ok(stdout) => parse_snap_table(&stdout),
-        Err(err) => {
-            crate::logging::warn(&format!("could not list available snap refreshes: {err:#}"));
-            HashMap::new()
-        }
-    };
 
     match run_capturing(&snap, &["list"]) {
         Ok(stdout) => {
@@ -356,7 +409,8 @@ pub fn scan_snap() -> Vec<InstalledApp> {
                 version,
                 package_manager: Some(SNAP_NAME.to_string()),
                 application_identifier: Some(name.clone()),
-                available_version: available.get(&name).cloned(),
+                available_version: available_for(&name),
+                update_available: verdict_for(&name),
                 name,
             }));
         }
@@ -385,7 +439,10 @@ fn parse_snap_version(stdout: &str) -> Option<String> {
 
 /// Parses the name/version columns out of `snap list` or `snap refresh --list`, which share one
 /// layout: a header row, then one whitespace-separated row per snap whose first two fields are
-/// always the name and the version (neither can contain a space).
+/// always the name and the version (neither can contain a space). Unlike Flatpak's listing the
+/// version is always printed, so this is a plain map rather than a [`PendingUpdates`] — but a
+/// snap does get rebuilt under an unchanged version string (a new revision, same `Version`), so a
+/// name being present here is still the verdict and the version only a hint.
 ///
 /// `snap refresh --list` prints "All snaps up to date." and no table when nothing is pending; the
 /// header check below is what makes that come back as an empty map rather than a bogus entry.
@@ -531,26 +588,52 @@ mod tests {
     #[test]
     fn parse_flatpak_list_reads_tab_separated_columns_including_names_with_spaces() {
         let stdout = "Firefox\torg.mozilla.firefox\t125.0.3\nGNU Image Manipulation Program\torg.gimp.GIMP\t2.10.36\n";
-        let mut available = HashMap::new();
-        available.insert("org.mozilla.firefox".to_string(), "126.0".to_string());
+        let mut pending = PendingUpdates::new();
+        pending.insert("org.mozilla.firefox".to_string(), Some("126.0".to_string()));
 
-        let apps = parse_flatpak_list(stdout, &available);
+        let apps = parse_flatpak_list(stdout, Some(&pending));
 
         assert_eq!(apps.len(), 2);
         assert_eq!(apps[0].name, "Firefox");
         assert_eq!(apps[0].version, "125.0.3");
         assert_eq!(apps[0].application_identifier.as_deref(), Some("org.mozilla.firefox"));
         assert_eq!(apps[0].available_version.as_deref(), Some("126.0"));
+        assert_eq!(apps[0].update_available, Some(true));
         assert_eq!(apps[0].package_manager.as_deref(), Some("Flatpak"));
         // A display name containing spaces must survive intact — the reason these columns are
         // split on tabs rather than whitespace.
         assert_eq!(apps[1].name, "GNU Image Manipulation Program");
         assert_eq!(apps[1].available_version, None);
+        // The listing ran and did not name GIMP, so GIMP is current — a definite answer, not an
+        // unknown one.
+        assert_eq!(apps[1].update_available, Some(false));
+    }
+
+    /// The case that showed 0 app updates on a real host: flatpak knows an update is pending but
+    /// has no version to print for it. The verdict must survive without the version.
+    #[test]
+    fn parse_flatpak_list_reports_a_pending_update_whose_version_is_unknown() {
+        let pending = parse_flatpak_updates("org.gnome.Calculator\n");
+
+        let apps = parse_flatpak_list("Calculator\torg.gnome.Calculator\t49.2\n", Some(&pending));
+
+        assert_eq!(apps[0].update_available, Some(true));
+        assert_eq!(apps[0].available_version, None);
+    }
+
+    /// A failed listing is not "nothing pending": the server must be told the verdict is unknown
+    /// so it falls back to its own version comparison rather than marking every app current.
+    #[test]
+    fn parse_flatpak_list_leaves_the_verdict_unknown_when_the_update_listing_failed() {
+        let apps = parse_flatpak_list("Firefox\torg.mozilla.firefox\t125.0.3\n", None);
+
+        assert_eq!(apps[0].update_available, None);
+        assert_eq!(apps[0].available_version, None);
     }
 
     #[test]
     fn parse_flatpak_list_reports_a_missing_version_as_unknown() {
-        let apps = parse_flatpak_list("Some App\torg.example.App\t\n", &HashMap::new());
+        let apps = parse_flatpak_list("Some App\torg.example.App\t\n", Some(&PendingUpdates::new()));
 
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].version, "unknown");
@@ -560,8 +643,21 @@ mod tests {
     fn parse_flatpak_updates_maps_application_ids_to_versions() {
         let updates = parse_flatpak_updates("org.mozilla.firefox\t126.0\norg.gimp.GIMP\t2.10.38\n");
 
-        assert_eq!(updates.get("org.mozilla.firefox").map(String::as_str), Some("126.0"));
+        assert_eq!(updates.get("org.mozilla.firefox"), Some(&Some("126.0".to_string())));
         assert_eq!(updates.len(), 2);
+    }
+
+    /// Captured from Flatpak 1.14.10 before and after `flatpak update --appstream`: with no
+    /// appstream cache the version column is empty and the table printer drops the tab with it.
+    /// Both lines must count as a pending update.
+    #[test]
+    fn parse_flatpak_updates_keeps_an_update_whose_version_column_is_missing() {
+        let updates = parse_flatpak_updates("org.gnome.Calculator\norg.mozilla.firefox\t126.0\norg.gimp.GIMP\t\n");
+
+        assert_eq!(updates.len(), 3);
+        assert_eq!(updates.get("org.gnome.Calculator"), Some(&None));
+        assert_eq!(updates.get("org.gimp.GIMP"), Some(&None));
+        assert_eq!(updates.get("org.mozilla.firefox"), Some(&Some("126.0".to_string())));
     }
 
     #[test]

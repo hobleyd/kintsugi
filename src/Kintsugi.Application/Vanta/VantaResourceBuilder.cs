@@ -143,7 +143,11 @@ public static class VantaResourceBuilder
             severity,
             ComponentUniqueId(status.SerialNumber),
             $"{status.ApplicationName} {status.InstalledVersion} is installed on {status.Hostname}; {latest} is the latest known version. "
-                + "Reported by Kintsugi from an installed-version comparison, not from a CVE feed.",
+                // Two sources feed UpdateAvailable (see UpgradePathRepository.InstallationUpdateStatus):
+                // the host's own package manager naming the installation as pending, or the server
+                // comparing the installed version against the latest one it knows. Neither is a CVE
+                // feed, which is the part a compliance reader needs to hear.
+                + "Reported by Kintsugi from the host's package manager or an installed-version comparison, not from a CVE feed.",
             IsResolvable(status),
             RemediationFor(status, latest));
     }

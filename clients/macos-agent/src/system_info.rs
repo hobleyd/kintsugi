@@ -25,6 +25,15 @@ pub struct InstalledApp {
     /// an update is available without having to research it separately.
     #[serde(rename = "availableVersion", skip_serializing_if = "Option::is_none")]
     pub available_version: Option<String>,
+    /// The manager's own verdict on whether an update is pending, independent of any version
+    /// string. Mirrors `ApplicationEntry.UpdateAvailable` on the server and the same field in the
+    /// Linux agent, which is the only one that sets it: Flatpak and Snap both ship rebuilds under
+    /// an unchanged version (and Flatpak often has no version to print at all), so their verdict
+    /// has to travel separately or the server's version comparison calls them current. Homebrew
+    /// has no such case — `brew outdated` only ever names a formula or cask whose version string
+    /// changed, so `available_version` already carries the verdict — and this stays `None`.
+    #[serde(rename = "updateAvailable", skip_serializing_if = "Option::is_none")]
+    pub update_available: Option<bool>,
 }
 
 /// Returns the machine's local hostname (e.g. "laptop-jsmith.local").
@@ -177,6 +186,7 @@ fn read_app_bundle(app_path: &Path) -> Result<Option<InstalledApp>> {
         package_manager: None,
         application_identifier,
         available_version: None,
+        update_available: None,
     }))
 }
 
@@ -256,6 +266,7 @@ pub fn scan_homebrew() -> HomebrewScan {
             package_manager: None,
             application_identifier: None,
             available_version: None,
+            update_available: None,
         }),
         Err(err) => crate::logging::warn(&format!("could not determine Homebrew's own version: {err}")),
     }
@@ -516,6 +527,7 @@ fn list_brew_packages(brew: &Path, run_as: Option<&str>, kind: &str, latest_vers
                 package_manager: Some(HOMEBREW_NAME.to_string()),
                 application_identifier: None,
                 available_version,
+                update_available: None,
             })
         })
         .collect()

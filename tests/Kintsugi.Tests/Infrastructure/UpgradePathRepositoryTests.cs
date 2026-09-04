@@ -35,13 +35,19 @@ public class UpgradePathRepositoryTests
     /// as parent/child exactly the way RegisterApplicationsCommandHandler does — the link the
     /// repository's fallback lookup reads to know which manager's bucket to check.
     /// </summary>
-    private static void AddManagedApplication(ApplicationDbContext context, Guid hostId, string name, string version, string packageManagerName)
+    private static void AddManagedApplication(ApplicationDbContext context, Guid hostId, string name, string version, string packageManagerName, bool? updateAvailable = null)
     {
         var manager = new InstalledApplication(hostId, packageManagerName, "1.0");
-        var managed = new InstalledApplication(hostId, name, version);
+        var managed = new InstalledApplication(hostId, name, version, updateAvailable: updateAvailable);
         managed.SetParent(manager.Id);
         context.InstalledApplications.AddRange(manager, managed);
     }
+
+    /// <summary>Where every Flatpak-managed row lives, the same way as <see cref="HomebrewBucket"/>.</summary>
+    private static readonly string FlatpakBucket = PlatformBucket.ForPackageManager(PackageManagerCatalog.Flatpak);
+
+    private static UpgradePath FlatpakRow(string name, string? latestVersion) =>
+        UpgradePath.Create(name, FlatpakBucket, UpgradePathStatus.Found, latestVersion, UpgradeMethod.Script, null, null, null, null, null, "#!/bin/bash\n...");
 
     [Fact]
     public async Task GetAsync_ReturnsNull_WhenNoMatchingRowExists()
@@ -591,5 +597,116 @@ public class UpgradePathRepositoryTests
 
         Assert.Equal(1, result[hostWithUpdate.Id]);
         Assert.False(result.ContainsKey(hostUpToDate.Id));
+    }
+
+    /// <summary>
+    /// The case that showed a Linux host at 0 app updates: Flatpak knows a rebuild is pending but
+    /// prints the same version string it already has (or none at all). The manager's verdict has to
+    /// carry the day over the version comparison, in every query that answers "is this behind".
+    /// </summary>
+    [Fact]
+    public async Task ManagerVerdict_CountsAnInstallationAsBehind_WhenTheVersionComparisonWouldNot()
+    {
+        await using var context = CreateContext();
+        var host = new Host("host-1", "SERIAL-1", "Ubuntu 24.04.1 LTS (Linux)");
+        context.Hosts.Add(host);
+        // Same version installed as the row knows about — a rebuild — and a second one where the
+        // row has no LatestVersion at all, because the host's appstream cache had nothing to print.
+        AddManagedApplication(context, host.Id, "Firefox", "126.0", PackageManagerCatalog.Flatpak, updateAvailable: true);
+        AddManagedApplication(context, host.Id, "Calculator", "49.2", PackageManagerCatalog.Flatpak, updateAvailable: true);
+        context.UpgradePaths.AddRange(FlatpakRow("Firefox", "126.0"), FlatpakRow("Calculator", null));
+        await context.SaveChangesAsync();
+        var repository = new UpgradePathRepository(context);
+
+        var counts = await repository.GetAppUpdateCountsByHostAsync(CancellationToken.None);
+        var statuses = await repository.GetStatusesAsync("SERIAL-1", CancellationToken.None);
+        var outdated = await repository.GetOutdatedStatusesAsync(CancellationToken.None);
+        var summaries = await repository.GetSummariesAsync(CancellationToken.None);
+
+        Assert.Equal(2, counts[host.Id]);
+        Assert.All(statuses.Where(s => s.ApplicationName is "Firefox" or "Calculator"), s => Assert.True(s.UpdateAvailable));
+        Assert.Equal(new[] { "Calculator", "Firefox" }, outdated.Select(s => s.ApplicationName).OrderBy(n => n));
+        foreach (var summary in summaries.Where(s => s.ApplicationName is "Firefox" or "Calculator"))
+        {
+            Assert.Equal(1, summary.UpdateAvailableHostCount);
+            Assert.Equal(0, summary.UpToDateHostCount);
+            Assert.Equal(new[] { "host-1" }, summary.HostNamesNeedingUpdate);
+        }
+    }
+
+    /// <summary>
+    /// The other direction: a fleet-wide LatestVersion can be wrong for this host (the Snap Store's
+    /// first stable entry may belong to another architecture), and the host's own manager saying
+    /// "nothing pending" settles it — so the agent is not told to patch, and the host is not counted.
+    /// </summary>
+    [Fact]
+    public async Task ManagerVerdict_CountsAnInstallationAsCurrent_WhenTheVersionComparisonWouldNot()
+    {
+        await using var context = CreateContext();
+        var host = new Host("host-1", "SERIAL-1", "Ubuntu 24.04.1 LTS (Linux)");
+        context.Hosts.Add(host);
+        AddManagedApplication(context, host.Id, "Firefox", "125.0", PackageManagerCatalog.Flatpak, updateAvailable: false);
+        context.UpgradePaths.Add(FlatpakRow("Firefox", "126.0"));
+        await context.SaveChangesAsync();
+        var repository = new UpgradePathRepository(context);
+
+        var counts = await repository.GetAppUpdateCountsByHostAsync(CancellationToken.None);
+        var statuses = await repository.GetStatusesAsync("SERIAL-1", CancellationToken.None);
+        var summary = (await repository.GetSummariesAsync(CancellationToken.None)).Single(s => s.ApplicationName == "Firefox");
+
+        Assert.False(counts.ContainsKey(host.Id));
+        Assert.False(statuses.Single(s => s.ApplicationName == "Firefox").UpdateAvailable);
+        Assert.Equal(1, summary.UpToDateHostCount);
+        Assert.Equal(0, summary.UpdateAvailableHostCount);
+        Assert.Empty(summary.HostNamesNeedingUpdate);
+    }
+
+    /// <summary>
+    /// No verdict — the listing failed, or the agent is one that never reports one — leaves the
+    /// version comparison in charge exactly as before, so nothing changes for macOS and Windows.
+    /// </summary>
+    [Fact]
+    public async Task ManagerVerdict_WhenAbsent_LeavesTheVersionComparisonToDecide()
+    {
+        await using var context = CreateContext();
+        var host = new Host("host-1", "SERIAL-1", "Ubuntu 24.04.1 LTS (Linux)");
+        context.Hosts.Add(host);
+        AddManagedApplication(context, host.Id, "Behind", "125.0", PackageManagerCatalog.Flatpak);
+        AddManagedApplication(context, host.Id, "Current", "126.0", PackageManagerCatalog.Flatpak);
+        context.UpgradePaths.AddRange(FlatpakRow("Behind", "126.0"), FlatpakRow("Current", "126.0"));
+        await context.SaveChangesAsync();
+        var repository = new UpgradePathRepository(context);
+
+        var counts = await repository.GetAppUpdateCountsByHostAsync(CancellationToken.None);
+        var statuses = await repository.GetStatusesAsync("SERIAL-1", CancellationToken.None);
+
+        Assert.Equal(1, counts[host.Id]);
+        Assert.True(statuses.Single(s => s.ApplicationName == "Behind").UpdateAvailable);
+        Assert.False(statuses.Single(s => s.ApplicationName == "Current").UpdateAvailable);
+    }
+
+    /// <summary>
+    /// Two hosts, one with a verdict and one without a LatestVersion to fall back on: the unknown one
+    /// counts on neither side, so the two counts no longer have to sum to the host count.
+    /// </summary>
+    [Fact]
+    public async Task GetSummariesAsync_LeavesAnInstallationWithNoVerdictAndNoLatestVersionOnNeitherSide()
+    {
+        await using var context = CreateContext();
+        var behind = new Host("host-a", "SERIAL-A", "Ubuntu 24.04.1 LTS (Linux)");
+        var unknown = new Host("host-b", "SERIAL-B", "Ubuntu 24.04.1 LTS (Linux)");
+        context.Hosts.AddRange(behind, unknown);
+        AddManagedApplication(context, behind.Id, "Calculator", "49.2", PackageManagerCatalog.Flatpak, updateAvailable: true);
+        AddManagedApplication(context, unknown.Id, "Calculator", "49.2", PackageManagerCatalog.Flatpak);
+        context.UpgradePaths.Add(FlatpakRow("Calculator", null));
+        await context.SaveChangesAsync();
+        var repository = new UpgradePathRepository(context);
+
+        var summary = (await repository.GetSummariesAsync(CancellationToken.None)).Single(s => s.ApplicationName == "Calculator");
+
+        Assert.Equal(2, summary.HostCount);
+        Assert.Equal(1, summary.UpdateAvailableHostCount);
+        Assert.Equal(0, summary.UpToDateHostCount);
+        Assert.Equal(new[] { "host-a" }, summary.HostNamesNeedingUpdate);
     }
 }

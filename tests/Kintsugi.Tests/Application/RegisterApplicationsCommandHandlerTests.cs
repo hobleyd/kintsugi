@@ -216,6 +216,78 @@ public class RegisterApplicationsCommandHandlerTests
     }
 
     [Fact]
+    public async Task Handle_StoresThePackageManagersUpdateVerdict_OnEachInstalledApplication()
+    {
+        SetUpHost(_host);
+        List<InstalledApplication>? added = null;
+        _installedApplicationRepository
+            .Setup(r => r.AddRangeAsync(It.IsAny<IEnumerable<InstalledApplication>>(), It.IsAny<CancellationToken>()))
+            .Callback<IEnumerable<InstalledApplication>, CancellationToken>((apps, _) => added = apps.ToList())
+            .Returns(Task.CompletedTask);
+
+        await CreateHandler().Handle(
+            new RegisterApplicationsCommand("SERIAL-1", new[]
+            {
+                new ApplicationEntry("Flatpak", "1.14.10", ApplicationIdentifier: "flatpak"),
+                new ApplicationEntry("Calculator", "49.2", PackageManager: "Flatpak", ApplicationIdentifier: "org.gnome.Calculator", UpdateAvailable: true),
+                new ApplicationEntry("GIMP", "2.10.36", PackageManager: "Flatpak", ApplicationIdentifier: "org.gimp.GIMP", UpdateAvailable: false),
+            }),
+            CancellationToken.None);
+
+        Assert.NotNull(added);
+        Assert.Null(added!.Single(a => a.Name == "Flatpak").UpdateAvailable);
+        Assert.True(added.Single(a => a.Name == "Calculator").UpdateAvailable);
+        Assert.False(added.Single(a => a.Name == "GIMP").UpdateAvailable);
+    }
+
+    [Fact]
+    public async Task Handle_SeedsANewUpgradePath_FromAPendingUpdateVerdictWithNoVersion()
+    {
+        // Flatpak on a host with no appstream cache: `remote-ls --updates` names the application and
+        // prints no version. The row still has to exist, or the installation is neither counted nor
+        // patchable, and it is created with no LatestVersion rather than an invented one.
+        SetUpHost(_host);
+        var flatpakBucket = PlatformBucket.ForPackageManager(PackageManagerCatalog.Flatpak);
+        _upgradePathRepository.Setup(r => r.GetAsync("Calculator", flatpakBucket, It.IsAny<CancellationToken>())).ReturnsAsync((UpgradePath?)null);
+
+        await CreateHandler().Handle(
+            new RegisterApplicationsCommand("SERIAL-1", new[]
+            {
+                new ApplicationEntry("Calculator", "49.2", PackageManager: "Flatpak", ApplicationIdentifier: "org.gnome.Calculator", UpdateAvailable: true),
+            }),
+            CancellationToken.None);
+
+        _upgradePathRepository.Verify(r => r.AddAsync(
+            It.Is<UpgradePath>(p => p.ApplicationName == "Calculator" && p.Platform == flatpakBucket && p.LatestVersion == null
+                && p.Method == UpgradeMethod.Script && p.Script == FlatpakUpgradeScript.Build(false)
+                && p.ApplicationIdentifier == "org.gnome.Calculator"),
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task Handle_KeepsAnExistingLatestVersion_WhenTheVerdictArrivesWithoutOne()
+    {
+        // The row's LatestVersion may have come from the script's own --update-version run against
+        // Flathub; a report that knows an update is pending but not which version must not erase it.
+        SetUpHost(_host);
+        var flatpakBucket = PlatformBucket.ForPackageManager(PackageManagerCatalog.Flatpak);
+        var existingPath = UpgradePath.Create(
+            "Calculator", flatpakBucket, UpgradePathStatus.Found, "50.0", UpgradeMethod.Script,
+            null, null, null, null, null, FlatpakUpgradeScript.Build(false), "org.gnome.Calculator");
+        _upgradePathRepository.Setup(r => r.GetAsync("Calculator", flatpakBucket, It.IsAny<CancellationToken>())).ReturnsAsync(existingPath);
+
+        await CreateHandler().Handle(
+            new RegisterApplicationsCommand("SERIAL-1", new[]
+            {
+                new ApplicationEntry("Calculator", "49.2", PackageManager: "Flatpak", ApplicationIdentifier: "org.gnome.Calculator", UpdateAvailable: true),
+            }),
+            CancellationToken.None);
+
+        Assert.Equal("50.0", existingPath.LatestVersion);
+        _upgradePathRepository.Verify(r => r.AddAsync(It.IsAny<UpgradePath>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
     public async Task Handle_LeavesAnExistingUpgradePathsScriptSignatureUntouched_OnRepeatRegistration()
     {
         // A signed, patchable row must not flip back to unsigned on the agent's very next check-in.
@@ -363,12 +435,17 @@ public class RegisterApplicationsCommandHandlerTests
     }
 
     [Fact]
-    public async Task Handle_DoesNotTouchUpgradePaths_ForEntriesWithNoAvailableVersionReported()
+    public async Task Handle_DoesNotTouchUpgradePaths_ForEntriesReportingNeitherAnAvailableVersionNorAPendingUpdate()
     {
         SetUpHost(_host);
 
         await CreateHandler().Handle(
-            new RegisterApplicationsCommand("SERIAL-1", new[] { new ApplicationEntry("firefox", "128.0", PackageManager: "Homebrew") }),
+            new RegisterApplicationsCommand("SERIAL-1", new[]
+            {
+                new ApplicationEntry("firefox", "128.0", PackageManager: "Homebrew"),
+                // A definite "nothing pending" is not an update to seed a row from either.
+                new ApplicationEntry("GIMP", "2.10.36", PackageManager: "Flatpak", ApplicationIdentifier: "org.gimp.GIMP", UpdateAvailable: false),
+            }),
             CancellationToken.None);
 
         _upgradePathRepository.Verify(r => r.GetAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);

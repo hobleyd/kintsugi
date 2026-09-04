@@ -27,6 +27,15 @@ pub struct InstalledApp {
     /// tell whether an update is available without having to research it separately.
     #[serde(rename = "availableVersion", skip_serializing_if = "Option::is_none")]
     pub available_version: Option<String>,
+    /// The manager's own verdict on whether an update is pending, independent of any version
+    /// string. Mirrors `ApplicationEntry.UpdateAvailable` on the server and the same field in the
+    /// Linux agent, which is the only one that sets it: Flatpak and Snap both ship rebuilds under
+    /// an unchanged version (and Flatpak often has no version to print at all), so their verdict
+    /// has to travel separately or the server's version comparison calls them current. winget's
+    /// "Available" column and `choco outdated` only ever name a package whose version string
+    /// changed, so `available_version` already carries the verdict here and this stays `None`.
+    #[serde(rename = "updateAvailable", skip_serializing_if = "Option::is_none")]
+    pub update_available: Option<bool>,
 }
 
 /// Returns the machine's hostname.
@@ -533,6 +542,7 @@ fn read_uninstall_entry(subkey: &RegKey, subkey_name: &str, managed_keys: &Manag
         package_manager: None,
         application_identifier: Some(application_identifier),
         available_version: None,
+        update_available: None,
     })
 }
 
@@ -664,6 +674,7 @@ fn scan_winget() -> PackageManagerScan {
         package_manager: None,
         application_identifier: Some(WINGET_NAME.to_string()),
         available_version: None,
+        update_available: None,
     }];
 
     let mut managed_keys = ManagedKeys::default();
@@ -691,6 +702,7 @@ fn scan_winget() -> PackageManagerScan {
                 package_manager: Some(WINGET_NAME.to_string()),
                 application_identifier: Some(package.id),
                 available_version: package.available,
+                update_available: None,
             });
         }
     }
@@ -791,6 +803,7 @@ fn scan_chocolatey() -> PackageManagerScan {
         package_manager: None,
         application_identifier: Some("chocolatey".to_string()),
         available_version: None,
+        update_available: None,
     }];
 
     let mut managed_keys = ManagedKeys::default();
@@ -828,6 +841,7 @@ fn scan_chocolatey() -> PackageManagerScan {
             version,
             package_manager: Some(CHOCOLATEY_NAME.to_string()),
             available_version: available.get(&id).cloned(),
+            update_available: None,
             application_identifier: Some(id),
         });
     }

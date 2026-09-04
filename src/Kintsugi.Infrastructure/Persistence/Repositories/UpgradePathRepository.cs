@@ -68,6 +68,7 @@ public class UpgradePathRepository : IUpgradePathRepository
             {
                 a.Name,
                 a.Version,
+                a.UpdateAvailable,
                 a.ApplicationIdentifier,
                 a.ParentApplicationId,
                 h.Hostname,
@@ -85,13 +86,14 @@ public class UpgradePathRepository : IUpgradePathRepository
 
         foreach (var app in installed)
         {
-            var path = ResolvePath(byNameAndPlatform, app.Name, app.OperatingSystem, PackageManagerOf(packageManagerNames, app.ParentApplicationId));
+            var packageManager = PackageManagerOf(packageManagerNames, app.ParentApplicationId);
+            var path = ResolvePath(byNameAndPlatform, app.Name, app.OperatingSystem, packageManager);
             if (path is null)
             {
                 continue;
             }
 
-            var updateAvailable = ComputeUpdateAvailable(path, app.Version);
+            var updateAvailable = ComputeUpdateAvailable(path, app.Version, app.UpdateAvailable);
 
             results.Add(new UpgradeStatusDto(
                 app.Name,
@@ -111,7 +113,8 @@ public class UpgradePathRepository : IUpgradePathRepository
                 path.Script,
                 app.ApplicationIdentifier,
                 path.ScriptSignature,
-                path.CommandSignature));
+                path.CommandSignature,
+                packageManager));
         }
 
         return results
@@ -128,6 +131,7 @@ public class UpgradePathRepository : IUpgradePathRepository
             {
                 a.Name,
                 a.Version,
+                a.UpdateAvailable,
                 a.ApplicationIdentifier,
                 a.ParentApplicationId,
                 h.Hostname,
@@ -150,8 +154,9 @@ public class UpgradePathRepository : IUpgradePathRepository
 
         foreach (var app in installed)
         {
-            var path = ResolvePath(byNameAndPlatform, app.Name, app.OperatingSystem, PackageManagerOf(packageManagerNames, app.ParentApplicationId));
-            if (path is null || !ComputeUpdateAvailable(path, app.Version))
+            var packageManager = PackageManagerOf(packageManagerNames, app.ParentApplicationId);
+            var path = ResolvePath(byNameAndPlatform, app.Name, app.OperatingSystem, packageManager);
+            if (path is null || !ComputeUpdateAvailable(path, app.Version, app.UpdateAvailable))
             {
                 continue;
             }
@@ -174,7 +179,8 @@ public class UpgradePathRepository : IUpgradePathRepository
                 path.Script,
                 app.ApplicationIdentifier,
                 path.ScriptSignature,
-                path.CommandSignature));
+                path.CommandSignature,
+                packageManager));
         }
 
         return results;
@@ -187,7 +193,7 @@ public class UpgradePathRepository : IUpgradePathRepository
         // full materialization GetAppUpdateCountsByHostAsync already does below, and bounded the
         // same way (by total installed-application rows, not by anything larger).
         var installed = await _context.InstalledApplications
-            .Join(_context.Hosts, a => a.HostId, h => h.Id, (a, h) => new { a.Name, a.Version, a.HostId, a.ParentApplicationId, h.Hostname, h.OperatingSystem })
+            .Join(_context.Hosts, a => a.HostId, h => h.Id, (a, h) => new { a.Name, a.Version, a.UpdateAvailable, a.HostId, a.ParentApplicationId, h.Hostname, h.OperatingSystem })
             .ToListAsync(cancellationToken);
 
         var upgradePaths = await _context.UpgradePaths.ToListAsync(cancellationToken);
@@ -213,12 +219,17 @@ public class UpgradePathRepository : IUpgradePathRepository
                 var path = byNameAndPlatform[(appGroup.Key.ToLowerInvariant(), platformGroup.Key)];
 
                 var hostCount = platformGroup.Select(x => x.HostId).Distinct().Count();
-                // No LatestVersion means nothing concrete is known yet (an unresearched app, a
-                // self-update command, or an unrecognized package manager) — report 0/0 ("unknown")
-                // rather than guessing, instead of counting those hosts as up to date.
-                var upToDateCount = path.LatestVersion is null
-                    ? 0
-                    : platformGroup.Where(x => !VersionComparer.IsNewer(path.LatestVersion, x.Version)).Select(x => x.HostId).Distinct().Count();
+                // Per installation, then per host: a host is behind if any of its installations
+                // is, and current only when one is definitely current. An installation whose
+                // status is unknown — no LatestVersion yet (an unresearched app, a self-update
+                // command, an unrecognized package manager) and no verdict from its manager —
+                // counts on neither side rather than being guessed at, which is why the two counts
+                // need not sum to hostCount.
+                var statuses = platformGroup
+                    .Select(x => (x.HostId, x.Hostname, Status: InstallationUpdateStatus(path, x.Version, x.UpdateAvailable)))
+                    .ToList();
+                var upToDateCount = statuses.Where(x => x.Status == false).Select(x => x.HostId).Distinct().Count();
+                var updateAvailableCount = statuses.Where(x => x.Status == true).Select(x => x.HostId).Distinct().Count();
                 // The hosts whose installation resolved to *this* bucket, which is not the
                 // application-level host list the Applications page also holds: that one is keyed
                 // on the application's name alone, so an application installed from Homebrew on a
@@ -230,15 +241,12 @@ public class UpgradePathRepository : IUpgradePathRepository
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .OrderBy(h => h, StringComparer.OrdinalIgnoreCase)
                     .ToArray();
-                var hostNamesNeedingUpdate = path.LatestVersion is null
-                    ? Array.Empty<string>()
-                    : platformGroup
-                        .Where(x => VersionComparer.IsNewer(path.LatestVersion, x.Version))
-                        .Select(x => x.Hostname)
-                        .Distinct()
-                        .OrderBy(h => h, StringComparer.OrdinalIgnoreCase)
-                        .ToArray();
-                var updateAvailableCount = path.LatestVersion is null ? 0 : hostCount - upToDateCount;
+                var hostNamesNeedingUpdate = statuses
+                    .Where(x => x.Status == true)
+                    .Select(x => x.Hostname)
+                    .Distinct()
+                    .OrderBy(h => h, StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
 
                 results.Add(new UpgradePathSummaryDto(
                     appGroup.Key,
@@ -282,7 +290,7 @@ public class UpgradePathRepository : IUpgradePathRepository
         // Fleet-wide, but bounded by total installed-application rows (like GetSummariesAsync's
         // join below), not by anything larger — safe to pull into memory for the per-host matching.
         var installed = await _context.InstalledApplications
-            .Join(_context.Hosts, a => a.HostId, h => h.Id, (a, h) => new { a.HostId, a.Name, a.Version, a.ParentApplicationId, h.OperatingSystem })
+            .Join(_context.Hosts, a => a.HostId, h => h.Id, (a, h) => new { a.HostId, a.Name, a.Version, a.UpdateAvailable, a.ParentApplicationId, h.OperatingSystem })
             .ToListAsync(cancellationToken);
 
         var upgradePaths = await _context.UpgradePaths.ToListAsync(cancellationToken);
@@ -299,7 +307,7 @@ public class UpgradePathRepository : IUpgradePathRepository
                 continue;
             }
 
-            if (!ComputeUpdateAvailable(path, app.Version))
+            if (!ComputeUpdateAvailable(path, app.Version, app.UpdateAvailable))
             {
                 continue;
             }
@@ -376,11 +384,27 @@ public class UpgradePathRepository : IUpgradePathRepository
             .GroupBy(p => (p.ApplicationName.ToLowerInvariant(), p.Platform))
             .ToDictionary(g => g.Key, g => g.OrderByDescending(p => p.CheckedUtc).First());
 
-    private static bool ComputeUpdateAvailable(UpgradePath path, string installedVersion) =>
-        // LatestVersion is null whenever nothing concrete is known yet (a self-update command, an
-        // unrecognized package manager, or an app not yet researched) — VersionComparer.IsNewer
-        // already returns false for a null latest, so those correctly never read as "available".
-        // A package-manager-managed app (e.g. Homebrew) that reports its own catalog version does
-        // carry a real LatestVersion and is compared normally, same as any AI-researched one.
-        VersionComparer.IsNewer(path.LatestVersion, installedVersion);
+    /// <summary>
+    /// Whether one installation is behind: true, false, or null when nothing can say. The agent's
+    /// package manager gets the first word — <see cref="InstalledApplication.UpdateAvailable"/> is
+    /// what <c>flatpak remote-ls --updates</c> or <c>snap refresh --list</c> reported for exactly
+    /// this installation, and it is right where a version comparison is not: Flatpak frequently
+    /// has no version to print for a pending update, and both managers ship rebuilds under an
+    /// unchanged version string, all of which compared as "current" and left a Linux host showing
+    /// 0 app updates. It is also right in the other direction — a fleet-wide LatestVersion that
+    /// came from the Snap Store's first stable entry can belong to another architecture (see
+    /// <c>SnapUpgradeScript</c>), and the host's own manager saying "nothing pending" settles it.
+    /// Only with no verdict does the comparison against the row's LatestVersion decide, and only
+    /// when there is a LatestVersion to compare against — null there means nothing concrete is
+    /// known yet (a self-update command, an unrecognized package manager, an app not yet
+    /// researched), which is unknown rather than current.
+    /// </summary>
+    private static bool? InstallationUpdateStatus(UpgradePath path, string installedVersion, bool? reportedUpdateAvailable) =>
+        reportedUpdateAvailable
+            ?? (path.LatestVersion is null ? null : VersionComparer.IsNewer(path.LatestVersion, installedVersion));
+
+    /// <summary>The two-valued form of <see cref="InstallationUpdateStatus"/>: unknown reads as
+    /// not available, so a host is never told to patch, and never counted as behind, on a guess.</summary>
+    private static bool ComputeUpdateAvailable(UpgradePath path, string installedVersion, bool? reportedUpdateAvailable) =>
+        InstallationUpdateStatus(path, installedVersion, reportedUpdateAvailable) == true;
 }
