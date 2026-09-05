@@ -36,13 +36,13 @@ class UpgradeScriptRepositoryImpl implements UpgradeScriptRepository {
 
   @override
   Future<UpgradeScriptsView> takeServerScript({
-    required String applicationName,
     required String platform,
+    required String sha256,
   }) async =>
       upgradeScriptsViewFromJson(
         await _api.postJson('/api/admin/upgrade-scripts/take-server-script', body: {
-          'applicationName': applicationName,
           'platform': platform,
+          'sha256': sha256,
         }) as Map<String, dynamic>,
       );
 }

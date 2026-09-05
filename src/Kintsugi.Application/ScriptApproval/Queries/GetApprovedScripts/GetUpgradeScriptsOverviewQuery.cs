@@ -62,16 +62,36 @@ public record ApprovedScriptDto(
     string SourceCommitSha,
     bool HeldLocally);
 
+/// <summary>One script a human here has or has not approved.</summary>
+/// <remarks>
+/// One entry per <em>script</em>, not per row. An AI-researched row is one application's script and
+/// appears as itself. A package-manager row is not: every application Homebrew (winget, Flatpak…)
+/// manages holds the same bytes, one "Sign Script" covers all of them
+/// (<c>FindExistingSignatureForScriptAsync</c>), and there is nothing per-application on such a row
+/// for a reviewer to look at — so listing "firefox", "slack", "zoom"… under <c>pm:Homebrew</c> was a
+/// list of the same script hundreds of times. Those rows collapse into one entry per (bucket,
+/// content, signed-or-not), named the way the approval repository names the same script
+/// (<see cref="ApprovedScriptIdentity.PackageManagerDisplayName"/>), with
+/// <paramref name="Applications"/> saying how many rows it stands for. Content is part of the key
+/// because a manager's bucket can legitimately hold two texts at once — rows signed against an
+/// older revision of a <c>*UpgradeScript.Build</c> body beside rows written by this build — and the
+/// reviewer's decision is per text. Signed-or-not is part of it so a set that is half signed shows
+/// as two entries rather than as one with a made-up verdict.
+/// </remarks>
+/// <param name="ApplicationName">The application, for an AI-researched script; the manager's label
+/// for a package-manager one. Same convention as <see cref="ApprovedScriptDto.ApplicationName"/>.</param>
+/// <param name="Applications">How many upgrade-path rows hold exactly this entry. 1 for an
+/// AI-researched script; for a package-manager script, the number of applications it patches.</param>
 /// <param name="Signed">Whether a human's approval covers it, and so whether any agent will run it.</param>
 /// <param name="ApprovedUpstream">Whether these exact bytes appear in the imported corpus. An unsigned
 /// row that is approved upstream is a bug worth seeing — a refresh should have blessed it — and is
 /// normally the language-mismatch case the import reports.</param>
-/// <param name="NewerServerScriptAvailable">True when this is a package-manager row whose stored
-/// script is not what this server's current build writes for it — i.e. one of the
-/// <c>*UpgradeScript.Build</c> bodies has been edited since this row got its content. Surfaced
+/// <param name="NewerServerScriptAvailable">True when this is a package-manager script that is not
+/// what this server's current build writes for those rows — i.e. one of the
+/// <c>*UpgradeScript.Build</c> bodies has been edited since they got their content. Surfaced
 /// because a *signed* row is deliberately never rewritten by a routine inventory report
 /// (<c>RegisterApplicationsCommandHandler</c>), so without this it would go on running the older
-/// text indefinitely with nothing to say a fix existed. Can also be true of an unsigned row, which
+/// text indefinitely with nothing to say a fix existed. Can also be true of an unsigned entry, which
 /// is a transient state the next inventory report clears — see
 /// <see cref="UpgradeScriptsOverviewDto.NewerServerScripts"/>, which counts only the signed ones for
 /// that reason. Always false for an AI-researched script, which has no canonical current version to
@@ -80,6 +100,7 @@ public record LocalScriptDto(
     string ApplicationName,
     string Platform,
     string Sha256,
+    int Applications,
     bool Signed,
     bool ApprovedUpstream,
     bool NewerServerScriptAvailable);

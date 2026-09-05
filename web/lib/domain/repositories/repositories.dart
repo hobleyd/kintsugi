@@ -125,9 +125,10 @@ abstract interface class UpgradeScriptRepository {
     required String signerFingerprint,
   });
 
+  /// Addressed by (bucket, content hash) — what the screen lists — rather than by row.
   Future<UpgradeScriptsView> takeServerScript({
-    required String applicationName,
     required String platform,
+    required String sha256,
   });
 }
 

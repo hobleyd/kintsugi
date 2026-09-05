@@ -89,12 +89,25 @@ public record ApprovedScriptIdentity(string DisplayName, string FileBaseName, st
         }
 
         identity = new ApprovedScriptIdentity(
-            $"{manager.Name} (any managed application)", Slug(manager.Name).ToLowerInvariant(), null)
+            PackageManagerDisplayName(manager.Name, isSelfUpdate: false), Slug(manager.Name).ToLowerInvariant(), null)
         {
             IsPackageManagerScript = true,
         };
         return true;
     }
+
+    /// <summary>
+    /// The label a package manager's shared script goes by — in the approval repository and on the
+    /// Upgrade Scripts page's local list, which shows that script once rather than once per
+    /// application (<c>GetUpgradeScriptsOverviewQueryHandler</c>). One function so the two never
+    /// disagree, and so both keep the property the <see cref="DisplayName"/> remarks depend on: it is
+    /// never a bare application name, so it can never match a real row in the adoption offer.
+    /// </summary>
+    /// <param name="isSelfUpdate">True only for a text an earlier build wrote for the manager's own
+    /// row, still signed and still running somewhere; this build writes one text per manager and
+    /// never publishes an entry under this label (see <see cref="For"/>).</param>
+    public static string PackageManagerDisplayName(string managerName, bool isSelfUpdate) =>
+        isSelfUpdate ? $"{managerName} (self-update)" : $"{managerName} (any managed application)";
 
     /// <summary>
     /// Reduces a name to something safe as a single git path component. Case is preserved, because

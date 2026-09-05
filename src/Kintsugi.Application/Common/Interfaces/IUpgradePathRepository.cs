@@ -70,6 +70,13 @@ public interface IUpgradePathRepository
     /// involved.</summary>
     Task<IReadOnlyList<UpgradePath>> GetScriptUpgradePathsAsync(CancellationToken cancellationToken);
 
+    /// <summary>The rows of <see cref="GetScriptUpgradePathsAsync(CancellationToken)"/> whose
+    /// <see cref="UpgradePath.Platform"/> is <paramref name="platform"/> — one package manager's
+    /// bucket, in practice. What <c>TakeServerWrittenScriptCommandHandler</c> reads to find every
+    /// row holding one script: the match is on a content hash computed here rather than a column,
+    /// so the bucket has to be loaded and the rows compared in memory.</summary>
+    Task<IReadOnlyList<UpgradePath>> GetScriptUpgradePathsAsync(string platform, CancellationToken cancellationToken);
+
     /// <summary>Count of installed applications with a known update available, per host — hosts
     /// with no such applications are absent from the result rather than present with a zero.</summary>
     Task<IReadOnlyDictionary<Guid, int>> GetAppUpdateCountsByHostAsync(CancellationToken cancellationToken);

@@ -285,6 +285,11 @@ public class UpgradePathRepository : IUpgradePathRepository
             .Where(p => p.Method == UpgradeMethod.Script && p.Script != null)
             .ToListAsync(cancellationToken);
 
+    public async Task<IReadOnlyList<UpgradePath>> GetScriptUpgradePathsAsync(string platform, CancellationToken cancellationToken) =>
+        await _context.UpgradePaths
+            .Where(p => p.Method == UpgradeMethod.Script && p.Script != null && p.Platform == platform)
+            .ToListAsync(cancellationToken);
+
     public async Task<IReadOnlyDictionary<Guid, int>> GetAppUpdateCountsByHostAsync(CancellationToken cancellationToken)
     {
         // Fleet-wide, but bounded by total installed-application rows (like GetSummariesAsync's

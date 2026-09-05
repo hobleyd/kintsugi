@@ -53,6 +53,12 @@ class _UpgradeScriptsView extends StatelessWidget {
               'against the key it pinned at enrollment before running anything, so "unsigned" means '
               'inert rather than trusted. Scripts are reviewed and signed on the Applications screen.',
             ),
+            const HintText(
+              'A package manager\'s script (Homebrew, winget, Chocolatey, Flatpak, Snap) is the same '
+              'for every application it manages and one signature covers all of them, so it is listed '
+              'once, named for the manager, with the number of applications it patches. Only an '
+              'AI-researched script is listed under its own application.',
+            ),
             if (overview != null)
               HintText(
                 'Approvals are shared through ${overview.repository}. Signing a script there opens a '
@@ -154,15 +160,15 @@ class _UpgradeScriptsView extends StatelessWidget {
       notices.add(AlertBox.error('Could not take the newer script: ${view.takeServerScriptError}'));
     } else if (view.tookServerScript != null) {
       final took = view.tookServerScript!;
-      notices.add(took.changed
+      notices.add(took.changed > 0
           ? AlertBox.success(
-              '${took.applicationName} on ${took.platform} now holds the script this server writes, '
-              'and is awaiting review — no agent will run it until it is signed. Signing it covers '
-              'every other row holding the same content.',
+              '${took.changed} row(s) on ${took.platform} now hold the script this server writes, '
+              'and are awaiting review — no agent will run it until it is signed. Signing it once '
+              'covers every row holding the same content.',
             )
           : AlertBox.success(
-              '${took.applicationName} on ${took.platform} already holds the script this server '
-              'writes; nothing changed.',
+              'Every row on ${took.platform} already holds the script this server writes; nothing '
+              'changed.',
             ));
     }
 
@@ -209,10 +215,10 @@ class _UpgradeScriptsView extends StatelessWidget {
       // A signed script is never replaced by a deployment, so this is the only thing that says a
       // newer one exists.
       notices.add(AlertBox.info(
-        '${overview.newerServerScripts} signed row(s) hold a script this server no longer writes — '
-        'one of its package-manager scripts has been changed since they were reviewed. They keep '
+        '${overview.newerServerScripts} signed script(s) are not what this server now writes — one '
+        'of its package-manager scripts has been changed since they were reviewed. Their rows keep '
         'running the text that was approved, and go on patching, until someone takes the newer one '
-        'below. Taking it leaves that row unsigned until it is reviewed and signed.',
+        'below. Taking it leaves those rows unsigned until it is reviewed and signed.',
       ));
     }
 
@@ -248,10 +254,11 @@ class _LocalScriptsTable extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => KintsugiTable(
-        minWidth: 900,
+        minWidth: 1000,
         columns: const [
-          TableColumnSpec(label: 'Application', width: FlexColumnWidth(1.4)),
+          TableColumnSpec(label: 'Script', width: FlexColumnWidth(1.4)),
           TableColumnSpec(label: 'Platform', width: FlexColumnWidth(1)),
+          TableColumnSpec(label: 'Applications', width: FixedColumnWidth(120)),
           TableColumnSpec(label: 'Content', width: FlexColumnWidth(0.9)),
           TableColumnSpec(label: 'Approved here', width: FixedColumnWidth(160)),
           TableColumnSpec(label: 'Approved upstream', width: FixedColumnWidth(160)),
@@ -263,6 +270,7 @@ class _LocalScriptsTable extends StatelessWidget {
               cells: [
                 Text(script.applicationName),
                 Text(script.platform),
+                Text('${script.applications}'),
                 CodeText(shorten(script.sha256, 12), muted: true),
                 script.signed
                     ? const StatusChip('Signed', statusKey: 'up-to-date')
@@ -271,10 +279,10 @@ class _LocalScriptsTable extends StatelessWidget {
                     ? const StatusChip('Yes', statusKey: 'up-to-date')
                     : const NoValue(),
                 if (script.newerServerScriptAvailable)
-                  // The row keeps running its reviewed script until this is pressed — nothing does
-                  // it by itself, because replacing the content of a signed row is replacing what
-                  // the fleet's agents execute. Taking it leaves the row unsigned, so the button
-                  // says so rather than implying the new text goes live on click.
+                  // Every row holding this script keeps running it until this is pressed — nothing
+                  // does it by itself, because replacing the content of a signed row is replacing
+                  // what the fleet's agents execute. Taking it leaves those rows unsigned, so the
+                  // button says so rather than implying the new text goes live on click.
                   SecondaryButton(
                     label: 'Take newer, for review',
                     onPressed: state.busy

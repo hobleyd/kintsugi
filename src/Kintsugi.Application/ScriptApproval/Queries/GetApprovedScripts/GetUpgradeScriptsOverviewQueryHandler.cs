@@ -1,6 +1,7 @@
 using MediatR;
 using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Application.UpgradePaths;
+using Kintsugi.Domain.Entities;
 
 namespace Kintsugi.Application.ScriptApproval.Queries.GetApprovedScripts;
 
@@ -40,32 +41,54 @@ public class GetUpgradeScriptsOverviewQueryHandler : IRequestHandler<GetUpgradeS
         var thisServer = _artifactSigningService.GetPublicKeyFingerprint();
 
         var approved = await _approvedScripts.GetAllAsync(cancellationToken);
-        var scriptRows = await _upgradePaths.GetScriptUpgradePathsAsync(cancellationToken);
+        var scriptRows = (await _upgradePaths.GetScriptUpgradePathsAsync(cancellationToken))
+            .Where(r => r.Script is not null)
+            .ToList();
         var unsignedRows = await _upgradePaths.GetRowsWithoutScriptSignatureAsync(cancellationToken);
 
         // Hashed once here rather than per comparison below: the same local script is checked against
         // the corpus, and the same corpus entry against every local row.
-        var localHashes = scriptRows
-            .Where(r => r.Script is not null)
-            .ToDictionary(r => (r.ApplicationName, r.Platform), r => ScriptContentHash.Of(r.Script!));
+        var localHashes = scriptRows.ToDictionary(r => (r.ApplicationName, r.Platform), r => ScriptContentHash.Of(r.Script!));
         var localHashSet = localHashes.Values.ToHashSet(StringComparer.OrdinalIgnoreCase);
         var approvedHashes = approved.Select(a => a.Sha256).ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+        // One entry per script, not per row — see LocalScriptDto. Rows under a recognized package
+        // manager's bucket are grouped by (bucket, content, signed-or-not) and named for the manager;
+        // every other row is its own entry. The unrecognized-manager case is deliberately in the
+        // per-row half: nothing writes a script for one today, so a row that has one is worth seeing
+        // as itself rather than being folded under a label this server has no builder for.
         var localScripts = scriptRows
-            .Where(r => r.Script is not null)
-            .Select(r =>
+            .GroupBy(r =>
             {
-                var hash = localHashes[(r.ApplicationName, r.Platform)];
+                var managerName = PlatformBucket.PackageManagerNameFrom(r.Platform);
+                var shared = managerName is not null && PackageManagerCatalog.TryGet(managerName, out _);
+                return (
+                    Key: shared ? string.Empty : r.ApplicationName,
+                    r.Platform,
+                    Hash: localHashes[(r.ApplicationName, r.Platform)],
+                    Signed: r.ScriptSignature is not null);
+            })
+            .Select(group =>
+            {
+                var rows = group.ToList();
+                var script = rows[0].Script!;
+                var name = group.Key.Key.Length > 0
+                    ? group.Key.Key
+                    : PackageManagerScriptLabel(group.Key.Platform, script, rows);
 
                 // Compared against what this build writes, not against a version number: these
                 // scripts carry none, and the content is the only thing a signature covers. Null for
-                // an AI-researched row, which has no server-written counterpart to differ from.
-                var current = PackageManagerCatalog.CurrentScriptFor(r.ApplicationName, r.Platform);
-                var newerServerScript = current is not null && !string.Equals(r.Script, current, StringComparison.Ordinal);
+                // an AI-researched row, which has no server-written counterpart to differ from. Asked
+                // of every row in the group rather than its first because Homebrew's and Snap's two
+                // builds are one text: a group there holds the manager's own row and its managed ones
+                // together.
+                var newerServerScript = rows.Any(r =>
+                    PackageManagerCatalog.CurrentScriptFor(r.ApplicationName, r.Platform) is { } current
+                    && !string.Equals(script, current, StringComparison.Ordinal));
 
                 return new LocalScriptDto(
-                    r.ApplicationName, r.Platform, hash, r.ScriptSignature is not null, approvedHashes.Contains(hash),
-                    newerServerScript);
+                    name, group.Key.Platform, group.Key.Hash, rows.Count, group.Key.Signed,
+                    approvedHashes.Contains(group.Key.Hash), newerServerScript);
             })
             .OrderBy(s => s.Signed)
             .ThenBy(s => s.ApplicationName, StringComparer.OrdinalIgnoreCase)
@@ -129,5 +152,32 @@ public class GetUpgradeScriptsOverviewQueryHandler : IRequestHandler<GetUpgradeS
                 .OrderBy(c => c.ApplicationName, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(c => c.Platform, StringComparer.OrdinalIgnoreCase)
                 .ToList());
+    }
+
+    /// <summary>
+    /// What one package-manager script is called on the page: "Homebrew (any managed application)"
+    /// or "Homebrew (self-update)", the same words the approval repository uses for the same bytes.
+    /// </summary>
+    /// <remarks>
+    /// Which of the two it is comes from the bytes when they are one of this build's — the rule
+    /// <see cref="ApprovedScriptIdentity"/> applies, for the same reason: the row is what must not
+    /// be trusted. When they are neither (a revision an earlier build wrote, still signed and still
+    /// running), the bytes cannot say, so the rows do: a group made only of the manager's own row
+    /// is its self-update script, anything else is the managed one. That is the same name-based
+    /// rule <see cref="PackageManagerCatalog.CurrentScriptFor"/> uses to decide which text to write.
+    /// </remarks>
+    private static string PackageManagerScriptLabel(string platform, string script, IReadOnlyList<UpgradePath> rows)
+    {
+        var managerName = PlatformBucket.PackageManagerNameFrom(platform)!;
+        PackageManagerCatalog.TryGet(managerName, out var manager);
+
+        var identity = ApprovedScriptIdentity.For(platform, script, rows[0].ApplicationName, null);
+        if (identity.IsPackageManagerScript)
+        {
+            return identity.DisplayName;
+        }
+
+        var isSelfUpdate = rows.All(r => string.Equals(r.ApplicationName, manager.Name, StringComparison.OrdinalIgnoreCase));
+        return ApprovedScriptIdentity.PackageManagerDisplayName(manager.Name, isSelfUpdate);
     }
 }

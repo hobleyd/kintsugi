@@ -103,30 +103,42 @@ class UpgradeScriptsOverview extends Equatable {
 }
 
 /// Mirrors `LocalScriptDto`.
+///
+/// One entry per *script*, not per upgrade-path row. A package-manager script (Homebrew, winget,
+/// Chocolatey, Flatpak, Snap) is the same bytes for every application the manager handles and one
+/// signature covers all of them, so the server lists it once, named for the manager, with
+/// [applications] saying how many rows it stands for. An AI-researched script is one application's
+/// and appears as itself.
 class LocalScript extends Equatable {
   const LocalScript({
     required this.applicationName,
     required this.platform,
     required this.sha256,
+    required this.applications,
     required this.signed,
     required this.approvedUpstream,
     required this.newerServerScriptAvailable,
   });
 
+  /// The application, for an AI-researched script; the manager's label ("Homebrew (any managed
+  /// application)") for a package-manager one — the same words the imported approvals use.
   final String applicationName;
   final String platform;
   final String sha256;
+
+  /// How many upgrade-path rows hold exactly this script. 1 for an AI-researched one.
+  final int applications;
   final bool signed;
   final bool approvedUpstream;
 
-  /// True when this row's script differs from the one this build would write for it. Nothing takes
+  /// True when this script differs from the one this build would write for its rows. Nothing takes
   /// the newer script by itself — replacing the content of a signed row is replacing what the
   /// fleet's agents execute — so this is what says one exists.
   final bool newerServerScriptAvailable;
 
   @override
   List<Object?> get props =>
-      [applicationName, platform, sha256, signed, approvedUpstream, newerServerScriptAvailable];
+      [applicationName, platform, sha256, applications, signed, approvedUpstream, newerServerScriptAvailable];
 }
 
 /// Mirrors `ApprovedScriptDto`.
@@ -272,17 +284,16 @@ class AdoptedScript extends Equatable {
 /// Mirrors `TakeServerWrittenScriptResultDto`.
 class TookServerScript extends Equatable {
   const TookServerScript({
-    required this.applicationName,
     required this.platform,
     required this.changed,
   });
 
-  final String applicationName;
   final String platform;
 
-  /// False when the row already held exactly what this build writes.
-  final bool changed;
+  /// How many rows took the new text. Zero when every row already held exactly what this build
+  /// writes.
+  final int changed;
 
   @override
-  List<Object?> get props => [applicationName, platform, changed];
+  List<Object?> get props => [platform, changed];
 }

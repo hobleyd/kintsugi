@@ -44,12 +44,13 @@ class AdoptApprovedScript {
       );
 }
 
-/// Puts the script this build writes onto one package-manager row, unsigned.
+/// Puts the script this build writes onto every row of one package-manager bucket holding the named
+/// content, unsigned.
 class TakeServerWrittenScript {
   const TakeServerWrittenScript(this._repository);
 
   final UpgradeScriptRepository _repository;
 
-  Future<UpgradeScriptsView> call({required String applicationName, required String platform}) =>
-      _repository.takeServerScript(applicationName: applicationName, platform: platform);
+  Future<UpgradeScriptsView> call({required String platform, required String sha256}) =>
+      _repository.takeServerScript(platform: platform, sha256: sha256);
 }

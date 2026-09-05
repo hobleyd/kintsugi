@@ -107,12 +107,14 @@ public class AdminUpgradeScriptsController : ControllerBase
     }
 
     /// <summary>
-    /// Puts the script this build writes for one package-manager row onto it, unsigned.
+    /// Puts the script this build writes onto every row of one package-manager bucket that holds the
+    /// named content, unsigned.
     /// </summary>
     /// <remarks>
-    /// Per-row and human-pressed for the reason <c>RegisterApplicationsCommandHandler</c> no longer
-    /// does it in the background: replacing the content of a signed row is replacing what the
-    /// fleet's agents execute, and that is a decision rather than a side effect of a deployment.
+    /// Human-pressed for the reason <c>RegisterApplicationsCommandHandler</c> no longer does it in
+    /// the background: replacing the content of a signed row is replacing what the fleet's agents
+    /// execute, and that is a decision rather than a side effect of a deployment. Addressed by script
+    /// rather than by row because that is what the screen lists — see <c>LocalScriptDto</c>.
     /// </remarks>
     [HttpPost("take-server-script")]
     [ProducesResponseType(typeof(UpgradeScriptsViewDto), StatusCodes.Status200OK)]
@@ -125,7 +127,7 @@ public class AdminUpgradeScriptsController : ControllerBase
         try
         {
             took = await _sender.Send(
-                new TakeServerWrittenScriptCommand(request.ApplicationName, request.Platform),
+                new TakeServerWrittenScriptCommand(request.Platform, request.Sha256),
                 cancellationToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -158,9 +160,10 @@ public record AdoptApprovedScriptRequest(
     string Sha256,
     string SignerFingerprint);
 
-/// <summary>Which row should take the script this build writes. See
-/// <see cref="AdoptApprovedScriptRequest"/> for why this is a request record.</summary>
-public record TakeServerWrittenScriptRequest(string ApplicationName, string Platform);
+/// <summary>Which script should be replaced by the one this build writes: the bucket and the content
+/// hash <c>LocalScriptDto</c> reported for it. See <see cref="AdoptApprovedScriptRequest"/> for why
+/// this is a request record.</summary>
+public record TakeServerWrittenScriptRequest(string Platform, string Sha256);
 
 /// <summary>The screen's state, plus whatever the action that produced this response did.</summary>
 /// <remarks>

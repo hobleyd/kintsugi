@@ -31,7 +31,7 @@ final class ApprovedScriptAdoptRequested extends UpgradeScriptsEvent {
   List<Object?> get props => [candidate];
 }
 
-/// Puts the script this build writes onto one package-manager row, unsigned.
+/// Puts the script this build writes onto every row holding one package-manager script, unsigned.
 final class ServerScriptTakeRequested extends UpgradeScriptsEvent {
   const ServerScriptTakeRequested(this.script);
 
@@ -125,10 +125,10 @@ class UpgradeScriptsBloc extends Bloc<UpgradeScriptsEvent, UpgradeScriptsState> 
   ) =>
       _run(
         emit,
-        'take:${event.script.applicationName}:${event.script.platform}',
+        'take:${event.script.platform}:${event.script.sha256}',
         () => _takeServerWrittenScript(
-          applicationName: event.script.applicationName,
           platform: event.script.platform,
+          sha256: event.script.sha256,
         ),
       );
 

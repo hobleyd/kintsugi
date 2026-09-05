@@ -46,6 +46,7 @@ LocalScript localScriptFromJson(Map<String, dynamic> json) => LocalScript(
       applicationName: json['applicationName'] as String? ?? '',
       platform: json['platform'] as String? ?? '',
       sha256: json['sha256'] as String? ?? '',
+      applications: (json['applications'] as num?)?.toInt() ?? 1,
       signed: json['signed'] as bool? ?? false,
       approvedUpstream: json['approvedUpstream'] as bool? ?? false,
       newerServerScriptAvailable: json['newerServerScriptAvailable'] as bool? ?? false,
@@ -86,7 +87,6 @@ AdoptedScript adoptedFromJson(Map<String, dynamic> json) => AdoptedScript(
     );
 
 TookServerScript tookServerScriptFromJson(Map<String, dynamic> json) => TookServerScript(
-      applicationName: json['applicationName'] as String? ?? '',
       platform: json['platform'] as String? ?? '',
-      changed: json['changed'] as bool? ?? false,
+      changed: (json['changed'] as num?)?.toInt() ?? 0,
     );
