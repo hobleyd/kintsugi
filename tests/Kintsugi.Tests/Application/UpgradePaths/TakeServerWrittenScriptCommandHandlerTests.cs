@@ -50,7 +50,7 @@ public class TakeServerWrittenScriptCommandHandlerTests
             new TakeServerWrittenScriptCommand("firefox", HomebrewBucket), CancellationToken.None);
 
         Assert.True(result.Changed);
-        Assert.Equal(HomebrewUpgradeScript.Build(isSelfUpdate: false), row.Script);
+        Assert.Equal(HomebrewUpgradeScript.Build(), row.Script);
         // Unsigned, so is_patchable refuses it until a human signs — which is the whole reason this
         // is a button rather than something the next inventory report does.
         Assert.Null(row.ScriptSignature);
@@ -68,14 +68,14 @@ public class TakeServerWrittenScriptCommandHandlerTests
         await CreateHandler().Handle(
             new TakeServerWrittenScriptCommand(PackageManagerCatalog.Homebrew, HomebrewBucket), CancellationToken.None);
 
-        Assert.Equal(HomebrewUpgradeScript.Build(isSelfUpdate: true), row.Script);
+        Assert.Equal(HomebrewUpgradeScript.Build(), row.Script);
     }
 
     [Fact]
     public async Task Handle_WhenTheRowAlreadyHoldsThisBuildsScript_ChangesNothing()
     {
         var row = SetUpRow(
-            "firefox", HomebrewBucket, HomebrewUpgradeScript.Build(isSelfUpdate: false), "signed:already-current");
+            "firefox", HomebrewBucket, HomebrewUpgradeScript.Build(), "signed:already-current");
 
         var result = await CreateHandler().Handle(
             new TakeServerWrittenScriptCommand("firefox", HomebrewBucket), CancellationToken.None);
@@ -124,7 +124,7 @@ public class TakeServerWrittenScriptCommandHandlerTests
         await CreateHandler().Handle(
             new TakeServerWrittenScriptCommand("Mozilla.Firefox", wingetBucket), CancellationToken.None);
 
-        Assert.Equal(WingetUpgradeScript.Build(isSelfUpdate: false), row.Script);
+        Assert.Equal(WingetUpgradeScript.Build(), row.Script);
         Assert.DoesNotContain("#!/bin/bash", row.Script);
     }
 }

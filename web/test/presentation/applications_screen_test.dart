@@ -3,10 +3,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:kintsugi_web/core/di/locator.dart';
 import 'package:kintsugi_web/core/theme/app_theme.dart';
 import 'package:kintsugi_web/core/widgets/alert_box.dart';
+import 'package:kintsugi_web/domain/entities/application.dart';
 import 'package:kintsugi_web/domain/usecases/application_usecases.dart';
 import 'package:kintsugi_web/domain/usecases/upgrade_path_usecases.dart';
 import 'package:kintsugi_web/presentation/applications/applications_screen.dart';
 
+import 'application_filters_test.dart' show path;
 import 'applications_update_check_test.dart'
     show FakeApplicationRepository, FakeUpgradePathRepository, overview, result;
 
@@ -104,6 +106,70 @@ void main() {
       ),
       findsOneWidget,
     );
+
+    await tearDownScreen(tester);
+  });
+
+  testWidgets('a package manager shows the script; its applications sit collapsed under it',
+      (tester) async {
+    ApplicationRow app(
+      String name, {
+      String latestVersion = '1.0',
+      List<ApplicationRow> children = const [],
+    }) =>
+        ApplicationRow(
+          name: name,
+          hostCount: 1,
+          hostNames: const ['alpha'],
+          upgradePaths: [
+            path(statusKey: 'up-to-date', platform: 'pm:Homebrew', latestVersion: latestVersion),
+          ],
+          children: children,
+        );
+    applications.next = ApplicationOverview(
+      applications: [
+        app('Homebrew', latestVersion: '4.6', children: [app('wget', latestVersion: '1.25')]),
+      ],
+      totalApplicationCount: 2,
+      allHostNames: const ['alpha'],
+    );
+    await pumpScreen(tester);
+
+    final show = find.byTooltip('Show 1 application');
+    final hide = find.byTooltip('Hide application');
+
+    // Collapsed: the manager's row, its script, its version, and an expander — no wget.
+    expect(find.text('Homebrew'), findsOneWidget);
+    expect(find.text('4.6'), findsOneWidget);
+    expect(viewScript, findsOneWidget);
+    expect(refresh, findsOneWidget);
+    expect(show, findsOneWidget);
+    expect(find.text('wget'), findsNothing);
+
+    await tester.tap(show);
+    await tester.pumpAndSettle();
+
+    // Expanded: wget appears with its version and its own version check, but the shared script
+    // is still shown once, on the manager's row, and wget carries no expander of its own.
+    expect(find.text('wget'), findsOneWidget);
+    expect(find.text('1.25'), findsOneWidget);
+    expect(viewScript, findsOneWidget);
+    expect(refresh, findsNWidgets(2));
+    expect(hide, findsOneWidget);
+    expect(show, findsNothing);
+    expect(find.byIcon(Icons.chevron_right), findsNothing);
+
+    // The manager's name is what the expander is keyed by, so the child's Refresh is wget's.
+    await tester.tap(refresh.last);
+    await tester.pump();
+    expect(upgradePaths.checked, [('wget', 'pm:Homebrew')]);
+    upgradePaths.completer.complete(result(success: true));
+    await tester.pumpAndSettle();
+
+    await tester.tap(hide);
+    await tester.pumpAndSettle();
+    expect(find.text('wget'), findsNothing);
+    expect(show, findsOneWidget);
 
     await tearDownScreen(tester);
   });

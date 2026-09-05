@@ -57,8 +57,8 @@ public class ResearchApplicationUpgradePathCommandHandler : IRequestHandler<Rese
                 }
 
                 // A brand-new (never-reviewed) script normally sits unsigned until a human uses
-                // "Sign Script" — but every Homebrew script is now byte-identical to every other
-                // Homebrew script sharing the same isSelfUpdate case (see HomebrewUpgradeScript.Build),
+                // "Sign Script" — but every package-manager script is byte-identical to every other
+                // row of its manager, the manager's own included (see RecognizedPackageManager.BuildScript),
                 // so once a human has signed this exact content anywhere, this row can safely inherit
                 // that same trust instead of sitting unsigned indefinitely.
                 if (existing.Method == UpgradeMethod.Script && existing.Script is not null && existing.ScriptSignature is null)
@@ -163,8 +163,11 @@ public class ResearchApplicationUpgradePathCommandHandler : IRequestHandler<Rese
         // a package-manager-managed application gets a real, checkable, signable upgrade path too
         // instead of a bare command with no way to learn the latest version short of asking the
         // managed host. bash for Homebrew, PowerShell for winget/Chocolatey — see
-        // PackageManagerCatalog.
-        var script = packageManager.BuildScript(isSelfUpdate);
+        // PackageManagerCatalog. The same text whether this is the manager's own row or one it
+        // manages: the script tells the two apart at runtime by --appName, which is what lets one
+        // signature cover both (see RecognizedPackageManager.BuildScript). isSelfUpdate only decides
+        // the wording of the note above for a manager this catalog does not know.
+        var script = packageManager.BuildScript();
 
         // What the script is addressed by. Homebrew has no real bundle identifier for a
         // formula/cask (see InstalledApplication.ApplicationIdentifier), so the package name stands
@@ -182,10 +185,10 @@ public class ResearchApplicationUpgradePathCommandHandler : IRequestHandler<Rese
         var latestVersion = await _researchClient.CheckScriptVersionAsync(
             script, request.Platform, request.ApplicationName, applicationIdentifier, cancellationToken);
 
-        // Every script from one manager (per isSelfUpdate) is byte-identical across every
-        // application, so once a human has signed this exact content anywhere, a freshly
-        // (re-)resolved row inherits that same trust immediately rather than sitting unsigned until
-        // someone happens to sign this particular application too.
+        // Every script from one manager is byte-identical across every application, so once a human
+        // has signed this exact content anywhere, a freshly (re-)resolved row inherits that same
+        // trust immediately rather than sitting unsigned until someone happens to sign this
+        // particular application too.
         var scriptSignature = await _upgradePathRepository.FindExistingSignatureForScriptAsync(script, cancellationToken);
 
         var entity = await UpsertAsync(

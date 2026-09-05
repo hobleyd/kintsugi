@@ -66,8 +66,10 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
         // every other Homebrew-managed application gets too.
         Assert.DoesNotContain("Firefox", result.Script);
         Assert.Contains("APP_NAME=\"$2\"", result.Script);
-        // brew update runs first so the upgrade isn't acting on a stale formula/cask index.
-        Assert.Contains("brew update && brew upgrade \"$APP_NAME\"", result.Script);
+        // brew update runs first — it is Homebrew's own self-update as well as the index refresh —
+        // so the upgrade isn't acting on a stale formula/cask index (see HomebrewUpgradeScript).
+        Assert.Contains("\nbrew update\n", result.Script);
+        Assert.Contains("brew upgrade \"$APP_NAME\"", result.Script);
         Assert.Contains("--update-version", result.Script);
         Assert.Equal("128.0", result.LatestVersion);
         _researchClient.Verify(c => c.GenerateScriptAsync(It.IsAny<AiProviderSettings>(), It.IsAny<UpgradePathScriptGenerationRequest>(), It.IsAny<CancellationToken>()), Times.Never);
@@ -196,14 +198,15 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
     }
 
     [Fact]
-    public async Task Handle_PackageManagerSelfUpdate_ForHomebrew_ResolvesToADeterministicSelfUpdateScript()
+    public async Task Handle_PackageManagerSelfUpdate_ForHomebrew_ResolvesToTheOneHomebrewScript()
     {
         var result = await CreateHandler().Handle(Command(UpgradePathWorkKind.PackageManagerSelfUpdate, "Homebrew"), CancellationToken.None);
 
         Assert.Equal(UpgradeMethod.Script, result.Method);
         Assert.Null(result.Command);
-        Assert.NotNull(result.Script);
-        Assert.Contains("brew update && brew upgrade", result.Script);
+        // The same bytes every formula gets: Homebrew's row is told apart at runtime by --appName,
+        // so one signature covers the manager and everything it manages (see HomebrewUpgradeScript).
+        Assert.Equal(HomebrewUpgradeScript.Build(), result.Script);
     }
 
     [Fact]
@@ -259,7 +262,9 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
         Assert.Equal(UpgradePathStatus.Found, result.Status);
         Assert.Equal(UpgradeMethod.Script, result.Method);
         Assert.NotNull(result.Script);
-        Assert.Contains("winget upgrade --exact --id $AppId", result.Script);
+        // Addressed by the package id winget knows it by, read from --appId at runtime.
+        Assert.Contains("winget upgrade --exact --id $upgradeId", result.Script);
+        Assert.Contains("else { $AppId }", result.Script);
         // Not a bash script — the whole reason package-manager rows moved to their own bucket.
         Assert.DoesNotContain("#!/bin/bash", result.Script);
         Assert.Equal("129.0", result.LatestVersion);

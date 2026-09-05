@@ -184,8 +184,9 @@ class KintsugiTableRow {
 
   final List<Widget> cells;
 
-  /// Indents the first cell and prefixes it with a chevron — how a package manager's applications
-  /// are shown under the manager.
+  /// Indents the first cell one step — how a package manager's applications are shown under the
+  /// manager. The step is on top of whatever the cell itself puts before its content, which for
+  /// the Applications table is an expander slot, so the child's name lands past the parent's.
   final bool isChild;
 
   /// Content shown across the full width of the table directly under this row.

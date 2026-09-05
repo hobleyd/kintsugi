@@ -10,14 +10,13 @@ namespace Kintsugi.Application.UpgradePaths;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Unlike every other manager in <see cref="PackageManagerCatalog"/>, <paramref name="isSelfUpdate"/>
-/// changes nothing here, and the parameter is accepted only to satisfy
-/// <see cref="RecognizedPackageManager.BuildScript"/>'s shared signature. Homebrew's own row needs a
-/// different script because Homebrew is not a formula, and Flatpak's because Flatpak is a
-/// distribution package — but snapd genuinely *is* a snap, published on the same store under the
-/// name "snapd", so `snap refresh snapd` is the same operation as `snap refresh firefox` with a
-/// different <c>--appId</c>. Returning one script for both cases isn't a shortcut; it means the two
-/// rows share a signature and one human review covers both (see
+/// One script for snapd's own row and every snap it manages, with no branch between them: snapd
+/// genuinely *is* a snap, published on the same store under the name "snapd" — which is the id the
+/// Linux agent reports its own row with — so `snap refresh snapd` is the same operation as
+/// `snap refresh firefox` with a different <c>--appId</c>. Every manager's script is one text now
+/// (see <see cref="RecognizedPackageManager.BuildScript"/>); Homebrew, winget and Flatpak have to
+/// branch at runtime to get there, Snap and Chocolatey simply do not need to. Sharing the text means
+/// the rows share a signature and one human review covers all of them (see
 /// <c>IUpgradePathRepository.FindExistingSignatureForScriptAsync</c>).
 /// </para>
 /// <para>
@@ -36,10 +35,8 @@ namespace Kintsugi.Application.UpgradePaths;
 /// </remarks>
 public static class SnapUpgradeScript
 {
-    public static string Build(bool isSelfUpdate)
+    public static string Build()
     {
-        _ = isSelfUpdate; // Intentionally unused — see the remarks above.
-
         return """
             #!/bin/bash
             set -euo pipefail

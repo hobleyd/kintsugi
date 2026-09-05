@@ -41,8 +41,9 @@ public class SignUpgradePathScriptCommandHandler : IRequestHandler<SignUpgradePa
         var signature = _artifactSigningService.Sign(existing.Script)!;
         existing.SignScript(signature);
 
-        // Every Homebrew script (per isSelfUpdate case) is now byte-for-byte identical across every
-        // application (see HomebrewUpgradeScript.Build) — a human reviewing and signing it here is
+        // Every package-manager script is byte-for-byte identical across every row of its manager,
+        // the manager's own included (see RecognizedPackageManager.BuildScript) — a human reviewing
+        // and signing it here is
         // vouching for that exact content, not for this one application specifically, so every other
         // already-resolved row sharing it becomes trusted immediately too, rather than only
         // self-healing the next time each one happens to get rescanned or re-registered.

@@ -9,13 +9,14 @@ UpgradePathSummary path({
   List<String> hostNames = const ['alpha', 'beta'],
   List<String> hostNamesNeedingUpdate = const [],
   String platform = 'macOS',
+  String latestVersion = '142.0',
 }) =>
     UpgradePathSummary(
       applicationName: 'Firefox',
       platform: platform,
       status: UpgradePathStatus.found,
       statusKey: statusKey,
-      latestVersion: '142.0',
+      latestVersion: latestVersion,
       method: UpgradeMethod.script,
       downloadUrl: null,
       command: null,
@@ -59,7 +60,6 @@ ApplicationTableRow row({
       children: const [],
     ),
     upgradePath: summary,
-    isChild: false,
   );
 }
 
@@ -131,7 +131,6 @@ void main() {
           children: [],
         ),
         upgradePath: null,
-        isChild: false,
       );
 
       expect(const ApplicationFilters(hostName: 'alpha').matches(noPath), isTrue);
@@ -162,7 +161,6 @@ void main() {
           children: [],
         ),
         upgradePath: null,
-        isChild: false,
       );
 
       expect(const ApplicationFilters(platform: 'macOS').matches(noPath), isFalse);
@@ -338,6 +336,94 @@ void main() {
 
       expect(state.allRows.map((r) => r.application.name), ['Homebrew', 'firefox']);
       expect(state.allRows.map((r) => r.isChild), [false, true]);
+    });
+  });
+
+  group('ApplicationsState.visibleRows', () {
+    ApplicationRow app(
+      String name, {
+      String statusKey = 'up-to-date',
+      String platform = 'pm:Homebrew',
+      String latestVersion = '1.0',
+      List<ApplicationRow> children = const [],
+    }) =>
+        ApplicationRow(
+          name: name,
+          hostCount: 1,
+          hostNames: const ['alpha'],
+          upgradePaths: [
+            path(statusKey: statusKey, platform: platform, latestVersion: latestVersion),
+          ],
+          children: children,
+        );
+
+    // Homebrew with two casks, and a standalone application beside it. wget sorts before firefox
+    // by version and after it by name, so the two orders tell grouping from a flat sort.
+    final overview = ApplicationOverview(
+      applications: [
+        app('Homebrew', children: [
+          app('firefox', latestVersion: '142.0', statusKey: 'update-available'),
+          app('wget', latestVersion: '1.25'),
+        ]),
+        app('Zoom', platform: 'macOS', latestVersion: '6.0'),
+      ],
+      totalApplicationCount: 4,
+      allHostNames: const ['alpha'],
+    );
+
+    List<String> names(ApplicationsState state) =>
+        state.visibleRows.map((r) => r.application.name).toList();
+
+    test('hides a manager applications until the manager is expanded', () {
+      final collapsed = ApplicationsState(overview: overview);
+      expect(names(collapsed), ['Homebrew', 'Zoom']);
+      expect(collapsed.visibleRows.first.matchingChildCount, 2);
+      expect(collapsed.visibleRows.last.matchingChildCount, 0);
+
+      final expanded = collapsed.copyWith(expandedManagerNames: {'Homebrew'});
+      expect(names(expanded), ['Homebrew', 'firefox', 'wget', 'Zoom']);
+      expect(expanded.visibleRows[1].parentName, 'Homebrew');
+      expect(expanded.visibleRows[1].usesManagerScript, isTrue);
+      expect(expanded.visibleRows.first.usesManagerScript, isFalse);
+    });
+
+    test('counts only the children the filters keep, so an empty expander is never offered', () {
+      final state = ApplicationsState(
+        overview: overview,
+        filters: const ApplicationFilters(statusKey: 'up-to-date'),
+        expandedManagerNames: const {'Homebrew'},
+      );
+
+      expect(names(state), ['Homebrew', 'wget', 'Zoom']);
+      expect(state.visibleRows.first.matchingChildCount, 1);
+
+      final none = state.copyWith(filters: const ApplicationFilters(search: 'brew'));
+      expect(names(none), ['Homebrew']);
+      expect(none.visibleRows.single.matchingChildCount, 0);
+    });
+
+    test('shows matching children of a manager the filters hid, expanded or not', () {
+      final state = ApplicationsState(
+        overview: overview,
+        filters: const ApplicationFilters(search: 'fire'),
+      );
+
+      expect(names(state), ['firefox']);
+      expect(state.visibleRows.single.isChild, isTrue);
+    });
+
+    test('sorts children among their siblings and keeps them under their manager', () {
+      final state = ApplicationsState(
+        overview: overview,
+        expandedManagerNames: const {'Homebrew'},
+        sort: const ApplicationSort('latest', ascending: false),
+      );
+
+      // A flat sort by version descending would read Zoom, firefox, wget, Homebrew.
+      expect(names(state), ['Zoom', 'Homebrew', 'firefox', 'wget']);
+
+      final byName = state.copyWith(sort: const ApplicationSort('name'));
+      expect(names(byName), ['Homebrew', 'firefox', 'wget', 'Zoom']);
     });
   });
 }

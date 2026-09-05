@@ -13,13 +13,12 @@ public class ApprovedScriptIdentityTests
 {
     private static readonly string HomebrewBucket = PlatformBucket.ForPackageManager(PackageManagerCatalog.Homebrew);
     private static readonly string WingetBucket = PlatformBucket.ForPackageManager(PackageManagerCatalog.Winget);
-    private static readonly string SnapBucket = PlatformBucket.ForPackageManager(PackageManagerCatalog.Snap);
 
     [Fact]
     public void For_AManagedPackageManagerScript_NamesTheManager_NotTheApplicationSigned()
     {
         var identity = ApprovedScriptIdentity.For(
-            HomebrewBucket, HomebrewUpgradeScript.Build(isSelfUpdate: false), "ada-url", "ada-url");
+            HomebrewBucket, HomebrewUpgradeScript.Build(), "ada-url", "ada-url");
 
         Assert.True(identity.IsPackageManagerScript);
         Assert.DoesNotContain("ada-url", identity.DisplayName);
@@ -30,21 +29,30 @@ public class ApprovedScriptIdentityTests
         Assert.Null(identity.ApplicationIdentifier);
     }
 
-    [Fact]
-    public void For_ASelfUpdateScript_IsDistinguishableFromTheManagedOne()
+    [Theory]
+    [InlineData(PackageManagerCatalog.Homebrew, "Homebrew", "brew")]
+    [InlineData(PackageManagerCatalog.Winget, "winget", "winget")]
+    [InlineData(PackageManagerCatalog.Chocolatey, "Chocolatey", "chocolatey")]
+    [InlineData(PackageManagerCatalog.Flatpak, "Flatpak", "flatpak")]
+    [InlineData(PackageManagerCatalog.Snap, "Snap", "snapd")]
+    public void For_TheManagersOwnRow_IsTheSameEntryAsItsManagedApplications(string managerName, string ownRowName, string ownRowId)
     {
-        // Two separate rows under one bucket with different content, so they must not collide on a
-        // filename either — the two entries live in different content directories, but a reader
-        // browsing the repository sees only the names.
-        var managed = ApprovedScriptIdentity.For(
-            HomebrewBucket, HomebrewUpgradeScript.Build(isSelfUpdate: false), "ada-url", "ada-url");
-        var selfUpdate = ApprovedScriptIdentity.For(
-            HomebrewBucket, HomebrewUpgradeScript.Build(isSelfUpdate: true), "Homebrew", "Homebrew");
+        // One text per manager, the manager's own row included (RecognizedPackageManager.BuildScript),
+        // so an entry signed from the manager's row and one signed from a managed application's are
+        // the same entry — same filename, same label — and there is no `<manager>-self-update` file
+        // any more. The names and ids here are the ones each agent reports the manager's own row
+        // under (system_info::HOMEBREW_NAME, WINGET_NAME, FLATPAK_NAME, ...).
+        Assert.True(PackageManagerCatalog.TryGet(managerName, out var manager));
+        var bucket = PlatformBucket.ForPackageManager(managerName);
 
-        Assert.True(selfUpdate.IsPackageManagerScript);
-        Assert.Equal("homebrew-self-update", selfUpdate.FileBaseName);
-        Assert.NotEqual(managed.FileBaseName, selfUpdate.FileBaseName);
-        Assert.NotEqual(managed.DisplayName, selfUpdate.DisplayName);
+        var fromManagerRow = ApprovedScriptIdentity.For(bucket, manager.BuildScript(), ownRowName, ownRowId);
+        var fromManagedRow = ApprovedScriptIdentity.For(bucket, manager.BuildScript(), "Firefox", "org.mozilla.firefox");
+
+        Assert.True(fromManagerRow.IsPackageManagerScript);
+        Assert.Equal(fromManagedRow.FileBaseName, fromManagerRow.FileBaseName);
+        Assert.Equal(fromManagedRow.DisplayName, fromManagerRow.DisplayName);
+        Assert.DoesNotContain("self-update", fromManagerRow.FileBaseName);
+        Assert.Null(fromManagerRow.ApplicationIdentifier);
     }
 
     [Theory]
@@ -58,22 +66,10 @@ public class ApprovedScriptIdentityTests
         Assert.True(PackageManagerCatalog.TryGet(managerName, out var manager));
 
         var identity = ApprovedScriptIdentity.For(
-            PlatformBucket.ForPackageManager(managerName), manager.BuildScript(false), "Firefox", "org.mozilla.firefox");
+            PlatformBucket.ForPackageManager(managerName), manager.BuildScript(), "Firefox", "org.mozilla.firefox");
 
         Assert.Equal(expected, identity.FileBaseName);
         Assert.True(identity.IsPackageManagerScript);
-    }
-
-    [Fact]
-    public void For_TheSnapScript_TakesTheManagedLabel_BecauseBothCasesAreTheSameScript()
-    {
-        // snapd is itself a snap, so SnapUpgradeScript returns one text for both cases (see
-        // UpgradeScriptTests.SnapSelfUpdate_IsTheSameScript_BecauseSnapdIsItselfASnap). One shared
-        // entry gets the more useful of the two labels rather than an arbitrary one.
-        var identity = ApprovedScriptIdentity.For(
-            SnapBucket, SnapUpgradeScript.Build(isSelfUpdate: true), "snapd", "snapd");
-
-        Assert.Equal("snap", identity.FileBaseName);
     }
 
     [Fact]
@@ -81,7 +77,7 @@ public class ApprovedScriptIdentityTests
     {
         // Adoption candidates are offered by matching an entry's name against a local row's
         // (GetUpgradeScriptsOverviewQueryHandler). A generic entry called exactly "Homebrew" would
-        // match the manager's own self-update row and offer it the per-application script.
+        // match the manager's own row and offer it a script it already holds.
         foreach (var managerName in new[]
         {
             PackageManagerCatalog.Homebrew, PackageManagerCatalog.Winget, PackageManagerCatalog.Chocolatey,
@@ -90,13 +86,10 @@ public class ApprovedScriptIdentityTests
         {
             Assert.True(PackageManagerCatalog.TryGet(managerName, out var manager));
 
-            foreach (var isSelfUpdate in new[] { false, true })
-            {
-                var identity = ApprovedScriptIdentity.For(
-                    PlatformBucket.ForPackageManager(managerName), manager.BuildScript(isSelfUpdate), managerName, null);
+            var identity = ApprovedScriptIdentity.For(
+                PlatformBucket.ForPackageManager(managerName), manager.BuildScript(), managerName, null);
 
-                Assert.NotEqual(managerName, identity.DisplayName);
-            }
+            Assert.NotEqual(managerName, identity.DisplayName);
         }
     }
 

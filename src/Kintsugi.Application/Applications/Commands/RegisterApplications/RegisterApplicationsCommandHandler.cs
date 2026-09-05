@@ -109,7 +109,7 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
     /// A row that already carries a <see cref="UpgradePath.ScriptSignature"/> keeps its script
     /// exactly as reviewed; only its <see cref="UpgradePath.LatestVersion"/> moves. This used to
     /// rewrite <see cref="UpgradePath.Script"/> from the builder unconditionally, under the belief
-    /// that "the script content for a given (manager, isSelfUpdate) case never changes". It does
+    /// that "the script content for a given manager never changes". It does
     /// change — every time one of the <c>*UpgradeScript.Build</c> bodies is edited — so what that
     /// actually meant was that a routine inventory report could swap the content of a signed row,
     /// content the fleet's agents may be executing right now, on the strength of a deployment
@@ -118,9 +118,10 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
     /// a human pressing Adopt does.
     ///
     /// So a signed script survives a server upgrade, and taking a newer server-written one is a
-    /// deliberate act: the Upgrade Scripts page shows which rows this build would now write
+    /// deliberate act: the Upgrade Scripts page shows which scripts this build would now write
     /// differently (<see cref="PackageManagerCatalog.CurrentScriptFor"/>) and
-    /// <c>TakeServerWrittenScriptCommand</c> replaces one, unsigned, for review.
+    /// <c>TakeServerWrittenScriptCommand</c> replaces one — on every row holding it — unsigned, for
+    /// review.
     /// </remarks>
     private async Task UpsertPackageManagerUpgradePathsAsync(IReadOnlyList<ApplicationEntry> applications, CancellationToken cancellationToken)
     {
@@ -169,7 +170,7 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
             // fixed script forward to rows that are still waiting for their first review.
             var script = existing?.ScriptSignature is not null
                 ? existing.Script
-                : packageManager.BuildScript(false);
+                : packageManager.BuildScript();
 
             if (existing is null)
             {

@@ -293,12 +293,7 @@ class _ApplicationsTable extends StatelessWidget {
     final expanded = state.expandedRowKey == row.key;
 
     return [
-      Text(
-        row.isChild ? '> ${row.application.name}' : row.application.name,
-        style: row.isChild
-            ? Theme.of(context).textTheme.bodyMedium?.copyWith(color: context.palette.muted)
-            : null,
-      ),
+      _NameCell(row: row, childrenShown: state.expandedManagerNames.contains(row.application.name)),
       CountBadge(row.application.hostCount),
       path == null ? const NoValue() : HintText(path.platform),
       _StatusCell(row: row),
@@ -312,6 +307,61 @@ class _ApplicationsTable extends StatelessWidget {
             context.read<ApplicationsBloc>().add(ApplicationRowExpansionToggled(row.key)),
       ),
     ];
+  }
+}
+
+/// The Application Name column: an expander for a package manager with applications under it, and
+/// the name.
+///
+/// Every row spends [_expanderSlotWidth] before its name, whether or not there is an expander in
+/// it, so the names line up down the column: a chevron beside "Homebrew" and none beside
+/// "Firefox" would otherwise stagger the two by an icon's width. Child rows are indented a further
+/// step by [KintsugiTableRow.isChild], which is what puts them visibly under the manager rather
+/// than beside it.
+class _NameCell extends StatelessWidget {
+  const _NameCell({required this.row, required this.childrenShown});
+
+  final ApplicationTableRow row;
+
+  /// Whether the manager's applications are on screen — drives the chevron's direction.
+  final bool childrenShown;
+
+  /// One [IconActionButton] (34px) and the gap to the name.
+  static const _expanderSlotWidth = 38.0;
+
+  @override
+  Widget build(BuildContext context) {
+    final count = row.matchingChildCount;
+    final plural = count == 1 ? 'application' : 'applications';
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SizedBox(
+          width: _expanderSlotWidth,
+          child: count == 0
+              ? null
+              : Align(
+                  alignment: Alignment.centerLeft,
+                  child: IconActionButton(
+                    icon: childrenShown ? Icons.expand_more : Icons.chevron_right,
+                    tooltip: childrenShown ? 'Hide $plural' : 'Show $count $plural',
+                    onPressed: () => context
+                        .read<ApplicationsBloc>()
+                        .add(ApplicationChildrenToggled(row.application.name)),
+                  ),
+                ),
+        ),
+        Flexible(
+          child: Text(
+            row.application.name,
+            style: row.isChild
+                ? Theme.of(context).textTheme.bodyMedium?.copyWith(color: context.palette.muted)
+                : null,
+          ),
+        ),
+      ],
+    );
   }
 }
 
@@ -364,16 +414,20 @@ class _UpgradeCell extends StatelessWidget {
       UpgradeMethod.script when path.script != null => Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            IconActionButton(
-              icon: Icons.description_outlined,
-              tooltip: 'View script',
-              onPressed: () => showScriptDialog(
-                context,
-                applicationName: row.application.name,
-                platform: path.platform,
-                script: path.script!,
+            // The manager's shared script is shown on the manager's row alone; an application
+            // under it keeps the version check, which is its own. See
+            // [ApplicationTableRow.usesManagerScript].
+            if (!row.usesManagerScript)
+              IconActionButton(
+                icon: Icons.description_outlined,
+                tooltip: 'View script',
+                onPressed: () => showScriptDialog(
+                  context,
+                  applicationName: row.application.name,
+                  platform: path.platform,
+                  script: path.script!,
+                ),
               ),
-            ),
             // The per-row form of "Check for Updates": runs this one script's --update-version on
             // the server, synchronously, and no AI is involved. The Latest and Checked columns
             // move when the overview is re-read; the notice above the table says what happened

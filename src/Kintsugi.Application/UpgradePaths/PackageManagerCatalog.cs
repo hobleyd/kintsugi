@@ -71,10 +71,9 @@ public static class PackageManagerCatalog
         TryGet(name, out var manager) ? manager.Name : name;
 
     /// <summary>
-    /// The script this server's current build would write for the row
-    /// (<paramref name="applicationName"/>, <paramref name="platform"/>), or null when that row is
-    /// not a recognized package manager's — an AI-researched script has no canonical current
-    /// version to compare against.
+    /// The script this server's current build would write for a row on <paramref name="platform"/>,
+    /// or null when that bucket is not a recognized package manager's — an AI-researched script has no
+    /// canonical current version to compare against.
     /// </summary>
     /// <remarks>
     /// Exists so a row's stored script can be compared against what this build would produce, which
@@ -83,24 +82,27 @@ public static class PackageManagerCatalog
     /// <c>TakeServerWrittenScriptCommand</c>, which a human presses, and
     /// <c>RegisterApplicationsCommandHandler</c>, which deliberately does not.
     /// </remarks>
+    /// <param name="applicationName">Accepted for the caller's convenience and not consulted: every
+    /// row in a manager's bucket, the manager's own included, gets the same text, and the script tells
+    /// the manager's own row apart at runtime by <c>--appName</c> (see
+    /// <see cref="RecognizedPackageManager.BuildScript"/>). It used to select a second, self-update
+    /// text for the row named after the manager.</param>
     public static string? CurrentScriptFor(string applicationName, string platform)
     {
+        _ = applicationName;
         var managerName = PlatformBucket.PackageManagerNameFrom(platform);
-        if (managerName is null || !TryGet(managerName, out var manager))
-        {
-            return null;
-        }
-
-        // The self-update row is the one named after the manager itself: a manager is its own
-        // manager, so its own row lives in the very bucket its managed applications do. Same rule
-        // PrepareUpgradePathScanQueryHandler uses to decide which kind of work item to emit.
-        var isSelfUpdate = string.Equals(applicationName, manager.Name, StringComparison.OrdinalIgnoreCase);
-        return manager.BuildScript(isSelfUpdate);
+        return managerName is not null && TryGet(managerName, out var manager) ? manager.BuildScript() : null;
     }
 }
 
-/// <param name="BuildScript">Takes <c>isSelfUpdate</c> — true for the manager's own row (upgrading
-/// the manager itself), false for one of the applications it manages. Returns content that is
-/// byte-identical for every application in that case, so one human "Sign Script" review covers
-/// them all (see <c>IUpgradePathRepository.FindExistingSignatureForScriptAsync</c>).</param>
-public record RecognizedPackageManager(string Name, ScriptLanguage Language, Func<bool, string> BuildScript);
+/// <param name="BuildScript">Returns content that is byte-identical for every row in the manager's
+/// bucket — every application it manages <em>and its own row</em>, since a manager is trivially its
+/// own manager — so one human "Sign Script" review covers them all (see
+/// <c>IUpgradePathRepository.FindExistingSignatureForScriptAsync</c>), and so the Applications
+/// screen can show the manager's script once, on the manager's row, on behalf of the applications
+/// nested under it. Where the manager's own row needs different handling (Homebrew is not a
+/// formula, winget is not a winget package under its own name, Flatpak is a distribution package) the
+/// script branches at <em>runtime</em> on <c>--appName</c> being the manager's name — the same name
+/// the agent reports the manager under and <c>PrepareUpgradePathScanQueryHandler</c> recognizes its
+/// row by. See the remarks on <see cref="HomebrewUpgradeScript"/> for why one text rather than two.</param>
+public record RecognizedPackageManager(string Name, ScriptLanguage Language, Func<string> BuildScript);

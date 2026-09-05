@@ -26,7 +26,7 @@ namespace Kintsugi.Application.ScriptApproval;
 /// Deliberately never equal to a real application name for a package-manager entry: adoption
 /// candidates are offered by matching an entry's name against a local row's
 /// (<c>GetUpgradeScriptsOverviewQueryHandler</c>), and "Homebrew" would match the manager's own
-/// self-update row and offer it the per-application script.</param>
+/// row and offer it a script it already holds.</param>
 /// <param name="FileBaseName">The script's filename without its extension — see
 /// <see cref="ApprovedScriptCorpus.ScriptPath"/>.</param>
 /// <param name="ApplicationIdentifier">Null for a package-manager entry, where the signing server's
@@ -76,29 +76,23 @@ public record ApprovedScriptIdentity(string DisplayName, string FileBaseName, st
             return false;
         }
 
-        // Which of the manager's two scripts this is, decided by comparing the bytes rather than by
-        // looking at the row — the row is exactly what must not be trusted here, and the content is
-        // what the entry is keyed by anyway. The managed case is tested first because Snap returns
-        // the same text for both (snapd is itself a snap, see
-        // UpgradeScriptTests.SnapSelfUpdate_IsTheSameScript...), and "the Snap script" is the more
-        // useful of the two labels for one shared entry.
-        var isManaged = string.Equals(script, manager.BuildScript(false), StringComparison.Ordinal);
-        var isSelfUpdate = string.Equals(script, manager.BuildScript(true), StringComparison.Ordinal);
-        if (!isManaged && !isSelfUpdate)
+        // Whether this is the manager's script, decided by comparing the bytes rather than by looking
+        // at the row — the row is exactly what must not be trusted here, and the content is what the
+        // entry is keyed by anyway. One text per manager: the manager's own row and every application
+        // it manages hold the same bytes (see RecognizedPackageManager.BuildScript), so there is one
+        // entry per manager and it takes the managed label. An entry holding an older build's
+        // self-update text is not this build's and is identified as the application it was signed
+        // against, like any other unrecognized content.
+        if (!string.Equals(script, manager.BuildScript(), StringComparison.Ordinal))
         {
             return false;
         }
 
-        var slug = Slug(manager.Name).ToLowerInvariant();
-        identity = isManaged
-            ? new ApprovedScriptIdentity($"{manager.Name} (any managed application)", slug, null)
-            {
-                IsPackageManagerScript = true,
-            }
-            : new ApprovedScriptIdentity($"{manager.Name} (self-update)", $"{slug}-self-update", null)
-            {
-                IsPackageManagerScript = true,
-            };
+        identity = new ApprovedScriptIdentity(
+            $"{manager.Name} (any managed application)", Slug(manager.Name).ToLowerInvariant(), null)
+        {
+            IsPackageManagerScript = true,
+        };
         return true;
     }
 

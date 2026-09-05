@@ -669,7 +669,7 @@ fn scan_winget() -> PackageManagerScan {
     let mut apps = vec![InstalledApp {
         name: WINGET_NAME.to_string(),
         // winget prints its version as "v1.9.25200"; the leading "v" is stripped so it compares
-        // against what the server-written self-update script reports (which strips it too).
+        // against what the server-written script reports for winget's own row (which strips it too).
         version: version_output.trim().trim_start_matches('v').to_string(),
         package_manager: None,
         application_identifier: Some(WINGET_NAME.to_string()),

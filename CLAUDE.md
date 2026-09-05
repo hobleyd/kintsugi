@@ -222,9 +222,35 @@ docker run --rm -v "$PWD/scripts":/w debian:12-slim \
 
 This is what caught `curl -fsSL -o /dev/null -w '%{redirect_url}'` returning an empty string — `-L`
 makes curl *follow* the redirect, so the variable reporting the un-followed redirect is empty. That
-one had shipped in Homebrew's own self-update row and in the prompt text recommending the pattern to
-the AI; nothing surfaced it, because the failure is a null `LatestVersion`, which is indistinguishable
-from "no update available".
+one had shipped in the branch of the Homebrew script that answers for Homebrew itself and in the
+prompt text recommending the pattern to the AI; nothing surfaced it, because the failure is a null
+`LatestVersion`, which is indistinguishable from "no update available".
+
+**Every package manager has one script, and the manager's own row is told apart at runtime.** Each
+manager used to get two texts from `BuildScript(isSelfUpdate)` — `homebrew-self-update.sh` beside
+`homebrew.sh`, `winget-self-update.ps1` beside `winget.ps1` — because the manager's own row needs
+different handling from the applications it manages. That second text cost more than it bought: the
+Applications screen nests every managed application under the manager's row and shows the manager's
+script there once on behalf of all of them, which is only honest if the manager's bytes *are* its
+children's bytes. So `RecognizedPackageManager.BuildScript` takes no argument, every builder returns
+one text, and where the manager's row differs the *script* branches on `--appName` being the
+manager's name — the name each agent reports the manager under (`system_info::HOMEBREW_NAME`,
+`WINGET_NAME`, `FLATPAK_NAME`) and the rule `PrepareUpgradePathScanQueryHandler` recognizes the row by.
+Homebrew is not a formula (GitHub's releases redirect for the version, `brew update` alone for the
+upgrade); winget is not a winget package under its own name (the winget-cli releases redirect, and
+`Microsoft.AppInstaller` is what gets upgraded); Flatpak is a distribution package (declines to answer
+a version, upgrades through the distribution's own manager). Snap and Chocolatey need no branch at
+all — snapd is a snap and `chocolatey` is a Chocolatey package, both reported under exactly that id.
+Three things follow. `brew update` is Homebrew's own self-update as well as the index refresh, so on
+macOS **every** application upgrade upgrades Homebrew too and the manager's row needs nothing more —
+do not put a blanket `brew upgrade` back on it, which would patch every formula on the host regardless
+of which rows a human has approved; the other managers get no such side effect, deliberately, since
+upgrading App Installer from inside a running `winget` is not something to do on every package. One
+signature now covers a manager and everything it manages, and `ApprovedScriptIdentity` publishes one
+entry per manager, never a `-self-update` one. And a server upgraded across this change shows the old
+self-update bytes on the Upgrade Scripts screen as a row with a newer server-written script, to be
+taken and signed like any other — `PackageManagerDisplayName(…, isSelfUpdate: true)` survives only to
+label those legacy rows.
 
 ## Architecture
 
@@ -352,13 +378,13 @@ every signature over it.
 **An entry is published as what it is, not as the row somebody happened to sign.** The row a human
 presses "Sign Script" on is one application's; a package-manager script is every application's. So
 `ApprovedScriptIdentity` decides what the metadata, the commit message, the pull request title and
-the filename say: a package-manager entry is `homebrew.sh` / `homebrew-self-update.sh` /
-`winget.ps1` and is labelled for the manager (never *as* the manager — `Homebrew` would match the
-manager's own self-update row in the adoption offer), with `ApplicationIdentifier` dropped because
-whichever application the reviewer was looking at says nothing about a script all of them share; an
-AI-researched entry keeps the application's own name and is filed under its identifier
-(`com.nextcloud.desktopclient.sh`, `Mozilla.Firefox.ps1`). Which of a manager's two scripts an entry
-holds is decided by comparing bytes against `BuildScript(true|false)`, not by trusting the row.
+the filename say: a package-manager entry is `homebrew.sh` / `winget.ps1` / `flatpak.sh` — one per
+manager, the manager's own row included — and is labelled for the manager (never *as* the manager —
+`Homebrew` would match the manager's own row in the adoption offer), with `ApplicationIdentifier`
+dropped because whichever application the reviewer was looking at says nothing about a script all of
+them share; an AI-researched entry keeps the application's own name and is filed under its identifier
+(`com.nextcloud.desktopclient.sh`, `Mozilla.Firefox.ps1`). Whether an entry is the manager's script
+is decided by comparing bytes against `BuildScript()`, not by trusting the row.
 The filename is **not** load-bearing: `ApprovedScriptCorpus.ScriptPathsIn` finds the script by
 extension and confirms it by hash, which is what keeps entries written under the original fixed
 `script.sh` readable, and why an existing `script.sh` is written to again rather than renamed. One
@@ -1085,11 +1111,27 @@ outlives its bytes, which now only ever fires on a deliberate act (a force-refre
 `TakeServerWrittenScript`) rather than in the background. And because nothing takes the newer script
 by itself, the Upgrade Scripts screen has to say one exists: `PackageManagerCatalog.CurrentScriptFor`
 gives the query handler the script this build would write, `LocalScriptDto.NewerServerScriptAvailable`
-flags a row that differs, and `TakeServerWrittenScriptCommand` replaces one — **unsigned**, so the
+flags a script that differs, and `TakeServerWrittenScriptCommand` replaces it — **unsigned**, so the
 new text reaches no host until someone has read it, and one "Sign Script" then covers every row
 holding those bytes via `FindExistingSignatureForScriptAsync`. Do not make that automatic on the
 grounds that the server trusts its own generated content: the review is the only thing standing
 between an edited builder body and root execution on every host.
+
+**The Upgrade Scripts screen lists scripts, not rows.** A package-manager bucket holds one row per
+application and the same bytes on every one of them, so listing rows put "firefox", "slack", "zoom"…
+under `pm:Homebrew` as hundreds of copies of one decision with nothing per-application on any of
+them for a reviewer to look at. `GetUpgradeScriptsOverviewQueryHandler` therefore collapses the rows
+of a *recognized* manager's bucket into one `LocalScriptDto` per (bucket, content, signed-or-not),
+named the way the approval repository names the same bytes
+(`ApprovedScriptIdentity.PackageManagerDisplayName`), with `Applications` saying how many rows it
+stands for; an AI-researched row is one application's script and stays its own entry. Content is
+part of the key because a bucket legitimately holds two texts at once — rows signed against an older
+builder revision beside rows this build wrote — and the review is per text. That is also why
+`TakeServerWrittenScriptCommand` is addressed by `(Platform, Sha256)` rather than by row: the button
+sits on the entry, and taking the newer text for one application while its siblings kept the old
+would leave a bucket running two revisions with nothing to say which was reviewed. A hash that no
+longer matches anything is a stale page and answers NotFound rather than acting on whatever
+replaced it.
 
 ## The three agents
 

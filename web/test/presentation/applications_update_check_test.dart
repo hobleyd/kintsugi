@@ -54,7 +54,6 @@ ApplicationOverview overview({String latestVersion = '142.0'}) => ApplicationOve
 ApplicationTableRow rowFor(ApplicationOverview overview) => ApplicationTableRow(
       application: overview.applications.single,
       upgradePath: overview.applications.single.upgradePaths.single,
-      isChild: false,
     );
 
 class FakeApplicationRepository implements ApplicationRepository {

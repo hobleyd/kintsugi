@@ -267,8 +267,9 @@ pub fn scan_homebrew() -> HomebrewScan {
             name: HOMEBREW_NAME.to_string(),
             version,
             package_manager: None,
-            // Homebrew's own self-update row (`brew update && brew upgrade`) runs as the same user
-            // every formula does, so it is as patchable as they are.
+            // Homebrew's own row runs the same shared script every formula does (`brew update` is
+            // Homebrew upgrading itself — see HomebrewUpgradeScript on the server), as the same
+            // user, so it is as patchable as they are.
             application_identifier: Some("brew".to_string()),
             available_version: None,
             update_available: None,

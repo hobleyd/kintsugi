@@ -24,7 +24,7 @@ public class RegisterApplicationsCommandHandlerTests
     /// the builder rather than stubbed, so a test can tell "the row already holds what this build
     /// writes" apart from "the builder has moved on since this row was reviewed" — which are the two
     /// cases the signed-row guard exists to separate.</summary>
-    private static readonly string HomebrewScript = HomebrewUpgradeScript.Build(isSelfUpdate: false);
+    private static readonly string HomebrewScript = HomebrewUpgradeScript.Build();
 
     private RegisterApplicationsCommandHandler CreateHandler() =>
         new(_hostRepository.Object, _installedApplicationRepository.Object, _upgradePathRepository.Object, _unitOfWork.Object);
@@ -147,7 +147,7 @@ public class RegisterApplicationsCommandHandlerTests
         _upgradePathRepository.Verify(r => r.AddAsync(
             It.Is<UpgradePath>(p => p.ApplicationName == "firefox" && p.Platform == HomebrewBucket && p.LatestVersion == "129.0"
                 && p.Method == UpgradeMethod.Script && p.Command == null && p.Script != null
-                && !p.Script.Contains("firefox") && p.Script.Contains("brew update && brew upgrade \"$APP_NAME\"")
+                && !p.Script.Contains("firefox") && p.Script.Contains("brew upgrade \"$APP_NAME\"")
                 && p.ApplicationIdentifier == "firefox"),
             It.IsAny<CancellationToken>()), Times.Once);
     }
@@ -259,7 +259,7 @@ public class RegisterApplicationsCommandHandlerTests
 
         _upgradePathRepository.Verify(r => r.AddAsync(
             It.Is<UpgradePath>(p => p.ApplicationName == "Calculator" && p.Platform == flatpakBucket && p.LatestVersion == null
-                && p.Method == UpgradeMethod.Script && p.Script == FlatpakUpgradeScript.Build(false)
+                && p.Method == UpgradeMethod.Script && p.Script == FlatpakUpgradeScript.Build()
                 && p.ApplicationIdentifier == "org.gnome.Calculator"),
             It.IsAny<CancellationToken>()), Times.Once);
     }
@@ -273,7 +273,7 @@ public class RegisterApplicationsCommandHandlerTests
         var flatpakBucket = PlatformBucket.ForPackageManager(PackageManagerCatalog.Flatpak);
         var existingPath = UpgradePath.Create(
             "Calculator", flatpakBucket, UpgradePathStatus.Found, "50.0", UpgradeMethod.Script,
-            null, null, null, null, null, FlatpakUpgradeScript.Build(false), "org.gnome.Calculator");
+            null, null, null, null, null, FlatpakUpgradeScript.Build(), "org.gnome.Calculator");
         _upgradePathRepository.Setup(r => r.GetAsync("Calculator", flatpakBucket, It.IsAny<CancellationToken>())).ReturnsAsync(existingPath);
 
         await CreateHandler().Handle(

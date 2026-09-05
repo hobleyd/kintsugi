@@ -24,10 +24,10 @@ public interface IUpgradePathRepository
     void Remove(UpgradePath upgradePath);
 
     /// <summary>The signature already recorded on some other row whose <see cref="UpgradePath.Script"/>
-    /// is byte-for-byte identical, if one exists — lets a Homebrew row inherit a human's prior
-    /// review the moment its own script content (see <c>HomebrewUpgradeScript.Build</c>, which
-    /// produces the same text for every formula/cask sharing an isSelfUpdate case) matches one
-    /// that's already been signed, rather than needing its own separate "Sign Script" review.</summary>
+    /// is byte-for-byte identical, if one exists — lets a package-manager row inherit a human's prior
+    /// review the moment its own script content (see <c>RecognizedPackageManager.BuildScript</c>, which
+    /// produces one text for every row of a manager, its own included) matches one that's already
+    /// been signed, rather than needing its own separate "Sign Script" review.</summary>
     Task<string?> FindExistingSignatureForScriptAsync(string script, CancellationToken cancellationToken);
 
     /// <summary>Every currently-unsigned row whose <see cref="UpgradePath.Script"/> is byte-for-byte

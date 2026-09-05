@@ -18,7 +18,8 @@ class ApplicationTableRow extends Equatable {
   const ApplicationTableRow({
     required this.application,
     required this.upgradePath,
-    required this.isChild,
+    this.parentName,
+    this.matchingChildCount = 0,
   });
 
   final ApplicationRow application;
@@ -26,17 +27,36 @@ class ApplicationTableRow extends Equatable {
   /// Null for an application nothing has been researched for yet.
   final UpgradePathSummary? upgradePath;
 
-  final bool isChild;
+  /// The package manager this application is listed under, or null for a top-level row. It is
+  /// the name the parent's rows are expanded and collapsed by — see
+  /// [ApplicationsState.expandedManagerNames].
+  final String? parentName;
+
+  /// How many of this application's children survive the current filters. Only a top-level row
+  /// with children has a non-zero count, and it is what decides whether the row gets an expander:
+  /// a manager whose every application is filtered out has nothing to expand, and a control that
+  /// toggles nothing visible would read as broken.
+  final int matchingChildCount;
+
+  bool get isChild => parentName != null;
 
   String get statusKey => upgradePath?.statusKey ?? 'not-checked';
 
   String get platform => upgradePath?.platform ?? '';
 
+  /// Whether this row's path is the package manager's own shared script — a child's `pm:` row.
+  /// Every application a manager owns carries byte-identical script content (see
+  /// `PackageManagerCatalog` on the server), so it is shown once, on the manager's own row, and
+  /// each child shows only what is its own: its versions and its version check. A child can still
+  /// have an OS-bucket row of its own — the same name installed standalone on another host — and
+  /// that row's script is that application's, so it stays.
+  bool get usesManagerScript => isChild && platform.startsWith('pm:');
+
   /// A stable identity for the row, used to key the expanded panel.
   String get key => '${application.name} $platform';
 
   @override
-  List<Object?> get props => [application, upgradePath, isChild];
+  List<Object?> get props => [application, upgradePath, parentName, matchingChildCount];
 }
 
 /// The filters the table applies, all client-side — everything they need is already in the
@@ -173,6 +193,16 @@ final class ApplicationRowExpansionToggled extends ApplicationsEvent {
   List<Object?> get props => [rowKey];
 }
 
+/// Shows or hides the applications listed under one package manager, by the manager's name.
+final class ApplicationChildrenToggled extends ApplicationsEvent {
+  const ApplicationChildrenToggled(this.applicationName);
+
+  final String applicationName;
+
+  @override
+  List<Object?> get props => [applicationName];
+}
+
 /// Re-runs one row's script to see whether a newer version has been released — the per-row form of
 /// the "Check for Updates" button, and like it, no AI call.
 final class ApplicationUpdateCheckRequested extends ApplicationsEvent {
@@ -205,6 +235,7 @@ final class ApplicationsState extends Equatable {
     this.filters = const ApplicationFilters(),
     this.sort,
     this.expandedRowKey,
+    this.expandedManagerNames = const {},
     this.loading = true,
     this.error,
     this.checkingRowKeys = const {},
@@ -220,6 +251,14 @@ final class ApplicationsState extends Equatable {
   /// moved is worse than no panel; one at a time makes that impossible rather than handled.
   final String? expandedRowKey;
 
+  /// Package managers whose applications are shown under them, by the manager's name. Collapsed
+  /// by default: a manager's applications all share one script and one status mechanism, so the
+  /// manager's row says most of what the table has to say about them, and a Homebrew fleet lists
+  /// dozens of formulae that would otherwise bury the applications researched individually.
+  /// Keyed by name rather than [ApplicationTableRow.key] because the children belong to the
+  /// application, not to one of its platform rows.
+  final Set<String> expandedManagerNames;
+
   final bool loading;
   final String? error;
 
@@ -231,17 +270,14 @@ final class ApplicationsState extends Equatable {
   final UpdateCheckNotice? checkNotice;
 
   /// Every row the response produced, before filtering, with children flattened in directly after
-  /// their parent so the nesting survives a sort.
-  List<ApplicationTableRow> get allRows {
-    final rows = <ApplicationTableRow>[];
-    for (final application in overview.applications) {
-      rows.addAll(_rowsFor(application, isChild: false));
-      for (final child in application.children) {
-        rows.addAll(_rowsFor(child, isChild: true));
-      }
-    }
-    return rows;
-  }
+  /// their parent.
+  List<ApplicationTableRow> get allRows => [
+        for (final application in overview.applications) ...[
+          ..._rowsFor(application),
+          for (final child in application.children)
+            ..._rowsFor(child, parentName: application.name),
+        ],
+      ];
 
   /// Every platform bucket the response names, sorted, for the Platform column's filter. Read off
   /// the rows rather than listed statically: the buckets a fleet actually has depend on which
@@ -256,36 +292,95 @@ final class ApplicationsState extends Equatable {
       ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
   }
 
-  /// The rows on screen: filtered, then sorted.
+  /// The rows on screen: filtered, then sorted, with a package manager's applications kept
+  /// directly under it.
+  ///
+  /// Sorted as groups rather than as one flat list — parents among parents, children among their
+  /// siblings — because a flat sort by Latest or Checked scatters a manager's applications through
+  /// the table, where an indented row with no manager above it says nothing about what it is
+  /// indented under. Children are shown only while their manager is expanded, with one exception:
+  /// a manager filtered out while some of its applications match — a search for one formula's
+  /// name, or a status the manager's own row does not have — still shows those applications,
+  /// because a filter that matched rows and then hid them all under a collapsed parent that is
+  /// not on screen would leave nothing for the expander to be pressed on.
   List<ApplicationTableRow> get visibleRows {
-    final rows = allRows.where(filters.matches).toList();
-    final order = sort;
-    if (order == null) return rows;
+    final groups = <({List<ApplicationTableRow> parents, List<ApplicationTableRow> children})>[];
+    for (final application in overview.applications) {
+      final children = [
+        for (final child in application.children)
+          ..._rowsFor(child, parentName: application.name).where(filters.matches),
+      ];
+      final parents = _rowsFor(application, matchingChildCount: children.length)
+          .where(filters.matches)
+          .toList();
+      if (parents.isNotEmpty || children.isNotEmpty) {
+        groups.add((parents: parents, children: children));
+      }
+    }
 
-    rows.sort((a, b) {
-      final comparison = switch (order.key) {
-        'name' => a.application.name.toLowerCase().compareTo(b.application.name.toLowerCase()),
-        'hosts' => a.application.hostCount.compareTo(b.application.hostCount),
-        'platform' => a.platform.toLowerCase().compareTo(b.platform.toLowerCase()),
-        'status' => a.statusKey.compareTo(b.statusKey),
-        'latest' =>
-          (a.upgradePath?.latestVersion ?? '').compareTo(b.upgradePath?.latestVersion ?? ''),
-        'checked' => (a.upgradePath?.checkedUtc ?? DateTime(0))
-            .compareTo(b.upgradePath?.checkedUtc ?? DateTime(0)),
-        _ => 0,
-      };
-      return order.ascending ? comparison : -comparison;
-    });
-    return rows;
+    final order = sort;
+    if (order != null) {
+      int compare(ApplicationTableRow a, ApplicationTableRow b) {
+        final comparison = switch (order.key) {
+          'name' =>
+            a.application.name.toLowerCase().compareTo(b.application.name.toLowerCase()),
+          'hosts' => a.application.hostCount.compareTo(b.application.hostCount),
+          'platform' => a.platform.toLowerCase().compareTo(b.platform.toLowerCase()),
+          'status' => a.statusKey.compareTo(b.statusKey),
+          'latest' =>
+            (a.upgradePath?.latestVersion ?? '').compareTo(b.upgradePath?.latestVersion ?? ''),
+          'checked' => (a.upgradePath?.checkedUtc ?? DateTime(0))
+              .compareTo(b.upgradePath?.checkedUtc ?? DateTime(0)),
+          _ => 0,
+        };
+        return order.ascending ? comparison : -comparison;
+      }
+
+      for (final group in groups) {
+        group.parents.sort(compare);
+        group.children.sort(compare);
+      }
+      // A group takes its place from its first row — the manager's own when it is on screen, else
+      // the first of the orphaned children.
+      groups.sort((a, b) => compare(
+            a.parents.isNotEmpty ? a.parents.first : a.children.first,
+            b.parents.isNotEmpty ? b.parents.first : b.children.first,
+          ));
+    }
+
+    return [
+      for (final group in groups) ...[
+        ...group.parents,
+        if (group.parents.isEmpty ||
+            expandedManagerNames.contains(group.parents.first.application.name))
+          ...group.children,
+      ],
+    ];
   }
 
-  static List<ApplicationTableRow> _rowsFor(ApplicationRow application, {required bool isChild}) {
+  static List<ApplicationTableRow> _rowsFor(
+    ApplicationRow application, {
+    String? parentName,
+    int matchingChildCount = 0,
+  }) {
     if (application.upgradePaths.isEmpty) {
-      return [ApplicationTableRow(application: application, upgradePath: null, isChild: isChild)];
+      return [
+        ApplicationTableRow(
+          application: application,
+          upgradePath: null,
+          parentName: parentName,
+          matchingChildCount: matchingChildCount,
+        ),
+      ];
     }
     return [
       for (final path in application.upgradePaths)
-        ApplicationTableRow(application: application, upgradePath: path, isChild: isChild),
+        ApplicationTableRow(
+          application: application,
+          upgradePath: path,
+          parentName: parentName,
+          matchingChildCount: matchingChildCount,
+        ),
     ];
   }
 
@@ -294,6 +389,7 @@ final class ApplicationsState extends Equatable {
     ApplicationFilters? filters,
     ApplicationSort? sort,
     String? expandedRowKey,
+    Set<String>? expandedManagerNames,
     bool? loading,
     String? error,
     Set<String>? checkingRowKeys,
@@ -307,6 +403,7 @@ final class ApplicationsState extends Equatable {
         filters: filters ?? this.filters,
         sort: sort ?? this.sort,
         expandedRowKey: clearExpanded ? null : (expandedRowKey ?? this.expandedRowKey),
+        expandedManagerNames: expandedManagerNames ?? this.expandedManagerNames,
         loading: loading ?? this.loading,
         error: clearError ? null : (error ?? this.error),
         checkingRowKeys: checkingRowKeys ?? this.checkingRowKeys,
@@ -314,8 +411,17 @@ final class ApplicationsState extends Equatable {
       );
 
   @override
-  List<Object?> get props =>
-      [overview, filters, sort, expandedRowKey, loading, error, checkingRowKeys, checkNotice];
+  List<Object?> get props => [
+        overview,
+        filters,
+        sort,
+        expandedRowKey,
+        expandedManagerNames,
+        loading,
+        error,
+        checkingRowKeys,
+        checkNotice,
+      ];
 }
 
 class ApplicationsBloc extends Bloc<ApplicationsEvent, ApplicationsState>
@@ -344,6 +450,13 @@ class ApplicationsBloc extends Bloc<ApplicationsEvent, ApplicationsState>
               ? state.copyWith(clearExpanded: true)
               : state.copyWith(expandedRowKey: event.rowKey),
         ));
+    // The instructions panel is left alone: a child's panel simply leaves the table with the row
+    // and comes back with it, since the table only builds panels for rows it is showing.
+    on<ApplicationChildrenToggled>((event, emit) => emit(state.copyWith(
+          expandedManagerNames: state.expandedManagerNames.contains(event.applicationName)
+              ? ({...state.expandedManagerNames}..remove(event.applicationName))
+              : {...state.expandedManagerNames, event.applicationName},
+        )));
 
     // Slower than the three seconds the background runs poll at: this is a large response, and a
     // resolved upgrade path only changes when one of those runs or a human changes it. It is here
