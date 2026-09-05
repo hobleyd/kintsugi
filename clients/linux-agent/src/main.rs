@@ -36,7 +36,7 @@ use config::Config;
 use identity::AgentIdentity;
 use queue::{Plan, PlannedApp, RequestHandler, RequestKind};
 use schedule::ScheduleState;
-use status::{AgentStatus, StatusReporter};
+use status::{AgentStatus, CheckInStatus, MenuAction, StatusReporter};
 use system_info::InstalledApp;
 
 /// How often the `--agent` loop wakes to check whether a patch cycle is due. Deliberately not
@@ -170,11 +170,10 @@ fn run_remote_control_service() -> Result<()> {
     Ok(())
 }
 
-/// The root service's job (`kintsugi-agent.service`, driven by `kintsugi-agent.timer`): registers
-/// this host and its installed applications, patches unattended if nobody is logged in to be
-/// asked, updates this agent itself, and finally reconciles its own check-in schedule. Runs once
-/// per invocation; systemd re-invokes it shortly after boot and, hourly, at this host's own
-/// assigned check-in minute (see `checkin_schedule`).
+/// The root service's job (`kintsugi-agent.service`, driven by `kintsugi-agent.timer`): one
+/// check-in — see `check_in` for what that is. Runs once per invocation; systemd re-invokes it
+/// shortly after boot and, hourly, at this host's own assigned check-in minute (see
+/// `checkin_schedule`).
 fn run_daemon() -> Result<()> {
     let config = Config::load();
     logging::init(&config::daemon_log_path());
@@ -191,6 +190,19 @@ fn run_daemon() -> Result<()> {
         return Ok(());
     };
 
+    check_in(&config)
+}
+
+/// One full check-in: registers this host and its installed applications, patches unattended if
+/// nobody is logged in to be asked, updates this agent itself, and finally reconciles its own
+/// check-in schedule. The whole of what the timer-driven root service does, and — since the menu's
+/// "Check In Now" — also what the queue service does for a `RequestKind::CheckIn`
+/// (`ServiceHandler::check_in`), which is why it is a function of its own rather than the body of
+/// `run_daemon`.
+///
+/// **Must be called with the privileged lock held.** Both callers already hold it for their whole
+/// invocation, and nothing in here may run concurrently with another package-manager run.
+fn check_in(config: &Config) -> Result<()> {
     // Before anything else that depends on them: re-assert the two directory modes the privilege
     // handoff rests on. `self_update` replaces the binary and never re-runs the installer, so a
     // host that received the wrong modes from packaging/install.sh would otherwise keep them
@@ -229,7 +241,7 @@ fn run_daemon() -> Result<()> {
     // rejects /api/host, /api/applications, /api/patching-policy, and /api/upgrade-paths outright
     // without a valid client certificate. Enrolls on first run; reuses the same identity from then
     // on, until it needs replacing (e.g. this host was decommissioned and re-provisioned).
-    let agent_identity = identity::load_or_enroll(&config, &serial_number);
+    let agent_identity = identity::load_or_enroll(config, &serial_number);
     let client = identity::build_client(Duration::from_secs(15), agent_identity.as_ref())
         .context("failed to build HTTP client")?;
 
@@ -239,7 +251,7 @@ fn run_daemon() -> Result<()> {
     // server rejects — would starve that process of a schedule for as long as the failure lasted,
     // while the host went on reporting healthy check-ins. Cheap enough to be unconditional: one
     // GET per hourly invocation.
-    let patching_policy = policy::refresh(&client, &config, &config::policy_cache_path());
+    let patching_policy = policy::refresh(&client, config, &config::policy_cache_path());
 
     let host_request = RegisterHostRequest {
         hostname,
@@ -256,7 +268,7 @@ fn run_daemon() -> Result<()> {
 
     if host_response.removal_requested {
         logging::info("the server has marked this host for removal — uninstalling instead of continuing this check-in");
-        self_removal::run(&client, &config, &serial_number);
+        self_removal::run(&client, config, &serial_number);
         return Ok(());
     }
 
@@ -270,13 +282,13 @@ fn run_daemon() -> Result<()> {
     let _: serde_json::Value = post_with_retry(&client, &config.register_applications_url(), &applications_request)
         .context("failed to register installed applications")?;
 
-    patch_unattended_if_nobody_is_logged_in(&client, &config, &serial_number, agent_identity.as_ref(), patching_policy.as_ref());
+    patch_unattended_if_nobody_is_logged_in(&client, config, &serial_number, agent_identity.as_ref(), patching_policy.as_ref());
 
     // Last, and only after everything above has already succeeded: check whether a newer build of
     // this agent itself has been published, and install it in place if so — see `self_update`.
     // Runs on every check-in, the same cadence as registration itself, since there's no separate
     // patching policy governing the agent's own updates.
-    self_update::check_and_apply(&client, &config, agent_identity.as_ref(), env!("CARGO_PKG_VERSION"));
+    self_update::check_and_apply(&client, config, agent_identity.as_ref(), env!("CARGO_PKG_VERSION"));
 
     // Last of all: reconcile the on-disk check-in schedule with whatever minute this host should
     // now be using — its own already-assigned one, or a different one the server just handed back
@@ -344,7 +356,9 @@ fn patch_unattended_if_nobody_is_logged_in(
 ///
 /// This is where the macOS agent's `WatchPaths` idea ends up. There, the path watch re-runs the
 /// entire daemon, which is affordable because the queue only ever carries one kind of request and
-/// only once per cycle.
+/// only once per cycle. The one request that *does* ask for a full check-in is
+/// `RequestKind::CheckIn` — the menu's "Check In Now" — and it gets exactly one, from
+/// `ServiceHandler::check_in`.
 fn run_queue_service() -> Result<()> {
     let config = Config::load();
     logging::init(&config::daemon_log_path());
@@ -439,6 +453,16 @@ impl RequestHandler for ServiceHandler<'_> {
         os_update::report_patched(self.client, self.config, self.serial_number);
         Ok(())
     }
+
+    /// Answers a [`RequestKind::CheckIn`]: the same check-in the timer runs on the hour, brought
+    /// forward. Legitimate here because `run_queue_service` holds the privileged lock for its whole
+    /// invocation, exactly as `run_daemon` does — see `check_in`'s own requirement. Builds its own
+    /// client rather than reusing `self.client`, because a check-in may *enroll* (the identity this
+    /// handler was given could be one the server has since refused) and the client has to follow.
+    fn check_in(&mut self) -> Result<String> {
+        check_in(self.config)?;
+        Ok(format!("checked in as {} (agent {})", self.serial_number, env!("CARGO_PKG_VERSION")))
+    }
 }
 
 /// The per-user process's implementation of the same protocol: every call is a round-trip through
@@ -472,12 +496,20 @@ impl RequestHandler for QueueClient {
         }
         Ok(())
     }
+
+    fn check_in(&mut self) -> Result<String> {
+        let result = queue::submit(&self.queue_dir, RequestKind::CheckIn, "", checkin_schedule::CHECK_IN_TIMEOUT)?;
+        if !result.success {
+            anyhow::bail!("{}", result.output.trim());
+        }
+        Ok(result.output)
+    }
 }
 
 /// The per-user process's job (`--agent`, run by `kintsugi-agent-ui.service` in the logged-in
 /// user's own systemd manager): tracks the fleet-wide patching policy and drives the
-/// confirm/delay/patch flow once it's due, plus the notification-area icon (progress / next due /
-/// Patch Now).
+/// confirm/delay/patch flow once it's due, plus the notification-area icon (progress / next
+/// check-in / next due / Check In Now / Patch Now).
 ///
 /// Like the Windows tray process and unlike the macOS one, it holds no mutual-TLS identity and
 /// makes **no network call at all**: it reads the policy out of the cache the root service writes,
@@ -487,8 +519,9 @@ impl RequestHandler for QueueClient {
 /// duress: there, any UI *must* live on the main thread and be driven by a Cocoa event loop. Here
 /// nothing imposes that — but the scheduler still needs to block on queue round-trips, 5-minute
 /// warnings and modal dialogs, so keeping it off the thread that owns the icon keeps the icon
-/// responsive. The two talk one direction each: the scheduler pushes `AgentStatus` updates to the
-/// menu (`report`), and a "Patch Now" click sends a signal back over `patch_now_rx`.
+/// responsive. The two talk one direction each: the scheduler pushes `AgentStatus` and
+/// `CheckInStatus` updates to the menu (`report`), and a click on "Check In Now" or "Patch Now"
+/// sends a `MenuAction` back over `menu_rx`.
 fn run_ui_agent() -> Result<()> {
     let config = Config::load();
     let state_dir = config::user_state_dir()?;
@@ -552,7 +585,7 @@ fn run_ui_agent() -> Result<()> {
 
     let state = ScheduleState::load_or_default(&schedule_state_path, &current_policy);
 
-    let (patch_now_tx, patch_now_rx) = mpsc::channel();
+    let (menu_tx, menu_rx) = mpsc::channel();
     let report: Box<StatusReporter> = Box::new(tray_menu::report_status);
 
     // A third thread, for the display half of remote control: the consent dialog, the screen capture
@@ -565,27 +598,36 @@ fn run_ui_agent() -> Result<()> {
     // black screen.
     std::thread::spawn(remote_session::run);
 
-    std::thread::spawn(move || run_scheduler(current_policy, state, queue_dir, policy_cache_path, patch_now_rx, report));
+    std::thread::spawn(move || run_scheduler(current_policy, state, queue_dir, policy_cache_path, menu_rx, report));
 
     // Blocks for the rest of the process's life — this call never returns normally.
-    tray_menu::run(patch_now_tx)
+    tray_menu::run(menu_tx)
 }
 
 /// The background half of `run_ui_agent` — see its doc comment for why this is a separate
 /// thread. Reports its state to the notification area via `report` at every meaningful
 /// transition, and treats a "Patch Now" click the same as a naturally due cycle except it skips
-/// the confirm/delay step entirely (see `patch_cycle::run_now`).
+/// the confirm/delay step entirely (see `patch_cycle::run_now`). A "Check In Now" click goes to
+/// the root service through the queue (see `checkin_schedule::request_now`).
 fn run_scheduler(
     mut current_policy: policy::PatchingPolicy,
     mut state: ScheduleState,
     queue_dir: std::path::PathBuf,
     policy_cache_path: std::path::PathBuf,
-    patch_now_rx: mpsc::Receiver<()>,
+    menu_rx: mpsc::Receiver<MenuAction>,
     report: Box<StatusReporter>,
 ) {
     report(AgentStatus::Idle { next_due_epoch: state.next_due_epoch() });
 
     let mut handler = QueueClient { queue_dir: queue_dir.clone() };
+
+    // The root service's schedule, as last shown in the menu. Re-read every tick — the service
+    // persists a minute on its first run and the server may move it on any check-in — but only
+    // pushed to the menu when the answer changes, which is once an hour: `tray_menu::format_due`
+    // shells out to `date`, and there is no reason to do that once a minute for a line that has
+    // not moved.
+    let checkin_schedule_path = config::checkin_schedule_path();
+    let mut shown_check_in: Option<CheckInStatus> = None;
 
     loop {
         // Tells the root service this host has somebody driving it, so it doesn't start patching
@@ -601,13 +643,27 @@ fn run_scheduler(
             current_policy = refreshed;
         }
 
-        // Waits on the channel rather than sleeping and polling it once per iteration — a
-        // "Patch Now" click wakes this immediately instead of sitting unnoticed for up to
-        // AGENT_POLL_INTERVAL, which from the menu just looks like the button did nothing.
-        match patch_now_rx.recv_timeout(AGENT_POLL_INTERVAL) {
-            Ok(()) => {
+        let next_check_in = CheckInStatus::Scheduled { next_epoch: checkin_schedule::next_check_in_epoch(&checkin_schedule_path) };
+        if shown_check_in != Some(next_check_in) {
+            tray_menu::report_check_in(next_check_in);
+            shown_check_in = Some(next_check_in);
+        }
+
+        // Waits on the channel rather than sleeping and polling it once per iteration — a click in
+        // the menu wakes this immediately instead of sitting unnoticed for up to
+        // AGENT_POLL_INTERVAL, which from the menu just looks like the item did nothing.
+        match menu_rx.recv_timeout(AGENT_POLL_INTERVAL) {
+            Ok(MenuAction::PatchNow) => {
                 logging::info("scheduler received the Patch Now signal");
                 patch_cycle::run_now(&mut handler, &current_policy, &mut state, report.as_ref());
+            }
+            Ok(MenuAction::CheckInNow) => {
+                logging::info("scheduler received the Check In Now signal");
+                tray_menu::report_check_in(CheckInStatus::InProgress);
+                checkin_schedule::request_now(&queue_dir);
+                // Forces the schedule line back at the top of the next tick, whatever it now says
+                // — the server may just have moved this host's minute.
+                shown_check_in = None;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if state.is_due() {
@@ -618,7 +674,7 @@ fn run_scheduler(
                 // The sender lives in tray_menu::run for the whole life of the process, so this
                 // should never happen — but if it does, fall back to plain polling rather than
                 // spin-looping on an instantly-erroring recv.
-                logging::error("patch-now channel disconnected unexpectedly");
+                logging::error("menu action channel disconnected unexpectedly");
                 std::thread::sleep(AGENT_POLL_INTERVAL);
             }
         }

@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Mutex, OnceLock};
 
@@ -15,7 +15,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use windows_sys::Win32::Foundation::POINT;
 
 use crate::logging;
-use crate::status::AgentStatus;
+use crate::status::{AgentStatus, CheckInStatus, MenuAction};
 use crate::win32::{instance, register_class, wide, WindowClass};
 
 const CLASS_NAME: &str = "KintsugiAgentTray";
@@ -32,10 +32,12 @@ const WM_NOTIFY_REQUESTED: u32 = WM_APP + 3;
 
 const ICON_ID: u32 = 1;
 
-const MENU_ID_STATUS: usize = 100;
-const MENU_ID_PROGRESS: usize = 101;
-const MENU_ID_PATCH_NOW: usize = 102;
-const MENU_ID_VERSION: usize = 103;
+const MENU_ID_CHECK_IN: usize = 100;
+const MENU_ID_STATUS: usize = 101;
+const MENU_ID_PROGRESS: usize = 102;
+const MENU_ID_CHECK_IN_NOW: usize = 103;
+const MENU_ID_PATCH_NOW: usize = 104;
+const MENU_ID_VERSION: usize = 105;
 
 /// The tray window's handle, published for the *other* threads that need to poke the UI.
 ///
@@ -55,17 +57,34 @@ static PENDING_STATUS: Mutex<Option<AgentStatus>> = Mutex::new(None);
 /// user is meant to see, so dropping all but the last would silently swallow most of them.
 static PENDING_NOTIFICATIONS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
-/// Sends the scheduler a "Patch Now" signal. Stored rather than passed because the window procedure
-/// is a plain function pointer with no room for state.
-static PATCH_NOW_TX: OnceLock<Sender<()>> = OnceLock::new();
+/// Sends the scheduler a `MenuAction`. Stored rather than passed because the window procedure is a
+/// plain function pointer with no room for state.
+static MENU_TX: OnceLock<Sender<MenuAction>> = OnceLock::new();
 
-/// Whether "Patch Now" is currently selectable — greyed out mid-cycle, the same way the macOS
-/// agent's menu item is, so a second cycle can't be started on top of a running one.
-static PATCH_NOW_ENABLED: AtomicIsize = AtomicIsize::new(1);
+/// Whether a patch cycle is running, and whether a "Check In Now" is in flight. Both action items
+/// are selectable only while neither is — greyed out mid-cycle, the same way the macOS agent's menu
+/// items are, so a second cycle can't be started on top of a running one, and greyed out during a
+/// check-in because the scheduler thread serves both actions: a click then would sit in the channel
+/// and run the moment the check-in finished, which from the menu looks like an item that did nothing
+/// and then, minutes later, did something unasked.
+static PATCHING: AtomicBool = AtomicBool::new(false);
+static CHECKING_IN: AtomicBool = AtomicBool::new(false);
 
-/// The two lines of menu text the icon currently shows. Owned by the UI thread; only ever read and
-/// written while handling a message, which is single-threaded by construction.
-static MENU_TEXT: Mutex<(String, String)> = Mutex::new((String::new(), String::new()));
+/// The three lines of menu text the icon currently shows: the check-in line, the status line and
+/// the progress line. Owned by the UI thread; only ever read and written while handling a message,
+/// which is single-threaded by construction.
+static MENU_TEXT: Mutex<MenuText> = Mutex::new(MenuText::EMPTY);
+
+#[derive(Clone)]
+struct MenuText {
+    check_in: String,
+    status: String,
+    progress: String,
+}
+
+impl MenuText {
+    const EMPTY: MenuText = MenuText { check_in: String::new(), status: String::new(), progress: String::new() };
+}
 
 /// Sets up the notification-area icon and runs this thread's message loop for the rest of the
 /// process's life — must be called on the main thread and never returns normally.
@@ -76,8 +95,8 @@ static MENU_TEXT: Mutex<(String, String)> = Mutex::new((String::new(), String::n
 /// stops being pumped for that long makes the icon stop responding to clicks. So the scheduler runs
 /// on a background thread and the UI keeps this one, exactly as on macOS.
 
-pub fn run(patch_now_tx: Sender<()>) -> Result<()> {
-    let _ = PATCH_NOW_TX.set(patch_now_tx);
+pub fn run(menu_tx: Sender<MenuAction>) -> Result<()> {
+    let _ = MENU_TX.set(menu_tx);
 
     let class = tray_class();
 
@@ -131,6 +150,27 @@ pub fn report_status(status: AgentStatus) {
         *pending = Some(status);
     }
     post_to_ui_thread(WM_STATUS_CHANGED);
+}
+
+/// Pushes the service's check-in schedule to the menu's "Next check-in" line, and greys both
+/// actions while a "Check In Now" is in flight. Safe to call from any thread, like `report_status`.
+///
+/// Separate from `report_status` because the two describe different processes: the patch cycle is
+/// this one's, the check-in is the service's, and either can be busy while the other is idle. No
+/// message is posted: the menu is built fresh from these statics on every click (see `show_menu`),
+/// so setting them is the whole of it — the same reason `report_remote_session` on the Linux agent
+/// has to poke ksni and this file's equivalent never did.
+pub fn report_check_in(status: CheckInStatus) {
+    let (line, checking_in) = match status {
+        CheckInStatus::Scheduled { next_epoch: Some(epoch) } => (format!("Next check-in: {}", format_due(epoch)), false),
+        CheckInStatus::Scheduled { next_epoch: None } => ("Next check-in: not yet scheduled".to_string(), false),
+        CheckInStatus::InProgress => ("Checking in with the server\u{2026}".to_string(), true),
+    };
+
+    if let Ok(mut text) = MENU_TEXT.lock() {
+        text.check_in = line;
+    }
+    CHECKING_IN.store(checking_in, Ordering::SeqCst);
 }
 
 /// Queues a balloon notification on the icon. Safe to call from any thread, for the same reason as
@@ -218,11 +258,11 @@ fn show_balloon(hwnd: HWND, title: &str, message: &str) {
 /// Applies a status to the menu text and the progress window — the UI thread's half of
 /// `report_status`.
 fn apply_status(status: AgentStatus) {
-    let (line_one, line_two, patch_now_enabled) = match &status {
+    let (status_line, progress_line, patching) = match &status {
         AgentStatus::Idle { next_due_epoch } => (
             format!("Next patch due: {}", format_due(*next_due_epoch)),
             "Status: idle".to_string(),
-            true,
+            false,
         ),
         AgentStatus::Patching { current, completed, total } => (
             format!("Patching: {current}"),
@@ -231,14 +271,15 @@ fn apply_status(status: AgentStatus) {
             } else {
                 "Progress: starting\u{2026}".to_string()
             },
-            false,
+            true,
         ),
     };
 
     if let Ok(mut text) = MENU_TEXT.lock() {
-        *text = (line_one, line_two);
+        text.status = status_line;
+        text.progress = progress_line;
     }
-    PATCH_NOW_ENABLED.store(isize::from(patch_now_enabled), Ordering::SeqCst);
+    PATCHING.store(patching, Ordering::SeqCst);
 
     // A window, unlike the menu, is visible without the user having to think to go looking for it —
     // opened the moment there's something to show, closed again once idle.
@@ -255,11 +296,9 @@ fn apply_status(status: AgentStatus) {
 /// screen, and building it fresh from the current text means there's no second copy of the state to
 /// keep in step.
 fn show_menu(hwnd: HWND) {
-    let (line_one, line_two) = MENU_TEXT
-        .lock()
-        .map(|text| text.clone())
-        .unwrap_or_else(|_| ("Loading patching status\u{2026}".to_string(), String::new()));
-    let patch_now_enabled = PATCH_NOW_ENABLED.load(Ordering::SeqCst) != 0;
+    let text = MENU_TEXT.lock().map(|text| text.clone()).unwrap_or(MenuText::EMPTY);
+    let actions_enabled = !PATCHING.load(Ordering::SeqCst) && !CHECKING_IN.load(Ordering::SeqCst);
+    let action_flags = if actions_enabled { MF_STRING } else { MF_STRING | MF_GRAYED };
 
     // SAFETY: every handle below is created and destroyed within this function, on the UI thread
     // that owns the window; every string outlives the call that reads it.
@@ -269,9 +308,11 @@ fn show_menu(hwnd: HWND) {
             return;
         }
 
-        let status_text = wide(&line_one);
+        let check_in_text = wide(if text.check_in.is_empty() { "Next check-in: not yet scheduled" } else { &text.check_in });
+        AppendMenuW(menu, MF_STRING | MF_GRAYED, MENU_ID_CHECK_IN, check_in_text.as_ptr());
+        let status_text = wide(if text.status.is_empty() { "Loading patching status\u{2026}" } else { &text.status });
         AppendMenuW(menu, MF_STRING | MF_GRAYED, MENU_ID_STATUS, status_text.as_ptr());
-        let progress_text = wide(&line_two);
+        let progress_text = wide(&text.progress);
         AppendMenuW(menu, MF_STRING | MF_GRAYED, MENU_ID_PROGRESS, progress_text.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
 
@@ -279,9 +320,10 @@ fn show_menu(hwnd: HWND) {
         // session_banner), which is both more visible and — being a SYSTEM-owned window — something
         // user-level malware cannot click or close. Two indicators would be two sources of truth
         // that could disagree about whether a session is running.
+        let check_in_now_text = wide("Check In Now");
+        AppendMenuW(menu, action_flags, MENU_ID_CHECK_IN_NOW, check_in_now_text.as_ptr());
         let patch_now_text = wide("Patch Now");
-        let patch_now_flags = if patch_now_enabled { MF_STRING } else { MF_STRING | MF_GRAYED };
-        AppendMenuW(menu, patch_now_flags, MENU_ID_PATCH_NOW, patch_now_text.as_ptr());
+        AppendMenuW(menu, action_flags, MENU_ID_PATCH_NOW, patch_now_text.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
 
         // Static for the life of the process — this binary's own version never changes underneath
@@ -330,12 +372,22 @@ unsafe extern "system" fn tray_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
             0
         }
         WM_COMMAND => {
-            if (wparam & 0xFFFF) as usize == MENU_ID_PATCH_NOW {
-                logging::info("\"Patch Now\" clicked in the notification area");
-                match PATCH_NOW_TX.get().map(|tx| tx.send(())) {
+            let action = match (wparam & 0xFFFF) as usize {
+                MENU_ID_CHECK_IN_NOW => {
+                    logging::info("\"Check In Now\" clicked in the notification area");
+                    Some(MenuAction::CheckInNow)
+                }
+                MENU_ID_PATCH_NOW => {
+                    logging::info("\"Patch Now\" clicked in the notification area");
+                    Some(MenuAction::PatchNow)
+                }
+                _ => None,
+            };
+            if let Some(action) = action {
+                match MENU_TX.get().map(|tx| tx.send(action)) {
                     Some(Ok(())) => {}
                     Some(Err(err)) => logging::error(&format!("could not signal the scheduler thread: {err}")),
-                    None => logging::error("\"Patch Now\" clicked before the scheduler was wired up"),
+                    None => logging::error(&format!("{action:?} clicked before the scheduler was wired up")),
                 }
             }
             0

@@ -34,7 +34,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use schedule::ScheduleState;
-use status::{AgentStatus, StatusReporter};
+use status::{AgentStatus, CheckInStatus, MenuAction, StatusReporter};
 
 /// How often the `--agent` loop wakes to check whether a patch cycle is due. Deliberately not tied
 /// to the patching interval itself — this is just the scheduler's own tick rate, small enough that
@@ -88,14 +88,7 @@ fn main() -> Result<()> {
 fn run_single_check_in() -> Result<()> {
     logging::init(&config::service_log_path());
 
-    let schedule_path = config::checkin_schedule_path();
-    let check_in_minute = checkin_schedule::load_or_assign(&schedule_path);
-
-    let mut agent = service::Agent::new()?;
-    let target_minute = agent.check_in(check_in_minute)?;
-    checkin_schedule::apply(&schedule_path, check_in_minute, target_minute);
-
-    Ok(())
+    service::Agent::new()?.check_in()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -200,14 +193,15 @@ fn run_remote_session_helper() -> Result<()> {
 /// Runs continuously in the logged-in user's own session — not elevated, so it can show dialogs and
 /// notifications directly, no privilege trickery needed — tracking the fleet-wide patching policy
 /// and driving the confirm/delay/patch flow once it's due, plus the notification-area icon
-/// (progress / next due / Patch Now).
+/// (progress / next check-in / next due / Check In Now / Patch Now).
 ///
 /// Splits into two threads for the same reason the macOS agent does: the UI has to keep pumping
 /// messages to stay responsive, while the scheduler blocks on queue round trips, five-minute
 /// warnings, and modal dialogs. So the *scheduler* runs on a background thread and the *UI* keeps
-/// the main one. They talk to each other one direction each: the scheduler pushes `AgentStatus`
-/// updates to the menu (`report`, ultimately a posted window message), and a "Patch Now" click sends
-/// a signal back to the scheduler over `patch_now_rx` — see `tray_menu` and `status`.
+/// the main one. They talk to each other one direction each: the scheduler pushes `AgentStatus` and
+/// `CheckInStatus` updates to the menu (`report`, ultimately a posted window message), and a click on
+/// "Check In Now" or "Patch Now" sends a `MenuAction` back to the scheduler over `menu_rx` — see
+/// `tray_menu` and `status`.
 ///
 /// Unlike its macOS counterpart, this process holds no mutual-TLS identity and makes no network call
 /// at all: it asks the service for the work list and for each patch, over the queue. See `queue` for
@@ -236,13 +230,13 @@ fn run_ui_agent() -> Result<()> {
 
     let state = ScheduleState::load_or_default(&schedule_state_path, &current_policy);
 
-    let (patch_now_tx, patch_now_rx) = mpsc::channel();
+    let (menu_tx, menu_rx) = mpsc::channel();
     let report: Box<StatusReporter> = Box::new(tray_menu::report_status);
 
-    std::thread::spawn(move || run_scheduler(current_policy, state, policy_cache_path, patch_now_rx, report));
+    std::thread::spawn(move || run_scheduler(current_policy, state, policy_cache_path, menu_rx, report));
 
     // Blocks for the rest of the process's life — this call never returns normally.
-    tray_menu::run(patch_now_tx)
+    tray_menu::run(menu_tx)
 }
 
 /// Hides the console window this process was given, so the tray agent doesn't flash a black box in
@@ -271,15 +265,23 @@ fn hide_console_window() {
 /// The background half of `run_ui_agent` — see its doc comment for why this is a separate thread.
 /// Reports its state to the menu via `report` at every meaningful transition, and treats a "Patch
 /// Now" click the same as a naturally due cycle except it skips the confirm/delay step entirely (see
-/// `patch_cycle::run_now`).
+/// `patch_cycle::run_now`). A "Check In Now" click goes to the service through the queue (see
+/// `checkin_schedule::request_now`).
 fn run_scheduler(
     mut current_policy: policy::PatchingPolicy,
     mut state: ScheduleState,
     policy_cache_path: std::path::PathBuf,
-    patch_now_rx: mpsc::Receiver<()>,
+    menu_rx: mpsc::Receiver<MenuAction>,
     report: Box<StatusReporter>,
 ) {
     report(AgentStatus::Idle { next_due_epoch: state.next_due_epoch() });
+
+    // The service's schedule, as last shown in the menu. Re-read every tick — the service persists
+    // a minute on its first run and the server may move it on any check-in — but only pushed to the
+    // menu when the answer changes, which is once an hour: `tray_menu::format_due` shells out to
+    // PowerShell, and there is no reason to do that once a minute for a line that has not moved.
+    let checkin_schedule_path = config::checkin_schedule_path();
+    let mut shown_check_in: Option<CheckInStatus> = None;
 
     loop {
         // Re-read rather than re-fetch: the service refreshes this file on its own schedule (see
@@ -289,13 +291,27 @@ fn run_scheduler(
             current_policy = refreshed;
         }
 
-        // Waits on the channel rather than sleeping and polling it once per iteration — a "Patch
-        // Now" click wakes this immediately instead of sitting unnoticed for up to
-        // AGENT_POLL_INTERVAL, which from the menu just looks like the item did nothing.
-        match patch_now_rx.recv_timeout(AGENT_POLL_INTERVAL) {
-            Ok(()) => {
+        let next_check_in = CheckInStatus::Scheduled { next_epoch: checkin_schedule::next_check_in_epoch(&checkin_schedule_path) };
+        if shown_check_in != Some(next_check_in) {
+            tray_menu::report_check_in(next_check_in);
+            shown_check_in = Some(next_check_in);
+        }
+
+        // Waits on the channel rather than sleeping and polling it once per iteration — a click in
+        // the menu wakes this immediately instead of sitting unnoticed for up to AGENT_POLL_INTERVAL,
+        // which from the menu just looks like the item did nothing.
+        match menu_rx.recv_timeout(AGENT_POLL_INTERVAL) {
+            Ok(MenuAction::PatchNow) => {
                 logging::info("scheduler received the Patch Now signal");
                 patch_cycle::run_now(&current_policy, &mut state, report.as_ref());
+            }
+            Ok(MenuAction::CheckInNow) => {
+                logging::info("scheduler received the Check In Now signal");
+                tray_menu::report_check_in(CheckInStatus::InProgress);
+                checkin_schedule::request_now(&config::queue_dir());
+                // Forces the schedule line back at the top of the next tick, whatever it now says —
+                // the server may just have moved this host's minute.
+                shown_check_in = None;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if state.is_due() {
@@ -306,7 +322,7 @@ fn run_scheduler(
                 // The sender lives in tray_menu for the whole life of the process, so this should
                 // never happen — but if it does, fall back to plain polling rather than spin-looping
                 // on an instantly-erroring recv.
-                logging::error("patch-now channel disconnected unexpectedly");
+                logging::error("menu action channel disconnected unexpectedly");
                 std::thread::sleep(AGENT_POLL_INTERVAL);
             }
         }

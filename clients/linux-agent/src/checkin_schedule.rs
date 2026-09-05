@@ -1,12 +1,24 @@
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 use crate::config;
+use crate::dialogs;
 use crate::logging;
+use crate::queue::{self, RequestKind};
+
+/// How long the per-user process waits for the root service to answer a "Check In Now" request. A
+/// check-in is the OS update check (`apt-get --just-print upgrade` and friends), the Flatpak and
+/// Snap inventory, two POSTs and possibly an agent download (`self_update::DOWNLOAD_TIMEOUT`), so
+/// minutes rather than seconds — but well short of `main::APP_PATCH_TIMEOUT`, because the menu reads
+/// "Checking in…" for the whole wait and an hour of that for a service that never answered would
+/// be worse than a reported timeout. Longer than `queue::MAX_REQUEST_AGE` is fine: that age is
+/// measured on a request nobody has *picked up* yet, and the `.path` unit picks one up in seconds.
+pub const CHECK_IN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedSchedule {
@@ -51,6 +63,84 @@ fn persist(path: &Path, minute: u8) {
     if let Ok(json) = serde_json::to_string_pretty(&PersistedSchedule { minute }) {
         if let Err(err) = fs::write(path, json) {
             logging::warn(&format!("could not persist the check-in schedule to {}: {err}", path.display()));
+            return;
+        }
+        // Explicitly, rather than left to root's umask, for the same reason `policy::fetch` does it
+        // to the policy cache: the per-user process reads this file for the menu's "Next check-in"
+        // line (see `next_check_in_epoch`), and it carries nothing but a minute.
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o644));
+    }
+}
+
+/// How long to wait until the next occurrence of `minute` past the hour — the same arithmetic the
+/// Windows service uses to time its own loop (its `checkin_schedule::seconds_until`); here systemd
+/// owns the timing and this only predicts it for the menu.
+///
+/// Never returns zero: exactly on the minute, the firing that matters is the next hour's.
+pub fn seconds_until(now_epoch_seconds: u64, minute: u8) -> u64 {
+    const HOUR: u64 = 3600;
+    let target_second_of_hour = u64::from(minute) * 60;
+    let current_second_of_hour = now_epoch_seconds % HOUR;
+
+    if target_second_of_hour > current_second_of_hour {
+        target_second_of_hour - current_second_of_hour
+    } else {
+        HOUR - (current_second_of_hour - target_second_of_hour)
+    }
+}
+
+/// When the root service next checks in, for the menu's "Next check-in" line: the next occurrence
+/// of this host's persisted minute, or `None` before the service's first run has assigned one.
+///
+/// Read by the per-user process, which is not root — so `CHECKIN_SCHEDULE_PATH` has to be reachable
+/// and readable by it. It is: the state directory is `0711` (traverse-only, see
+/// `config::STATE_DIR_MODE`) and `persist` writes the file `0644`. A host whose service predates
+/// that mode shows "not yet scheduled" until its next check-in rewrites the file, which
+/// `self_update` guarantees happens without anyone reinstalling.
+pub fn next_check_in_epoch(schedule_path: &Path) -> Option<u64> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    next_check_in_epoch_at(schedule_path, now)
+}
+
+/// The testable half of [`next_check_in_epoch`] — `now` is a parameter so the arithmetic can be
+/// checked against a fixed clock.
+fn next_check_in_epoch_at(schedule_path: &Path, now_epoch_seconds: u64) -> Option<u64> {
+    load(schedule_path).map(|minute| now_epoch_seconds + seconds_until(now_epoch_seconds, minute))
+}
+
+/// The menu's "Check In Now": asks the root service to check in immediately rather than at this
+/// host's next hourly minute — re-registering, re-reporting the inventory, and installing any newer
+/// build of this agent that has been published — and tells the user how it went.
+///
+/// A round trip through the same queue every other privileged step uses, because a check-in is the
+/// root service's job and this process cannot do one: it holds no identity to register with. The
+/// request carries nothing and asks for nothing the service would not do on its own within the
+/// hour, so the queue's security property holds trivially — the worst a forged one can do is a
+/// check-in early.
+///
+/// As on Windows and unlike macOS (where the request is only a wake-up for a daemon that checks in
+/// on every start), the queue service runs the check-in *inside* the request (`main::check_in`,
+/// under the privileged lock it already holds), so the answer reflects that check-in. If it installs
+/// a newer agent, `self_update` restarts this process to pick it up — so the notification below may
+/// never show, and the new version in the menu is the confirmation instead.
+///
+/// Blocks the scheduler thread for the duration. That is what keeps a second click (or a due patch
+/// cycle) from running underneath a check-in — the menu greys both actions meanwhile, see
+/// `tray_menu::report_check_in`.
+pub fn request_now(queue_dir: &Path) {
+    logging::info("asking the kintsugi-agent service to check in now");
+    match queue::submit(queue_dir, RequestKind::CheckIn, "", CHECK_IN_TIMEOUT) {
+        Ok(result) if result.success => {
+            logging::info("the kintsugi-agent service checked in with the server");
+            dialogs::notify("Kintsugi Patching", "Checked in with the server.");
+        }
+        Ok(result) => {
+            logging::warn(&format!("the kintsugi-agent service could not check in: {}", result.output.trim()));
+            dialogs::notify("Kintsugi Patching", &format!("Check-in failed: {}", result.output.trim()));
+        }
+        Err(err) => {
+            logging::warn(&format!("could not get the kintsugi-agent service to check in: {err:#}"));
+            dialogs::notify("Kintsugi Patching", &format!("Check-in failed: {err:#}"));
         }
     }
 }
@@ -197,6 +287,53 @@ mod tests {
         assert_eq!(load(&path), None);
 
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn persist_leaves_the_schedule_readable_by_the_per_user_process() {
+        let path = scratch_path("mode");
+        persist(&path, 5);
+
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "the menu's \"Next check-in\" line reads this file as an unprivileged user");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn seconds_until_waits_for_the_target_minute_later_this_hour() {
+        // 00:10:00 UTC, target :30 -> 20 minutes.
+        assert_eq!(seconds_until(600, 30), 20 * 60);
+    }
+
+    #[test]
+    fn seconds_until_rolls_over_to_the_next_hour_when_the_minute_has_passed() {
+        // 00:40:00 UTC, target :30 -> 50 minutes (next hour's :30).
+        assert_eq!(seconds_until(40 * 60, 30), 50 * 60);
+    }
+
+    #[test]
+    fn seconds_until_never_returns_zero() {
+        assert_eq!(seconds_until(30 * 60, 30), 3600);
+    }
+
+    #[test]
+    fn next_check_in_epoch_is_the_next_occurrence_of_the_persisted_minute() {
+        let path = scratch_path("next-check-in");
+        persist(&path, 30);
+
+        // 00:10:00 UTC -> 00:30:00 UTC.
+        assert_eq!(next_check_in_epoch_at(&path, 600), Some(30 * 60));
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn next_check_in_epoch_is_none_before_the_service_has_assigned_a_minute() {
+        let path = scratch_path("next-check-in-missing");
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(next_check_in_epoch_at(&path, 600), None);
     }
 
     #[test]

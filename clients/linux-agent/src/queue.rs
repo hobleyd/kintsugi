@@ -51,6 +51,10 @@ pub enum RequestKind {
     /// "Install pending OS updates." No body — the service always runs the same fixed install, so
     /// this can never carry instructions of its own.
     OsUpdate,
+    /// "Check in with the server now" — the menu's "Check In Now", see
+    /// `checkin_schedule::request_now`. No body — the queue service runs the same check-in the
+    /// timer runs on the hour (`main::check_in`), just now.
+    CheckIn,
 }
 
 impl RequestKind {
@@ -62,11 +66,12 @@ impl RequestKind {
             RequestKind::Plan => "plan.request",
             RequestKind::AppPatch => "app-patch.request",
             RequestKind::OsUpdate => "os-update.request",
+            RequestKind::CheckIn => "check-in.request",
         }
     }
 
     fn from_file_name(file_name: &str) -> Option<Self> {
-        for kind in [RequestKind::Plan, RequestKind::AppPatch, RequestKind::OsUpdate] {
+        for kind in [RequestKind::Plan, RequestKind::AppPatch, RequestKind::OsUpdate, RequestKind::CheckIn] {
             if file_name.ends_with(kind.extension()) {
                 return Some(kind);
             }
@@ -208,6 +213,8 @@ pub trait RequestHandler {
     fn plan(&mut self) -> Result<Plan>;
     fn patch_application(&mut self, application_name: &str) -> Result<()>;
     fn install_os_updates(&mut self) -> Result<()>;
+    /// Answers a [`RequestKind::CheckIn`]. Returns the message the per-user process shows.
+    fn check_in(&mut self) -> Result<String>;
 }
 
 /// The service's half of the handoff: processes every pending request found, oldest first, so a
@@ -326,6 +333,10 @@ fn run_request(kind: RequestKind, body: &str, handler: &mut impl RequestHandler)
             Ok(()) => RequestResult { success: true, output: "installed pending OS updates".to_string(), data: None },
             Err(err) => RequestResult { success: false, output: format!("{err:#}"), data: None },
         },
+        RequestKind::CheckIn => match handler.check_in() {
+            Ok(output) => RequestResult { success: true, output, data: None },
+            Err(err) => RequestResult { success: false, output: format!("{err:#}"), data: None },
+        },
     }
 }
 
@@ -419,6 +430,7 @@ mod tests {
         patched: Vec<String>,
         os_updates_installed: usize,
         plans_requested: usize,
+        check_ins: usize,
         fail_patches: bool,
     }
 
@@ -443,6 +455,11 @@ mod tests {
             self.os_updates_installed += 1;
             Ok(())
         }
+
+        fn check_in(&mut self) -> Result<String> {
+            self.check_ins += 1;
+            Ok("checked in".to_string())
+        }
     }
 
     fn scratch_queue(name: &str) -> PathBuf {
@@ -454,7 +471,7 @@ mod tests {
 
     #[test]
     fn request_kind_round_trips_through_its_file_name() {
-        for kind in [RequestKind::Plan, RequestKind::AppPatch, RequestKind::OsUpdate] {
+        for kind in [RequestKind::Plan, RequestKind::AppPatch, RequestKind::OsUpdate, RequestKind::CheckIn] {
             let name = format!("1756512000-42-0.{}", kind.extension());
             assert_eq!(RequestKind::from_file_name(&name), Some(kind));
         }
@@ -528,6 +545,23 @@ mod tests {
         assert_eq!(plan.apps.len(), 1);
         assert!(plan.os_update_available);
         assert_eq!(plan.total(), 2);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn process_queue_answers_a_check_in_request_with_the_handlers_message() {
+        let dir = scratch_queue("check-in");
+        let request_path = write_request(&dir, RequestKind::CheckIn, "").unwrap();
+
+        let mut handler = RecordingHandler::default();
+        process_queue(&dir, &mut handler);
+
+        assert_eq!(handler.check_ins, 1);
+        let result: RequestResult = serde_json::from_str(&fs::read_to_string(result_path_for(&request_path)).unwrap()).unwrap();
+        assert!(result.success);
+        assert_eq!(result.output, "checked in");
+        assert!(result.data.is_none());
 
         let _ = fs::remove_dir_all(&dir);
     }

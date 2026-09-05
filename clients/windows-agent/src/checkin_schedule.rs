@@ -1,10 +1,20 @@
 use std::fs;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::dialogs;
 use crate::logging;
+use crate::queue::{self, RequestKind};
+
+/// How long the tray process waits for the service to answer a "Check In Now" request. A check-in
+/// is a Windows Update search, the winget and Chocolatey inventory, two POSTs and possibly an agent
+/// download (`self_update::DOWNLOAD_TIMEOUT`), so minutes rather than seconds — the same shape as
+/// `patch_cycle::PLAN_TIMEOUT`, with headroom for the download. The menu reads "Checking in…" for
+/// the whole wait, so an hour of that for a service that never answered would be worse than a
+/// reported timeout.
+pub const CHECK_IN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedSchedule {
@@ -97,6 +107,61 @@ pub fn seconds_until(now_epoch_seconds: u64, minute: u8) -> u64 {
         target_second_of_hour - current_second_of_hour
     } else {
         HOUR - (current_second_of_hour - target_second_of_hour)
+    }
+}
+
+/// When the service next checks in, for the menu's "Next check-in" line: the next occurrence of
+/// this host's persisted minute, or `None` before the service's first run has assigned one. The
+/// same arithmetic `service::run_loop` uses to time itself, so the two agree by construction.
+///
+/// Read by the tray process, which is not SYSTEM — so `checkin_schedule_path` has to be readable by
+/// it. It is, the same way `policy_cache_path` is: a file the service creates under `%ProgramData%`
+/// inherits that directory's default ACL, which grants `BUILTIN\Users` read. It carries nothing
+/// but a minute.
+pub fn next_check_in_epoch(schedule_path: &Path) -> Option<u64> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+    next_check_in_epoch_at(schedule_path, now)
+}
+
+/// The testable half of [`next_check_in_epoch`] — `now` is a parameter so the arithmetic can be
+/// checked against a fixed clock.
+fn next_check_in_epoch_at(schedule_path: &Path, now_epoch_seconds: u64) -> Option<u64> {
+    load(schedule_path).map(|minute| now_epoch_seconds + seconds_until(now_epoch_seconds, minute))
+}
+
+/// The menu's "Check In Now": asks the service to check in immediately rather than at this host's
+/// next hourly minute — re-registering, re-reporting the inventory, and installing any newer build
+/// of this agent that has been published — and tells the user how it went.
+///
+/// A round trip through the same queue every other privileged step uses, because a check-in is the
+/// service's job and this process cannot do one: it holds no identity to register with. The request
+/// carries nothing and asks for nothing the service would not do on its own within the hour, so the
+/// queue's security property holds trivially — the worst a forged one can do is a check-in early.
+///
+/// Unlike the macOS agent, where the request is only a wake-up for a daemon that checks in on every
+/// start, the service here is resident and runs the check-in *inside* the request
+/// (`service::Agent::check_in`), so the answer reflects that check-in. If it installs a newer agent,
+/// `self_update` restarts this process to pick it up — so the notification below may never show,
+/// and the new version in the menu is the confirmation instead.
+///
+/// Blocks the scheduler thread for the duration. That is what keeps a second click (or a due patch
+/// cycle) from running underneath a check-in — the menu greys both actions meanwhile, see
+/// `tray_menu::report_check_in`.
+pub fn request_now(queue_dir: &Path) {
+    logging::info("asking the agent service to check in now");
+    match queue::submit(queue_dir, RequestKind::CheckIn, "", CHECK_IN_TIMEOUT) {
+        Ok(result) if result.success => {
+            logging::info("the agent service checked in with the server");
+            dialogs::notify("Kintsugi Patching", "Checked in with the server.");
+        }
+        Ok(result) => {
+            logging::warn(&format!("the agent service could not check in: {}", result.output.trim()));
+            dialogs::notify("Kintsugi Patching", &format!("Check-in failed: {}", result.output.trim()));
+        }
+        Err(err) => {
+            logging::warn(&format!("could not get the agent service to check in: {err:#}"));
+            dialogs::notify("Kintsugi Patching", &format!("Check-in failed: {err:#}"));
+        }
     }
 }
 
@@ -198,5 +263,24 @@ mod tests {
                 assert!(wait > 0 && wait <= 3600, "minute={minute} second_of_hour={second_of_hour} wait={wait}");
             }
         }
+    }
+
+    #[test]
+    fn next_check_in_epoch_is_the_next_occurrence_of_the_persisted_minute() {
+        let path = scratch_path("next-check-in");
+        persist(&path, 30);
+
+        // 00:10:00 UTC -> 00:30:00 UTC.
+        assert_eq!(next_check_in_epoch_at(&path, 600), Some(30 * 60));
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn next_check_in_epoch_is_none_before_the_service_has_assigned_a_minute() {
+        let path = scratch_path("next-check-in-missing");
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(next_check_in_epoch_at(&path, 600), None);
     }
 }

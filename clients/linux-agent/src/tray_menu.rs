@@ -8,16 +8,16 @@ use ksni::menu::StandardItem;
 use ksni::{Icon, MenuItem, ToolTip};
 
 use crate::logging;
-use crate::status::AgentStatus;
+use crate::status::{AgentStatus, CheckInStatus, MenuAction};
 
 const TRAY_ICON_BYTES: &[u8] = include_bytes!("../assets/tray-icon.png");
 const TOOLTIP: &str = "Kintsugi Patching";
 
-/// Sends the scheduler a "Patch Now" signal. Stored in a static rather than captured by the menu
-/// closure because `ksni` rebuilds the menu from `&self` on every redraw, and threading a channel
-/// through the tray's own state would mean `AgentStatus` updates carrying it around too — the
-/// same reasoning that puts the Windows agent's sender in a static beside its window procedure.
-static PATCH_NOW_TX: OnceLock<Sender<()>> = OnceLock::new();
+/// Sends the scheduler a `MenuAction`. Stored in a static rather than captured by the menu closure
+/// because `ksni` rebuilds the menu from `&self` on every redraw, and threading a channel through
+/// the tray's own state would mean `AgentStatus` updates carrying it around too — the same
+/// reasoning that puts the Windows agent's sender in a static beside its window procedure.
+static MENU_TX: OnceLock<Sender<MenuAction>> = OnceLock::new();
 
 /// The live tray, once `run` has managed to register one. `None` on a host with no notification
 /// area (see `run`), which every update below then silently skips.
@@ -36,13 +36,36 @@ static REMOTE_SESSION: Mutex<Option<String>> = Mutex::new(None);
 /// hold one.
 static END_REMOTE_SESSION: AtomicBool = AtomicBool::new(false);
 
-/// The two lines of menu text the icon currently shows, plus whether "Patch Now" is selectable —
-/// greyed out mid-cycle, the same way both other agents' menu items are, so a second cycle can't
-/// be started on top of a running one.
+/// The three lines of menu text the icon currently shows, plus whether a patch cycle is running and
+/// whether a "Check In Now" is in flight. Both action items are selectable only while neither is —
+/// greyed out mid-cycle, the same way both other agents' menu items are, so a second cycle can't be
+/// started on top of a running one, and greyed out during a check-in because the scheduler thread
+/// serves both actions: a click then would sit in the channel and run the moment the check-in
+/// finished, which from the menu looks like an item that did nothing and then, minutes later, did
+/// something unasked.
 struct KintsugiTray {
+    check_in_line: String,
     status_line: String,
     progress_line: String,
-    patch_now_enabled: bool,
+    patching: bool,
+    checking_in: bool,
+}
+
+impl KintsugiTray {
+    fn actions_enabled(&self) -> bool {
+        !self.patching && !self.checking_in
+    }
+
+    fn send(action: MenuAction) {
+        match MENU_TX.get() {
+            Some(sender) => {
+                if let Err(err) = sender.send(action) {
+                    logging::error(&format!("could not signal the scheduler thread: {err}"));
+                }
+            }
+            None => logging::error(&format!("{action:?} clicked before the scheduler was wired up")),
+        }
+    }
 }
 
 impl ksni::Tray for KintsugiTray {
@@ -69,6 +92,12 @@ impl ksni::Tray for KintsugiTray {
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let mut items: Vec<MenuItem<Self>> = vec![
             StandardItem {
+                label: self.check_in_line.clone(),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
                 label: self.status_line.clone(),
                 enabled: false,
                 ..Default::default()
@@ -83,9 +112,9 @@ impl ksni::Tray for KintsugiTray {
             MenuItem::Separator,
         ];
 
-        // Directly under the status lines and above "Patch Now": while a session is running it is
-        // the most important thing in this menu. Absent entirely otherwise, rather than greyed out —
-        // the overwhelming majority of hosts never have one.
+        // Directly under the status lines and above "Check In Now" and "Patch Now": while a session
+        // is running it is the most important thing in this menu. Absent entirely otherwise, rather
+        // than greyed out — the overwhelming majority of hosts never have one.
         if let Some(requested_by) = REMOTE_SESSION.lock().ok().and_then(|held| held.clone()) {
             items.push(
                 StandardItem {
@@ -111,18 +140,21 @@ impl ksni::Tray for KintsugiTray {
 
         items.extend([
             StandardItem {
+                label: "Check In Now".into(),
+                enabled: self.actions_enabled(),
+                activate: Box::new(|_: &mut Self| {
+                    logging::info("\"Check In Now\" clicked in the notification area");
+                    Self::send(MenuAction::CheckInNow);
+                }),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
                 label: "Patch Now".into(),
-                enabled: self.patch_now_enabled,
+                enabled: self.actions_enabled(),
                 activate: Box::new(|_: &mut Self| {
                     logging::info("\"Patch Now\" clicked in the notification area");
-                    match PATCH_NOW_TX.get() {
-                        Some(sender) => {
-                            if let Err(err) = sender.send(()) {
-                                logging::error(&format!("could not signal the scheduler thread: {err}"));
-                            }
-                        }
-                        None => logging::error("\"Patch Now\" clicked before the scheduler was wired up"),
-                    }
+                    Self::send(MenuAction::PatchNow);
                 }),
                 ..Default::default()
             }
@@ -144,7 +176,7 @@ impl ksni::Tray for KintsugiTray {
 }
 
 /// Registers the notification-area icon and then blocks for the rest of the process's life.
-/// `patch_now_tx` is how a click on "Patch Now" reaches the scheduler thread.
+/// `menu_tx` is how a click on "Check In Now" or "Patch Now" reaches the scheduler thread.
 ///
 /// **A failure to register is not a failure of this function.** The macOS and Windows agents can
 /// both take a menu bar / notification area for granted; Linux cannot. There may be no session
@@ -156,13 +188,15 @@ impl ksni::Tray for KintsugiTray {
 ///
 /// It never returns normally, matching `tray_menu::run` on both other agents: `main` treats this
 /// call as the end of the line.
-pub fn run(patch_now_tx: Sender<()>) -> Result<()> {
-    let _ = PATCH_NOW_TX.set(patch_now_tx);
+pub fn run(menu_tx: Sender<MenuAction>) -> Result<()> {
+    let _ = MENU_TX.set(menu_tx);
 
     let tray = KintsugiTray {
+        check_in_line: "Next check-in: not yet scheduled".to_string(),
         status_line: "Loading patching status\u{2026}".to_string(),
         progress_line: String::new(),
-        patch_now_enabled: true,
+        patching: false,
+        checking_in: false,
     };
 
     match tray.spawn() {
@@ -186,8 +220,6 @@ pub fn run(patch_now_tx: Sender<()>) -> Result<()> {
     }
 }
 
-/// Pushes a status update to the notification area. Safe to call from any thread — the scheduler
-/// thread is the only real caller.
 /// Shows or hides the remote-session block in the menu. Safe to call from any thread.
 pub fn report_remote_session(requested_by: Option<String>) {
     if let Ok(mut held) = REMOTE_SESSION.lock() {
@@ -209,12 +241,14 @@ pub fn take_end_remote_session_request() -> bool {
     END_REMOTE_SESSION.swap(false, Ordering::SeqCst)
 }
 
+/// Pushes a status update to the notification area. Safe to call from any thread — the scheduler
+/// thread is the only real caller.
 pub fn report_status(status: AgentStatus) {
-    let (status_line, progress_line, patch_now_enabled) = match &status {
+    let (status_line, progress_line, patching) = match &status {
         AgentStatus::Idle { next_due_epoch } => (
             format!("Next patch due: {}", format_due(*next_due_epoch)),
             "Status: idle".to_string(),
-            true,
+            false,
         ),
         AgentStatus::Patching { current, completed, total } => (
             format!("Patching: {current}"),
@@ -223,7 +257,7 @@ pub fn report_status(status: AgentStatus) {
             } else {
                 "Progress: starting\u{2026}".to_string()
             },
-            false,
+            true,
         ),
     };
 
@@ -232,7 +266,7 @@ pub fn report_status(status: AgentStatus) {
             handle.update(move |tray: &mut KintsugiTray| {
                 tray.status_line = status_line;
                 tray.progress_line = progress_line;
-                tray.patch_now_enabled = patch_now_enabled;
+                tray.patching = patching;
             });
         }
     }
@@ -244,6 +278,28 @@ pub fn report_status(status: AgentStatus) {
     match &status {
         AgentStatus::Idle { .. } => crate::progress_window::hide(),
         AgentStatus::Patching { current, completed, total } => crate::progress_window::show_and_update(current, *completed, *total),
+    }
+}
+
+/// Pushes the root service's check-in schedule to the menu's "Next check-in" line, and greys both
+/// actions while a "Check In Now" is in flight. Safe to call from any thread, like `report_status`.
+///
+/// Separate from `report_status` because the two describe different processes: the patch cycle is
+/// this one's, the check-in is the root service's, and either can be busy while the other is idle.
+pub fn report_check_in(status: CheckInStatus) {
+    let (check_in_line, checking_in) = match status {
+        CheckInStatus::Scheduled { next_epoch: Some(epoch) } => (format!("Next check-in: {}", format_due(epoch)), false),
+        CheckInStatus::Scheduled { next_epoch: None } => ("Next check-in: not yet scheduled".to_string(), false),
+        CheckInStatus::InProgress => ("Checking in with the server\u{2026}".to_string(), true),
+    };
+
+    if let Ok(guard) = TRAY.lock() {
+        if let Some(handle) = guard.as_ref() {
+            handle.update(move |tray: &mut KintsugiTray| {
+                tray.check_in_line = check_in_line;
+                tray.checking_in = checking_in;
+            });
+        }
     }
 }
 

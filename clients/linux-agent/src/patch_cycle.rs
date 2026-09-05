@@ -314,6 +314,11 @@ mod tests {
             self.actions.push("os-update".to_string());
             Ok(())
         }
+
+        fn check_in(&mut self) -> anyhow::Result<String> {
+            self.actions.push("check-in".to_string());
+            Ok("checked in".to_string())
+        }
     }
 
     fn policy() -> PatchingPolicy {

@@ -1155,6 +1155,27 @@ read `identity/` (still `0700`, and deliberately). `install.sh` sets it, and
 belt-and-braces, because `self_update` replaces the binary and never re-runs the installer, so
 hosts already in the field have no other repair path.
 
+**"Next check-in" is a prediction the per-user process makes from a root-written file, and "Check
+In Now" is a queue request.** The menu's check-in line is `checkin_schedule::next_check_in_epoch`:
+the next occurrence of the minute in `checkin-schedule.json`, which only the root half writes.
+That file therefore has to be readable by the per-user process on all three platforms — root's
+`0644` umask into a `0755` directory on macOS, an explicit `0644` in the Linux `persist` (the state
+directory is traverse-only, so the mode on the file is all there is, exactly as for `policy.json`),
+and `%ProgramData%`'s inherited `Users` read on Windows. It shows "not yet scheduled" until the
+first check-in writes it. The scheduler re-reads it every tick and pushes it to the menu only when
+it changes, because `format_due` shells out for the local time. "Check In Now" is
+`RequestKind::CheckIn`, carrying nothing — the root half re-registers, re-reports the inventory and
+runs `self_update`, which is everything it would do at the hour, so the worst a forged request does
+is a check-in early. What answers it differs by platform in a way worth knowing before debugging
+one: on macOS the file is only a *wake-up* — `WatchPaths` starts the daemon, every daemon
+invocation *is* a check-in, and `DaemonRequestHandler::check_in` merely confirms work already done
+before the queue was reached — whereas the Windows service (`Agent::check_in`) and the Linux queue
+service (`main::check_in`, under the lock it already holds) run the check-in *inside* the request.
+If that check-in installs a newer agent, the per-user process asking is restarted before it can
+read the answer; the new version in the menu is the confirmation. Both action items are greyed out
+while either a patch cycle or a check-in is running, because one scheduler thread serves both and a
+queued click would otherwise run minutes later, unasked.
+
 **Only the Linux agent patches with nobody logged in, and it has to.** Both other agents put the
 patching schedule in the per-user process, which costs nothing when every managed host is somebody's
 desktop. Most of a Linux fleet is servers with no graphical session at all, so the same design would

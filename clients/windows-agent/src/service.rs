@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -84,6 +85,11 @@ pub struct Agent {
     client: reqwest::blocking::Client,
     identity: Option<AgentIdentity>,
     serial_number: String,
+    /// This host's assigned check-in minute and where it is persisted — owned here rather than by
+    /// `run_loop` because a check-in can now also be asked for over the queue ("Check In Now"), and
+    /// both callers have to apply the server's answer the same way. See `check_in`.
+    schedule_path: PathBuf,
+    check_in_minute: u8,
     /// Set once a check-in response has asked for removal, so the loop stops rather than carrying on
     /// against files it has just deleted.
     removed: bool,
@@ -94,13 +100,24 @@ impl Agent {
         let config = Config::load();
         let serial_number = system_info::serial_number().context("could not determine this machine's identifier")?;
 
+        let schedule_path = config::checkin_schedule_path();
+        let check_in_minute = checkin_schedule::load_or_assign(&schedule_path);
+
         // Enrolls on first run; reuses the same identity from then on, until it needs replacing
         // (e.g. this host was decommissioned and re-provisioned). Every agent-only route is
         // rejected by nginx without the resulting certificate — see nginx/default.conf.
         let identity = identity::load_or_enroll(&config, &serial_number);
         let client = identity::build_client(Duration::from_secs(15), identity.as_ref()).context("failed to build HTTP client")?;
 
-        Ok(Self { config, client, identity, serial_number, removed: false })
+        Ok(Self { config, client, identity, serial_number, schedule_path, check_in_minute, removed: false })
+    }
+
+    pub fn serial_number(&self) -> &str {
+        &self.serial_number
+    }
+
+    pub fn check_in_minute(&self) -> u8 {
+        self.check_in_minute
     }
 
     /// Re-checks disk for an identity this service failed to enroll earlier.
@@ -129,12 +146,13 @@ impl Agent {
     }
 
     /// One full check-in: register this host and its installed applications, then check for a newer
-    /// build of this agent itself. Returns the check-in minute the server wants this host to use
-    /// from now on.
+    /// build of this agent itself, then adopt whichever check-in minute the server wants this host
+    /// to use from now on.
     ///
     /// The same sequence the macOS daemon runs per invocation, minus the queue drain — a resident
-    /// service handles the queue continuously in its own loop rather than once per check-in.
-    pub fn check_in(&mut self, check_in_minute: u8) -> Result<u8> {
+    /// service handles the queue continuously in its own loop rather than once per check-in. Run on
+    /// the hour by `run_loop`, once by `--check-in`, and on demand by a `RequestKind::CheckIn`.
+    pub fn check_in(&mut self) -> Result<()> {
         self.ensure_identity();
 
         let hostname = system_info::hostname().context("could not determine hostname")?;
@@ -162,7 +180,7 @@ impl Agent {
         let host_request = RegisterHostRequest {
             hostname,
             serial_number: self.serial_number.clone(),
-            check_in_minute,
+            check_in_minute: self.check_in_minute,
             operating_system,
             ip_address,
             operating_system_update_available: os_update_status.as_ref().map(|s| s.available),
@@ -176,7 +194,7 @@ impl Agent {
             logging::info("the server has marked this host for removal — uninstalling instead of continuing this check-in");
             self_removal::run(&self.client, &self.config, &self.serial_number);
             self.removed = true;
-            return Ok(check_in_minute);
+            return Ok(());
         }
 
         let applications = collect_installed_applications();
@@ -202,7 +220,12 @@ impl Agent {
         // `self_update`. There's no policy/schedule governing the agent's own updates.
         self_update::check_and_apply(&self.client, &self.config, self.identity.as_ref(), env!("CARGO_PKG_VERSION"));
 
-        Ok(host_response.suggested_check_in_minute.unwrap_or(check_in_minute))
+        // Applied last, matching the macOS ordering, so a minute change never lands halfway through
+        // a check-in.
+        let target_minute = host_response.suggested_check_in_minute.unwrap_or(self.check_in_minute);
+        self.check_in_minute = checkin_schedule::apply(&self.schedule_path, self.check_in_minute, target_minute);
+
+        Ok(())
     }
 
     pub fn was_removed(&self) -> bool {
@@ -284,6 +307,15 @@ impl RequestHandler for Agent {
         // is: this is the side holding the identity every agent-only route requires.
         os_update::report_patched(&self.client, &self.config, &self.serial_number);
         Ok(())
+    }
+
+    /// Answers a [`queue::RequestKind::CheckIn`]: the same check-in `run_loop` runs on the hour,
+    /// brought forward. `run_loop` leaves its own next wake-up where it was — an extra check-in at
+    /// the hour costs two requests and nothing else, and the tray's "Next check-in" line predicts
+    /// that hourly firing rather than this one.
+    fn check_in(&mut self) -> Result<String> {
+        Agent::check_in(self)?;
+        Ok(format!("checked in as {} (agent {})", self.serial_number, env!("CARGO_PKG_VERSION")))
     }
 }
 
@@ -371,9 +403,6 @@ pub fn run_loop(shutdown: Arc<AtomicBool>) {
     // The first moment nothing can still be running the copy a previous self-update displaced.
     self_update::clean_up_displaced_binary();
 
-    let schedule_path = config::checkin_schedule_path();
-    let mut check_in_minute = checkin_schedule::load_or_assign(&schedule_path);
-
     let mut agent = match Agent::new() {
         Ok(agent) => agent,
         Err(err) => {
@@ -386,8 +415,9 @@ pub fn run_loop(shutdown: Arc<AtomicBool>) {
     };
 
     logging::info(&format!(
-        "kintsugi-agent service starting; api_base_url={} check_in_minute=:{check_in_minute:02}",
-        Config::load().api_base_url
+        "kintsugi-agent service starting; api_base_url={} check_in_minute=:{:02}",
+        Config::load().api_base_url,
+        agent.check_in_minute()
     ));
 
     // Remote control gets a thread of its own, and it is the only standing outbound connection this
@@ -400,7 +430,7 @@ pub fn run_loop(shutdown: Arc<AtomicBool>) {
     // session request waiting for the next tick, and a frame stream inside the queue's poll.
     {
         let remote_config = Config::load();
-        let remote_serial = agent.serial_number.clone();
+        let remote_serial = agent.serial_number().to_string();
         let remote_shutdown = shutdown.clone();
         std::thread::spawn(move || crate::remote_control::run(remote_config, remote_serial, remote_shutdown));
     }
@@ -411,24 +441,22 @@ pub fn run_loop(shutdown: Arc<AtomicBool>) {
 
     while !shutdown.load(Ordering::SeqCst) {
         if now_epoch() >= next_check_in_at {
-            match agent.check_in(check_in_minute) {
-                Ok(target_minute) => {
-                    // Applied last, matching the macOS ordering, so a minute change never lands
-                    // halfway through a check-in.
-                    check_in_minute = checkin_schedule::apply(&schedule_path, check_in_minute, target_minute);
-                }
-                Err(err) => logging::warn(&format!("check-in failed, will retry at the next scheduled time: {err:#}")),
+            if let Err(err) = agent.check_in() {
+                logging::warn(&format!("check-in failed, will retry at the next scheduled time: {err:#}"));
             }
 
-            if agent.was_removed() {
-                logging::info("this host has been removed; the service is stopping");
-                return;
-            }
-
-            next_check_in_at = now_epoch() + checkin_schedule::seconds_until(now_epoch(), check_in_minute);
+            next_check_in_at = now_epoch() + checkin_schedule::seconds_until(now_epoch(), agent.check_in_minute());
         }
 
         queue::process_queue(&config::queue_dir(), &mut agent);
+
+        // After the queue rather than only after the hourly check-in: a queue-triggered check-in
+        // (see `RequestHandler::check_in`) can learn of a removal too. A drain against the directory
+        // `self_removal` has just deleted is a no-op, so nothing is lost by checking once, here.
+        if agent.was_removed() {
+            logging::info("this host has been removed; the service is stopping");
+            return;
+        }
 
         std::thread::sleep(QUEUE_POLL_INTERVAL);
     }
