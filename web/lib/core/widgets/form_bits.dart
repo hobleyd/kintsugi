@@ -69,6 +69,40 @@ class KintsugiTextField extends StatelessWidget {
       );
 }
 
+/// The search box a table puts in one of its column headers — see `TableColumnSpec.filter`.
+///
+/// Owns its controller, seeded from [value], and reports every keystroke through [onChanged];
+/// the screen's bloc holds the text as filter state and the table filters client-side, so there
+/// is no round trip and no submit. Shared by the Applications and Hosts tables so a search reads
+/// the same wherever it appears.
+class SearchField extends StatefulWidget {
+  const SearchField({super.key, required this.value, required this.onChanged, this.hintText = 'Search...'});
+
+  final String value;
+  final ValueChanged<String> onChanged;
+  final String hintText;
+
+  @override
+  State<SearchField> createState() => _SearchFieldState();
+}
+
+class _SearchFieldState extends State<SearchField> {
+  late final _controller = TextEditingController(text: widget.value);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => KintsugiTextField(
+        controller: _controller,
+        hintText: widget.hintText,
+        onChanged: widget.onChanged,
+      );
+}
+
 /// A select. Its own widget so the four settings screens' dropdowns look identical and so the
 /// popup is drawn on the panel surface rather than Material's default.
 class KintsugiDropdown<T> extends StatelessWidget {

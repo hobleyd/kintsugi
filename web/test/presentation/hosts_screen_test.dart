@@ -21,7 +21,9 @@ class _FakeHostRepository implements HostRepository {
   Future<void> requestRemoval(String id) async {}
 }
 
-/// The Status column: the status chip, with the agent's version in brackets on the line beneath.
+/// The Status column: the status chip, with the agent's version in brackets centred on the line
+/// beneath — and the Hostname column's search box, which is the only way to find one host in a
+/// fleet too big to scroll.
 ///
 /// Pumps the real [HostsScreen] against a fake registered in [locator] the way `injection.dart`
 /// registers the real one. The version is the one thing here without a server-side mirror test:
@@ -32,7 +34,7 @@ void main() {
     locator
       ..registerSingleton(GetHosts(_FakeHostRepository([
         hostFromJson({'id': 'a', 'hostname': 'alpha', 'serialNumber': 'A1', 'status': 1, 'agentVersion': '0.6.1'}),
-        hostFromJson({'id': 'b', 'hostname': 'bravo', 'serialNumber': 'B2', 'status': 2}),
+        hostFromJson({'id': 'b', 'hostname': 'bravo', 'serialNumber': 'B2', 'ipAddress': '10.0.0.7', 'status': 2}),
       ])))
       ..registerSingleton(RequestHostRemoval(_FakeHostRepository(const [])));
   });
@@ -57,18 +59,61 @@ void main() {
   /// timers still pending.
   Future<void> tearDownScreen(WidgetTester tester) => tester.pumpWidget(const SizedBox());
 
-  testWidgets('a host that reported its agent version shows it under the status chip', (tester) async {
+  testWidgets('a host that reported its agent version shows it centred under the status chip', (tester) async {
     await pumpScreen(tester);
 
     final chip = tester.getRect(find.ancestor(of: find.text('ONLINE'), matching: find.byType(StatusChip)));
     final version = tester.getRect(find.text('(0.6.1)'));
     expect(version.top, greaterThanOrEqualTo(chip.bottom));
-    expect(version.left, chip.left);
+    // Centred on the chip, not on the column: the cell is 140px wide and left-aligned, so a version
+    // centred on the column would sit visibly to the right of a short chip.
+    expect(version.center.dx, closeTo(chip.center.dx, 1.0));
 
     // The host whose agent predates the field gets the chip alone — no empty brackets.
     expect(find.text('OFFLINE'), findsOneWidget);
     expect(find.text('()'), findsNothing);
     expect(find.textContaining(RegExp(r'^\(.*\)$')), findsOneWidget);
+
+    await tearDownScreen(tester);
+  });
+
+  testWidgets('the search narrows the table by hostname, serial number or address', (tester) async {
+    await pumpScreen(tester);
+    expect(find.text('alpha'), findsOneWidget);
+    expect(find.text('bravo'), findsOneWidget);
+
+    final search = find.byType(TextField);
+
+    // A fragment of the hostname, in the wrong case.
+    await tester.enterText(search, 'ALP');
+    await tester.pump();
+    expect(find.text('alpha'), findsOneWidget);
+    expect(find.text('bravo'), findsNothing);
+    expect(find.text('1 of 2 host(s) match the search'), findsOneWidget);
+
+    // The tail of a serial number, and an address — neither is the hostname.
+    await tester.enterText(search, 'b2');
+    await tester.pump();
+    expect(find.text('bravo'), findsOneWidget);
+    expect(find.text('alpha'), findsNothing);
+
+    await tester.enterText(search, '10.0.0');
+    await tester.pump();
+    expect(find.text('bravo'), findsOneWidget);
+    expect(find.text('alpha'), findsNothing);
+
+    // Nothing matching leaves the table — and so the search box — on screen, with a message.
+    await tester.enterText(search, 'zulu');
+    await tester.pump();
+    expect(find.text('No hosts match the search.'), findsOneWidget);
+    expect(search, findsOneWidget);
+
+    // Clearing it brings everything back and restores the plain count.
+    await tester.enterText(search, '');
+    await tester.pump();
+    expect(find.text('alpha'), findsOneWidget);
+    expect(find.text('bravo'), findsOneWidget);
+    expect(find.text('2 host(s) registered'), findsOneWidget);
 
     await tearDownScreen(tester);
   });

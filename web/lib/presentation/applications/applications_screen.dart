@@ -179,7 +179,7 @@ class _ApplicationsTable extends StatelessWidget {
         label: 'Application Name',
         width: const FlexColumnWidth(1.6),
         sortKey: 'name',
-        filter: _SearchField(
+        filter: SearchField(
           value: state.filters.search,
           onChanged: (value) =>
               bloc.add(ApplicationsFiltersChanged(state.filters.copyWith(search: value))),
@@ -423,33 +423,6 @@ class _ManualSteps extends StatelessWidget {
           // SelectionArea covers this, and a nested one would break a drag across the panel.
           children: [Text(instructions, style: Theme.of(context).textTheme.bodySmall)],
         ),
-      );
-}
-
-class _SearchField extends StatefulWidget {
-  const _SearchField({required this.value, required this.onChanged});
-
-  final String value;
-  final ValueChanged<String> onChanged;
-
-  @override
-  State<_SearchField> createState() => _SearchFieldState();
-}
-
-class _SearchFieldState extends State<_SearchField> {
-  late final _controller = TextEditingController(text: widget.value);
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) => KintsugiTextField(
-        controller: _controller,
-        hintText: 'Search...',
-        onChanged: widget.onChanged,
       );
 }
 

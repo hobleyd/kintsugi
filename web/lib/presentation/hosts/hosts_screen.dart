@@ -7,6 +7,7 @@ import '../../core/router/app_router.dart';
 import '../../core/theme/kintsugi_palette.dart';
 import '../../core/widgets/alert_box.dart';
 import '../../core/widgets/buttons.dart';
+import '../../core/widgets/form_bits.dart';
 import '../../core/widgets/kintsugi_table.dart';
 import '../../core/widgets/page_scaffold.dart';
 import '../../core/widgets/panel.dart';
@@ -38,8 +39,21 @@ class _HostsView extends StatelessWidget {
       BlocBuilder<HostsBloc, HostsState>(builder: (context, state) => _buildBody(context, state));
 
   Widget _buildBody(BuildContext context, HostsState state) {
+    final bloc = context.read<HostsBloc>();
     final columns = <TableColumnSpec>[
-      const TableColumnSpec(label: 'Hostname', width: FlexColumnWidth(1.4)),
+      TableColumnSpec(
+        label: 'Hostname',
+        width: const FlexColumnWidth(1.4),
+        // Under the Hostname header, where the Applications table keeps its own search, though it
+        // matches serial numbers and addresses too — see `HostsState.visibleHosts`. A fleet of a
+        // few hundred hosts is past scrolling for one, and the hostname is what somebody arrives
+        // knowing.
+        filter: SearchField(
+          value: state.search,
+          hintText: 'Search hosts...',
+          onChanged: (value) => bloc.add(HostsSearchChanged(value)),
+        ),
+      ),
       const TableColumnSpec(label: 'Serial Number', width: FlexColumnWidth(1.2)),
       const TableColumnSpec(label: 'Operating System', width: FlexColumnWidth(1.2)),
       const TableColumnSpec(label: 'OS Update', width: FlexColumnWidth(1.2)),
@@ -53,9 +67,13 @@ class _HostsView extends StatelessWidget {
       const TableColumnSpec(label: 'Actions', width: FixedColumnWidth(150)),
     ];
 
+    final visible = state.visibleHosts;
+
     return PageScaffold(
       title: 'Registered Hosts',
-      subtitle: '${state.hosts.length} host(s) registered',
+      subtitle: state.search.isEmpty
+          ? '${state.hosts.length} host(s) registered'
+          : '${visible.length} of ${state.hosts.length} host(s) match the search',
       children: [
         if (state.error != null) AlertBox.error(state.error!),
         if (state.notice != null) AlertBox.success(state.notice!),
@@ -66,15 +84,23 @@ class _HostsView extends StatelessWidget {
             'No hosts have been registered yet. A host appears here once its agent enrolls and '
             'reports in.',
           )
-        else
+        else ...[
+          // The table stays on screen when the search matches nothing, because the search box is
+          // in its header — swapping the whole table for an empty panel would take the box away
+          // with the text still in it.
           KintsugiTable(
             columns: columns,
             minWidth: 1180,
             rows: [
-              for (final host in state.hosts)
-                KintsugiTableRow(cells: _cells(context, host, state)),
+              for (final host in visible) KintsugiTableRow(cells: _cells(context, host, state)),
             ],
           ),
+          if (visible.isEmpty)
+            const Padding(
+              padding: EdgeInsets.only(top: 16),
+              child: EmptyPanel('No hosts match the search.'),
+            ),
+        ],
       ],
     );
   }
@@ -101,8 +127,13 @@ class _HostsView extends StatelessWidget {
               )
             : CountBadge(host.appUpdatesAvailableCount),
         host.ipAddress == null ? const NoValue() : Text(host.ipAddress!),
+        // Centred on the chip, not on the column. The cell aligns its child left under loose
+        // constraints, so this Column is only as wide as its widest child — the chip — and
+        // `center` puts the version under the middle of it. Not `IntrinsicWidth`: on web the
+        // chip's intrinsic width comes out narrower than it lays out at and its label breaks
+        // mid-word ("ONLIN / E").
         Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             Wrap(
               spacing: 6,
