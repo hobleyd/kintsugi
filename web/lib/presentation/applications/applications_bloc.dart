@@ -42,19 +42,36 @@ class ApplicationTableRow extends Equatable {
 /// The filters the table applies, all client-side — everything they need is already in the
 /// response, so there is no round trip.
 class ApplicationFilters extends Equatable {
-  const ApplicationFilters({this.search = '', this.statusKey = 'all', this.hostName = 'all'});
+  const ApplicationFilters({
+    this.search = '',
+    this.statusKey = 'all',
+    this.hostName = 'all',
+    this.platform = 'all',
+  });
 
   final String search;
   final String statusKey;
   final String hostName;
 
-  bool get isActive => search.isNotEmpty || statusKey != 'all' || hostName != 'all';
+  /// A platform bucket as the server names it (`macOS`, `pm:Homebrew`, ...), or `all`. Matched
+  /// exactly rather than case-insensitively: the options are read off the response itself
+  /// ([ApplicationsState.platformOptions]), so there is no other spelling to reconcile.
+  final String platform;
 
-  ApplicationFilters copyWith({String? search, String? statusKey, String? hostName}) =>
+  bool get isActive =>
+      search.isNotEmpty || statusKey != 'all' || hostName != 'all' || platform != 'all';
+
+  ApplicationFilters copyWith({
+    String? search,
+    String? statusKey,
+    String? hostName,
+    String? platform,
+  }) =>
       ApplicationFilters(
         search: search ?? this.search,
         statusKey: statusKey ?? this.statusKey,
         hostName: hostName ?? this.hostName,
+        platform: platform ?? this.platform,
       );
 
   /// Whether one row survives these filters.
@@ -63,6 +80,9 @@ class ApplicationFilters extends Equatable {
       return false;
     }
     if (statusKey != 'all' && row.statusKey != statusKey) return false;
+    // A row with no researched path has no platform, so it is excluded under any specific one --
+    // the same answer the host filter gives for a host the row is not on.
+    if (platform != 'all' && row.platform != platform) return false;
     if (hostName == 'all') return true;
 
     final host = hostName.toLowerCase();
@@ -93,7 +113,7 @@ class ApplicationFilters extends Equatable {
   }
 
   @override
-  List<Object?> get props => [search, statusKey, hostName];
+  List<Object?> get props => [search, statusKey, hostName, platform];
 }
 
 /// How the table is ordered.
@@ -221,6 +241,19 @@ final class ApplicationsState extends Equatable {
       }
     }
     return rows;
+  }
+
+  /// Every platform bucket the response names, sorted, for the Platform column's filter. Read off
+  /// the rows rather than listed statically: the buckets a fleet actually has depend on which
+  /// agents and package managers report, and a fixed list would offer platforms with nothing
+  /// under them. Rows with no researched path have no platform and contribute nothing.
+  List<String> get platformOptions {
+    final platforms = <String>{
+      for (final row in allRows)
+        if (row.platform.isNotEmpty) row.platform,
+    };
+    return platforms.toList()
+      ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
   }
 
   /// The rows on screen: filtered, then sorted.

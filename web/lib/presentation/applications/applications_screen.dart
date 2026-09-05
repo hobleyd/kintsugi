@@ -198,7 +198,18 @@ class _ApplicationsTable extends StatelessWidget {
               bloc.add(ApplicationsFiltersChanged(state.filters.copyWith(hostName: value))),
         ),
       ),
-      const TableColumnSpec(label: 'Platform', width: FlexColumnWidth(1), sortKey: 'platform'),
+      TableColumnSpec(
+        label: 'Platform',
+        width: const FlexColumnWidth(1),
+        sortKey: 'platform',
+        filter: KintsugiDropdown<String>(
+          value: state.filters.platform,
+          items: ['all', ...state.platformOptions],
+          labelOf: (value) => value == 'all' ? 'All platforms' : value,
+          onChanged: (value) =>
+              bloc.add(ApplicationsFiltersChanged(state.filters.copyWith(platform: value))),
+        ),
+      ),
       TableColumnSpec(
         label: 'Status',
         width: const FixedColumnWidth(160),

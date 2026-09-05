@@ -144,6 +144,52 @@ void main() {
     });
   });
 
+  group('platform', () {
+    test('matches the bucket the row resolved to, exactly', () {
+      final homebrewRow = row(statusKey: 'up-to-date', platform: 'pm:Homebrew');
+
+      expect(const ApplicationFilters(platform: 'pm:Homebrew').matches(homebrewRow), isTrue);
+      expect(const ApplicationFilters(platform: 'macOS').matches(homebrewRow), isFalse);
+    });
+
+    test('excludes a row with no researched path, which has no platform', () {
+      const noPath = ApplicationTableRow(
+        application: ApplicationRow(
+          name: 'Firefox',
+          hostCount: 1,
+          hostNames: ['alpha'],
+          upgradePaths: [],
+          children: [],
+        ),
+        upgradePath: null,
+        isChild: false,
+      );
+
+      expect(const ApplicationFilters(platform: 'macOS').matches(noPath), isFalse);
+      expect(const ApplicationFilters().matches(noPath), isTrue);
+    });
+
+    test('combines with the host filter on the row own bucket', () {
+      final homebrewRow = row(
+        statusKey: 'up-to-date',
+        platform: 'pm:Homebrew',
+        installedOn: const ['mac-host', 'win-host'],
+        pathInstalledOn: const ['mac-host'],
+      );
+
+      expect(
+        const ApplicationFilters(platform: 'pm:Homebrew', hostName: 'mac-host')
+            .matches(homebrewRow),
+        isTrue,
+      );
+      expect(
+        const ApplicationFilters(platform: 'pm:Homebrew', hostName: 'win-host')
+            .matches(homebrewRow),
+        isFalse,
+      );
+    });
+  });
+
   group('host combined with update-available', () {
     // The subtle rule, and the reason the API sends hostNamesNeedingUpdate at all. "Update
     // Available" is fleet-wide — true if ANY host is behind — so testing only "is it installed
@@ -183,6 +229,7 @@ void main() {
       expect(const ApplicationFilters(search: 'x').isActive, isTrue);
       expect(const ApplicationFilters(statusKey: 'up-to-date').isActive, isTrue);
       expect(const ApplicationFilters(hostName: 'alpha').isActive, isTrue);
+      expect(const ApplicationFilters(platform: 'macOS').isActive, isTrue);
     });
   });
 
@@ -217,6 +264,51 @@ void main() {
       expect(state.allRows.length, 3);
       expect(state.allRows.map((r) => r.platform), ['macOS', 'Windows', '']);
       expect(state.allRows.last.statusKey, 'not-checked');
+    });
+
+    test('lists each platform once, sorted, and omits rows with no path', () {
+      final state = ApplicationsState(
+        overview: ApplicationOverview(
+          applications: [
+            ApplicationRow(
+              name: 'Firefox',
+              hostCount: 2,
+              hostNames: const ['alpha', 'beta'],
+              upgradePaths: [
+                path(statusKey: 'up-to-date', platform: 'Windows'),
+                path(statusKey: 'up-to-date', platform: 'macOS'),
+              ],
+              children: const [],
+            ),
+            ApplicationRow(
+              name: 'Homebrew',
+              hostCount: 1,
+              hostNames: const ['alpha'],
+              upgradePaths: [path(statusKey: 'up-to-date', platform: 'pm:Homebrew')],
+              children: [
+                ApplicationRow(
+                  name: 'wget',
+                  hostCount: 1,
+                  hostNames: const ['alpha'],
+                  upgradePaths: [path(statusKey: 'up-to-date', platform: 'pm:Homebrew')],
+                  children: const [],
+                ),
+              ],
+            ),
+            const ApplicationRow(
+              name: 'Nothing Researched',
+              hostCount: 1,
+              hostNames: ['alpha'],
+              upgradePaths: [],
+              children: [],
+            ),
+          ],
+          totalApplicationCount: 4,
+          allHostNames: const ['alpha', 'beta'],
+        ),
+      );
+
+      expect(state.platformOptions, ['macOS', 'pm:Homebrew', 'Windows']);
     });
 
     test('flattens a package manager children directly after their parent', () {
