@@ -157,7 +157,11 @@ class _HostsView extends StatelessWidget {
         ),
         LocalTimestamp(host.lastSeenUtc),
         Wrap(
-          spacing: 4,
+          // Deliberately wide: Connect and Remove sit side by side and only one of them is
+          // reversible from here, so a slip between them costs a host, not a mis-click. Two
+          // 40px buttons plus this gap is 104, inside the 126 the fixed 150 column leaves after
+          // the gutters, so the Wrap never breaks onto a second line.
+          spacing: 24,
           children: [
             IconActionButton(
               icon: Icons.desktop_windows_outlined,
