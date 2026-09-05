@@ -150,11 +150,14 @@ void main() {
     await tester.pumpAndSettle();
 
     // Expanded: wget appears with its version and its own version check, but the shared script
-    // is still shown once, on the manager's row, and wget carries no expander of its own.
+    // is still shown once, on the manager's row, and wget carries no expander of its own — and no
+    // AI-instructions panel either, since nothing about a manager's script is researched or signed
+    // per application. The manager's row keeps that button: it is where the script is signed.
     expect(find.text('wget'), findsOneWidget);
     expect(find.text('1.25'), findsOneWidget);
     expect(viewScript, findsOneWidget);
     expect(refresh, findsNWidgets(2));
+    expect(find.byTooltip('AI instructions'), findsOneWidget);
     expect(hide, findsOneWidget);
     expect(show, findsNothing);
     expect(find.byIcon(Icons.chevron_right), findsNothing);

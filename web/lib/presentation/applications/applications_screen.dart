@@ -266,7 +266,7 @@ class _ApplicationsTable extends StatelessWidget {
               KintsugiTableRow(
                 isChild: row.isChild,
                 cells: _cells(context, row),
-                expanded: state.expandedRowKey == row.key
+                expanded: row.offersInstructions && state.expandedRowKey == row.key
                     ? InstructionsPanel(
                         // Keyed so switching rows rebuilds the panel rather than reusing the
                         // previous row's blocs and controllers.
@@ -300,12 +300,15 @@ class _ApplicationsTable extends StatelessWidget {
       HintText(path?.latestVersion ?? '—'),
       _UpgradeCell(row: row, checking: state.checkingRowKeys.contains(row.key)),
       path == null ? const NoValue() : LocalTimestamp(path.checkedUtc),
-      IconActionButton(
-        icon: expanded ? Icons.expand_less : Icons.expand_more,
-        tooltip: 'AI instructions',
-        onPressed: () =>
-            context.read<ApplicationsBloc>().add(ApplicationRowExpansionToggled(row.key)),
-      ),
+      if (row.offersInstructions)
+        IconActionButton(
+          icon: expanded ? Icons.expand_less : Icons.expand_more,
+          tooltip: 'AI instructions',
+          onPressed: () =>
+              context.read<ApplicationsBloc>().add(ApplicationRowExpansionToggled(row.key)),
+        )
+      else
+        const NoValue(),
     ];
   }
 }

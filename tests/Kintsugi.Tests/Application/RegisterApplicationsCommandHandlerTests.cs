@@ -153,6 +153,69 @@ public class RegisterApplicationsCommandHandlerTests
     }
 
     [Fact]
+    public async Task Handle_SeedsTheManagersOwnRow_WithTheSameScriptAsItsApplications_AndNoVersion()
+    {
+        // The agent reports Homebrew itself with no available version (no manager lists itself in
+        // its own outdated report), so this row used to exist only once somebody pressed "Find
+        // Upgrade Paths" — and the Applications screen, which shows the manager's script on this row
+        // on behalf of every formula under it, read "not checked yet" above rows that plainly had
+        // one. LatestVersion is left for the update-check coordinator: a check-in is no place for a
+        // call to GitHub.
+        SetUpHost(_host);
+        _upgradePathRepository.Setup(r => r.GetAsync(It.IsAny<string>(), HomebrewBucket, It.IsAny<CancellationToken>())).ReturnsAsync((UpgradePath?)null);
+
+        await CreateHandler().Handle(
+            new RegisterApplicationsCommand("SERIAL-1", new[]
+            {
+                new ApplicationEntry("Homebrew", "4.6.0", ApplicationIdentifier: "brew"),
+                new ApplicationEntry("firefox", "128.0", PackageManager: "Homebrew", AvailableVersion: "129.0"),
+            }),
+            CancellationToken.None);
+
+        _upgradePathRepository.Verify(r => r.AddAsync(
+            It.Is<UpgradePath>(p => p.ApplicationName == "Homebrew" && p.Platform == HomebrewBucket && p.LatestVersion == null
+                && p.Method == UpgradeMethod.Script && p.Script == HomebrewScript && p.ApplicationIdentifier == "brew"),
+            It.IsAny<CancellationToken>()), Times.Once);
+        _upgradePathRepository.Verify(r => r.AddAsync(
+            It.Is<UpgradePath>(p => p.ApplicationName == "firefox" && p.Script == HomebrewScript),
+            It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task Handle_LeavesTheManagersOwnRowsLatestVersionAlone_WhenTheReportCarriesNone()
+    {
+        // The version the update-check coordinator found from --update-version must survive a
+        // check-in that, as every check-in does, knows nothing about it.
+        SetUpHost(_host);
+        var existing = UpgradePath.Create(
+            "Homebrew", HomebrewBucket, UpgradePathStatus.Found, "4.6.1", UpgradeMethod.Script,
+            null, null, null, null, null, HomebrewScript, "brew");
+        _upgradePathRepository.Setup(r => r.GetAsync("Homebrew", HomebrewBucket, It.IsAny<CancellationToken>())).ReturnsAsync(existing);
+
+        await CreateHandler().Handle(
+            new RegisterApplicationsCommand("SERIAL-1", new[] { new ApplicationEntry("Homebrew", "4.6.0", ApplicationIdentifier: "brew") }),
+            CancellationToken.None);
+
+        Assert.Equal("4.6.1", existing.LatestVersion);
+        _upgradePathRepository.Verify(r => r.AddAsync(It.IsAny<UpgradePath>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Handle_DoesNotSeedARow_ForAStandaloneApplicationThatIsNotAManager()
+    {
+        // Only a recognized manager's own row is seeded by name; anything else standalone is the
+        // AI research scan's to resolve.
+        SetUpHost(_host);
+
+        await CreateHandler().Handle(
+            new RegisterApplicationsCommand("SERIAL-1", new[] { new ApplicationEntry("Nextcloud", "3.15.0", ApplicationIdentifier: "com.nextcloud.desktopclient") }),
+            CancellationToken.None);
+
+        _upgradePathRepository.Verify(r => r.AddAsync(It.IsAny<UpgradePath>(), It.IsAny<CancellationToken>()), Times.Never);
+        _upgradePathRepository.Verify(r => r.GetAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
     public async Task Handle_InheritsAnExistingSignature_WhenCreatingARow_AndIdenticalScriptContentIsAlreadySigned()
     {
         SetUpHost(_host);

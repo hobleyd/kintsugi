@@ -52,6 +52,13 @@ class ApplicationTableRow extends Equatable {
   /// that row's script is that application's, so it stays.
   bool get usesManagerScript => isChild && platform.startsWith('pm:');
 
+  /// Whether the Actions column offers the AI-instructions panel for this row. A row nested under
+  /// a manager holds either the manager's shared script — researched by nobody, and signed from
+  /// the manager's row — or no row at all yet; AI instructions apply to neither. The manager's own
+  /// row keeps the panel, since that is where its script is read and signed, and so does a child's
+  /// OS-bucket row, whose script is its own.
+  bool get offersInstructions => !isChild || (upgradePath != null && !usesManagerScript);
+
   /// A stable identity for the row, used to key the expanded panel.
   String get key => '${application.name} $platform';
 

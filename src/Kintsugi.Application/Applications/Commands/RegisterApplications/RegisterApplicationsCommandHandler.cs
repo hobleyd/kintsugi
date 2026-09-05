@@ -92,6 +92,21 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
     /// Script row, and the Hosts screen counts nothing that has no row to resolve to. Such a row
     /// keeps whatever <see cref="UpgradePath.LatestVersion"/> it already had rather than having it
     /// erased by a report that simply did not know one.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The manager's <em>own</em> row ("Homebrew", "winget", ...) is seeded here as well, whether or
+    /// not it reports a version — every agent reports its manager with <c>available_version</c>
+    /// unset, since no manager lists itself in its own outdated report. It is the same script as
+    /// every application under it (see <c>RecognizedPackageManager.BuildScript</c>), and the
+    /// Applications screen nests those applications under the manager's row and shows the script
+    /// there once on behalf of all of them — so a manager with no row reads as "not checked yet"
+    /// above a list of applications that each plainly have one. Before this the manager's row
+    /// existed only once somebody pressed "Find Upgrade Paths". Its <see cref="UpgradePath.LatestVersion"/>
+    /// stays whatever it was — the update-check coordinator fills it from the script's own
+    /// <c>--update-version</c>; an agent check-in is no place for a call to GitHub.
+    /// </para>
+    /// <para>
     /// Stored under the same
     /// <see cref="PlatformBucket.ForPackageManager"/> bucket and <see cref="UpgradeMethod.Script"/>
     /// shape <c>ResearchApplicationUpgradePathCommandHandler</c> uses (never the real per-host OS
@@ -104,8 +119,8 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
     /// moment some other row's identical script content has already been signed — a human still has
     /// to review and sign the very first script per manager, but every other application sharing
     /// that exact content never needs its own separate review.
-    /// </summary>
-    /// <remarks>
+    /// </para>
+    /// <para>
     /// A row that already carries a <see cref="UpgradePath.ScriptSignature"/> keeps its script
     /// exactly as reviewed; only its <see cref="UpgradePath.LatestVersion"/> moves. This used to
     /// rewrite <see cref="UpgradePath.Script"/> from the builder unconditionally, under the belief
@@ -122,6 +137,7 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
     /// differently (<see cref="PackageManagerCatalog.CurrentScriptFor"/>) and
     /// <c>TakeServerWrittenScriptCommand</c> replaces one — on every row holding it — unsigned, for
     /// review.
+    /// </para>
     /// </remarks>
     private async Task UpsertPackageManagerUpgradePathsAsync(IReadOnlyList<ApplicationEntry> applications, CancellationToken cancellationToken)
     {
@@ -129,13 +145,22 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
 
         foreach (var entry in applications)
         {
-            var reportsUpdate = !string.IsNullOrEmpty(entry.AvailableVersion) || entry.UpdateAvailable == true;
-            if (string.IsNullOrEmpty(entry.PackageManager) || !reportsUpdate || !seen.Add(entry.Name))
+            RecognizedPackageManager packageManager;
+            if (!string.IsNullOrEmpty(entry.PackageManager))
             {
+                var reportsUpdate = !string.IsNullOrEmpty(entry.AvailableVersion) || entry.UpdateAvailable == true;
+                if (!reportsUpdate || !PackageManagerCatalog.TryGet(entry.PackageManager, out packageManager))
+                {
+                    continue;
+                }
+            }
+            else if (!PackageManagerCatalog.TryGet(entry.Name, out packageManager))
+            {
+                // Neither managed nor a manager: an application the scan researches, not this.
                 continue;
             }
 
-            if (!PackageManagerCatalog.TryGet(entry.PackageManager, out var packageManager))
+            if (!seen.Add(entry.Name))
             {
                 continue;
             }
