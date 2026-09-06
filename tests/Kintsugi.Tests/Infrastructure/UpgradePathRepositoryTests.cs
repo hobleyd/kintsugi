@@ -709,4 +709,63 @@ public class UpgradePathRepositoryTests
         Assert.Equal(0, summary.UpToDateHostCount);
         Assert.Equal(new[] { "host-a" }, summary.HostNamesNeedingUpdate);
     }
+
+    private static UpgradePath HomebrewRow(string name, string script, string? signature = null)
+    {
+        var row = UpgradePath.Create(name, HomebrewBucket, UpgradePathStatus.Found, "1.0", UpgradeMethod.Script, null, null, null, null, null, script, name);
+        if (signature is not null)
+        {
+            row.SignScript(signature);
+        }
+
+        return row;
+    }
+
+    [Fact]
+    public async Task GetSignedPackageManagerScriptAsync_ReturnsNull_WhenNothingInTheBucketIsSigned()
+    {
+        // Unsigned rows do not count, and neither does a signed row in another bucket: the answer is
+        // what *this* manager's fleet has been reviewed on, or nothing.
+        await using var context = CreateContext();
+        context.UpgradePaths.Add(HomebrewRow("firefox", "#!/bin/bash\n# unsigned\n"));
+        var aiRow = UpgradePath.Create("Firefox", PlatformBucket.MacOs, UpgradePathStatus.Found, "1.0", UpgradeMethod.Script, null, null, null, null, null, "#!/bin/bash\n# ai\n");
+        aiRow.SignScript("signed:ai");
+        context.UpgradePaths.Add(aiRow);
+        await context.SaveChangesAsync();
+
+        var result = await new UpgradePathRepository(context).GetSignedPackageManagerScriptAsync(HomebrewBucket, CancellationToken.None);
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task GetSignedPackageManagerScriptAsync_ReturnsTheSignedScriptAndItsSignature()
+    {
+        await using var context = CreateContext();
+        context.UpgradePaths.Add(HomebrewRow("firefox", "#!/bin/bash\n# reviewed\n", "signed:reviewed"));
+        context.UpgradePaths.Add(HomebrewRow("slack", "#!/bin/bash\n# reviewed\n", "signed:reviewed"));
+        context.UpgradePaths.Add(HomebrewRow("zoom", "#!/bin/bash\n# newer, unsigned\n"));
+        await context.SaveChangesAsync();
+
+        var result = await new UpgradePathRepository(context).GetSignedPackageManagerScriptAsync(HomebrewBucket, CancellationToken.None);
+
+        Assert.Equal(new PackageManagerBucketScript("#!/bin/bash\n# reviewed\n", "signed:reviewed"), result);
+    }
+
+    [Fact]
+    public async Task GetSignedPackageManagerScriptAsync_WhenTwoTextsAreSigned_ReturnsTheOneOnMoreRows()
+    {
+        // Only reachable by a human pasting and then signing a different script on one row. The
+        // fleet mostly runs the other text, so that is what a new row joins.
+        await using var context = CreateContext();
+        context.UpgradePaths.Add(HomebrewRow("firefox", "#!/bin/bash\n# majority\n", "signed:majority"));
+        context.UpgradePaths.Add(HomebrewRow("slack", "#!/bin/bash\n# majority\n", "signed:majority"));
+        context.UpgradePaths.Add(HomebrewRow("odd-one-out", "#!/bin/bash\n# hand-edited\n", "signed:hand-edited"));
+        await context.SaveChangesAsync();
+
+        var result = await new UpgradePathRepository(context).GetSignedPackageManagerScriptAsync(HomebrewBucket, CancellationToken.None);
+
+        Assert.Equal("#!/bin/bash\n# majority\n", result!.Script);
+        Assert.Equal("signed:majority", result.Signature);
+    }
 }

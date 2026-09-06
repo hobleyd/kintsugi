@@ -166,6 +166,31 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
     }
 
     [Fact]
+    public async Task Handle_PackageManagerManaged_WritesTheBucketsReviewedScript_NotTheBuildersNewerOne()
+    {
+        // Homebrew's bucket runs a reviewed script that is no longer what the builder writes (a
+        // *UpgradeScript.Build body was edited since). "Find Upgrade Paths" for a formula with no row
+        // yet — or a force-recheck of one that has — must give that row the text the rest of the
+        // bucket runs, signed, rather than the builder's newer bytes unsigned. The latter was one of
+        // the two routes by which a bucket ended up on two revisions with the newer rows not patching;
+        // see PackageManagerBucketScript.
+        const string reviewed = "#!/bin/bash\n# the revision the fleet was reviewed on\n";
+        _repository
+            .Setup(r => r.GetSignedPackageManagerScriptAsync(HomebrewBucket, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PackageManagerBucketScript(reviewed, "signed:over-the-reviewed-revision"));
+
+        var result = await CreateHandler().Handle(Command(UpgradePathWorkKind.PackageManagerManaged, "Homebrew"), CancellationToken.None);
+
+        Assert.Equal(reviewed, result.Script);
+        Assert.NotEqual(HomebrewUpgradeScript.Build(), result.Script);
+        _repository.Verify(r => r.AddAsync(
+            It.Is<UpgradePath>(p => p.Script == reviewed && p.ScriptSignature == "signed:over-the-reviewed-revision"),
+            It.IsAny<CancellationToken>()), Times.Once);
+        // The version check ran against the script the row actually holds.
+        _researchClient.Verify(c => c.CheckScriptVersionAsync(reviewed, It.IsAny<string>(), "Firefox", "Firefox", It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
     public async Task Handle_AlreadyFoundScriptPath_InheritsAnExistingSignature_WhenIdenticalScriptContentIsAlreadySigned()
     {
         // A row already Found (and skipped) but never itself reviewed and signed should still

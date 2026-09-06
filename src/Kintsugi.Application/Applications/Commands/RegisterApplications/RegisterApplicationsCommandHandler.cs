@@ -115,10 +115,10 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
     /// look it up by, and an agent would never recognize it as patchable.
     /// An entry naming a manager this system doesn't recognize is left entirely alone here: there
     /// is no script to write for it, and the scan is what resolves it to NotFound with a note.
-    /// A row with no signature yet (brand new, or never reviewed) inherits one automatically the
-    /// moment some other row's identical script content has already been signed — a human still has
-    /// to review and sign the very first script per manager, but every other application sharing
-    /// that exact content never needs its own separate review.
+    /// A row with no signature yet (brand new, or never reviewed) takes whatever the rest of its
+    /// bucket already runs — the bucket's signed script and its signature, when there is one — so a
+    /// human still has to review and sign the very first script per manager, but every application
+    /// that turns up afterwards joins that reviewed script at once. See <see cref="PackageManagerBucketScript"/>.
     /// </para>
     /// <para>
     /// A row that already carries a <see cref="UpgradePath.ScriptSignature"/> keeps its script
@@ -136,12 +136,18 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
     /// deliberate act: the Upgrade Scripts page shows which scripts this build would now write
     /// differently (<see cref="PackageManagerCatalog.CurrentScriptFor"/>) and
     /// <c>TakeServerWrittenScriptCommand</c> replaces one — on every row holding it — unsigned, for
-    /// review.
+    /// review. Until somebody does, a row seeded after the deployment gets the <em>reviewed</em> text
+    /// rather than the builder's, or the bucket would split in two and the new rows would sit
+    /// unsigned and unpatchable — which is exactly what happened.
     /// </para>
     /// </remarks>
     private async Task UpsertPackageManagerUpgradePathsAsync(IReadOnlyList<ApplicationEntry> applications, CancellationToken cancellationToken)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // One lookup per manager per report, not per application: a fresh host reports a hundred
+        // Homebrew rows and every one of them gets the same answer. Nothing written in this loop is
+        // saved before the report finishes, so the answer cannot change under it either.
+        var bucketScripts = new Dictionary<string, PackageManagerBucketScript>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var entry in applications)
         {
@@ -190,26 +196,33 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
             var applicationIdentifier = entry.ApplicationIdentifier ?? entry.Name;
             var existing = await _upgradePathRepository.GetAsync(entry.Name, platform, cancellationToken);
 
-            // A reviewed script is left exactly as it was reviewed — see the remarks above. Only a
-            // row nobody has signed yet is (re)written from the builder, which is what carries a
-            // fixed script forward to rows that are still waiting for their first review.
-            var script = existing?.ScriptSignature is not null
-                ? existing.Script
-                : packageManager.BuildScript();
+            // A reviewed script is left exactly as it was reviewed — see the remarks above. A row
+            // nobody has signed yet, and a row that does not exist, gets what the rest of its bucket
+            // already runs: the bucket's signed script and signature when there is one, the builder's
+            // text only when nothing in the bucket has been reviewed. Asking the builder first is what
+            // used to split a bucket after a deployment — see PackageManagerBucketScript.
+            if (existing?.ScriptSignature is not null)
+            {
+                existing.Update(
+                    UpgradePathStatus.Found, entry.AvailableVersion ?? existing.LatestVersion, UpgradeMethod.Script,
+                    downloadUrl: null, command: null, instructions: null, sourceUrl: null, notes: null,
+                    script: existing.Script, applicationIdentifier: applicationIdentifier);
+                continue;
+            }
+
+            if (!bucketScripts.TryGetValue(packageManager.Name, out var bucketScript))
+            {
+                bucketScript = await PackageManagerBucketScript.ResolveAsync(_upgradePathRepository, packageManager, cancellationToken);
+                bucketScripts[packageManager.Name] = bucketScript;
+            }
 
             if (existing is null)
             {
                 var created = UpgradePath.Create(
                     entry.Name, platform, UpgradePathStatus.Found, entry.AvailableVersion,
                     UpgradeMethod.Script, downloadUrl: null, command: null, instructions: null, sourceUrl: null, notes: null,
-                    script: script, applicationIdentifier: applicationIdentifier);
-
-                var inheritedSignature = await _upgradePathRepository.FindExistingSignatureForScriptAsync(script, cancellationToken);
-                if (inheritedSignature is not null)
-                {
-                    created.SetSignatures(inheritedSignature, null);
-                }
-
+                    script: bucketScript.Script, applicationIdentifier: applicationIdentifier);
+                created.SetSignatures(bucketScript.Signature, null);
                 await _upgradePathRepository.AddAsync(created, cancellationToken);
             }
             else
@@ -217,16 +230,8 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
                 existing.Update(
                     UpgradePathStatus.Found, entry.AvailableVersion ?? existing.LatestVersion, UpgradeMethod.Script,
                     downloadUrl: null, command: null, instructions: null, sourceUrl: null, notes: null,
-                    script: script, applicationIdentifier: applicationIdentifier);
-
-                if (existing.ScriptSignature is null)
-                {
-                    var inheritedSignature = await _upgradePathRepository.FindExistingSignatureForScriptAsync(script, cancellationToken);
-                    if (inheritedSignature is not null)
-                    {
-                        existing.SetSignatures(inheritedSignature, existing.CommandSignature);
-                    }
-                }
+                    script: bucketScript.Script, applicationIdentifier: applicationIdentifier);
+                existing.SetSignatures(bucketScript.Signature, existing.CommandSignature);
             }
         }
     }

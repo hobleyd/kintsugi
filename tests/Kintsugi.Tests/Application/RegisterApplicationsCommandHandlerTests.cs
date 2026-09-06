@@ -404,11 +404,13 @@ public class RegisterApplicationsCommandHandlerTests
     }
 
     [Fact]
-    public async Task Handle_WhenAnUnsignedRowHoldsAnOlderScript_WritesTheCurrentOne()
+    public async Task Handle_WhenAnUnsignedRowHoldsAnOlderScript_AndNothingInTheBucketIsReviewed_WritesTheCurrentOne()
     {
         // The other side of it. Nothing is being protected on an unsigned row — no agent will run it
-        // — so a fixed script reaches it without anyone having to ask, and it is still unsigned
-        // afterwards, which is what keeps a human between the new text and the fleet.
+        // — and nothing in the bucket has been reviewed (the default GetSignedPackageManagerScriptAsync
+        // setup), so the builder's text is the only candidate: a fixed script reaches it without
+        // anyone having to ask, and it is still unsigned afterwards, which is what keeps a human
+        // between the new text and the fleet.
         SetUpHost(_host);
         var existingPath = UpgradePath.Create(
             "firefox", HomebrewBucket, UpgradePathStatus.Found, "127.0", UpgradeMethod.Script,
@@ -424,6 +426,94 @@ public class RegisterApplicationsCommandHandlerTests
 
         Assert.Equal(HomebrewScript, existingPath.Script);
         Assert.Null(existingPath.ScriptSignature);
+    }
+
+    [Fact]
+    public async Task Handle_SeedsANewRow_WithTheBucketsReviewedScript_NotTheBuildersNewerOne()
+    {
+        // The bug this rule exists for. Homebrew's bucket runs a reviewed script; then a builder body
+        // is edited and deployed; then a host installs a new formula. Seeding that row from the
+        // builder gave the bucket a second text — the Upgrade Scripts screen showed two Homebrew
+        // entries, 118 applications and 4 — and, since no signature existed for the new bytes, left
+        // the 4 unsigned and silently not patching. The new row must join what the bucket already
+        // runs, signature included, and patch from its first check-in.
+        const string reviewed = "#!/bin/bash\n# the revision the fleet was reviewed on\n";
+        SetUpHost(_host);
+        _upgradePathRepository.Setup(r => r.GetAsync("newformula", HomebrewBucket, It.IsAny<CancellationToken>())).ReturnsAsync((UpgradePath?)null);
+        _upgradePathRepository
+            .Setup(r => r.GetSignedPackageManagerScriptAsync(HomebrewBucket, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PackageManagerBucketScript(reviewed, "signed:over-the-reviewed-revision"));
+        UpgradePath? added = null;
+        _upgradePathRepository
+            .Setup(r => r.AddAsync(It.IsAny<UpgradePath>(), It.IsAny<CancellationToken>()))
+            .Callback<UpgradePath, CancellationToken>((p, _) => added = p)
+            .Returns(Task.CompletedTask);
+
+        await CreateHandler().Handle(
+            new RegisterApplicationsCommand("SERIAL-1", new[]
+            {
+                new ApplicationEntry("newformula", "1.0", PackageManager: "Homebrew", AvailableVersion: "1.1"),
+            }),
+            CancellationToken.None);
+
+        Assert.NotNull(added);
+        Assert.Equal(reviewed, added!.Script);
+        Assert.NotEqual(HomebrewScript, added.Script);
+        Assert.Equal("signed:over-the-reviewed-revision", added.ScriptSignature);
+        // The builder was never consulted for content: the bucket answered.
+        _upgradePathRepository.Verify(
+            r => r.FindExistingSignatureForScriptAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Handle_RealignsAnUnsignedRow_ToTheBucketsReviewedScript()
+    {
+        // A row that already got the builder's newer text (seeded before this rule existed, or by a
+        // force-recheck) is unsigned, so nothing protects it — and it is the odd one out in a bucket
+        // that runs a reviewed script. The next report puts it back with the rest, signed, and the
+        // split on the Upgrade Scripts screen heals itself without anyone pressing anything.
+        const string reviewed = "#!/bin/bash\n# the revision the fleet was reviewed on\n";
+        SetUpHost(_host);
+        var strayRow = UpgradePath.Create(
+            "firefox", HomebrewBucket, UpgradePathStatus.Found, "127.0", UpgradeMethod.Script,
+            null, null, null, null, null, HomebrewScript, "firefox");
+        _upgradePathRepository.Setup(r => r.GetAsync("firefox", HomebrewBucket, It.IsAny<CancellationToken>())).ReturnsAsync(strayRow);
+        _upgradePathRepository
+            .Setup(r => r.GetSignedPackageManagerScriptAsync(HomebrewBucket, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new PackageManagerBucketScript(reviewed, "signed:over-the-reviewed-revision"));
+
+        await CreateHandler().Handle(
+            new RegisterApplicationsCommand("SERIAL-1", new[]
+            {
+                new ApplicationEntry("firefox", "128.0", PackageManager: "Homebrew", AvailableVersion: "129.0"),
+            }),
+            CancellationToken.None);
+
+        Assert.Equal(reviewed, strayRow.Script);
+        Assert.Equal("signed:over-the-reviewed-revision", strayRow.ScriptSignature);
+        Assert.Equal("129.0", strayRow.LatestVersion);
+    }
+
+    [Fact]
+    public async Task Handle_ResolvesTheBucketScriptOncePerManager_HoweverManyApplicationsReport()
+    {
+        // A fresh host reports every Homebrew formula it has in one go. The answer is per bucket, so
+        // asking once is enough — and a hundred GroupBy queries on every check-in is not.
+        SetUpHost(_host);
+        _upgradePathRepository.Setup(r => r.GetAsync(It.IsAny<string>(), HomebrewBucket, It.IsAny<CancellationToken>())).ReturnsAsync((UpgradePath?)null);
+
+        await CreateHandler().Handle(
+            new RegisterApplicationsCommand("SERIAL-1", new[]
+            {
+                new ApplicationEntry("firefox", "128.0", PackageManager: "Homebrew", AvailableVersion: "129.0"),
+                new ApplicationEntry("slack", "4.0", PackageManager: "Homebrew", AvailableVersion: "4.1"),
+                new ApplicationEntry("zoom", "6.0", PackageManager: "Homebrew", AvailableVersion: "6.1"),
+            }),
+            CancellationToken.None);
+
+        _upgradePathRepository.Verify(
+            r => r.GetSignedPackageManagerScriptAsync(HomebrewBucket, It.IsAny<CancellationToken>()), Times.Once);
+        _upgradePathRepository.Verify(r => r.AddAsync(It.IsAny<UpgradePath>(), It.IsAny<CancellationToken>()), Times.Exactly(3));
     }
 
     [Fact]

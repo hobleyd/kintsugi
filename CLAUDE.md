@@ -1102,8 +1102,26 @@ what that actually meant was that a background report could swap the content of 
 content the fleet's agents may be executing right now, on the strength of a deployment nobody was
 watching. It is exactly what `UpgradePath.AdoptApprovedScript` refuses to do, and a report has less
 business doing it than a human pressing Adopt. Now a row that carries a `ScriptSignature` keeps its
-script exactly as reviewed and only `LatestVersion` moves; an *unsigned* row is still written from
-the builder, which is how a fixed script reaches rows nobody has approved yet.
+script exactly as reviewed and only `LatestVersion` moves.
+
+**What an unsigned or new row gets is the bucket's reviewed script, not the builder's — and that
+rule is `PackageManagerBucketScript`, used by both writers.** Protecting signed rows alone shipped a
+second bug: after a builder edit the reviewed rows kept the old text while every row seeded *after*
+the deployment — a host installing a new formula, a "Find Upgrade Paths" for one, a force-recheck —
+got the new text from the builder, unsigned, because no signature existed for those bytes. The
+Upgrade Scripts screen showed two `Homebrew (any managed application)` entries (118 applications and
+4), and the 4 were quietly not patching. So `RegisterApplicationsCommandHandler` and
+`ResearchApplicationUpgradePathCommandHandler.ApplyPackageManagerCommandAsync` both ask
+`IUpgradePathRepository.GetSignedPackageManagerScriptAsync` what the bucket already runs and write
+that, signature included; the builder is consulted only for a bucket in which nothing has been
+reviewed yet — the very first script per manager, which a human still signs. A package-manager
+bucket therefore holds one script, the builder's newer text reaches it only through
+`TakeServerWrittenScriptCommand` (which moves every row at once), and a stray unsigned row on a
+different text is pulled back into line by the next report. Do not reintroduce a
+`packageManager.BuildScript()` call on a write path outside that helper. Signed rows are still never
+touched: two *signed* texts in one bucket can only come from a human pasting and then signing a
+different script on one row, and that is shown as two entries rather than undone; new rows join the
+text on the most rows.
 
 Two things follow. `UpgradePath.Apply` drops `ScriptSignature` whenever the content it is replacing
 actually differs (same for `Command`/`CommandSignature`) — the invariant that a signature never

@@ -47,6 +47,22 @@ public class UpgradePathRepository : IUpgradePathRepository
             .Select(p => p.ScriptSignature)
             .FirstOrDefaultAsync(cancellationToken);
 
+    public async Task<PackageManagerBucketScript?> GetSignedPackageManagerScriptAsync(string platform, CancellationToken cancellationToken)
+    {
+        // Grouped by text, not by (text, signature): ECDSA signatures are randomised, so the same
+        // bytes signed twice carry two different strings, and any one of them verifies. Min() picks
+        // one deterministically.
+        var reviewed = await _context.UpgradePaths
+            .Where(p => p.Platform == platform && p.Method == UpgradeMethod.Script && p.Script != null && p.ScriptSignature != null)
+            .GroupBy(p => p.Script!)
+            .Select(g => new { Script = g.Key, Signature = g.Min(p => p.ScriptSignature)!, Rows = g.Count() })
+            .OrderByDescending(x => x.Rows)
+            .ThenBy(x => x.Script)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        return reviewed is null ? null : new PackageManagerBucketScript(reviewed.Script, reviewed.Signature);
+    }
+
     public async Task<IReadOnlyList<UpgradePath>> GetRowsWithoutScriptSignatureAsync(CancellationToken cancellationToken) =>
         await _context.UpgradePaths
             .Where(p => p.ScriptSignature == null)

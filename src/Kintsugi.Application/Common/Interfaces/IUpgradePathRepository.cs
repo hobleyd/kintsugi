@@ -30,6 +30,15 @@ public interface IUpgradePathRepository
     /// been signed, rather than needing its own separate "Sign Script" review.</summary>
     Task<string?> FindExistingSignatureForScriptAsync(string script, CancellationToken cancellationToken);
 
+    /// <summary>The script the signed rows of one package-manager bucket hold, with its signature, or
+    /// null when nothing in that bucket has been signed. What <see cref="PackageManagerBucketScript"/>
+    /// gives a new or unsigned row, so a bucket never splits between the text a human reviewed and
+    /// the text this build would write. Should a bucket hold more than one signed text (a human
+    /// pasted and then signed a different script on one row), the one on the most rows is returned —
+    /// it is what the fleet mostly runs — with the script's bytes as the tiebreaker, so the answer is
+    /// stable across calls.</summary>
+    Task<PackageManagerBucketScript?> GetSignedPackageManagerScriptAsync(string platform, CancellationToken cancellationToken);
+
     /// <summary>Every currently-unsigned row whose <see cref="UpgradePath.Script"/> is byte-for-byte
     /// identical to <paramref name="script"/> — used to propagate one freshly-signed Homebrew
     /// script's signature immediately to every other already-resolved row sharing that same content

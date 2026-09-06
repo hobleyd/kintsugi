@@ -167,7 +167,13 @@ public class ResearchApplicationUpgradePathCommandHandler : IRequestHandler<Rese
         // manages: the script tells the two apart at runtime by --appName, which is what lets one
         // signature cover both (see RecognizedPackageManager.BuildScript). isSelfUpdate only decides
         // the wording of the note above for a manager this catalog does not know.
-        var script = packageManager.BuildScript();
+        //
+        // Taken from the bucket rather than the builder: when the bucket already runs a reviewed
+        // script this row joins it, signature included, instead of getting the builder's newer text
+        // unsigned and leaving the bucket split — see PackageManagerBucketScript. A force-recheck of
+        // one Homebrew application must not be the way a second revision gets into Homebrew's bucket.
+        var bucketScript = await PackageManagerBucketScript.ResolveAsync(_upgradePathRepository, packageManager, cancellationToken);
+        var script = bucketScript.Script;
 
         // What the script is addressed by. Homebrew has no real bundle identifier for a
         // formula/cask (see InstalledApplication.ApplicationIdentifier), so the package name stands
@@ -185,15 +191,9 @@ public class ResearchApplicationUpgradePathCommandHandler : IRequestHandler<Rese
         var latestVersion = await _researchClient.CheckScriptVersionAsync(
             script, request.Platform, request.ApplicationName, applicationIdentifier, cancellationToken);
 
-        // Every script from one manager is byte-identical across every application, so once a human
-        // has signed this exact content anywhere, a freshly (re-)resolved row inherits that same
-        // trust immediately rather than sitting unsigned until someone happens to sign this
-        // particular application too.
-        var scriptSignature = await _upgradePathRepository.FindExistingSignatureForScriptAsync(script, cancellationToken);
-
         var entity = await UpsertAsync(
             request.ApplicationName, request.Platform, UpgradePathStatus.Found, latestVersion, UpgradeMethod.Script,
-            null, null, null, null, null, script, applicationIdentifier, cancellationToken, scriptSignature);
+            null, null, null, null, null, script, applicationIdentifier, cancellationToken, bucketScript.Signature);
 
         return ToResult(entity, Skipped: false, note: null);
     }
