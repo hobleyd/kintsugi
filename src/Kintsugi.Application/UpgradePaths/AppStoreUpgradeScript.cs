@@ -40,14 +40,27 @@ namespace Kintsugi.Application.UpgradePaths;
 /// <see cref="Build"/>.
 /// </para>
 /// <para>
-/// <c>--update</c> is deliberately not implemented yet. Since Apple's fix for CVE-2025-43411
-/// (macOS 14.8.2 / 15.7.2 / 26.1) an App Store install needs root, while the download half needs the
-/// logged-in user's store session — two users, neither of which the agent's per-user process is on
-/// its own, and no Apple-supported command line does either. The branch exits non-zero saying so,
-/// which is what a reviewer reading it before signing should see; a signed script that exited 0
-/// having done nothing would make the agent report the latest version as installed. How that branch
-/// gets filled in — Apple's own automatic updates, or a root-owned <c>mas</c> behind a sudoers rule
-/// — is a deployment decision recorded in CLAUDE.md under "Platform buckets".
+/// <c>--update</c> runs as <em>root</em>, from the agent's LaunchDaemon — the opposite of Homebrew's
+/// script, and the macOS agent's <c>upgrade::runs_as_root</c> names this manager for that reason.
+/// Since Apple's fix for CVE-2025-43411 (macOS 14.8.2 / 15.7.2 / 26.1) installing a store update
+/// needs root, while starting the download needs the logged-in user's store session (CommerceKit
+/// talks to <c>com.apple.appstoreagent</c> in that user's <c>gui/</c> launchd domain). A root process
+/// can be both: <c>launchctl asuser &lt;console uid&gt;</c> puts it in the user's bootstrap namespace,
+/// and <c>mas</c> — given <c>SUDO_UID</c>/<c>SUDO_GID</c> — seteuid's to the user for the CommerceKit
+/// half and runs <c>installer</c> as root for the install half, which needs no password because the
+/// real uid is already 0. Verified end to end from a LaunchDaemon on macOS 26.6 (Numbers 15.1 →
+/// 15.3.1); the per-user process cannot do it, because its <c>sudo</c> has no TTY to answer.
+/// </para>
+/// <para>
+/// The <c>mas</c> it runs is the copy the agent ships as <c>/usr/local/bin/kintsugi-mas</c>
+/// (<c>config::MAS_BINARY_PATH</c> in the macOS agent; installed by <c>install.sh</c> and kept current
+/// by <c>self_update</c>), never Homebrew's: a root daemon executing a user-writable binary is root
+/// for whoever owns the Homebrew prefix, so the script refuses a binary not owned by root or writable
+/// by anyone else. <c>mas</c> resolves installed apps through Spotlight, so it re-indexes a bundle it
+/// finds unindexed — noisy in the log, harmless. And a <c>mas update</c> that finds nothing to update
+/// exits 0 having printed nothing, so the script treats empty output as failure: the agent reports
+/// the server's latest version as installed on exit 0 (<c>patch_cycle::run_patches</c>), and a silent
+/// no-op would make that report a lie the next inventory contradicts.
 /// </para>
 /// </remarks>
 public static class AppStoreUpgradeScript
@@ -134,19 +147,72 @@ public static class AppStoreUpgradeScript
               exit 0
             fi
 
-            # --update mode: runs on the managed Mac, as the logged-in user (the agent's per-user
-            # process runs every package-manager row, see upgrade::runs_as_root).
+            # --update mode: runs on the managed Mac, as root, from the agent's LaunchDaemon (see
+            # upgrade::runs_as_root in the macOS agent, which sends this manager's rows to the root
+            # queue rather than running them as the logged-in user the way Homebrew's are).
             #
-            # Not implemented yet, and it says so rather than pretending. Since Apple's fix for
-            # CVE-2025-43411 (macOS 14.8.2 / 15.7.2 / 26.1) installing an App Store update needs root,
-            # while starting the download needs the logged-in user's store session; the per-user
-            # process is one of those and cannot become the other, and Apple ships no command line
-            # for either. Exiting non-zero here is load-bearing: an exit 0 that did nothing would make
-            # the agent report the latest version as installed (patch_cycle::run_patches) and the
-            # next inventory would contradict it. Do not sign this script expecting it to patch.
-            echo "App Store updates are not yet performed by the agent; the App Store's own automatic" >&2
-            echo "updates (System Settings > App Store > Automatic Updates) install them." >&2
-            exit 1
+            # Two users are needed and root can be both. Since Apple's fix for CVE-2025-43411 (macOS
+            # 14.8.2 / 15.7.2 / 26.1) installing a store update needs root, while starting the download
+            # needs the logged-in user's store session — CommerceKit talks to com.apple.appstoreagent in
+            # that user's gui/<uid> launchd domain, which a bare root process cannot see ("No bag
+            # entry"). `launchctl asuser <uid>` runs the command inside that domain while staying root;
+            # `mas`, seeing euid 0 and SUDO_UID, drops its effective uid to the user for the CommerceKit
+            # half (it refuses to run as root without SUDO_UID at all), then runs `sudo installer` for
+            # the install half — which asks no password because the real uid is still 0. Verified from
+            # a real LaunchDaemon on macOS 26.6.
+            if [ "$(id -u)" != 0 ]; then
+              echo "this script must run as root (the agent's daemon), not as the logged-in user" >&2
+              exit 1
+            fi
+
+            # The agent's own copy of mas, never Homebrew's: a root daemon executing a binary anyone
+            # else can write is root for that person. Owner and mode are checked, not just presence,
+            # because on an Intel Mac /usr/local/bin is Homebrew's prefix and user-owned — a swapped
+            # file there would be owned by whoever swapped it, which is exactly what this catches.
+            MAS=/usr/local/bin/kintsugi-mas
+            if [ ! -x "$MAS" ]; then
+              echo "$MAS is not installed — it ships with the macOS agent from 0.9.0 (install.sh / self_update)" >&2
+              exit 1
+            fi
+            mas_owner=$(stat -f '%u' "$MAS")
+            mas_mode=$(stat -f '%Lp' "$MAS")
+            if [ "$mas_owner" != 0 ] || [ $(( 8#$mas_mode & 8#022 )) -ne 0 ]; then
+              echo "$MAS is owned by uid $mas_owner with mode $mas_mode; refusing to run anything root did not put there" >&2
+              exit 1
+            fi
+
+            # Whoever is at the console owns the store session. The per-user process only asks for
+            # this row while somebody is logged in, so an empty console here is a request that outlived
+            # its session (see queue::REQUEST_TIMEOUT), not the normal case.
+            console_uid=$(stat -f '%u' /dev/console)
+            console_user=$(stat -f '%Su' /dev/console)
+            if [ -z "$console_uid" ] || [ "$console_uid" = 0 ]; then
+              echo "nobody is logged in at the console, and an App Store update needs that user's store session" >&2
+              exit 1
+            fi
+            console_gid=$(id -g "$console_user")
+            console_home=$(dscl . -read "/Users/$console_user" NFSHomeDirectory | sed -E 's/^NFSHomeDirectory: //')
+
+            # --bundle: --appId is the CFBundleIdentifier the agent reported, so mas is told so rather
+            # than left to guess from its shape. --verbose makes an id the store does not know a
+            # warning instead of silence. stdout is captured because an update that finds nothing to
+            # do exits 0 having printed nothing — and exit 0 is what makes the agent report the
+            # server's latest version as installed, so "nothing happened" has to fail here. The
+            # capture is outside `set -e` so a failed run's progress lines still reach the agent's log
+            # ahead of its exit status, rather than being dropped with the assignment.
+            set +e
+            output=$(launchctl asuser "$console_uid" /usr/bin/env \
+              SUDO_UID="$console_uid" SUDO_GID="$console_gid" \
+              HOME="$console_home" USER="$console_user" LOGNAME="$console_user" \
+              "$MAS" update --verbose --bundle "$APP_ID")
+            status=$?
+            set -e
+            printf '%s\n' "$output"
+            [ "$status" -eq 0 ] || exit "$status"
+            if [ -z "$output" ]; then
+              echo "the App Store reported nothing to update for $APP_ID — the installed build may already be the store's current one" >&2
+              exit 1
+            fi
             """;
     }
 }

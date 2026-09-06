@@ -1110,20 +1110,48 @@ prefix left a Mac with four of them out of date reporting nothing. A VPP-license
 (`kMDItemAppStoreReceiptIsVPPLicensed`, an MDM's device-based assignment) is reported without an
 identifier, because the MDM owns it and no Apple Account can update it.
 
-Three things about `AppStoreUpgradeScript` that each fail silently if changed. Its lookup is
+Two things about `AppStoreUpgradeScript`'s version check fail silently if changed. Its lookup is
 `itunes.apple.com/lookup?bundleId=…&entity=desktopSoftware` — **not `macSoftware`**, which for an app
 sold as one purchase on iOS and macOS returns the iOS record (Pages 15.3 against a Mac build of
 15.3.1; `mas` queries `desktopSoftware` for the same reason). Without `country=` it asks the US
 storefront, so an app not sold there answers `resultCount: 0` and the row's `LatestVersion` stays null
-— the server cannot know a host's storefront, so this is documented rather than solved. And its
-`--update` mode **deliberately exits 1**: since Apple's fix for CVE-2025-43411 (macOS 14.8.2 / 15.7.2 /
-26.1) installing a store update needs root while starting the download needs the logged-in user's
-store session, and the per-user process that runs every package-manager row is only one of those.
-`mas ≥ 4` bridges the two by running `sudo installer` itself, which a LaunchAgent with no TTY cannot
-answer. Whether that branch is filled by the store's own automatic updates (`AutoUpdate` in
-`/Library/Preferences/com.apple.commerce`) or by a root-owned `mas` behind a sudoers rule is an open
-decision; until it is made, the row shows as behind and is not patched, and an exit 0 there would make
-`patch_cycle::run_patches` report the latest version as installed having installed nothing.
+— the server cannot know a host's storefront, so this is documented rather than solved.
+
+**An App Store update runs as root, from the daemon, inside the console user's session — the mirror
+image of Homebrew.** Since Apple's fix for CVE-2025-43411 (macOS 14.8.2 / 15.7.2 / 26.1) installing a
+store update needs root, while starting the download needs the logged-in user's store session:
+CommerceKit talks to `com.apple.appstoreagent` in that user's `gui/<uid>` launchd domain, which a bare
+root process cannot see (`No bag entry`). The per-user process is one of those two and cannot become
+the other — `mas ≥ 4` bridges them by running `sudo installer` itself, and a LaunchAgent has no TTY to
+answer it. Root can be both: `launchctl asuser <uid>` puts it inside the user's bootstrap namespace
+while it stays uid 0, `mas` — handed `SUDO_UID`/`SUDO_GID` by hand — seteuid's to the user for the
+CommerceKit half, and its `sudo installer` asks no password because the real uid is already 0. This
+was verified from a real LaunchDaemon on macOS 26.6 (Numbers 15.1 → 15.3.1), *not* from `sudo` in a
+Terminal — `sudo` keeps the caller's audit session, and so does `sudo launchctl submit`, which lands
+the job in `gui/<uid>` and proves nothing about the daemon; only a plist bootstrapped into the
+`system` domain does. So `upgrade::runs_as_root` sends this manager's rows to the root queue by name
+(`system_info::APP_STORE_NAME`), the script refuses on its first line if it is not root, and the
+`launchctl asuser` dance lives in the script rather than the agent, the way AI-written scripts already
+`launchctl asuser … osascript` to quit an application.
+
+**The `mas` it runs is the agent's own root-owned copy, `/usr/local/bin/kintsugi-mas`, and that is not
+packaging tidiness.** A root daemon executing Homebrew's `/opt/homebrew/bin/mas` — user-writable — is
+root for whoever owns the Homebrew prefix. `publish-release.sh` fetches mas-cli's two per-architecture
+`.pkg`s pinned by digest, extracts the Mach-O (`libexec/bin/mas`; `bin/mas` is a zsh formatting
+wrapper), `lipo`s them into one universal file, ad-hoc signs it like the agent, and refuses to build a
+single-architecture one; `install.sh` installs it `root:wheel 0755`, `self_update` replaces it from the
+same archive whenever one is present (so a host installed before it gains App Store patching on its
+next update), and the script checks owner *and* mode before executing it — on an Intel Mac
+`/usr/local/bin` is Homebrew's user-owned prefix, so a swapped file there would be owned by whoever
+swapped it, which is exactly what the check catches. Bumping `MAS_VERSION` means re-pinning both
+digests and re-running the LaunchDaemon check above: mas drives private frameworks and has broken on
+macOS majors before; mas 7 needs macOS 13. Two behaviours of `mas` are load-bearing in the script:
+it resolves installed apps through Spotlight and re-indexes any it finds unindexed (noisy, harmless),
+and a `mas update` with nothing to do **exits 0 having printed nothing** — so the script treats
+empty output as failure, because exit 0 is what makes `patch_cycle::run_patches` report the server's
+latest version as installed, and a silent no-op would be a patch result the next inventory
+contradicts. A store dialog is still possible (an app owned by a different Apple Account); that is the
+honest outcome, and nothing here can answer it.
 
 **A signed script is never rewritten by a deployment, and editing one of those bodies changes
 nothing until a human says so.** `RegisterApplicationsCommandHandler` used to rewrite `Script` from
@@ -1193,7 +1221,7 @@ original — then the others for what each platform forced to differ. The differ
 | Privileged half | root LaunchDaemon, re-invoked by launchd | resident service (`windows-service`) | systemd oneshot on a `.timer` |
 | Per-user half | LaunchAgent | logon-triggered task for `BUILTIN\Users` | systemd user unit, `graphical-session.target` |
 | Check-in schedule | rewrites its own plist, reloads launchd via a detached helper | computes its next wake in-process | rewrites its own `.timer`, `daemon-reload` |
-| Privilege handoff | queue: OS updates and AI-researched scripts; Homebrew stays per-user | queue, everything | queue, everything |
+| Privilege handoff | queue: OS updates, AI-researched scripts and App Store rows; Homebrew stays per-user | queue, everything | queue, everything |
 | Inventory | `/Applications` bundles + Homebrew + App Store (by receipt) | uninstall registry (3 views) + winget + Chocolatey | Flatpak + Snap (not dpkg/rpm — see above) |
 | OS updates | `softwareupdate` | Windows Update Agent COM API, via PowerShell | apt / dnf / yum / zypper / pacman / apk |
 | Host identity | hardware serial, always present | SMBIOS serial, **often a placeholder** | DMI serial, **often a placeholder** |
@@ -1223,6 +1251,9 @@ get `brew` run as root — and a request older than `queue::REQUEST_TIMEOUT` or 
 current boot is discarded unrun, because the process that would have shown progress for it is gone.
 The prompt now describes that context (root, a LaunchDaemon, no GUI session — quit the application
 via `launchctl asuser`, never relaunch it), so a script is generated for the process that runs it.
+An App Store row (`PackageManager` "App Store") goes to the daemon too, for the reason under
+"Platform buckets": the install half needs root and the download half needs the console user's
+session, and only root can be both.
 
 **"No network call at all" includes the patching policy, and 0.5.0 got that wrong.**
 `/api/patching-policy` sits inside nginx's client-certificate regex, so there is no such thing as
@@ -1369,6 +1400,13 @@ by then — only the long-running per-user units get restarted.
   fresh install. Both agents publish `.tar.gz` — Windows included — because
   `AgentPackageArchiveRewriter` reads gzip-tar specifically, and `tar.exe` has shipped in Windows
   since 10 1803.
+- `/usr/local/bin/kintsugi-mas` is named in four places that nothing checks agree: the macOS agent's
+  `config::MAS_BINARY_PATH` (what `self_update` replaces and `self_removal` deletes), its
+  `MAS_BINARY_NAME` (the tarball entry `self_update` extracts and `publish-release.sh` writes),
+  `install.sh`/`uninstall.sh`'s `MAS_DEST`, and the `MAS=` line of the server's
+  `AppStoreUpgradeScript`. Move one and App Store rows fail with "kintsugi-mas is not installed" on a
+  host that plainly has it — a signed script's text is not rewritten by a deployment, so the server
+  side of that rename only reaches a host after a human takes and re-signs the new script.
 - The enrollment token is not baked into published packages — `AgentPackageArchiveRewriter` writes
   the current `AGENT_ENROLLMENT_TOKEN` into `config.toml` on every download, so rotation never
   staleness-breaks a published package. `AgentPackagesController.Download` skips that rewrite for a

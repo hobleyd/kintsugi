@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::identity::{self, AgentIdentity};
 use crate::logging;
+use crate::system_info;
 
 /// Mirrors the backend's `UpgradeStatusDto` — see
 /// Kintsugi.Application/UpgradePaths/UpgradeStatusDto.cs. `latestVersion`/`updateAvailable`
@@ -56,9 +57,9 @@ pub struct UpgradeStatus {
 /// Whether this row's upgrade has to be run by the root daemon (through `queue`) rather than by the
 /// per-user process asking. The dividing line is who owns the installation:
 ///
-/// - A **package-manager** row is Homebrew's, and Homebrew refuses to run as root outright
-///   ("Running Homebrew as root is extremely dangerous and no longer supported"); its installs are
-///   user-owned, so the logged-in user is the right — and only — process for it. A legacy
+/// - A **Homebrew** row stays with the logged-in user: Homebrew refuses to run as root outright
+///   ("Running Homebrew as root is extremely dangerous and no longer supported"), and its installs
+///   are user-owned, so the logged-in user is the right — and only — process for it. A legacy
 ///   `PackageManagerCommand` row is a bare `brew upgrade ...` for the same reason.
 /// - An **AI-researched** row (no package manager) installs into `/Applications` the way the
 ///   server's prompt tells it to — replace the bundle in place, or `installer -pkg ... -target /` —
@@ -68,11 +69,21 @@ pub struct UpgradeStatus {
 ///   Macs. The prompt now writes these scripts *for* root (see
 ///   `AiUpgradePathResearchClient.BuildScriptGenerationPrompt`), so this is also the only context
 ///   they are tested in.
+/// - An **App Store** row goes to root as well, for a reason that is the mirror image of Homebrew's.
+///   Since Apple's fix for CVE-2025-43411 the install half of a store update needs root, while the
+///   download half needs the logged-in user's store session; the per-user process is one of those
+///   and has no way to become the other (its `sudo` has no TTY to answer), whereas root can be both
+///   — `launchctl asuser` puts it inside the user's session and `mas` drops to that user for the
+///   store half. The server's `AppStoreUpgradeScript` does exactly that dance, and it is written for
+///   root: run as the user it refuses on its first line. Recognized by the same name the inventory
+///   reports the manager under (`system_info::APP_STORE_NAME`), which is also the string the
+///   server's `PackageManagerCatalog.AppStore` keys the row's bucket by.
 ///
 /// The daemon asks this same question before running a request (see `main::DaemonRequestHandler`)
 /// and refuses a Homebrew row, so a forged request cannot get `brew` run as root either.
 pub fn runs_as_root(status: &UpgradeStatus) -> bool {
-    status.method == UpgradeMethod::Script && status.package_manager.is_none()
+    status.method == UpgradeMethod::Script
+        && status.package_manager.as_deref().is_none_or(|manager| manager.eq_ignore_ascii_case(system_info::APP_STORE_NAME))
 }
 
 /// Mirrors Kintsugi.Domain.Enums.UpgradeMethod. Deserializes from the backend's plain enum
@@ -412,6 +423,15 @@ mod tests {
     fn a_homebrew_script_stays_with_the_logged_in_user() {
         // Homebrew refuses to run as root, so this must never reach the daemon.
         assert!(!runs_as_root(&status(UpgradeMethod::Script, Some("Homebrew"))));
+    }
+
+    #[test]
+    fn an_app_store_script_runs_as_root() {
+        // The install half of a store update needs root and the download half needs the console
+        // user's session; only root can be both (via `launchctl asuser`), so this must reach the
+        // daemon. Matched case-insensitively like every other row name.
+        assert!(runs_as_root(&status(UpgradeMethod::Script, Some("App Store"))));
+        assert!(runs_as_root(&status(UpgradeMethod::Script, Some("app store"))));
     }
 
     #[test]

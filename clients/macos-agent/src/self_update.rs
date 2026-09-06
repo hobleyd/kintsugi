@@ -152,7 +152,8 @@ fn parse_shasum_output(stdout: &str) -> Option<String> {
 /// Extracts the downloaded tarball — the same full install bundle a human downloads from the
 /// Clients page (binary + config.toml + plists + install/uninstall scripts, see
 /// packaging/publish-release.sh) — and installs whatever it finds at `kintsugi-agent` at its top
-/// level over this agent's own binary, ignoring everything else in the bundle.
+/// level over this agent's own binary, ignoring everything else in the bundle except
+/// `kintsugi-mas`, which is installed beside it when the archive carries one.
 fn install_binary(downloaded_path: &Path) -> Result<()> {
     let extract_dir = std::env::temp_dir().join(format!("kintsugi-agent-update-extract-{}", std::process::id()));
     fs::create_dir_all(&extract_dir).context("failed to create a temp directory to extract the package into")?;
@@ -180,21 +181,34 @@ fn extract_and_install(downloaded_path: &Path, extract_dir: &Path) -> Result<()>
         anyhow::bail!("the published package does not contain a kintsugi-agent binary at its top level");
     }
 
-    let installed_path = config::installed_binary_path();
+    // The agent's own `mas` (see `config::MAS_BINARY_NAME`) travels in the same archive and is
+    // replaced together with the agent, which is what lets the server's AppStoreUpgradeScript assume
+    // the two agree. Installed first: a host first installed from a release that predates it gains
+    // App Store patching on its next self-update, with no reinstall — the same gap the Linux agent's
+    // `restart_remote_control_unit` closes for its fourth unit. A release built without it (see
+    // publish-release.sh, which warns loudly) leaves whatever copy is already installed in place
+    // rather than removing it.
+    let extracted_mas = extract_dir.join(config::MAS_BINARY_NAME);
+    if extracted_mas.is_file() {
+        install_over(&extracted_mas, &config::mas_binary_path())?;
+    }
 
-    // Staged next to the final destination, then renamed over it — a same-filesystem rename is
-    // atomic, so nothing (launchd included) ever observes a partially-written binary at the real
-    // path.
+    install_over(&extracted_binary, &config::installed_binary_path())
+}
+
+/// Staged next to the final destination, then renamed over it — a same-filesystem rename is atomic,
+/// so nothing (launchd included) ever observes a partially-written binary at the real path.
+fn install_over(extracted: &Path, installed_path: &Path) -> Result<()> {
     let staged_path = installed_path.with_extension("new");
-    fs::copy(&extracted_binary, &staged_path).context("failed to stage the new binary")?;
+    fs::copy(extracted, &staged_path).with_context(|| format!("failed to stage the new {}", installed_path.display()))?;
 
     let mut permissions = fs::metadata(&staged_path).context("failed to read staged binary permissions")?.permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(&staged_path, permissions).context("failed to make the staged binary executable")?;
 
-    fs::rename(&staged_path, &installed_path).context("failed to install the new binary")?;
+    fs::rename(&staged_path, installed_path).with_context(|| format!("failed to install {}", installed_path.display()))?;
 
-    logging::info(&format!("installed new kintsugi-agent binary at {}", installed_path.display()));
+    logging::info(&format!("installed new binary at {}", installed_path.display()));
     Ok(())
 }
 

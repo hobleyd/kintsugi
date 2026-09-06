@@ -50,6 +50,15 @@ const UI_PLIST_PATH: &str = "/Library/LaunchAgents/au.com.sharpblue.kintsugiagen
 /// self-update target: `self_update::check_and_apply` replaces exactly this path.
 const INSTALLED_BINARY_PATH: &str = "/usr/local/bin/kintsugi-agent";
 
+/// The agent's own copy of `mas` (mas-cli), installed beside the binary by packaging/install.sh and
+/// replaced by `self_update` from the same archive — the only thing that runs an App Store update,
+/// and the reason the archive carries it. The server's `AppStoreUpgradeScript` names this exact path
+/// and refuses it unless root owns it: that script runs as root from the daemon, and a root daemon
+/// executing Homebrew's `/opt/homebrew/bin/mas` would be root for whoever owns the Homebrew prefix.
+/// `kintsugi-` prefixed so it can never be mistaken for, or shadowed by, a user's own `mas` on PATH.
+pub const MAS_BINARY_NAME: &str = "kintsugi-mas";
+const MAS_BINARY_PATH: &str = "/usr/local/bin/kintsugi-mas";
+
 /// launchd labels for the two jobs packaging/install.sh installs — kept here (rather than only as
 /// bash variables in that script) so `self_update` can `launchctl kickstart` both of them by name
 /// once it's replaced the binary they both run.
@@ -219,6 +228,10 @@ pub fn ui_plist_path() -> PathBuf {
 
 pub fn installed_binary_path() -> PathBuf {
     PathBuf::from(INSTALLED_BINARY_PATH)
+}
+
+pub fn mas_binary_path() -> PathBuf {
+    PathBuf::from(MAS_BINARY_PATH)
 }
 
 /// The parent of every path under `/Library/Application Support/kintsugi-agent` (config,

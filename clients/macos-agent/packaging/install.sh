@@ -42,6 +42,9 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 LABEL="au.com.sharpblue.kintsugiagent"
 UI_LABEL="au.com.sharpblue.kintsugiagent-ui"
 BIN_DEST="/usr/local/bin/kintsugi-agent"
+# The agent's own copy of mas — see src/config.rs MAS_BINARY_PATH and the server's
+# AppStoreUpgradeScript, which runs exactly this path as root and refuses it unless root owns it.
+MAS_DEST="/usr/local/bin/kintsugi-mas"
 PLIST_DEST="/Library/LaunchDaemons/${LABEL}.plist"
 UI_PLIST_DEST="/Library/LaunchAgents/${UI_LABEL}.plist"
 CONFIG_DIR="/Library/Application Support/kintsugi-agent"
@@ -75,6 +78,19 @@ install -o root -g wheel -m 755 "$SRC_BIN" "$BIN_DEST"
 # menu bar agent (no visible crash dialog, since nothing launched it interactively). Clearing it
 # here means the install itself is the one moment this is guaranteed to be dealt with.
 xattr -dr com.apple.quarantine "$BIN_DEST" 2>/dev/null || true
+
+# Optional in the archive (publish-release.sh packages it from mas-cli's release; a hand-built
+# source tree has none). Without it the agent still inventories App Store apps and the server still
+# tracks their versions; only the upgrade step fails, saying so, until a package that carries it
+# arrives by self_update.
+PREBUILT_MAS="$SCRIPT_DIR/kintsugi-mas"
+if [[ -f "$PREBUILT_MAS" ]]; then
+    echo "Installing kintsugi-mas to ${MAS_DEST}..."
+    install -o root -g wheel -m 755 "$PREBUILT_MAS" "$MAS_DEST"
+    xattr -dr com.apple.quarantine "$MAS_DEST" 2>/dev/null || true
+else
+    echo "WARNING: no kintsugi-mas beside this script; App Store applications will be inventoried but not upgraded." >&2
+fi
 
 echo "Installing config to ${CONFIG_DEST}..."
 mkdir -p "$CONFIG_DIR"

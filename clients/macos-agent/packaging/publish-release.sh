@@ -1,12 +1,13 @@
 #!/bin/bash
 # Builds the release binary, bundles it with everything a brand-new install needs (config.toml,
-# both LaunchDaemon/LaunchAgent plists, install.sh, uninstall.sh — the same set dist/ has always
-# held as kintsugi-agent-macos-installer.tar.gz), and publishes that one bundle to the server.
+# both LaunchDaemon/LaunchAgent plists, install.sh, uninstall.sh, and kintsugi-mas — the same set
+# dist/ has always held as kintsugi-agent-macos-installer.tar.gz), and publishes that one bundle to
+# the server.
 #
 # It does double duty: a human downloads it from the Clients page for a fresh install, and an
 # already-enrolled agent's own auto-update check downloads the very same file and just extracts
-# the "kintsugi-agent" entry out of it, ignoring the rest (see self_update.rs's extraction) — so
-# there's only ever one artifact to build and publish, not two.
+# the "kintsugi-agent" (and "kintsugi-mas") entries out of it, ignoring the rest (see
+# self_update.rs's extraction) — so there's only ever one artifact to build and publish, not two.
 #
 # The bundled config.toml's enrollment_token is left blank here on purpose: the server rewrites it
 # to whatever AGENT_ENROLLMENT_TOKEN currently is on every download request, not just once at
@@ -16,6 +17,7 @@
 #   packaging/publish-release.sh
 #   packaging/publish-release.sh --api-base-url https://kintsugi.example.com:8443
 #   packaging/publish-release.sh --release-notes "Fixes the menu bar version label"
+#   packaging/publish-release.sh --mas-binary /path/to/universal/mas   # offline; skips the download
 #
 # The version published is always this crate's own Cargo.toml version — bump that first. Run from
 # a plain (non-root) shell; unlike install.sh this never needs sudo, since it's talking to the
@@ -28,12 +30,28 @@
 # publishing. The tar invocation below stays the single owner of the archive's top-level entry
 # names either way, because those names are what self_update.rs extracts by — reimplementing the
 # `tar` call in a workflow file would let the two drift apart silently. See
-# .github/workflows/release-clients.yml.
+# .github/workflows/ci.yml.
 set -euo pipefail
+
+# The archive carries the agent's own copy of mas (https://github.com/mas-cli/mas), which is the
+# only thing that can update a Mac App Store app from a script: the server's AppStoreUpgradeScript
+# runs /usr/local/bin/kintsugi-mas as root inside the console user's session (see config.rs's
+# MAS_BINARY_PATH and the script itself for the whole arrangement). It has to be *our* root-owned
+# copy because a root daemon that ran Homebrew's user-writable /opt/homebrew/bin/mas would be root
+# for whoever owns that prefix. mas publishes one .pkg per architecture and no universal build, so
+# both are fetched, pinned by digest, and lipo'd into one — an arm64-only kintsugi-mas would leave
+# every Intel Mac's App Store rows failing with "not installed". Bumping MAS_VERSION means
+# re-pinning both digests from the release's asset list (the GitHub API reports them as
+# `digest: sha256:...`) and re-verifying `mas update` from a LaunchDaemon, since mas drives Apple's
+# private CommerceKit and has broken on macOS majors before. mas 7 needs macOS 13 or newer.
+MAS_VERSION="7.0.0"
+MAS_ARM64_SHA256="bc218a854c85d9e1c95496a96b26287bb66056b95688b90f91d04fa62ed21b75"
+MAS_X86_64_SHA256="9bca1de1fb6ea19c9e0b9d7b7c85249020c9ed65a9d434c2ef40896a2f3395f9"
 
 API_BASE_URL="${AGENT_API_BASE_URL:-https://kintsugi.example.com:8443}"
 RELEASE_NOTES=""
 PREBUILT_BINARY=""
+PREBUILT_MAS=""
 OUTPUT_DIR=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -55,6 +73,11 @@ while [[ $# -gt 0 ]]; do
         --output-dir)
             [[ $# -ge 2 ]] || { echo "--output-dir requires a value" >&2; exit 1; }
             OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --mas-binary)
+            [[ $# -ge 2 ]] || { echo "--mas-binary requires a value" >&2; exit 1; }
+            PREBUILT_MAS="$2"
             shift 2
             ;;
         *)
@@ -110,13 +133,52 @@ cp "$SCRIPT_DIR/au.com.sharpblue.kintsugiagent-ui.plist" "$WORK_DIR/au.com.sharp
 cp "$SCRIPT_DIR/install.sh" "$WORK_DIR/install.sh"
 cp "$SCRIPT_DIR/uninstall.sh" "$WORK_DIR/uninstall.sh"
 
+# Extracts the Mach-O out of one of mas's per-architecture installer packages. The .pkg installs a
+# zsh wrapper at bin/mas that formats tabular output (and wants jq for it); the real program is
+# libexec/bin/mas, and `mas update` needs nothing from the wrapper.
+fetch_mas_slice() {
+    local arch="$1" expected_sha="$2" dest="$3"
+    local pkg="$WORK_DIR/mas-${arch}.pkg" expanded="$WORK_DIR/mas-${arch}-expanded"
+    curl -fsSL -o "$pkg" "https://github.com/mas-cli/mas/releases/download/v${MAS_VERSION}/mas-${MAS_VERSION}-${arch}.pkg"
+    local actual_sha
+    actual_sha="$(shasum -a 256 "$pkg" | cut -d' ' -f1)"
+    if [[ "$actual_sha" != "$expected_sha" ]]; then
+        echo "mas-${MAS_VERSION}-${arch}.pkg digest mismatch: expected ${expected_sha}, got ${actual_sha}" >&2
+        echo "Refusing to package a mas binary that is not the one this script was pinned against." >&2
+        exit 1
+    fi
+    pkgutil --expand-full "$pkg" "$expanded"
+    cp "$expanded/mas.pkg/Payload/usr/local/opt/mas/libexec/bin/mas" "$dest"
+}
+
+if [[ -n "$PREBUILT_MAS" ]]; then
+    echo "Packaging kintsugi-mas from ${PREBUILT_MAS}..."
+    cp "$PREBUILT_MAS" "$WORK_DIR/kintsugi-mas"
+else
+    echo "Fetching mas v${MAS_VERSION} (arm64 + x86_64) and building a universal kintsugi-mas..."
+    fetch_mas_slice arm64 "$MAS_ARM64_SHA256" "$WORK_DIR/mas-arm64"
+    fetch_mas_slice x86_64 "$MAS_X86_64_SHA256" "$WORK_DIR/mas-x86_64"
+    lipo -create -output "$WORK_DIR/kintsugi-mas" "$WORK_DIR/mas-arm64" "$WORK_DIR/mas-x86_64"
+fi
+# Asserted rather than trusted: a single-architecture kintsugi-mas is exactly the artifact that
+# would pass every test on the build host and fail on half the fleet.
+if ! lipo -archs "$WORK_DIR/kintsugi-mas" | grep -q 'x86_64' || ! lipo -archs "$WORK_DIR/kintsugi-mas" | grep -q 'arm64'; then
+    echo "kintsugi-mas is not universal: $(lipo -archs "$WORK_DIR/kintsugi-mas")" >&2
+    exit 1
+fi
+# Ad-hoc signed like the agent, for the same reason: lipo keeps each slice's original ad-hoc
+# signature, but one identity over the whole file is what a fleet CodeRequirement would name.
+# mas carries no entitlements, so re-signing loses nothing.
+codesign --sign - --force --identifier kintsugi-mas "$WORK_DIR/kintsugi-mas"
+lipo -info "$WORK_DIR/kintsugi-mas"
+
 ARCHIVE_NAME="kintsugi-agent-macos-${VERSION}.tar.gz"
 ARCHIVE_PATH="$WORK_DIR/$ARCHIVE_NAME"
 # -C + bare filenames, not full source paths, so the archive's top-level entries are exactly
 # "kintsugi-agent", "install.sh", etc. — what both install.sh's own instructions and
 # self_update.rs's extraction expect, rather than being nested under a temp-dir path.
 tar -czf "$ARCHIVE_PATH" -C "$WORK_DIR" \
-    kintsugi-agent config.toml \
+    kintsugi-agent kintsugi-mas config.toml \
     au.com.sharpblue.kintsugiagent.plist au.com.sharpblue.kintsugiagent-ui.plist \
     install.sh uninstall.sh
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Stops and removes kintsugi-agent's LaunchDaemon, binary, and config.
+# Stops and removes kintsugi-agent's LaunchDaemon, binaries (the agent and its kintsugi-mas), and config.
 # Run with sudo:
 #   sudo packaging/uninstall.sh
 set -euo pipefail
@@ -14,6 +14,7 @@ UI_LABEL="au.com.sharpblue.kintsugiagent-ui"
 PLIST_DEST="/Library/LaunchDaemons/${LABEL}.plist"
 UI_PLIST_DEST="/Library/LaunchAgents/${UI_LABEL}.plist"
 BIN_DEST="/usr/local/bin/kintsugi-agent"
+MAS_DEST="/usr/local/bin/kintsugi-mas"
 CONFIG_DIR="/Library/Application Support/kintsugi-agent"
 
 launchctl bootout system "$PLIST_DEST" 2>/dev/null || true
@@ -26,11 +27,11 @@ fi
 
 rm -f "$PLIST_DEST"
 rm -f "$UI_PLIST_DEST"
-rm -f "$BIN_DEST"
+rm -f "$BIN_DEST" "$MAS_DEST"
 rm -f /var/log/kintsugi-agent.log /var/log/kintsugi-agent.err.log
 rm -f /tmp/kintsugi-agent-ui.out.log /tmp/kintsugi-agent-ui.err.log
 
-echo "Removed LaunchDaemon, LaunchAgent, binary, and logs."
+echo "Removed LaunchDaemon, LaunchAgent, binaries, and logs."
 echo "Config left in place at: $CONFIG_DIR (remove manually if no longer needed)."
 echo "Per-user schedule/policy state left in place under each user's ~/Library/Application"
 echo "  Support/kintsugi-agent (remove manually if no longer needed)."

@@ -44,6 +44,7 @@ fn remove_files() {
     remove_path(&config::ui_plist_path());
     remove_path(&config::daemon_plist_path());
     remove_path(&config::installed_binary_path());
+    remove_path(&config::mas_binary_path());
     // Config, identity, queue, daemon log, and check-in schedule all live under this one
     // directory — see `config::config_dir`.
     remove_dir(&config::config_dir());

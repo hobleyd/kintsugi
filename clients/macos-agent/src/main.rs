@@ -247,8 +247,9 @@ impl queue::RequestHandler for DaemonRequestHandler<'_> {
     /// the server and is verified against the pinned artifact-signing key. A request that names an
     /// application with no signed, patchable upgrade path simply fails. So does one naming a row
     /// `upgrade::runs_as_root` says belongs to the logged-in user: the per-user process never asks
-    /// for those, and Homebrew must not be run as root on anybody's say-so. Same shape as the
-    /// Windows service's `patch_application`.
+    /// for those, and Homebrew must not be run as root on anybody's say-so. (An App Store row is
+    /// root's — see `runs_as_root` for why — so it passes this gate and its script does the
+    /// `launchctl asuser` work itself.) Same shape as the Windows service's `patch_application`.
     fn patch_application(&mut self, application_name: &str) -> Result<()> {
         let identity = self.identity.context("this agent has not enrolled an identity yet")?;
 

@@ -171,21 +171,45 @@ public class UpgradeScriptTests
     }
 
     /// <summary>
-    /// --update is not implemented, and the contract is that it fails rather than pretends: an exit
-    /// 0 that changed nothing would make the agent report the latest version as installed
-    /// (<c>patch_cycle::run_patches</c> trusts the exit code). Whatever fills this branch in — see the
-    /// remarks on <see cref="AppStoreUpgradeScript"/> — must replace the refusal, not follow it.
+    /// --update runs as root from the daemon and reaches the console user's store session through
+    /// <c>launchctl asuser</c> — the arrangement the spike proved from a real LaunchDaemon. Every
+    /// piece here is load-bearing: <c>SUDO_UID</c> is what makes <c>mas</c> drop to the user for
+    /// CommerceKit (bare root is refused outright), <c>--bundle</c> says --appId is a bundle identifier,
+    /// and the binary is the agent's own root-owned copy, never Homebrew's.
     /// </summary>
     [Fact]
-    public void AppStoreScript_RefusesToUpdate_RatherThanExitingZeroHavingDoneNothing()
+    public void AppStoreScript_UpdatesAsRoot_InsideTheConsoleUsersSession_WithTheAgentsOwnMas()
+    {
+        var code = CodeLines(AppStoreUpgradeScript.Build());
+
+        Assert.Contains("launchctl asuser \"$console_uid\"", code);
+        Assert.Contains("SUDO_UID=\"$console_uid\"", code);
+        Assert.Contains("\"$MAS\" update --verbose --bundle \"$APP_ID\"", code);
+        Assert.Contains("MAS=/usr/local/bin/kintsugi-mas", code);
+        // A root daemon running a user-writable binary is root for that user, so ownership and mode
+        // are checked, not just presence.
+        Assert.Contains("stat -f '%u' \"$MAS\"", code);
+        Assert.Contains("8#022", code);
+        Assert.DoesNotContain("/opt/homebrew/bin/mas", code);
+        Assert.DoesNotContain("sudo ", code);
+    }
+
+    /// <summary>
+    /// A <c>mas update</c> that finds nothing to do exits 0 having printed nothing, and exit 0 is
+    /// what makes the agent report the server's latest version as installed
+    /// (<c>patch_cycle::run_patches</c>). So an empty result has to be a failure, or the next
+    /// inventory contradicts a patch result the agent just sent.
+    /// </summary>
+    [Fact]
+    public void AppStoreScript_TreatsASilentNoOpUpdateAsFailure()
     {
         var script = AppStoreUpgradeScript.Build();
-
         var updateMode = script.IndexOf("# --update mode", StringComparison.Ordinal);
         Assert.True(updateMode >= 0);
         var tail = CodeLines(script[updateMode..]);
 
-        Assert.Contains("exit 1", tail);
+        Assert.Contains("output=$(launchctl asuser", tail);
+        Assert.Contains("if [ -z \"$output\" ]; then", tail);
         Assert.DoesNotContain("exit 0", tail);
     }
 
