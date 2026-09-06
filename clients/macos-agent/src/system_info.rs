@@ -112,17 +112,58 @@ pub fn local_ip_address() -> Result<String> {
 /// Scans the top level of /Applications for .app bundles, reading each
 /// one's Info.plist for its display name and version. Bundles owned by
 /// Apple (bundle identifier starting with "com.apple.") are skipped, since
-/// they're part of the OS rather than something worth patch-tracking.
-/// Individual unreadable bundles are skipped with a warning rather than
-/// failing the whole scan.
+/// they're part of the OS rather than something worth patch-tracking —
+/// unless they carry an App Store receipt, see below. Individual unreadable
+/// bundles are skipped with a warning rather than failing the whole scan.
 ///
 /// `cask_app_bundle_names` (from [`HomebrewScan::cask_app_bundle_names`])
 /// are also skipped: a cask-installed app lives under /Applications like
 /// any other, but it's already reported as Homebrew-managed by
 /// [`scan_homebrew`], so re-reporting it here would register it a second
 /// time as an unmanaged, standalone application.
+///
+/// A bundle installed from the Mac App Store is reported as managed by
+/// [`APP_STORE_NAME`] rather than as a standalone application, and the App
+/// Store itself is reported once as their manager whenever there is at least
+/// one — see [`read_app_bundle`] for why that distinction matters.
 pub fn scan_applications_folder(cask_app_bundle_names: &HashSet<String>) -> Vec<InstalledApp> {
-    scan_applications_folder_at(Path::new("/Applications"), cask_app_bundle_names)
+    let mut apps = scan_applications_folder_at(Path::new("/Applications"), cask_app_bundle_names);
+
+    if apps.iter().any(|app| app.package_manager.as_deref() == Some(APP_STORE_NAME)) {
+        match app_store_version() {
+            Ok(version) => apps.push(InstalledApp {
+                name: APP_STORE_NAME.to_string(),
+                version,
+                package_manager: None,
+                // The App Store is part of macOS and updates with it (see `os_update`), so its own
+                // row has nothing to patch; the server's AppStoreUpgradeScript declines to answer a
+                // version for it for the same reason, and no identifier keeps `is_patchable` false.
+                application_identifier: None,
+                available_version: None,
+                update_available: None,
+            }),
+            Err(err) => crate::logging::warn(&format!("could not determine the App Store's own version: {err}")),
+        }
+    }
+
+    apps
+}
+
+/// Name reported for the Mac App Store's own entry, and the `packageManager` value every
+/// application installed from it is tagged with — the backend links a child to its manager by
+/// matching this name against another entry's `name` in the same report, and
+/// `PackageManagerCatalog.AppStore` on the server recognizes this exact string. Its
+/// `AppStoreUpgradeScript` tells the manager's own row apart from its children by this name at
+/// runtime, the way `HomebrewUpgradeScript` does with [`HOMEBREW_NAME`].
+pub const APP_STORE_NAME: &str = "App Store";
+
+/// The App Store's own version, read from the bundle macOS ships it in.
+fn app_store_version() -> Result<String> {
+    let json = read_plist_as_json(Path::new("/System/Applications/App Store.app/Contents/Info.plist"))?;
+    json["CFBundleShortVersionString"]
+        .as_str()
+        .map(str::to_string)
+        .context("App Store's Info.plist has no CFBundleShortVersionString")
 }
 
 fn scan_applications_folder_at(dir: &Path, cask_app_bundle_names: &HashSet<String>) -> Vec<InstalledApp> {
@@ -155,6 +196,28 @@ fn scan_applications_folder_at(dir: &Path, cask_app_bundle_names: &HashSet<Strin
     apps
 }
 
+/// A bundle that came from the Mac App Store carries the store's receipt at
+/// `Contents/_MASReceipt/receipt`; nothing else does, and `/System/Applications/*` — the bundles
+/// that actually are part of the OS — never has one. That file decides two things here.
+///
+/// The first is who manages the application. Reported as a standalone bundle, an App Store app
+/// goes to the AI research flow, whose macOS prompt (`AiUpgradePathResearchClient`) assumes a
+/// Developer-ID distribution and writes a script that downloads the vendor's DMG and replaces the
+/// bundle in place — swapping an App Store build for a direct-download one, with its receipt,
+/// sandbox container and any in-app purchases gone, and the App Store no longer recognizing it.
+/// Signed and approved, that script runs as root through the queue and nothing errors. So the
+/// receipt routes the bundle to the `App Store` manager and the server's fixed
+/// `AppStoreUpgradeScript` instead, which knows exactly where it came from.
+///
+/// The second is whether `com.apple.` means "part of the OS". It doesn't for Xcode, Pages,
+/// Numbers, Keynote, iMovie or GarageBand — Apple-authored, but sold through the store and updated
+/// by it, not by `softwareupdate` — and skipping them by prefix left a Mac with four of them out of
+/// date reporting nothing. The receipt tells the two kinds of Apple bundle apart.
+///
+/// A VPP-licensed bundle (installed by an MDM's device-based assignment, rather than under a
+/// person's Apple Account) is reported under the same manager but with no `application_identifier`,
+/// which is how an entry says "do not try" (see [`InstalledApp::application_identifier`]): the MDM
+/// owns those installations, and the App Store cannot update one under any Apple Account.
 fn read_app_bundle(app_path: &Path) -> Result<Option<InstalledApp>> {
     let info_plist = app_path.join("Contents/Info.plist");
     if !info_plist.is_file() {
@@ -164,7 +227,8 @@ fn read_app_bundle(app_path: &Path) -> Result<Option<InstalledApp>> {
     let json = read_plist_as_json(&info_plist)?;
 
     let bundle_id = json["CFBundleIdentifier"].as_str().unwrap_or("");
-    if bundle_id.starts_with("com.apple.") {
+    let from_app_store = app_path.join(APP_STORE_RECEIPT).is_file();
+    if bundle_id.starts_with("com.apple.") && !from_app_store {
         return Ok(None);
     }
 
@@ -181,16 +245,66 @@ fn read_app_bundle(app_path: &Path) -> Result<Option<InstalledApp>> {
         .unwrap_or("unknown")
         .to_string();
 
-    let application_identifier = if bundle_id.is_empty() { None } else { Some(bundle_id.to_string()) };
+    // The bundle identifier is what both ends of the App Store script key on: the server's
+    // `--update-version` looks it up with `lookup?bundleId=`, and `mas` accepts it in place of the
+    // numeric ADAM ID. It needs no Spotlight index, unlike `kMDItemAppStoreAdamID`.
+    let application_identifier = if bundle_id.is_empty() || (from_app_store && vpp_licensed(app_path)) {
+        None
+    } else {
+        Some(bundle_id.to_string())
+    };
 
     Ok(Some(InstalledApp {
         name,
         version,
-        package_manager: None,
+        package_manager: from_app_store.then(|| APP_STORE_NAME.to_string()),
         application_identifier,
         available_version: None,
         update_available: None,
     }))
+}
+
+/// Where the Mac App Store leaves its receipt inside a bundle it installed. The same path `mas`
+/// copies a fresh receipt to after an update.
+const APP_STORE_RECEIPT: &str = "Contents/_MASReceipt/receipt";
+
+/// Whether Spotlight records this App Store bundle as installed under a Volume Purchase Program
+/// licence — an MDM's device-based assignment — rather than under a person's Apple Account. Read
+/// through `mdls` because the receipt itself is a PKCS#7 blob and parsing it would need a crate for
+/// a single boolean. Best-effort in the safe direction: an unindexed bundle answers `(null)`, which
+/// is read as "not VPP", and the worst that costs is a row that looks patchable and whose update
+/// the App Store then refuses with a clear message — where the other error would silently keep a
+/// patchable application out of every cycle.
+fn vpp_licensed(app_path: &Path) -> bool {
+    let output = Command::new("/usr/bin/mdls")
+        .args(["-raw", "-name", "kMDItemAppStoreReceiptIsVPPLicensed"])
+        .arg(app_path)
+        .output();
+    match output {
+        Ok(output) if output.status.success() => parse_mdls_bool(&String::from_utf8_lossy(&output.stdout)) == Some(true),
+        Ok(output) => {
+            crate::logging::warn(&format!(
+                "mdls failed for {}: {}",
+                app_path.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+            false
+        }
+        Err(err) => {
+            crate::logging::warn(&format!("could not run mdls for {}: {err}", app_path.display()));
+            false
+        }
+    }
+}
+
+/// The pure half of [`vpp_licensed`]: `mdls -raw` prints a boolean attribute as `1` or `0`, and
+/// `(null)` when the attribute is absent or the bundle is not indexed.
+fn parse_mdls_bool(raw: &str) -> Option<bool> {
+    match raw.trim() {
+        "1" => Some(true),
+        "0" => Some(false),
+        _ => None,
+    }
 }
 
 /// Converts a plist (binary or XML) to JSON via the system `plutil` tool,
@@ -786,5 +900,87 @@ mod tests {
         assert_eq!(app_bundle_name_in_applications("/Applications/Utilities/Foo.app"), None);
         assert_eq!(app_bundle_name_in_applications("/Applications/DisplayLink"), None);
         assert_eq!(app_bundle_name_in_applications("/Library/Preferences/com.example.plist"), None);
+    }
+
+    /// Writes a minimal `.app` bundle under the system temp directory: an XML Info.plist (which
+    /// `plutil` converts like any real one) and, when asked, an App Store receipt in the place the
+    /// store puts it. The receipt's bytes are irrelevant — only its presence is read.
+    fn scratch_bundle(name: &str, bundle_id: &str, with_receipt: bool) -> PathBuf {
+        let app = std::env::temp_dir().join(format!("kintsugi-system-info-test-{}-{name}.app", std::process::id()));
+        let _ = fs::remove_dir_all(&app);
+        fs::create_dir_all(app.join("Contents")).unwrap();
+        fs::write(
+            app.join("Contents/Info.plist"),
+            format!(
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>{bundle_id}</string>
+  <key>CFBundleName</key><string>{name}</string>
+  <key>CFBundleShortVersionString</key><string>1.2.3</string>
+</dict></plist>
+"#
+            ),
+        )
+        .unwrap();
+        if with_receipt {
+            let receipt = app.join(APP_STORE_RECEIPT);
+            fs::create_dir_all(receipt.parent().unwrap()).unwrap();
+            fs::write(receipt, b"not a real receipt").unwrap();
+        }
+        app
+    }
+
+    #[test]
+    fn read_app_bundle_reports_a_receipt_bearing_bundle_as_app_store_managed() {
+        let app = scratch_bundle("wireguard", "com.wireguard.macos", true);
+
+        let installed = read_app_bundle(&app).unwrap().expect("an App Store bundle is reported");
+
+        assert_eq!(installed.package_manager.as_deref(), Some(APP_STORE_NAME));
+        // The bundle identifier, not the ADAM ID: it is what the server's `lookup?bundleId=` and
+        // `mas` both accept, and it needs no Spotlight index.
+        assert_eq!(installed.application_identifier.as_deref(), Some("com.wireguard.macos"));
+        assert_eq!(installed.version, "1.2.3");
+
+        let _ = fs::remove_dir_all(app);
+    }
+
+    #[test]
+    fn read_app_bundle_keeps_a_standalone_bundle_unmanaged() {
+        let app = scratch_bundle("standalone", "com.example.Standalone", false);
+
+        let installed = read_app_bundle(&app).unwrap().expect("a standalone bundle is reported");
+
+        assert_eq!(installed.package_manager, None);
+        assert_eq!(installed.application_identifier.as_deref(), Some("com.example.Standalone"));
+
+        let _ = fs::remove_dir_all(app);
+    }
+
+    #[test]
+    fn read_app_bundle_tells_apple_app_store_apps_apart_from_the_os_by_the_receipt() {
+        // Xcode, Pages and friends are `com.apple.*` and were skipped as "part of the OS" — while
+        // four of them sat out of date on the fleet's own Mac. The receipt is what separates an
+        // Apple bundle sold through the store from one that ships with macOS.
+        let os_bundle = scratch_bundle("safari", "com.apple.Safari", false);
+        let store_bundle = scratch_bundle("xcode", "com.apple.dt.Xcode", true);
+
+        assert!(read_app_bundle(&os_bundle).unwrap().is_none());
+        let xcode = read_app_bundle(&store_bundle).unwrap().expect("an Apple App Store app is reported");
+        assert_eq!(xcode.package_manager.as_deref(), Some(APP_STORE_NAME));
+        assert_eq!(xcode.application_identifier.as_deref(), Some("com.apple.dt.Xcode"));
+
+        let _ = fs::remove_dir_all(os_bundle);
+        let _ = fs::remove_dir_all(store_bundle);
+    }
+
+    #[test]
+    fn parse_mdls_bool_reads_the_three_answers_mdls_gives() {
+        assert_eq!(parse_mdls_bool("1\n"), Some(true));
+        assert_eq!(parse_mdls_bool("0"), Some(false));
+        // Unindexed bundle or absent attribute: not a "yes", so the row stays patchable.
+        assert_eq!(parse_mdls_bool("(null)"), None);
+        assert_eq!(parse_mdls_bool(""), None);
     }
 }

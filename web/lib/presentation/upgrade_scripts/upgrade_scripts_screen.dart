@@ -54,7 +54,7 @@ class _UpgradeScriptsView extends StatelessWidget {
               'inert rather than trusted. Scripts are reviewed and signed on the Applications screen.',
             ),
             const HintText(
-              'A package manager\'s script (Homebrew, winget, Chocolatey, Flatpak, Snap) is the same '
+              'A package manager\'s script (Homebrew, App Store, winget, Chocolatey, Flatpak, Snap) is the same '
               'for every application it manages and one signature covers all of them, so it is listed '
               'once, named for the manager, with the number of applications it patches. Only an '
               'AI-researched script is listed under its own application.',

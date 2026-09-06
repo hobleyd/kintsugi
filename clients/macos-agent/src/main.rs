@@ -483,7 +483,9 @@ fn run_scheduler(
 /// scan is told which bundle names Homebrew already accounts for
 /// (`cask_app_bundle_names`) and skips those, keeping the Homebrew-tagged
 /// entry as the single source of truth for that app rather than also
-/// reporting it as a separate, unmanaged application. Any remaining exact
+/// reporting it as a separate, unmanaged application. The folder scan itself
+/// tells App Store installs apart from standalone bundles by their receipt
+/// (see `system_info::read_app_bundle`). Any remaining exact
 /// (name, version, ...) duplicates are still deduplicated, since the
 /// backend rejects duplicate (host, name, version) rows in a single report.
 fn collect_installed_applications() -> Vec<InstalledApp> {

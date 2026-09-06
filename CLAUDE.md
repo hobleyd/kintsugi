@@ -568,8 +568,8 @@ shape when adding another. Update-check re-runs each resolved script's own `--up
 and makes no AI call.
 
 **Every upgrade script is one of two languages, decided by its platform bucket.** `ScriptLanguages.For`
-maps a bucket to bash (macOS, Linux, Homebrew, Flatpak, Snap) or PowerShell (Windows, winget,
-Chocolatey), and that one function governs three things that must never
+maps a bucket to bash (macOS, Linux, Homebrew, App Store, Flatpak, Snap) or PowerShell (Windows,
+winget, Chocolatey), and that one function governs three things that must never
 disagree: which prompt `BuildScriptGenerationPrompt` writes, which validator checks the result
 (`shellcheck` vs `Invoke-ScriptAnalyzer`), and which interpreter `CheckScriptVersionAsync` runs it
 under (`bash` vs `pwsh`). That's why the runtime image installs all four; removing any of them
@@ -1061,7 +1061,7 @@ Writing units only when absent is what keeps it from ever clobbering a file an a
 
 `PlatformBucket` keys an `upgrade_paths` row. An AI-researched row lives under an *OS* bucket
 (`macOS`, `Windows`, `Linux`); a package-manager-managed row lives under its *manager's* bucket
-(`pm:Homebrew`, `pm:winget`, `pm:Chocolatey`, `pm:Flatpak`, `pm:Snap` — see
+(`pm:Homebrew`, `pm:App Store`, `pm:winget`, `pm:Chocolatey`, `pm:Flatpak`, `pm:Snap` — see
 `PlatformBucket.ForPackageManager`), because what a `brew upgrade` row actually depends on is the
 manager, not the OS.
 
@@ -1080,7 +1080,8 @@ The catalog is what both `ResearchApplicationUpgradePathCommandHandler` and
 **There is a hard entry requirement for that catalog, and it is not "an agent can drive it".** A
 manager belongs there only if its catalog can be queried *over HTTP from the API server*, because
 that is where `--update-version` runs and because one row per (application, manager) is shared by the
-whole fleet. Homebrew, winget, Chocolatey, Flathub and the Snap Store each publish one global
+whole fleet. Homebrew, winget, Chocolatey, Flathub, the Snap Store and the Mac App Store (via Apple's
+iTunes Search API) each publish one global
 catalog and satisfy both. **apt, dnf, zypper and pacman satisfy neither** — "the latest version of
 curl" depends on which repositories *that* host has configured, and one `pm:APT` row would have
 Debian 12 and Ubuntu 24.04 overwriting each other's answer forever. So they are deliberately absent,
@@ -1093,6 +1094,36 @@ Every `*UpgradeScript.Build` must return **byte-identical content for every appl
 name and id are read from `--appName`/`--appId` at runtime, never baked in. That is what lets one
 human "Sign Script" review cover every application a manager handles, via
 `FindExistingSignatureForScriptAsync`.
+
+**An App Store bundle is told apart by its receipt, and reporting it as a plain bundle was actively
+harmful.** `Contents/_MASReceipt/receipt` exists in every bundle the Mac App Store installed and in
+nothing else — `/System/Applications/*` never carries one. The macOS agent's `read_app_bundle` reports
+such a bundle under the `App Store` manager (`system_info::APP_STORE_NAME`, the same string as
+`PackageManagerCatalog.AppStore`) with its bundle identifier, and reports the store itself once as
+their manager. Before that, an App Store app was a standalone application and went to the AI, whose
+macOS prompt assumes a Developer-ID distribution and writes a script that fetches the vendor's DMG
+and replaces the bundle — swapping a store build for a direct-download one, receipt and sandbox
+container gone, with the store no longer updating it. Signed and approved, that ran as root through
+the queue and nothing errored. The receipt also decides what `com.apple.` means: Xcode, Pages,
+Keynote, Numbers, iMovie and GarageBand are Apple's *and* sold through the store, and skipping them by
+prefix left a Mac with four of them out of date reporting nothing. A VPP-licensed bundle
+(`kMDItemAppStoreReceiptIsVPPLicensed`, an MDM's device-based assignment) is reported without an
+identifier, because the MDM owns it and no Apple Account can update it.
+
+Three things about `AppStoreUpgradeScript` that each fail silently if changed. Its lookup is
+`itunes.apple.com/lookup?bundleId=…&entity=desktopSoftware` — **not `macSoftware`**, which for an app
+sold as one purchase on iOS and macOS returns the iOS record (Pages 15.3 against a Mac build of
+15.3.1; `mas` queries `desktopSoftware` for the same reason). Without `country=` it asks the US
+storefront, so an app not sold there answers `resultCount: 0` and the row's `LatestVersion` stays null
+— the server cannot know a host's storefront, so this is documented rather than solved. And its
+`--update` mode **deliberately exits 1**: since Apple's fix for CVE-2025-43411 (macOS 14.8.2 / 15.7.2 /
+26.1) installing a store update needs root while starting the download needs the logged-in user's
+store session, and the per-user process that runs every package-manager row is only one of those.
+`mas ≥ 4` bridges the two by running `sudo installer` itself, which a LaunchAgent with no TTY cannot
+answer. Whether that branch is filled by the store's own automatic updates (`AutoUpdate` in
+`/Library/Preferences/com.apple.commerce`) or by a root-owned `mas` behind a sudoers rule is an open
+decision; until it is made, the row shows as behind and is not patched, and an exit 0 there would make
+`patch_cycle::run_patches` report the latest version as installed having installed nothing.
 
 **A signed script is never rewritten by a deployment, and editing one of those bodies changes
 nothing until a human says so.** `RegisterApplicationsCommandHandler` used to rewrite `Script` from
@@ -1163,7 +1194,7 @@ original — then the others for what each platform forced to differ. The differ
 | Per-user half | LaunchAgent | logon-triggered task for `BUILTIN\Users` | systemd user unit, `graphical-session.target` |
 | Check-in schedule | rewrites its own plist, reloads launchd via a detached helper | computes its next wake in-process | rewrites its own `.timer`, `daemon-reload` |
 | Privilege handoff | queue: OS updates and AI-researched scripts; Homebrew stays per-user | queue, everything | queue, everything |
-| Inventory | `/Applications` bundles + Homebrew | uninstall registry (3 views) + winget + Chocolatey | Flatpak + Snap (not dpkg/rpm — see above) |
+| Inventory | `/Applications` bundles + Homebrew + App Store (by receipt) | uninstall registry (3 views) + winget + Chocolatey | Flatpak + Snap (not dpkg/rpm — see above) |
 | OS updates | `softwareupdate` | Windows Update Agent COM API, via PowerShell | apt / dnf / yum / zypper / pacman / apk |
 | Host identity | hardware serial, always present | SMBIOS serial, **often a placeholder** | DMI serial, **often a placeholder** |
 | Nobody logged in | nothing patches | nothing patches | root service patches unattended — see below |

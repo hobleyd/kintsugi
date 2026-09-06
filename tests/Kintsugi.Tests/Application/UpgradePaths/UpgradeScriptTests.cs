@@ -15,6 +15,7 @@ public class UpgradeScriptTests
     public static TheoryData<string> AllScripts() => new()
     {
         HomebrewUpgradeScript.Build(),
+        AppStoreUpgradeScript.Build(),
         WingetUpgradeScript.Build(),
         ChocolateyUpgradeScript.Build(),
         FlatpakUpgradeScript.Build(),
@@ -115,6 +116,77 @@ public class UpgradeScriptTests
         // manager's row, approved or not. Each application has a row of its own for that.
         Assert.DoesNotContain("brew upgrade\n", script);
         Assert.DoesNotContain("brew update && brew upgrade\n", script);
+    }
+
+    [Fact]
+    public void AppStoreScript_IsBash()
+    {
+        Assert.StartsWith("#!/bin/bash", AppStoreUpgradeScript.Build());
+    }
+
+    /// <summary>
+    /// The catalog's entry requirement, asserted at the source: --update-version runs on the API
+    /// server, so it may only reach the network — never `mas`, which would need the store session of
+    /// a Mac that is not this server. And it has to ask for the right platform: for an app sold as one
+    /// purchase on iOS and macOS, <c>entity=macSoftware</c> answers with the iOS record (Pages 15.3
+    /// when the Mac build was 15.3.1), so every such row would compare against another platform's
+    /// release. <c>desktopSoftware</c> is what the App Store's own tooling asks for.
+    /// </summary>
+    [Fact]
+    public void AppStoreScript_ChecksTheiTunesSearchApiOverHttp_ForTheMacRecordSpecifically()
+    {
+        var script = AppStoreUpgradeScript.Build();
+        var code = CodeLines(script);
+
+        Assert.Contains("https://itunes.apple.com/lookup?bundleId=${APP_ID}&entity=desktopSoftware", code);
+        Assert.DoesNotContain("entity=macSoftware", code);
+        Assert.DoesNotContain("\nmas ", code);
+        // A miss is a 200 with an empty results array, so the count has to be checked or a stray
+        // "version" elsewhere in the body would be read as the answer.
+        Assert.Contains("\"resultCount\"", code);
+    }
+
+    /// <summary>
+    /// The script's non-comment lines joined back together. The comments beside these calls exist
+    /// precisely to name the flag or entity that must not appear, so an assertion over the whole
+    /// text would trip on its own warning label.
+    /// </summary>
+    private static string CodeLines(string script) =>
+        string.Join('\n', script.Split('\n').Where(line => !line.TrimStart().StartsWith('#')));
+
+    /// <summary>
+    /// The App Store ships with macOS and is updated by <c>softwareupdate</c>, so its own row has no
+    /// answerable version question. One script serves it and every application it manages (see
+    /// <see cref="RecognizedPackageManager.BuildScript"/>) and tells the store's row apart at runtime
+    /// by <c>--appName</c>, the name the macOS agent reports it under
+    /// (<c>system_info::APP_STORE_NAME</c>).
+    /// </summary>
+    [Fact]
+    public void AppStoreScript_TellsItsOwnRowApartAtRuntime_ByTheNameTheAgentReports()
+    {
+        var script = AppStoreUpgradeScript.Build();
+
+        Assert.Contains("is_app_store_itself()", script);
+        Assert.Contains("= \"app store\"", script);
+    }
+
+    /// <summary>
+    /// --update is not implemented, and the contract is that it fails rather than pretends: an exit
+    /// 0 that changed nothing would make the agent report the latest version as installed
+    /// (<c>patch_cycle::run_patches</c> trusts the exit code). Whatever fills this branch in — see the
+    /// remarks on <see cref="AppStoreUpgradeScript"/> — must replace the refusal, not follow it.
+    /// </summary>
+    [Fact]
+    public void AppStoreScript_RefusesToUpdate_RatherThanExitingZeroHavingDoneNothing()
+    {
+        var script = AppStoreUpgradeScript.Build();
+
+        var updateMode = script.IndexOf("# --update mode", StringComparison.Ordinal);
+        Assert.True(updateMode >= 0);
+        var tail = CodeLines(script[updateMode..]);
+
+        Assert.Contains("exit 1", tail);
+        Assert.DoesNotContain("exit 0", tail);
     }
 
     [Theory]
@@ -241,6 +313,7 @@ public class UpgradeScriptTests
 
     [Theory]
     [InlineData(PackageManagerCatalog.Homebrew, "Homebrew", "firefox")]
+    [InlineData(PackageManagerCatalog.AppStore, "App Store", "com.wireguard.macos")]
     [InlineData(PackageManagerCatalog.Winget, "winget", "Mozilla.Firefox")]
     [InlineData(PackageManagerCatalog.Chocolatey, "Chocolatey", "firefox")]
     [InlineData(PackageManagerCatalog.Flatpak, "Flatpak", "org.mozilla.firefox")]
@@ -380,6 +453,7 @@ public class UpgradeScriptTests
 
     [Theory]
     [InlineData(PackageManagerCatalog.Homebrew, ScriptLanguage.Bash)]
+    [InlineData(PackageManagerCatalog.AppStore, ScriptLanguage.Bash)]
     [InlineData(PackageManagerCatalog.Winget, ScriptLanguage.PowerShell)]
     [InlineData(PackageManagerCatalog.Chocolatey, ScriptLanguage.PowerShell)]
     [InlineData(PackageManagerCatalog.Flatpak, ScriptLanguage.Bash)]
@@ -397,8 +471,8 @@ public class UpgradeScriptTests
         // version check for that manager fails, LatestVersion stays null, and nothing ever patches.
         foreach (var name in new[]
                  {
-                     PackageManagerCatalog.Homebrew, PackageManagerCatalog.Winget, PackageManagerCatalog.Chocolatey,
-                     PackageManagerCatalog.Flatpak, PackageManagerCatalog.Snap
+                     PackageManagerCatalog.Homebrew, PackageManagerCatalog.AppStore, PackageManagerCatalog.Winget,
+                     PackageManagerCatalog.Chocolatey, PackageManagerCatalog.Flatpak, PackageManagerCatalog.Snap
                  })
         {
             Assert.True(PackageManagerCatalog.TryGet(name, out var manager));

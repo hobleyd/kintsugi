@@ -104,8 +104,8 @@ class UpgradeScriptsOverview extends Equatable {
 
 /// Mirrors `LocalScriptDto`.
 ///
-/// One entry per *script*, not per upgrade-path row. A package-manager script (Homebrew, winget,
-/// Chocolatey, Flatpak, Snap) is the same bytes for every application the manager handles and one
+/// One entry per *script*, not per upgrade-path row. A package-manager script (Homebrew, App Store,
+/// winget, Chocolatey, Flatpak, Snap) is the same bytes for every application the manager handles and one
 /// signature covers all of them, so the server lists it once, named for the manager, with
 /// [applications] saying how many rows it stands for. An AI-researched script is one application's
 /// and appears as itself.

@@ -31,11 +31,13 @@ public class ApprovedScriptIdentityTests
 
     [Theory]
     [InlineData(PackageManagerCatalog.Homebrew, "Homebrew", "brew")]
+    // The App Store's own row carries no identifier at all — it is part of macOS and never patches.
+    [InlineData(PackageManagerCatalog.AppStore, "App Store", null)]
     [InlineData(PackageManagerCatalog.Winget, "winget", "winget")]
     [InlineData(PackageManagerCatalog.Chocolatey, "Chocolatey", "chocolatey")]
     [InlineData(PackageManagerCatalog.Flatpak, "Flatpak", "flatpak")]
     [InlineData(PackageManagerCatalog.Snap, "Snap", "snapd")]
-    public void For_TheManagersOwnRow_IsTheSameEntryAsItsManagedApplications(string managerName, string ownRowName, string ownRowId)
+    public void For_TheManagersOwnRow_IsTheSameEntryAsItsManagedApplications(string managerName, string ownRowName, string? ownRowId)
     {
         // One text per manager, the manager's own row included (RecognizedPackageManager.BuildScript),
         // so an entry signed from the manager's row and one signed from a managed application's are
@@ -57,6 +59,8 @@ public class ApprovedScriptIdentityTests
 
     [Theory]
     [InlineData(PackageManagerCatalog.Homebrew, "homebrew")]
+    // The space becomes the one separator Slug allows, and the file name is lowercased like the rest.
+    [InlineData(PackageManagerCatalog.AppStore, "app-store")]
     [InlineData(PackageManagerCatalog.Winget, "winget")]
     [InlineData(PackageManagerCatalog.Chocolatey, "chocolatey")]
     [InlineData(PackageManagerCatalog.Flatpak, "flatpak")]
@@ -80,8 +84,8 @@ public class ApprovedScriptIdentityTests
         // match the manager's own row and offer it a script it already holds.
         foreach (var managerName in new[]
         {
-            PackageManagerCatalog.Homebrew, PackageManagerCatalog.Winget, PackageManagerCatalog.Chocolatey,
-            PackageManagerCatalog.Flatpak, PackageManagerCatalog.Snap,
+            PackageManagerCatalog.Homebrew, PackageManagerCatalog.AppStore, PackageManagerCatalog.Winget,
+            PackageManagerCatalog.Chocolatey, PackageManagerCatalog.Flatpak, PackageManagerCatalog.Snap,
         })
         {
             Assert.True(PackageManagerCatalog.TryGet(managerName, out var manager));
