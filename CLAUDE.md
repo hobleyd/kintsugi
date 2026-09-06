@@ -1597,6 +1597,12 @@ by then — only the long-running per-user units get restarted.
   `extract_rgb` and the tile constants — verbatim. They all feed the same viewer, so the tile grid
   and the full-frame threshold have to agree; the platform half above it is the only part that
   differs, and it differs completely (ScreenCaptureKit, GDI, X11 `GetImage`).
+- The three agents' tray glyphs (`macos-agent/assets/menu-bar-icon.png`,
+  `linux-agent/assets/tray-icon.png`, `windows-agent/assets/tray-icon.png`) are one file three times:
+  a black shape on transparency, which each platform recolours itself — macOS as a template image,
+  Windows by tinting it black or white for the taskbar's `SystemUsesLightTheme` at load and on every
+  `ImmersiveColorSet` broadcast. A replacement that bakes in a colour or a background breaks that on
+  all three at once; `cmp` them after touching one.
 - `remote_control::CONSENT_TIMEOUT` (60s) must stay *shorter* than
   `RemoteControlDefaults.ConsentTimeout` (90s). The agent's dialog is what should give up, so the
   answer is a reported `TimedOut`; the server's is only a backstop for an agent that never answers

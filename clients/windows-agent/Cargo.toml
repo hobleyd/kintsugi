@@ -47,10 +47,11 @@ winreg = "0.52"
 tungstenite = { version = "0.30", default-features = false, features = ["handshake", "rustls-tls-native-roots"] }
 rustls-pemfile = "2"
 rustls-native-certs = "0.8"
-# JPEG-encoding screen tiles. The tray icon and the progress window are drawn with GDI directly, so
-# unlike the macOS agent this is the only thing here that needs an image codec at all — hence jpeg
-# alone, with no png.
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# "png" alongside "jpeg", for the same two reasons as the Linux agent: png is the notification-area
+# icon (`tray_menu::TRAY_ICON_BYTES`, the same asset the other two agents embed), jpeg is every
+# remote control screen tile. Also brings imageops, which is what scales the icon to the size the
+# shell draws it at — see tray_menu::load_icon.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [target.'cfg(windows)'.dependencies]
 # The Service Control Manager plumbing for the SYSTEM half of this agent (see service.rs) — the

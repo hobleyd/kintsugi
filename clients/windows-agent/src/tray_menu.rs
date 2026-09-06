@@ -8,11 +8,14 @@ use windows_sys::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW, GetCursorPos, GetMessageW, LoadIconW,
-    PostMessageW, PostQuitMessage, SetForegroundWindow, TrackPopupMenu, TranslateMessage, IDI_APPLICATION, MF_GRAYED, MF_SEPARATOR, MF_STRING,
-    MSG, TPM_BOTTOMALIGN, TPM_RIGHTALIGN, WM_APP, WM_DESTROY, WM_RBUTTONUP, WS_OVERLAPPED,
+    AppendMenuW, CreateIcon, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyMenu, DispatchMessageW, GetCursorPos,
+    GetMessageW, GetSystemMetrics, LoadIconW, PostMessageW, PostQuitMessage, SetForegroundWindow, TrackPopupMenu, TranslateMessage, HICON,
+    IDI_APPLICATION, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, SM_CXSMICON, SM_CYSMICON, TPM_BOTTOMALIGN, TPM_RIGHTALIGN, WM_APP, WM_DESTROY,
+    WM_RBUTTONUP, WM_SETTINGCHANGE, WS_OVERLAPPED,
 };
 use windows_sys::Win32::Foundation::POINT;
+use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
+use winreg::RegKey;
 
 use crate::logging;
 use crate::status::{AgentStatus, CheckInStatus, MenuAction};
@@ -20,6 +23,15 @@ use crate::win32::{instance, register_class, wide, WindowClass};
 
 const CLASS_NAME: &str = "KintsugiAgentTray";
 const TOOLTIP: &str = "Kintsugi Patching";
+/// The same glyph the macOS and Linux agents embed (`menu-bar-icon.png`, `tray-icon.png`): a
+/// single-colour shape on transparency, tinted at load time to suit the taskbar — see `load_icon`.
+const TRAY_ICON_BYTES: &[u8] = include_bytes!("../assets/tray-icon.png");
+/// What `WM_SETTINGCHANGE` carries in `lparam` when the light/dark theme changes — the one settings
+/// change that means the icon has to be re-tinted.
+const IMMERSIVE_COLOR_SET: &str = "ImmersiveColorSet";
+/// The icon size to fall back to when `GetSystemMetrics(SM_CXSMICON)` answers 0, which it does only
+/// on failure. 16 is the notification area's size at 100% scaling.
+const DEFAULT_ICON_SIZE: i32 = 16;
 
 /// The message the notification-area icon sends this window for every mouse event on it. Must be in
 /// the `WM_APP` range: `WM_USER` is reserved for the *window class's* own use, and a control could
@@ -46,6 +58,11 @@ const MENU_ID_VERSION: usize = 105;
 /// here is "post a message, let the UI thread do the work". Everything that actually touches a
 /// window happens on the thread that owns it.
 static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
+
+/// The `HICON` currently shown, so a re-tint on theme change can destroy the previous one. Only the
+/// UI thread reads or writes it; an atomic rather than a `Cell` only because a static has to be
+/// `Sync`. Zero while the system's own `IDI_APPLICATION` is showing, which is never ours to destroy.
+static TRAY_ICON: AtomicIsize = AtomicIsize::new(0);
 
 /// Set by the scheduler thread, drained by the UI thread when it handles `WM_STATUS_CHANGED`. Only
 /// the latest matters — an intermediate progress step that was superseded before the UI got to it
@@ -220,9 +237,7 @@ fn add_icon(hwnd: HWND) -> Result<()> {
     let mut data = icon_data(hwnd);
     data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     data.uCallbackMessage = WM_TRAY_ICON;
-    // SAFETY: IDI_APPLICATION is a system-provided icon resource; loading it with a null module
-    // handle is the documented way to get it, and the handle is owned by the system.
-    data.hIcon = unsafe { LoadIconW(std::ptr::null_mut(), IDI_APPLICATION) };
+    data.hIcon = current_icon();
     copy_into(&mut data.szTip, TOOLTIP);
 
     // SAFETY: data is fully initialized above and outlives the call, which copies what it needs.
@@ -239,6 +254,143 @@ fn remove_icon(hwnd: HWND) {
     // until the user hovered over it, so this runs on the way out of the message loop.
     unsafe {
         Shell_NotifyIconW(NIM_DELETE, &data);
+    }
+    destroy_current_icon();
+}
+
+/// Swaps the shown icon for one tinted for the theme now in effect — the UI thread's response to
+/// `WM_SETTINGCHANGE` announcing `ImmersiveColorSet`. The previous `HICON` is destroyed only after
+/// the shell has been handed the new one; `Shell_NotifyIconW` copies what it needs, so the old
+/// handle is not referenced afterwards.
+fn retint_icon(hwnd: HWND) {
+    let previous = TRAY_ICON.swap(0, Ordering::SeqCst);
+
+    let mut data = icon_data(hwnd);
+    data.uFlags = NIF_ICON;
+    data.hIcon = current_icon();
+
+    // SAFETY: as in add_icon.
+    unsafe {
+        Shell_NotifyIconW(NIM_MODIFY, &data);
+        if previous != 0 {
+            DestroyIcon(previous as HICON);
+        }
+    }
+}
+
+/// The icon to show right now: this agent's own glyph tinted for the taskbar, recorded in
+/// `TRAY_ICON` for later destruction — or, if building it failed, the system's generic application
+/// icon, which is what the notification area showed before the glyph was embedded and is still
+/// better than no icon at all. That failure is logged, since it is the one thing that would make
+/// this agent look like an unnamed program in the overflow menu.
+fn current_icon() -> HICON {
+    match load_icon(taskbar_uses_light_theme()) {
+        Ok(icon) => {
+            TRAY_ICON.store(icon as isize, Ordering::SeqCst);
+            icon
+        }
+        Err(err) => {
+            logging::warn(&format!("could not build the notification-area icon, showing the generic one: {err:#}"));
+            // SAFETY: IDI_APPLICATION is a system-provided icon resource; loading it with a null
+            // module handle is the documented way to get it, and the handle is owned by the system.
+            unsafe { LoadIconW(std::ptr::null_mut(), IDI_APPLICATION) }
+        }
+    }
+}
+
+fn destroy_current_icon() {
+    let icon = TRAY_ICON.swap(0, Ordering::SeqCst);
+    if icon != 0 {
+        // SAFETY: the handle came from CreateIcon in load_icon and nothing else holds it — the
+        // shell copies the icon it is handed.
+        unsafe {
+            DestroyIcon(icon as HICON);
+        }
+    }
+}
+
+/// Whether the taskbar — and so the notification area this icon sits in — is drawn light.
+///
+/// `SystemUsesLightTheme` is the taskbar's setting; `AppsUseLightTheme` beside it governs
+/// application windows and can differ, so it is deliberately not the one read. Missing (Windows 10
+/// before 1903, or a value nothing has written) means the dark taskbar those builds always drew.
+fn taskbar_uses_light_theme() -> bool {
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", KEY_READ)
+        .and_then(|key| key.get_value::<u32, _>("SystemUsesLightTheme"))
+        .map(|value| value == 1)
+        .unwrap_or(false)
+}
+
+/// Decodes the embedded glyph, scales it to the size the shell draws a notification-area icon at,
+/// tints it black on a light taskbar or white on a dark one, and hands it to Win32 as an icon.
+///
+/// The tinting is what macOS does for free with a template image and what a Windows icon cannot ask
+/// for: the glyph is black, and a black shape on the dark taskbar Windows 10 and 11 draw by default
+/// is invisible — which would read as no icon at all, the very report that led here. Scaling
+/// happens here rather than being left to the shell because the shell's own downscale of a 64px
+/// bitmap to 16px is a nearest-neighbour affair that turns the glyph's thin strokes to noise.
+fn load_icon(light_taskbar: bool) -> Result<HICON> {
+    let decoded = image::load_from_memory_with_format(TRAY_ICON_BYTES, image::ImageFormat::Png)
+        .context("failed to decode the embedded tray icon")?
+        .into_rgba8();
+
+    // SAFETY: GetSystemMetrics takes an index and returns an integer; 0 means failure, handled below.
+    let (width, height) = unsafe { (GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON)) };
+    let width = if width > 0 { width } else { DEFAULT_ICON_SIZE };
+    let height = if height > 0 { height } else { DEFAULT_ICON_SIZE };
+
+    let scaled = image::imageops::resize(&decoded, width as u32, height as u32, image::imageops::FilterType::Lanczos3);
+    let tint = if light_taskbar { 0x00 } else { 0xFF };
+    let bitmaps = IconBitmaps::from_rgba(scaled.as_raw(), width as usize, height as usize, tint);
+
+    // SAFETY: both buffers are laid out as CreateIcon documents — a 32bpp colour bitmap and a 1bpp
+    // mask with WORD-aligned rows — and are sized for exactly `width` × `height`. CreateIcon copies
+    // them; neither has to outlive the call.
+    let icon = unsafe { CreateIcon(instance(), width, height, 1, 32, bitmaps.and_mask.as_ptr(), bitmaps.xor_color.as_ptr()) };
+    if icon.is_null() {
+        anyhow::bail!("CreateIcon failed for a {width}x{height} icon");
+    }
+    Ok(icon)
+}
+
+/// The two bitmaps `CreateIcon` wants, built from straight-alpha RGBA pixels.
+///
+/// The colour bitmap is 32bpp BGRA. Windows draws a 32bpp icon by its alpha channel, so the
+/// glyph's soft edges survive; the AND mask is only consulted where alpha is unsupported and is
+/// written the conventional way regardless — 1 where the pixel is fully transparent (keep the
+/// background), 0 where anything is drawn — rather than left to chance.
+struct IconBitmaps {
+    xor_color: Vec<u8>,
+    and_mask: Vec<u8>,
+}
+
+impl IconBitmaps {
+    /// Bytes per row of the 1bpp mask. `CreateIcon` builds the mask with `CreateBitmap`, whose rows
+    /// are WORD-aligned — not the DWORD alignment a DIB would use.
+    fn mask_stride(width: usize) -> usize {
+        (width.div_ceil(8) + 1) & !1
+    }
+
+    /// `tint` replaces every pixel's colour — the glyph is a single colour on transparency, so only
+    /// its alpha carries the shape and the colour is whatever the taskbar needs it to be.
+    fn from_rgba(rgba: &[u8], width: usize, height: usize, tint: u8) -> IconBitmaps {
+        debug_assert_eq!(rgba.len(), width * height * 4);
+
+        let mut xor_color = Vec::with_capacity(width * height * 4);
+        let stride = Self::mask_stride(width);
+        let mut and_mask = vec![0u8; stride * height];
+
+        for (index, pixel) in rgba.chunks_exact(4).enumerate() {
+            let alpha = pixel[3];
+            xor_color.extend_from_slice(&[tint, tint, tint, alpha]);
+            if alpha == 0 {
+                let (x, y) = (index % width, index / width);
+                and_mask[y * stride + x / 8] |= 0x80 >> (x % 8);
+            }
+        }
+
+        IconBitmaps { xor_color, and_mask }
     }
 }
 
@@ -409,12 +561,36 @@ unsafe extern "system" fn tray_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
             }
             0
         }
+        WM_SETTINGCHANGE => {
+            // Broadcast to every top-level window for any system setting; the theme flip is the
+            // one this icon cares about, named in lparam. A hidden WS_OVERLAPPED window still
+            // receives broadcasts, which is the only reason this window can learn of it at all.
+            if setting_changed_is(lparam, IMMERSIVE_COLOR_SET) {
+                retint_icon(hwnd);
+            }
+            0
+        }
         WM_DESTROY => {
             PostQuitMessage(0);
             0
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
+}
+
+/// Whether a `WM_SETTINGCHANGE`'s `lparam` names `setting`. The parameter is a pointer to a
+/// NUL-terminated UTF-16 string — or null, for the many settings changes that name nothing.
+fn setting_changed_is(lparam: LPARAM, setting: &str) -> bool {
+    let text = lparam as *const u16;
+    if text.is_null() {
+        return false;
+    }
+    let expected = wide(setting);
+    // SAFETY: Windows guarantees the string is NUL-terminated and lives for the duration of the
+    // message; reading one u16 at a time up to and including the terminator stays inside it.
+    // Comparing against a terminated buffer means the walk stops at the first mismatch or at
+    // `expected`'s own terminator, whichever comes first.
+    expected.iter().enumerate().all(|(index, &wanted)| unsafe { *text.add(index) } == wanted)
 }
 
 /// Renders `epoch` in the PC's own local time (not UTC) — what the person looking at the menu
@@ -506,5 +682,102 @@ mod tests {
         let queued = PENDING_NOTIFICATIONS.lock().unwrap();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].1, "queued before the icon existed");
+    }
+
+    /// The icon ships in the binary, so a corrupt or wrongly-formatted asset is a build-time
+    /// mistake this catches rather than something a user discovers — the same test the Linux
+    /// agent keeps over the same bytes.
+    #[test]
+    fn the_embedded_icon_decodes_to_a_square_rgba_glyph() {
+        let decoded = image::load_from_memory_with_format(TRAY_ICON_BYTES, image::ImageFormat::Png)
+            .expect("the embedded tray icon should decode")
+            .into_rgba8();
+
+        assert!(decoded.width() > 0);
+        assert_eq!(decoded.width(), decoded.height());
+        // A glyph on transparency: some pixels drawn, some not. All-opaque would mean the asset
+        // was flattened onto a background and would paint a square on the taskbar.
+        assert!(decoded.pixels().any(|p| p[3] == 0));
+        assert!(decoded.pixels().any(|p| p[3] == 255));
+    }
+
+    #[test]
+    fn mask_rows_are_word_aligned() {
+        // CreateIcon hands the mask to CreateBitmap, whose scanlines start on a WORD boundary. A
+        // DWORD-aligned (DIB-style) stride would shear every row of a 16- or 24-pixel icon.
+        assert_eq!(IconBitmaps::mask_stride(8), 2);
+        assert_eq!(IconBitmaps::mask_stride(16), 2);
+        assert_eq!(IconBitmaps::mask_stride(20), 4);
+        assert_eq!(IconBitmaps::mask_stride(24), 4);
+        assert_eq!(IconBitmaps::mask_stride(32), 4);
+    }
+
+    #[test]
+    fn from_rgba_tints_the_colour_and_keeps_the_alpha() {
+        // Two pixels wide, one high: an opaque black pixel and a half-transparent one. Whatever the
+        // source colour, the output carries the tint; the alpha — the shape — is untouched.
+        let rgba = [0, 0, 0, 255, 10, 20, 30, 128];
+
+        let bitmaps = IconBitmaps::from_rgba(&rgba, 2, 1, 0xFF);
+
+        assert_eq!(bitmaps.xor_color, vec![0xFF, 0xFF, 0xFF, 255, 0xFF, 0xFF, 0xFF, 128]);
+    }
+
+    #[test]
+    fn from_rgba_masks_exactly_the_fully_transparent_pixels() {
+        // 9 pixels wide so the mask spans two bytes per row, two rows so the stride is exercised.
+        // Only pixel (0, 0) and pixel (8, 1) are fully transparent; a half-transparent pixel is
+        // drawn, not masked.
+        let mut rgba = vec![0u8; 9 * 2 * 4];
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+        // Row-major, 4 bytes per pixel, alpha last: (x, y) → (y * 9 + x) * 4 + 3.
+        rgba[3] = 0; // (0, 0)
+        rgba[(9 + 8) * 4 + 3] = 0; // (8, 1)
+        rgba[4 + 3] = 128; // (1, 0), partially transparent
+
+        let bitmaps = IconBitmaps::from_rgba(&rgba, 9, 2, 0x00);
+
+        let stride = IconBitmaps::mask_stride(9);
+        assert_eq!(stride, 2);
+        assert_eq!(bitmaps.and_mask.len(), stride * 2);
+        assert_eq!(bitmaps.and_mask[0], 0b1000_0000, "(0, 0) is the top bit of row 0");
+        assert_eq!(bitmaps.and_mask[1], 0, "(1, 0) is drawn, not masked");
+        assert_eq!(bitmaps.and_mask[stride], 0, "row 1's first byte has no transparent pixel");
+        assert_eq!(bitmaps.and_mask[stride + 1], 0b1000_0000, "(8, 1) is the top bit of row 1's second byte");
+    }
+
+    /// The bitmaps `from_rgba` lays out are only right if Win32 agrees they are: a wrong stride or
+    /// depth is a null handle from `CreateIcon`, which `current_icon` would quietly paper over with
+    /// the generic icon — the very state being fixed. Both tints, since that is the whole range.
+    #[test]
+    fn the_embedded_glyph_becomes_an_icon_for_either_taskbar() {
+        for light_taskbar in [true, false] {
+            let icon = load_icon(light_taskbar).expect("CreateIcon should accept the glyph");
+            assert!(!icon.is_null());
+            // SAFETY: the handle was just created by CreateIcon and nothing else holds it.
+            unsafe {
+                DestroyIcon(icon);
+            }
+        }
+    }
+
+    #[test]
+    fn setting_changed_is_reads_the_lparam_string_and_tolerates_null() {
+        let theme = wide(IMMERSIVE_COLOR_SET);
+        assert!(setting_changed_is(theme.as_ptr() as LPARAM, IMMERSIVE_COLOR_SET));
+
+        let other = wide("Policy");
+        assert!(!setting_changed_is(other.as_ptr() as LPARAM, IMMERSIVE_COLOR_SET));
+
+        // A prefix of the name is a different setting, and so is the name with more on the end.
+        let prefix = wide("ImmersiveColor");
+        assert!(!setting_changed_is(prefix.as_ptr() as LPARAM, IMMERSIVE_COLOR_SET));
+        let longer = wide("ImmersiveColorSetX");
+        assert!(!setting_changed_is(longer.as_ptr() as LPARAM, IMMERSIVE_COLOR_SET));
+
+        // Most WM_SETTINGCHANGE broadcasts name nothing at all.
+        assert!(!setting_changed_is(0, IMMERSIVE_COLOR_SET));
     }
 }
