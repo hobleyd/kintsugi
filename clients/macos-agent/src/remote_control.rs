@@ -68,6 +68,21 @@ const CONSENT_TIMEOUT: Duration = Duration::from_secs(60);
 /// noticed.
 const CONTROL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// How long the control socket may go without a single frame from the server before it is
+/// declared dead and reopened.
+///
+/// The server pings every 30s (`RemoteControlController.KeepAliveInterval`), so a healthy socket is
+/// never silent for long; this is three missed pings. It exists because a read that returns
+/// `WouldBlock` forever looks exactly like a healthy idle socket, and there is a way for a socket to
+/// die that produces nothing else: the network it was opened on going away. This Mac was reached
+/// over a VPN, the VPN disconnected, and the kernel went on reporting the socket `ESTABLISHED` —
+/// nothing will ever send a RST for a source address that no longer exists — while the server had
+/// long since timed it out and marked the host unreachable. The agent logged "socket open" and
+/// nothing else for ten hours. A laptop that sleeps and wakes on a different network fails the same
+/// way. Keep this comfortably above the server's ping interval; below it a healthy socket reconnects
+/// in a loop.
+const CONTROL_SILENCE_TIMEOUT: Duration = Duration::from_secs(90);
+
 /// How long a session loop waits for a new frame before going back to check for input. Also the
 /// upper bound on input latency, which is why it is small: at 20ms the remote pointer feels
 /// attached to the hand moving it.
@@ -223,14 +238,27 @@ fn hold_control_socket(
     // *complete* flush, since a partial one means some of it is still buffered here.
     let mut awaiting_flush: Vec<Sender<()>> = Vec::new();
 
+    // The last time anything at all arrived from the server — a message or its keep-alive ping.
+    // See `CONTROL_SILENCE_TIMEOUT` for why a silent socket has to be treated as a dead one.
+    let mut last_heard = Instant::now();
+
     loop {
         // 1. Anything the server has to say.
         match read_control_message(&mut socket)? {
             ControlRead::Message(text) => {
+                last_heard = Instant::now();
                 handle_server_message(&text, config, serial_number, identity, active, &outbound_tx, end_session_requested);
             }
+            ControlRead::KeepAlive => last_heard = Instant::now(),
             ControlRead::Closed => return Ok(()),
-            ControlRead::Idle => {}
+            ControlRead::Idle => {
+                if last_heard.elapsed() > CONTROL_SILENCE_TIMEOUT {
+                    return Err(anyhow!(
+                        "nothing heard from the server for {}s; treating the control socket as dead",
+                        last_heard.elapsed().as_secs()
+                    ));
+                }
+            }
         }
 
         // 2. Anything a session thread wants said.
@@ -258,6 +286,8 @@ fn hold_control_socket(
 
 enum ControlRead {
     Message(String),
+    /// A ping, a pong or anything else that is not a message but proves the server is still there.
+    KeepAlive,
     Closed,
     Idle,
 }
@@ -266,9 +296,10 @@ fn read_control_message(socket: &mut Socket) -> Result<ControlRead> {
     match socket.read() {
         Ok(Message::Text(text)) => Ok(ControlRead::Message(text.to_string())),
         Ok(Message::Close(_)) => Ok(ControlRead::Closed),
-        // Ping/Pong are answered inside tungstenite; a binary message on this socket is not part of
-        // the protocol and is ignored rather than treated as a fault.
-        Ok(_) => Ok(ControlRead::Idle),
+        // Ping/Pong are answered inside tungstenite but still handed back here, which is what the
+        // silence watchdog listens for. A binary message on this socket is not part of the protocol
+        // and is ignored rather than treated as a fault — but it still counts as the server talking.
+        Ok(_) => Ok(ControlRead::KeepAlive),
         Err(err) if is_would_block(&err) => Ok(ControlRead::Idle),
         Err(tungstenite::Error::ConnectionClosed) | Err(tungstenite::Error::AlreadyClosed) => Ok(ControlRead::Closed),
         Err(err) => Err(anyhow!(err).context("reading from the remote control socket")),

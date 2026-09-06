@@ -41,6 +41,18 @@ use crate::remote_protocol::{parse_server_message, AgentMessage, ConsentOutcome,
 /// How long the relay waits between polls of its three channels.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+/// How long the control socket may go without a single frame from the server before it is
+/// declared dead and reopened.
+///
+/// The server pings every 30s (`RemoteControlController.KeepAliveInterval`), so this is three
+/// missed pings. A read that returns `WouldBlock` forever looks exactly like a healthy idle
+/// socket, and a socket whose network has gone away — a VPN dropping, a host waking on a different
+/// network — produces nothing else: the kernel reports it `ESTABLISHED` for good, since nothing
+/// will ever send a RST for a source address that no longer exists, while the server has long
+/// since timed it out and marked the host unreachable. Same value and reasoning as the macOS
+/// agent, where it was found. Keep it comfortably above the server's ping interval.
+const CONTROL_SILENCE_TIMEOUT: Duration = Duration::from_secs(90);
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Reconnect backoff. As the other two agents: a host that cannot reach the server is a host nobody
@@ -147,16 +159,29 @@ fn relay(
 
     let mut relay = Relay { control, session: None, session_id: None, reader: FrameReader::new() };
 
+    // The last time anything at all arrived on the control socket — a message or the server's
+    // keep-alive ping. See `CONTROL_SILENCE_TIMEOUT`.
+    let mut last_heard = Instant::now();
+
     loop {
         // 1. The server, to the per-user process.
         match read_text(&mut relay.control)? {
             SocketRead::Message(text) => {
+                last_heard = Instant::now();
                 if let Some(line) = handle_server_message(&text, &mut ipc, &mut relay)? {
                     logging::info(&format!("remote control: {line}"));
                 }
             }
+            SocketRead::KeepAlive => last_heard = Instant::now(),
             SocketRead::Closed => return Ok(()),
-            SocketRead::Idle => {}
+            SocketRead::Idle => {
+                if last_heard.elapsed() > CONTROL_SILENCE_TIMEOUT {
+                    return Err(anyhow!(
+                        "nothing heard from the server for {}s; treating the control socket as dead",
+                        last_heard.elapsed().as_secs()
+                    ));
+                }
+            }
         }
 
         // 2. The per-user process, to the server or to the viewer.
@@ -186,7 +211,9 @@ fn relay(
                         },
                     )?;
                 }
-                SocketRead::Idle => {}
+                // A session socket carries frames outbound, so a dead one fails on the write and
+                // needs no silence watchdog of its own.
+                SocketRead::KeepAlive | SocketRead::Idle => {}
             }
         }
 
@@ -318,6 +345,8 @@ fn handle_agent_frame(
 
 enum SocketRead {
     Message(String),
+    /// A ping, a pong or anything else that is not a message but proves the peer is still there.
+    KeepAlive,
     Closed,
     Idle,
 }
@@ -326,9 +355,10 @@ fn read_text(socket: &mut Socket) -> Result<SocketRead> {
     match socket.read() {
         Ok(Message::Text(text)) => Ok(SocketRead::Message(text.to_string())),
         Ok(Message::Close(_)) => Ok(SocketRead::Closed),
-        // Ping and pong are answered inside tungstenite. A binary message is not part of the
-        // protocol in this direction and is ignored.
-        Ok(_) => Ok(SocketRead::Idle),
+        // Ping and pong are answered inside tungstenite but still handed back here, which is what the
+        // control socket's silence watchdog listens for. A binary message is not part of the protocol
+        // in this direction and is ignored — but it still counts as the peer talking.
+        Ok(_) => Ok(SocketRead::KeepAlive),
         Err(err) if is_would_block(&err) => Ok(SocketRead::Idle),
         Err(tungstenite::Error::ConnectionClosed) | Err(tungstenite::Error::AlreadyClosed) => Ok(SocketRead::Closed),
         Err(err) => Err(anyhow!(err).context("reading from a remote control socket")),

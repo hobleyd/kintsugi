@@ -39,6 +39,13 @@ public class RemoteControlController : ControllerBase
     /// is silent for hours at a time, and something has to keep it from looking dead: nginx's
     /// <c>proxy_read_timeout</c> on this location, and any stateful firewall between the host and
     /// the server, both measure idleness in bytes on the wire.
+    /// <para>
+    /// It is also the agent's only evidence that the server is still there. Each agent's
+    /// <c>remote_control.rs</c> reconnects after <c>CONTROL_SILENCE_TIMEOUT</c> (90s, three of
+    /// these) with nothing received, because a socket whose network has gone away — a VPN dropping,
+    /// a laptop waking elsewhere — never gets a RST and reads as healthy forever otherwise. Lengthen
+    /// this past that and every healthy agent reconnects in a loop.
+    /// </para>
     /// </summary>
     private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(30);
 

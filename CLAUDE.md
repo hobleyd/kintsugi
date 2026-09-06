@@ -1602,6 +1602,15 @@ by then — only the long-running per-user units get restarted.
   answer is a reported `TimedOut`; the server's is only a backstop for an agent that never answers
   at all. Invert them and the server abandons a dialog that is still on screen, so a user who then
   clicks Allow grants a session nobody is waiting for.
+- `remote_control::CONTROL_SILENCE_TIMEOUT` (90s, all three agents) must stay *longer* than
+  `RemoteControlController.KeepAliveInterval` (30s) by a comfortable multiple. The server's ping is
+  the only thing an idle control socket ever receives, and it is the agent's only evidence the
+  server is still there: a socket whose network went away — a VPN dropping, a laptop waking on a
+  different Wi-Fi — never receives a RST, so the kernel reports it `ESTABLISHED` and `read()` returns
+  `WouldBlock` forever, exactly as a healthy idle socket does. Before the watchdog a Mac sat like
+  that for ten hours, logging "socket open" once and nothing after, "unreachable" on the Hosts
+  screen while its check-ins were fine. Set the timeout below the ping interval and every healthy
+  host reconnects in a loop instead.
 - `/api/remote-control` is gated by its **own `=` location** in `nginx/default.conf`, not by the
   agent regex — the only agent route that is. A new agent route still belongs in the regex; this one
   is separate because a WebSocket needs an hour-long `proxy_read_timeout` that must not apply to
