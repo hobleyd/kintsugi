@@ -106,7 +106,7 @@ class ApplicationFilters extends Equatable {
     if (search.isNotEmpty && !row.application.name.toLowerCase().contains(search.toLowerCase())) {
       return false;
     }
-    if (statusKey != 'all' && row.statusKey != statusKey) return false;
+    if (!_matchesStatus(row)) return false;
     // A row with no researched path has no platform, so it is excluded under any specific one --
     // the same answer the host filter gives for a host the row is not on.
     if (platform != 'all' && row.platform != platform) return false;
@@ -137,6 +137,25 @@ class ApplicationFilters extends Equatable {
     final hostNames = rowHostNames.isEmpty ? row.application.hostNames : rowHostNames;
 
     return hostNames.any((h) => h.toLowerCase() == host);
+  }
+
+  /// The status filter reads the row's badge key -- except for "Update Available", which reads
+  /// the count behind it. `UpgradePathStatusKey.For` on the server ranks a failed check, a missing
+  /// path and an unsigned script *above* an available update, so a row whose hosts are behind
+  /// wears "Review And Sign" or "Check Failed" rather than "Update Available" -- the more urgent
+  /// fact, and the right badge. But the Hosts screen's per-host count
+  /// (`GetAppUpdateCountsByHostAsync`) counts every installation that is behind regardless of
+  /// signature or status, and its badge deep-links here with this filter. Matching the badge key
+  /// alone made that link land on an empty table whenever the outdated rows were also unsigned:
+  /// eight updates on the Hosts screen, none on this one. The question this filter answers is "is
+  /// an update available", which is `updateAvailableHostCount`, whatever else is also true of the
+  /// row.
+  bool _matchesStatus(ApplicationTableRow row) {
+    if (statusKey == 'all') return true;
+    if (statusKey == 'update-available') {
+      return (row.upgradePath?.updateAvailableHostCount ?? 0) > 0;
+    }
+    return row.statusKey == statusKey;
   }
 
   @override

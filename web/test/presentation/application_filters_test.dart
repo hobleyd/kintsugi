@@ -87,6 +87,39 @@ void main() {
         isFalse,
       );
     });
+
+    test('"update-available" matches on the count, not the badge, so an unsigned or failed row with '
+        'hosts behind is still an available update', () {
+      // UpgradePathStatusKey.For ranks review-sign and check-failed above update-available, while
+      // the Hosts screen's per-host count ignores both. The Hosts badge deep-links here with this
+      // filter, and matching the badge key alone landed it on an empty table.
+      for (final badge in ['review-sign', 'check-failed', 'not-found']) {
+        expect(
+          const ApplicationFilters(statusKey: 'update-available')
+              .matches(row(statusKey: badge, needingUpdate: ['alpha'])),
+          isTrue,
+          reason: badge,
+        );
+        expect(
+          const ApplicationFilters(statusKey: 'update-available', hostName: 'alpha')
+              .matches(row(statusKey: badge, needingUpdate: ['alpha'])),
+          isTrue,
+          reason: '$badge with host',
+        );
+        expect(
+          const ApplicationFilters(statusKey: 'update-available', hostName: 'beta')
+              .matches(row(statusKey: badge, needingUpdate: ['alpha'])),
+          isFalse,
+          reason: '$badge with other host',
+        );
+      }
+      // And a row nobody is behind on is not an available update whatever its badge says.
+      expect(
+        const ApplicationFilters(statusKey: 'update-available')
+            .matches(row(statusKey: 'review-sign')),
+        isFalse,
+      );
+    });
   });
 
   group('host', () {
