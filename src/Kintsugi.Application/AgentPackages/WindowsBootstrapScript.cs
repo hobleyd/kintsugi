@@ -62,6 +62,16 @@ namespace Kintsugi.Application.AgentPackages;
 /// guarantees the installer that runs is the one shipped with the binary it is installing.
 /// </para>
 /// <para>
+/// <b>What has actually been run.</b> The rendered text parses clean under PowerShell 7, and its
+/// two pure-logic pieces — the checksum comparison and the <c>config.toml</c> rewrite — were
+/// executed there against real files, which is what confirmed that <c>Get-FileHash</c>'s uppercase
+/// output matches a lowercase pin and that the rewritten file is BOM-less TOML the <c>toml</c>
+/// crate accepts. It has <em>not</em> been run end to end under Windows PowerShell 5.1, which is
+/// what will actually execute it; nothing in the body is newer than 5.1 (no ternary, no
+/// <c>&amp;&amp;</c>, no null-conditional, and splatting to a native command has worked since v3),
+/// but do not read the tests here as a claim that it has.
+/// </para>
+/// <para>
 /// Windows only, by nature — the three agents are otherwise kept deliberately in step. CrowdStrike
 /// is the reason this platform needs it: there is no equivalent ask for macOS or Linux yet, and
 /// inventing one would be two more texts with no deployment behind them.
@@ -162,6 +172,16 @@ public static class WindowsBootstrapScript
 
             Exit codes: 0 installed, or already installed. Non-zero on any failure, with the reason
             on stdout and appended to the log file named at the end of the run.
+
+            THE RELEASE MUST BE PUBLICLY DOWNLOADABLE. The Kintsugi server attaches its own GitHub
+            token when it imports a build, so it can import from a private repository perfectly
+            well; the curl below is anonymous, and against a private release it would 404 on every
+            host with a message that reads like a broken URL rather than like a permissions problem.
+
+            GIVE IT AT LEAST TEN MINUTES. The download is capped at five and the packaged installer
+            then runs one check-in synchronously, so on a slow host the whole run can approach ten.
+            CrowdStrike RTR's default script timeout is ten minutes; a tighter one kills the run
+            mid-install, which produces no exit code of ours and no explanation in the console.
 
         .PARAMETER Force
             Reinstall even when the agent is already present. Only for repairing a broken install -
@@ -291,7 +311,7 @@ public static class WindowsBootstrapScript
             # simply the wrong bytes.
             & curl.exe --silent --show-error --fail --location `
                 --proto '=https' --proto-redir '=https' --tlsv1.2 `
-                --retry 3 --retry-delay 5 --connect-timeout 30 --max-time 900 `
+                --retry 3 --retry-delay 5 --connect-timeout 30 --max-time 300 `
                 --output $ArchivePath $DownloadUrl
             if ($LASTEXITCODE -ne 0) { throw "Downloading $DownloadUrl failed (curl exit code $LASTEXITCODE)." }
             if (-not (Test-Path -LiteralPath $ArchivePath)) { throw "curl reported success but $ArchivePath was not written." }

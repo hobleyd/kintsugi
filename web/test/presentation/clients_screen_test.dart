@@ -73,7 +73,15 @@ void main() {
 
   testWidgets('a package with no upstream checksum says so instead of opening an empty dialog',
       (tester) async {
-    await pumpScreen(tester);
+    // Pumped without the wrapping Scaffold the other tests use, because the reason must reach the
+    // reader through the screen's own AlertBox rather than through anything the harness supplies.
+    // A transient toast would be the wrong shape for it besides: the remedy is the "Refresh
+    // clients" button a few pixels away, so the message should stay on screen beside it.
+    tester.view.physicalSize = const Size(1400, 900);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(MaterialApp(theme: AppTheme.light(), home: const ClientsScreen()));
+    await tester.pumpAndSettle();
 
     await tester.tap(find.text('WINDOWS DEPLOYMENT SCRIPT'));
     await tester.pumpAndSettle();

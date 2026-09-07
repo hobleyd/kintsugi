@@ -72,6 +72,11 @@ final class ClientsState extends Equatable {
   /// The script the screen has just been handed, or null once it has been shown. Held in state
   /// rather than returned from the button's own handler so the fetch is the bloc's, like every
   /// other request this screen makes.
+  ///
+  /// Only ever set when there *is* a script. A server with nothing to render reports its reason
+  /// through [error] instead, which this screen already paints as an `AlertBox` above the table —
+  /// the reason's remedy is the "Refresh clients" button a few pixels away, so it belongs beside
+  /// that button and not in something that fades.
   final WindowsBootstrapScript? bootstrapScript;
 
   @override
@@ -162,11 +167,18 @@ class ClientsBloc extends Bloc<ClientsEvent, ClientsState> {
       fetchingBootstrapScript: true,
     ));
     try {
+      // "Nothing published yet" and "published without an upstream checksum" arrive as a 200 with
+      // a reason rather than as a failure, because both are ordinary states with a fix on this
+      // screen. They still reach the reader the same way a failure does.
+      final result = await _getWindowsBootstrapScript();
       emit(ClientsState(
         view: state.view,
         loading: false,
         expandedPlatform: state.expandedPlatform,
-        bootstrapScript: await _getWindowsBootstrapScript(),
+        bootstrapScript: result.script == null ? null : result,
+        error: result.script == null
+            ? (result.unavailableReason ?? 'No deployment script could be rendered.')
+            : null,
       ));
     } on ApiException catch (error) {
       emit(ClientsState(

@@ -46,26 +46,18 @@ class _ClientsView extends StatelessWidget {
         builder: _build,
       );
 
+  /// Shows the rendered script. Reached only when there is one: a server with nothing to render
+  /// reports its reason through `state.error`, which `_build` already paints as an `AlertBox`
+  /// above the table, beside the "Refresh clients" button that is the remedy for both causes.
   static void _showBootstrapScript(BuildContext context, ClientsState state) {
     final result = state.bootstrapScript!;
     context.read<ClientsBloc>().add(const ClientsBootstrapScriptDismissed());
-
-    final script = result.script;
-    if (script == null) {
-      // Nothing published, or published without an upstream checksum. Both are fixed by the
-      // "Refresh clients" button already on this screen, so the reason belongs beside it rather
-      // than inside a dialog that would only be able to say the same thing.
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-        content: Text(result.unavailableReason ?? 'No deployment script could be rendered.'),
-      ));
-      return;
-    }
 
     showScriptDialog(
       context,
       applicationName: 'Install-KintsugiAgent.ps1',
       platform: 'Windows agent v${result.version} - pins SHA-256 ${result.sha256}',
-      script: script,
+      script: result.script!,
     );
   }
 
