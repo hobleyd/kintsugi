@@ -387,11 +387,24 @@ them share; an AI-researched entry keeps the application's own name and is filed
 is decided by comparing bytes against `BuildScript()`, not by trusting the row.
 The filename is **not** load-bearing: `ApprovedScriptCorpus.ScriptPathsIn` finds the script by
 extension and confirms it by hash, which is what keeps entries written under the original fixed
-`script.sh` readable, and why an existing `script.sh` is written to again rather than renamed. One
-consequence to hold onto: a generic package-manager entry matches no local row's name, so those
-entries are **bless-only** — correctly, since this server generates those exact bytes itself and
-`ImportApprovedScriptsFromSourceCommandHandler`'s content-match bless already covers them. Adoption
-is for AI-researched scripts, where matching on name is exactly right.
+`script.sh` readable. One consequence to hold onto: a generic package-manager entry matches no local
+row's name, so those entries are **bless-only** — correctly, since this server generates those exact
+bytes itself and `ImportApprovedScriptsFromSourceCommandHandler`'s content-match bless already covers
+them. Adoption is for AI-researched scripts, where matching on name is exactly right.
+
+**A pull request is raised for new content only, and "already approved" is decided by the entry, not
+the signature.** `GitHubScriptApprovalPublisher` first asks whether
+`approved-scripts/<sha256>/metadata.json` exists on the default branch, and if it does, signing
+reports `AlreadyApproved` and writes nothing — whichever server's signature the entry carries. Once
+the bytes are on the trust root they are approved for every server reading it; a second server
+signing them locally is doing what a bless does (re-signing approved content with its own key so its
+own agents can verify it), and a bless raises no pull request. The check used to compare this
+signer's signature *document* against the one on the branch, and that never matched: an ECDSA
+signature is randomised per signing and the document carries `SignedAtUtc`, so every re-sign of an
+already-merged script — the Homebrew script taken from a newer build and signed on a second server,
+say — opened a pull request rewriting one signature file. Do not put a document comparison back; the
+`signatures/<fingerprint>.json`-per-signer layout still exists so two servers approving the same
+*new* bytes at the same time never conflict, not so that every server publishes its attestation.
 
 **A remote signature is never served to an agent — the importing server re-signs.** Each agent pins
 exactly one signing key at enrollment: its own server's. So the Upgrade Scripts screen's "Refresh

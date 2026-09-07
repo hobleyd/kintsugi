@@ -43,8 +43,10 @@ public enum ScriptApprovalPublishOutcome
     /// of the same content by the same signer, typically after a re-review.</summary>
     PullRequestAlreadyOpen,
 
-    /// <summary>This signer's attestation over these bytes is already on the default branch, so
-    /// there is nothing to propose.</summary>
+    /// <summary>An entry for these bytes is already on the default branch — under any server's
+    /// signature — so the script is approved for every server reading the repository and there is
+    /// nothing to propose. Signing it locally then re-signs already-approved content, which is what
+    /// a bless does, and a bless raises no pull request either.</summary>
     AlreadyApproved,
 
     /// <summary>Publication failed. The local approval still stands — see

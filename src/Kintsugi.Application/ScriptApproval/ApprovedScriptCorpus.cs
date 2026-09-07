@@ -42,9 +42,12 @@ public static class ApprovedScriptCorpus
 
     /// <summary>
     /// Written and parsed with indentation and a fixed property order (the record's own declaration
-    /// order) so that approving identical content twice produces byte-identical files. That is what
-    /// makes the publisher idempotent — it can compare what it is about to write against what is
-    /// already on the default branch and skip opening a pull request that would change nothing.
+    /// order) so that the same metadata serialises to byte-identical files. That is what lets the
+    /// publisher, retrying an approval on its own earlier branch, see that a file already holds what
+    /// it was about to write. It does <em>not</em> make a signature document reproducible — an ECDSA
+    /// signature is randomised per signing and the document carries the signing time — which is why
+    /// the publisher decides "already approved" from the entry's existence on the default branch, not
+    /// from comparing documents.
     /// </summary>
     public static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -57,10 +60,9 @@ public static class ApprovedScriptCorpus
 
     public static string MetadataPath(string sha256) => $"{ContentDirectory(sha256)}/{MetadataFileName}";
 
-    /// <summary>The historical filename, from before an entry was named after what it is. Still
-    /// written to rather than replaced when an existing entry already carries it — renaming a file
-    /// on the trust root would be a delete plus a create on content that is already reviewed and
-    /// merged, which is churn for a cosmetic gain.</summary>
+    /// <summary>The historical filename, from before an entry was named after what it is. Kept so the
+    /// reader's tests can spell it: a merged entry is never written to again (see the publisher's
+    /// first check), so nothing needs to decide between the two names for an existing entry.</summary>
     public const string LegacyScriptBaseName = "script";
 
     public static string ScriptPath(string sha256, string baseName, ScriptLanguage language) =>

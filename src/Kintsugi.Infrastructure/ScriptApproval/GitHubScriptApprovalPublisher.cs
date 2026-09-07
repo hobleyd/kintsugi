@@ -16,9 +16,19 @@ namespace Kintsugi.Infrastructure.ScriptApproval;
 /// The work is deliberately shaped to be idempotent, because signing the same script twice is a
 /// normal thing for a reviewer to do (a re-review, a second look after an edit elsewhere) and it must
 /// not litter the repository with duplicate pull requests. Three checks, in order of cheapness:
-/// this signer's attestation is already on the default branch; a branch proposing it already exists;
+/// an entry for these bytes is already on the default branch; a branch proposing it already exists;
 /// a file about to be written already holds exactly these bytes. Only what is genuinely new gets
 /// written.
+///
+/// The first check is on the <em>content</em> being approved, not on this signer's attestation over
+/// it. The default branch is the trust root: once an entry for these bytes has been merged, the
+/// script is approved for every server reading the repository, and a second server signing the same
+/// bytes locally is doing exactly what <c>ImportApprovedScriptsFromSourceCommandHandler</c>'s bless
+/// does automatically — re-signing already-approved content with its own key so its own agents can
+/// verify it. Bless raises no pull request for that, and neither should Sign. It also cannot be done
+/// by comparing signature documents: an ECDSA signature is randomised per signing and the document
+/// carries the signing time, so the same server re-signing the same bytes never reproduces the file
+/// it published before, and that comparison opened a pull request on every re-sign.
 ///
 /// The branch name is derived from the content hash and the signer fingerprint rather than being
 /// unique per attempt, which is what makes the second check possible at all.
@@ -81,23 +91,24 @@ public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
     {
         var defaultBranch = await GetDefaultBranchAsync(target, cancellationToken);
 
-        // What this entry is, as opposed to which row was signed to produce it — the two differ for
-        // every package-manager script. See ApprovedScriptIdentity.
-        var identity = ApprovedScriptIdentity.For(submission);
-        var scriptPath = await ResolveScriptPathAsync(target, submission, identity, defaultBranch, cancellationToken);
-        var files = BuildFiles(submission, identity, scriptPath);
-        var signaturePath = ApprovedScriptCorpus.SignaturePath(submission.Sha256, submission.SignerFingerprint);
-
-        // Already merged: this signer has vouched for these exact bytes on the trust root, so there
-        // is nothing left to propose.
-        var existingSignature = await GetFileAsync(target, signaturePath, defaultBranch, cancellationToken);
-        if (existingSignature is not null && existingSignature.Content == files[signaturePath])
+        // Already merged: an entry for these exact bytes is on the trust root, so the script is
+        // approved for every server reading it and there is nothing left to propose — whichever
+        // server's signature it carries. metadata.json is the file every entry has exactly one of.
+        // Checked before anything is derived from the submission, because it is also what keeps a
+        // legacy `script.sh` entry from ever gaining a second copy of its bytes under the descriptive
+        // name: an entry that already exists is never written to again at all.
+        var existingEntry = await GetFileAsync(target, ApprovedScriptCorpus.MetadataPath(submission.Sha256), defaultBranch, cancellationToken);
+        if (existingEntry is not null)
         {
             return new ScriptApprovalPublishResult(
                 ScriptApprovalPublishOutcome.AlreadyApproved,
-                Message: $"{target.Repository} already carries this signature on {defaultBranch}.");
+                Message: $"{target.Repository} already carries this script on {defaultBranch}.");
         }
 
+        // What this entry is, as opposed to which row was signed to produce it — the two differ for
+        // every package-manager script. See ApprovedScriptIdentity.
+        var identity = ApprovedScriptIdentity.For(submission);
+        var files = BuildFiles(submission, identity);
         var branch = BranchNameFor(submission);
 
         // Already proposed: reuse the open pull request rather than opening a second one that would
@@ -131,37 +142,10 @@ public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
     }
 
     /// <summary>
-    /// The path this entry's script is written to: the descriptive name from
-    /// <paramref name="identity"/>, unless the entry already carries the original fixed
-    /// <c>script.sh</c>/<c>script.ps1</c> name on <paramref name="defaultBranch"/> with exactly
-    /// these bytes — in which case that existing file <em>is</em> the script and is written to
-    /// again, rather than leaving the same content in the directory twice under two names.
-    /// </summary>
-    private async Task<string> ResolveScriptPathAsync(
-        GitHubTarget target,
-        ScriptApprovalSubmission submission,
-        ApprovedScriptIdentity identity,
-        string defaultBranch,
-        CancellationToken cancellationToken)
-    {
-        var descriptive = ApprovedScriptCorpus.ScriptPath(submission.Sha256, identity.FileBaseName, submission.Language);
-        var legacy = ApprovedScriptCorpus.ScriptPath(
-            submission.Sha256, ApprovedScriptCorpus.LegacyScriptBaseName, submission.Language);
-        if (string.Equals(descriptive, legacy, StringComparison.Ordinal))
-        {
-            return descriptive;
-        }
-
-        var existing = await GetFileAsync(target, legacy, defaultBranch, cancellationToken);
-        return existing is not null && existing.Content == submission.Script ? legacy : descriptive;
-    }
-
-    /// <summary>
     /// The three files one approval consists of, keyed by repository path. Built together so the
     /// script, its metadata and the signature over it are always written as one consistent set.
     /// </summary>
-    private static Dictionary<string, string> BuildFiles(
-        ScriptApprovalSubmission submission, ApprovedScriptIdentity identity, string scriptPath)
+    private static Dictionary<string, string> BuildFiles(ScriptApprovalSubmission submission, ApprovedScriptIdentity identity)
     {
         var metadata = new ApprovedScriptMetadataDocument(
             submission.Sha256,
@@ -182,7 +166,7 @@ public class GitHubScriptApprovalPublisher : IScriptApprovalPublisher
         {
             // The script's bytes exactly as signed — no trailing newline added, no re-indentation,
             // nothing. Any change here changes its hash and invalidates every signature over it.
-            [scriptPath] = submission.Script,
+            [ApprovedScriptCorpus.ScriptPath(submission.Sha256, identity.FileBaseName, submission.Language)] = submission.Script,
             [ApprovedScriptCorpus.MetadataPath(submission.Sha256)] = ApprovedScriptCorpus.Serialize(metadata),
             [ApprovedScriptCorpus.SignaturePath(submission.Sha256, submission.SignerFingerprint)] =
                 ApprovedScriptCorpus.Serialize(signature),
