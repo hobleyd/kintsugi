@@ -193,6 +193,16 @@ fn run_daemon() -> Result<()> {
     check_in(&config)
 }
 
+/// What a check-in leaves behind for the schedule step in `check_in`.
+enum CheckInOutcome {
+    /// Registered; the server may have handed back a different minute because this host's is
+    /// carrying more load than others.
+    Completed { suggested_check_in_minute: Option<u8> },
+    /// The server had marked this host for removal and `self_removal` has torn the units down —
+    /// there is no timer left to schedule.
+    Uninstalled,
+}
+
 /// One full check-in: registers this host and its installed applications, patches unattended if
 /// nobody is logged in to be asked, updates this agent itself, and finally reconciles its own
 /// check-in schedule. The whole of what the timer-driven root service does, and — since the menu's
@@ -212,6 +222,33 @@ fn check_in(config: &Config) -> Result<()> {
     let checkin_schedule_path = config::checkin_schedule_path();
     let checkin_minute = checkin_schedule::load_or_assign(&checkin_schedule_path);
 
+    let outcome = register_and_report(config, checkin_minute);
+
+    // Last of all, and whether or not the check-in succeeded: reconcile the on-disk timer with the
+    // minute this host should be using — its own already-assigned one, or a different one the
+    // server just handed back. The failure path matters as much as the success path. The packaged
+    // timer unit carries no `OnCalendar` (see packaging/kintsugi-agent.timer), only `OnBootSec`, so
+    // until this writes one the service has no hourly schedule at all — and a first run that
+    // failed (a blank enrollment token, a server that was down, a serial number the placeholder
+    // screen refused) used to return before reaching this point, leaving the host with nothing to
+    // retry it until a reboot or a human ran `systemctl start`. The one exception is a host the
+    // server has told to uninstall: `self_removal` has just deleted the timer, and rewriting it
+    // would resurrect the schedule for a binary that is no longer there.
+    let target_minute = match &outcome {
+        Ok(CheckInOutcome::Uninstalled) => return Ok(()),
+        Ok(CheckInOutcome::Completed { suggested_check_in_minute }) => {
+            suggested_check_in_minute.unwrap_or(checkin_minute)
+        }
+        Err(_) => checkin_minute,
+    };
+    checkin_schedule::apply(&checkin_schedule_path, target_minute);
+
+    outcome.map(|_| ())
+}
+
+/// The body of a check-in — everything between reading this host's check-in minute and applying
+/// it to the timer, split out so `check_in` can run the schedule step on every exit path.
+fn register_and_report(config: &Config, checkin_minute: u8) -> Result<CheckInOutcome> {
     let hostname = system_info::hostname().context("could not determine hostname")?;
     // Deliberately fatal, unlike everything else below: without a unique identity this host would
     // share a certificate — and so a host record, and so its data — with every other host whose
@@ -269,7 +306,7 @@ fn check_in(config: &Config) -> Result<()> {
     if host_response.removal_requested {
         logging::info("the server has marked this host for removal — uninstalling instead of continuing this check-in");
         self_removal::run(&client, config, &serial_number);
-        return Ok(());
+        return Ok(CheckInOutcome::Uninstalled);
     }
 
     let applications = collect_installed_applications();
@@ -290,13 +327,9 @@ fn check_in(config: &Config) -> Result<()> {
     // patching policy governing the agent's own updates.
     self_update::check_and_apply(&client, config, agent_identity.as_ref(), env!("CARGO_PKG_VERSION"));
 
-    // Last of all: reconcile the on-disk check-in schedule with whatever minute this host should
-    // now be using — its own already-assigned one, or a different one the server just handed back
-    // in host_response because this minute is carrying more load than others.
-    let target_minute = host_response.suggested_check_in_minute.unwrap_or(checkin_minute);
-    checkin_schedule::apply(&checkin_schedule_path, target_minute);
-
-    Ok(())
+    Ok(CheckInOutcome::Completed {
+        suggested_check_in_minute: host_response.suggested_check_in_minute,
+    })
 }
 
 /// Drives a patch cycle from the root service when — and only when — no per-user agent has

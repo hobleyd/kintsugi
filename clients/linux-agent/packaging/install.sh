@@ -153,9 +153,23 @@ echo "Creating request queue at ${QUEUE_DIR}..."
 install -d -o root -g root -m 1733 "$QUEUE_DIR"
 
 echo "Installing systemd units..."
-for unit in "$SERVICE_UNIT" "$TIMER_UNIT" "$QUEUE_SERVICE_UNIT" "$QUEUE_PATH_UNIT" "$REMOTE_CONTROL_UNIT"; do
+for unit in "$SERVICE_UNIT" "$QUEUE_SERVICE_UNIT" "$QUEUE_PATH_UNIT" "$REMOTE_CONTROL_UNIT"; do
     install -o root -g root -m 644 "$SCRIPT_DIR/$unit" "${SYSTEM_UNIT_DIR}/$unit"
 done
+
+# The timer is the one unit the agent owns after installation: its first check-in assigns this host
+# a minute and rewrites the file with an OnCalendar for it (src/checkin_schedule.rs), and the
+# packaged copy deliberately has none. Overwriting a timer that already carries a schedule would
+# throw that minute away on every reinstall/upgrade — and, worse, leave the host with nothing but
+# OnBootSec until the first check-in after the reinstall succeeded, which on a host whose check-in
+# was failing is never. So the packaged copy goes in only where no scheduled timer exists; anything
+# else in the template that changed since is picked up by the next check-in, which regenerates the
+# whole file whenever it differs from what it would write.
+if grep -q '^OnCalendar=' "${SYSTEM_UNIT_DIR}/$TIMER_UNIT" 2>/dev/null; then
+    echo "Keeping the existing ${TIMER_UNIT}: it already carries this host's check-in minute."
+else
+    install -o root -g root -m 644 "$SCRIPT_DIR/$TIMER_UNIT" "${SYSTEM_UNIT_DIR}/$TIMER_UNIT"
+fi
 install -d -o root -g root -m 755 "$USER_UNIT_DIR"
 install -o root -g root -m 644 "$SCRIPT_DIR/$UI_UNIT" "${USER_UNIT_DIR}/$UI_UNIT"
 

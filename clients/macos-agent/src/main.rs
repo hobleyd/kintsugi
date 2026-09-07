@@ -119,6 +119,16 @@ fn main() -> Result<()> {
     run_daemon()
 }
 
+/// What a check-in leaves behind for the schedule step in `run_daemon`.
+enum CheckInOutcome {
+    /// Registered; the server may have handed back a different minute because this host's is
+    /// carrying more load than others.
+    Completed { suggested_check_in_minute: Option<u8> },
+    /// The server had marked this host for removal and `self_removal` has torn the jobs down —
+    /// there is no plist left to schedule.
+    Uninstalled,
+}
+
 /// The root LaunchDaemon's job: registers this host and its installed applications (as it always
 /// has), then drains any pending request left by the `--agent` process — an OS update to install,
 /// or an AI-researched application script to run as root — see `queue::process_queue`. Runs once
@@ -137,6 +147,34 @@ fn run_daemon() -> Result<()> {
     let checkin_schedule_path = config::checkin_schedule_path();
     let checkin_minute = checkin_schedule::load_or_assign(&checkin_schedule_path);
 
+    let outcome = register_and_report(&config, checkin_minute);
+
+    // Last of all, and whether or not the check-in succeeded: reconcile the on-disk plist with the
+    // minute this host should be using — its own already-assigned one, or a different one the
+    // server just handed back (see checkin_schedule::apply for why this has to be the very last
+    // thing a check-in does). The failure path matters as much as the success path. The packaged
+    // plist carries no `StartCalendarInterval` (see packaging/au.com.sharpblue.kintsugiagent.plist),
+    // only `RunAtLoad` and `WatchPaths`, so until this writes one the daemon has no hourly schedule
+    // at all — and a first run that failed (a blank enrollment token, a server that was down) used
+    // to return before reaching this point, leaving the host with nothing to retry it until a
+    // reboot, a queue request or a human ran `launchctl kickstart`. The one exception is a host the
+    // server has told to uninstall: `self_removal` has just deleted the plist, and rewriting it
+    // would resurrect the schedule for a binary that is no longer there.
+    let target_minute = match &outcome {
+        Ok(CheckInOutcome::Uninstalled) => return Ok(()),
+        Ok(CheckInOutcome::Completed { suggested_check_in_minute }) => {
+            suggested_check_in_minute.unwrap_or(checkin_minute)
+        }
+        Err(_) => checkin_minute,
+    };
+    checkin_schedule::apply(&checkin_schedule_path, target_minute);
+
+    outcome.map(|_| ())
+}
+
+/// The body of a check-in — everything between reading this host's check-in minute and applying
+/// it to the plist, split out so `run_daemon` can run the schedule step on every exit path.
+fn register_and_report(config: &Config, checkin_minute: u8) -> Result<CheckInOutcome> {
     let hostname = system_info::hostname().context("could not determine hostname")?;
     let serial_number = system_info::serial_number().context("could not determine serial number")?;
 
@@ -163,7 +201,7 @@ fn run_daemon() -> Result<()> {
     // rejects /api/host, /api/applications, /api/patching-policy, and /api/upgrade-paths outright
     // without a valid client certificate. Enrolls on first run; reuses the same identity from then
     // on, until it needs replacing (e.g. this host was decommissioned and re-provisioned).
-    let agent_identity = identity::load_or_enroll(&config, &serial_number);
+    let agent_identity = identity::load_or_enroll(config, &serial_number);
     let client = identity::build_client(Duration::from_secs(15), agent_identity.as_ref())
         .context("failed to build HTTP client")?;
 
@@ -182,8 +220,8 @@ fn run_daemon() -> Result<()> {
 
     if host_response.removal_requested {
         logging::info("the server has marked this host for removal — uninstalling instead of continuing this check-in");
-        self_removal::run(&client, &config, &serial_number);
-        return Ok(());
+        self_removal::run(&client, config, &serial_number);
+        return Ok(CheckInOutcome::Uninstalled);
     }
 
     let applications = collect_installed_applications();
@@ -206,7 +244,7 @@ fn run_daemon() -> Result<()> {
         &config::queue_dir(),
         &mut DaemonRequestHandler {
             client: &client,
-            config: &config,
+            config,
             serial_number: &serial_number,
             identity: agent_identity.as_ref(),
         },
@@ -216,16 +254,11 @@ fn run_daemon() -> Result<()> {
     // this agent itself has been published, and install it in place if so — see `self_update`.
     // Runs on every check-in (RunAtLoad + hourly + on-demand), the same cadence as registration
     // itself, since there's no separate patching policy governing the agent's own updates.
-    self_update::check_and_apply(&client, &config, agent_identity.as_ref(), env!("CARGO_PKG_VERSION"));
+    self_update::check_and_apply(&client, config, agent_identity.as_ref(), env!("CARGO_PKG_VERSION"));
 
-    // Last of all: reconcile the on-disk check-in schedule with whatever minute this host should
-    // now be using — its own already-assigned one, or a different one the server just handed back
-    // in host_response because this minute is carrying more load than others (see
-    // checkin_schedule::apply for why this has to be the very last thing a check-in does).
-    let target_minute = host_response.suggested_check_in_minute.unwrap_or(checkin_minute);
-    checkin_schedule::apply(&checkin_schedule_path, target_minute);
-
-    Ok(())
+    Ok(CheckInOutcome::Completed {
+        suggested_check_in_minute: host_response.suggested_check_in_minute,
+    })
 }
 
 /// The daemon's answers to the per-user process's requests — see `queue`. Holds what the requests

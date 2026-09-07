@@ -27,9 +27,9 @@ struct PersistedSchedule {
 
 /// Loads this host's assigned check-in minute-of-hour, assigning (and persisting) a fresh
 /// pseudo-random one on first run. Deliberately doesn't touch the timer unit itself — see
-/// `apply`, which the caller invokes separately once the whole check-in has actually completed,
-/// so a unit rewrite (and the systemd reload that goes with it) never happens in the middle of a
-/// check-in that isn't done yet.
+/// `apply`, which the caller invokes separately once the whole check-in has finished, so a unit
+/// rewrite (and the systemd reload that goes with it) never happens in the middle of a check-in
+/// that isn't done yet.
 pub fn load_or_assign(path: &Path) -> u8 {
     if let Some(minute) = load(path) {
         return minute;
@@ -148,9 +148,11 @@ pub fn request_now(queue_dir: &Path) {
 /// Applies a (possibly new) check-in minute: persists it locally and, only if the installed timer
 /// unit doesn't already reflect it, rewrites that unit and reloads it with systemd so the new
 /// schedule actually takes effect. Called once, last, at the end of every check-in (see
-/// `main::run_daemon`) — both for a first-ever assignment (the freshly installed timer has no
-/// per-host minute baked in yet) and whenever the server hands back a different minute because
-/// this one is carrying more load than others.
+/// `main::check_in`) — succeeded *or failed*, since the packaged unit has no `OnCalendar` and a
+/// failed first run that skipped this would leave the host with no hourly schedule at all — both
+/// for a first-ever assignment (the freshly installed timer has no per-host minute baked in yet)
+/// and whenever the server hands back a different minute because this one is carrying more load
+/// than others.
 pub fn apply(schedule_path: &Path, minute: u8) {
     persist(schedule_path, minute);
 

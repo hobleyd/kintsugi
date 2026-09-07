@@ -142,8 +142,22 @@ mkdir -p "$IDENTITY_DIR"
 chown root:admin "$IDENTITY_DIR"
 chmod 0770 "$IDENTITY_DIR"
 
-echo "Installing LaunchDaemon to ${PLIST_DEST}..."
-install -o root -g wheel -m 644 "$SCRIPT_DIR/${LABEL}.plist" "$PLIST_DEST"
+# The LaunchDaemon plist is the one file the agent owns after installation: its first check-in
+# assigns this host a minute and rewrites the plist with a StartCalendarInterval for it
+# (src/checkin_schedule.rs), and the packaged copy deliberately has none. Overwriting a plist that
+# already carries a schedule would throw that minute away on every reinstall/upgrade — and leave
+# the host with nothing but RunAtLoad and WatchPaths until the first check-in after the reinstall
+# succeeded, which on a host whose check-in was failing is never. So the packaged copy goes in
+# only where no scheduled plist exists; anything else in the template that changed since is picked
+# up by the next check-in, which regenerates the whole file whenever it differs from what it would
+# write. Same rule as the Linux installer's kintsugi-agent.timer.
+# The <key> element, not the bare word: the packaged plist's own comment names the key it lacks.
+if grep -q '<key>StartCalendarInterval</key>' "$PLIST_DEST" 2>/dev/null; then
+    echo "Keeping the existing LaunchDaemon at ${PLIST_DEST}: it already carries this host's check-in minute."
+else
+    echo "Installing LaunchDaemon to ${PLIST_DEST}..."
+    install -o root -g wheel -m 644 "$SCRIPT_DIR/${LABEL}.plist" "$PLIST_DEST"
+fi
 
 # Unload first in case this is a reinstall/upgrade.
 launchctl bootout system "$PLIST_DEST" 2>/dev/null || true
