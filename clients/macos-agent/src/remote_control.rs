@@ -33,7 +33,7 @@
 //! together are the whole justification for a feature that otherwise reads as spyware, so none of
 //! them is optional and none of them should be made configurable.
 
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -521,12 +521,9 @@ fn run_session(
     // The viewer needs the geometry before the first tile, or it has nothing to draw into and no
     // way to convert a click back into a screen position.
     let display_info = serde_json::to_string(&geometry.to_display_info()).context("could not describe the display")?;
-    // Queued and flushed rather than `send`, for the same reason as the control socket: this one is
-    // non-blocking too, and a WouldBlock here would abandon a session before its first frame.
-    socket
-        .write(Message::text(display_info))
-        .map_err(|err| anyhow!("{err}"))
-        .context("could not send the display geometry to the viewer")?;
+    // Queued rather than `send`, for the same reason as the control socket: this one is non-blocking
+    // too, and a WouldBlock here would abandon a session before its first frame.
+    write_queued(&mut socket, Message::text(display_info)).context("could not send the display geometry to the viewer")?;
 
     // None when Accessibility is missing. The session still runs — the administrator can see the
     // screen, which is most of what a support call needs — and the dialog already said so.
@@ -578,8 +575,10 @@ fn run_session(
                 tiles_sent += 1;
                 bytes_sent += tile.len() as u64;
                 // Labelled, because breaking the inner loop alone would discard the error and go
-                // straight back to capturing for a socket that is no longer there.
-                if let Err(err) = socket.write(Message::Binary(tile.into())) {
+                // straight back to capturing for a socket that is no longer there. A WouldBlock is
+                // not that error — see `write_queued` — and `pending_flush` below is what then
+                // holds capture until the socket has caught up.
+                if let Err(err) = write_queued(&mut socket, Message::Binary(tile.into())) {
                     break 'session format!("{err:#}");
                 }
             }
@@ -782,13 +781,32 @@ fn is_would_block(error: &tungstenite::Error) -> bool {
 /// cannot complete right now returns `WouldBlock` — which is ordinary, not a failure. Reporting it
 /// as one tore the control socket down and reconnected, losing the message and the host's
 /// reachability along with it. Queue here; [`flush`] is called once per loop iteration and is where
-/// `WouldBlock` is tolerated.
+/// the rest of the sending happens.
 fn queue(socket: &mut Socket, message: &AgentMessage) -> Result<()> {
     let json = serde_json::to_string(message).context("could not serialise a remote control message")?;
-    socket
-        .write(Message::text(json))
-        .map_err(|err| anyhow!("{err}"))
-        .context("could not queue a remote control message")
+    write_queued(socket, Message::text(json))
+}
+
+/// Queues one message on a non-blocking socket without requiring that it leave right now.
+///
+/// `WebSocket::write` is not the pure "queue it" it reads as. tungstenite formats the frame into its
+/// own out-buffer and then, once that buffer holds more than its 128 KiB write threshold, tries the
+/// socket — and with rustls in front, *every* write first tries to push the TLS bytes a previous
+/// write left pending (`rustls::Stream::complete_prior_io`). On a non-blocking socket either attempt
+/// reports `WouldBlock` the moment the kernel's send buffer is full, which a burst of JPEG tiles
+/// reaches on a full frame larger than that threshold. The frame is already in the out-buffer by
+/// then — nothing is lost, and [`flush`] sends it once the network catches up — so `WouldBlock` here
+/// is the same non-event it is there. Treated as fatal it ended the Linux agent's every Wayland
+/// session about one second after consent ("IO error: Resource temporarily unavailable"); this
+/// agent's `pending_flush` gating made it rarer here, not impossible.
+///
+/// Generic over the stream so a test can stand in a socket that refuses every write.
+fn write_queued<S: Read + Write>(socket: &mut WebSocket<S>, message: Message) -> Result<()> {
+    match socket.write(message) {
+        Ok(()) => Ok(()),
+        Err(err) if is_would_block(&err) => Ok(()),
+        Err(err) => Err(anyhow!(err).context("could not queue a remote control message")),
+    }
 }
 
 /// Pushes whatever is queued. `Ok(false)` means the socket could not take all of it yet, which is
@@ -893,5 +911,55 @@ mod tests {
         assert!(is_would_block(&tungstenite::Error::Io(std::io::Error::from(ErrorKind::Interrupted))));
         assert!(!is_would_block(&tungstenite::Error::Io(std::io::Error::from(ErrorKind::ConnectionReset))));
         assert!(!is_would_block(&tungstenite::Error::ConnectionClosed));
+    }
+
+    /// A socket whose kernel send buffer is full: every write reports `WouldBlock` until `accept`
+    /// is set, after which it takes everything. Reads never return anything.
+    struct SaturatedStream {
+        accept: std::rc::Rc<std::cell::Cell<bool>>,
+        taken: Vec<u8>,
+    }
+
+    impl Read for SaturatedStream {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(ErrorKind::WouldBlock.into())
+        }
+    }
+
+    impl Write for SaturatedStream {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.accept.get() {
+                self.taken.extend_from_slice(bytes);
+                Ok(bytes.len())
+            } else {
+                Err(ErrorKind::WouldBlock.into())
+            }
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_tile_burst_the_socket_cannot_take_yet_is_queued_rather_than_fatal() {
+        // The shape of the failure that ended every Linux Wayland session on its first frame: enough
+        // tile bytes to pass tungstenite's write threshold, into a socket that is not draining.
+        let accept = std::rc::Rc::new(std::cell::Cell::new(false));
+        let stream = SaturatedStream { accept: accept.clone(), taken: Vec::new() };
+        let mut socket = WebSocket::from_raw_socket(stream, tungstenite::protocol::Role::Client, None);
+
+        let tile = vec![0xAB_u8; 64 * 1024];
+        for _ in 0..4 {
+            write_queued(&mut socket, Message::Binary(tile.clone().into())).expect("WouldBlock is not a failure");
+        }
+        assert!(socket.get_ref().taken.is_empty(), "nothing can have left while the socket refused every write");
+
+        // The network catches up; the loop's flush step sends what was queued, none of it lost.
+        accept.set(true);
+        socket.flush().expect("a socket that is draining flushes");
+        let sent = &socket.get_ref().taken;
+        // Four frames, each a header plus the masked payload.
+        assert!(sent.len() >= 4 * tile.len(), "sent {} bytes, expected at least {}", sent.len(), 4 * tile.len());
     }
 }
