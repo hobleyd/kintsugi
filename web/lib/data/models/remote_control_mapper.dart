@@ -12,10 +12,18 @@ RemoteControlSession remoteControlSessionFromJson(Map<String, dynamic> json) => 
       serialNumber: json['serialNumber']?.toString() ?? '',
       hostname: json['hostname']?.toString() ?? '',
       requestedBy: json['requestedBy']?.toString() ?? '',
+      kind: enumFromJson(
+        json['kind'],
+        RemoteControlSessionKind.values,
+        const ['Screen', 'Shell'],
+        RemoteControlSessionKind.screen,
+      ),
       consent: enumFromJson(
         json['consent'],
         RemoteControlConsent.values,
-        const ['Pending', 'Granted', 'Denied', 'TimedOut', 'AgentUnreachable'],
+        // Appended, never reordered: `enumFromJson` also reads an ordinal, and these names line up
+        // with the C# members by position.
+        const ['Pending', 'Granted', 'Denied', 'TimedOut', 'AgentUnreachable', 'NotRequired', 'Unavailable'],
         RemoteControlConsent.pending,
       ),
       requestedAtUtc: dateTimeRequiredFromJson(json['requestedAtUtc']),
@@ -42,6 +50,14 @@ const int remoteProtocolVersion = 1;
 const int remoteTileHeaderBytes = 14;
 
 const int _kindJpegTile = 1;
+
+/// `version, kind` — a shell frame carries raw terminal bytes and needs no geometry, but keeps the
+/// same two leading bytes every binary message in this protocol has, so a frame of the wrong kind
+/// is refused rather than drawn or typed.
+const int remoteShellFrameHeaderBytes = 2;
+
+const int _kindShellOutput = 2;
+const int _kindShellInput = 3;
 
 /// Reads a text message from the agent — currently only the display geometry.
 ///
@@ -80,6 +96,12 @@ RemoteScreenUpdate? remoteTextUpdateFromJson(String text) {
         canControlInput: decoded['canControlInput'] != false,
       );
 
+    case 'shell':
+      final shell = decoded['shell']?.toString() ?? '';
+      final user = decoded['user']?.toString() ?? '';
+      if (shell.isEmpty || user.isEmpty) return null;
+      return RemoteShellInfo(shell: shell, user: user);
+
     default:
       return null;
   }
@@ -111,8 +133,36 @@ RemoteScreenTile? remoteTileFromBytes(Uint8List message) {
   );
 }
 
-/// Maps an input event to what the agent's `parse_viewer_input` reads.
-Map<String, Object?> remoteInputToJson(RemoteInput input) => switch (input) {
+/// Reads one shell output frame, or null for a binary message that is not one.
+///
+/// Mirrors `encode_shell_output` on the agent side. An empty payload is legitimate and is returned
+/// as an empty frame rather than as null — null here means "not shell output", which is a different
+/// thing from "no bytes this time".
+RemoteShellOutput? remoteShellOutputFromBytes(Uint8List message) {
+  if (message.lengthInBytes < remoteShellFrameHeaderBytes) return null;
+  if (message[0] != remoteProtocolVersion) return null;
+  if (message[1] != _kindShellOutput) return null;
+
+  return RemoteShellOutput(Uint8List.sublistView(message, remoteShellFrameHeaderBytes));
+}
+
+/// Frames typed input for the wire, or null for an input that does not travel as binary.
+///
+/// The counterpart of the agent's `decode_shell_input`, and the only place this client sends a
+/// binary message at all.
+Uint8List? remoteShellInputToBytes(RemoteInput input) {
+  if (input is! RemoteShellInput) return null;
+
+  final framed = Uint8List(remoteShellFrameHeaderBytes + input.bytes.lengthInBytes);
+  framed[0] = remoteProtocolVersion;
+  framed[1] = _kindShellInput;
+  framed.setRange(remoteShellFrameHeaderBytes, framed.length, input.bytes);
+  return framed;
+}
+
+/// Maps an input event to what the agent's `parse_viewer_input` reads, or null for one that travels
+/// as a binary frame instead — see [remoteShellInputToBytes].
+Map<String, Object?>? remoteInputToJson(RemoteInput input) => switch (input) {
       RemotePointerInput(:final action, :final x, :final y, :final button) => {
           'type': 'pointer',
           'action': switch (action) {
@@ -146,6 +196,15 @@ Map<String, Object?> remoteInputToJson(RemoteInput input) => switch (input) {
           // `parse_viewer_input` reads as "leave this as it is".
           'jpegQuality': ?jpegQuality,
         },
+      RemoteShellResize(:final columns, :final rows) => {
+          'type': 'resize',
+          'cols': columns,
+          'rows': rows,
+        },
+      // Sent as a binary frame, not JSON. Null rather than an unreachable arm, because the switch
+      // has to be exhaustive over the sealed type and pretending this case produces a message would
+      // put a keystroke on the wire in a shape no agent reads.
+      RemoteShellInput() => null,
     };
 
 double _asDouble(Object? raw) => raw is num ? raw.toDouble() : 0;

@@ -388,6 +388,8 @@ impl InputInjector {
             ViewerInput::Key { hid, down } => self.key(*hid, *down),
             // Handled by the capture side, not here.
             ViewerInput::Quality { .. } => {}
+            // A shell session's business, and a shell session has no injector at all.
+            ViewerInput::Resize { .. } => {}
         }
     }
 

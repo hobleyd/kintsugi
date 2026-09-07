@@ -15,6 +15,10 @@ public class RemoteControlSessionConfiguration : IEntityTypeConfiguration<Remote
         builder.Property(s => s.SerialNumber).HasMaxLength(128).IsRequired();
         builder.Property(s => s.Hostname).HasMaxLength(255).IsRequired();
         builder.Property(s => s.RequestedBy).HasMaxLength(320).IsRequired();
+        // Stored as names, like Consent beside it: this table is read by humans looking into what
+        // somebody did to a machine, and an ordinal that shifts when a member is appended is worth
+        // nothing to them a year later.
+        builder.Property(s => s.Kind).HasConversion<string>().HasMaxLength(32).IsRequired();
         builder.Property(s => s.Consent).HasConversion<string>().HasMaxLength(32).IsRequired();
         builder.Property(s => s.EndReason).HasMaxLength(256);
 

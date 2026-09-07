@@ -523,8 +523,8 @@ pins all of it at a width narrow enough to force every case; none of them throws
 build, and none is visible in a table whose labels happen to be short.
 
 **Enums cross the wire as names or as ordinals depending on the type, and that must not be
-"fixed".** `UpgradePathStatus`, `UpgradeMethod` and `ScriptApprovalPublishOutcome` carry
-converters and write their names; `HostStatus`, `AiProvider`, `AuthProvider`, `AuditProvider`,
+"fixed".** `UpgradePathStatus`, `UpgradeMethod`, `ScriptApprovalPublishOutcome`,
+`RemoteControlConsent` and `RemoteControlSessionKind` carry converters and write their names; `HostStatus`, `AiProvider`, `AuthProvider`, `AuditProvider`,
 `PatchingTimeUnit` and `AgentPackageImportOutcome` have none, so System.Text.Json writes their
 ordinals. Turning on a global string-enum converter would break the fleet: all three agents read
 some of these as ordinals — `clients/*/src/policy.rs` parses `interval_unit` as a `u8`.
@@ -808,9 +808,52 @@ one".
 
 ## Remote control
 
-An administrator can take control of a macOS host's screen, keyboard and mouse from the Hosts
-screen's Connect action. **macOS only for now** — see the note at the end on why the other two
-agents need a different shape.
+An administrator can take control of a host's screen, keyboard and mouse from the Hosts screen's
+Connect action, or open a **terminal** on it from the Terminal action beside it. Both are the same
+session underneath — one request, one relay, one audit row — and `RemoteControlSessionKind` on the
+wire is the whole of the difference.
+
+**A shell session asks nobody, and that is the deliberate exception to everything below.** It is
+the access an administrator of this fleet already has by other means — it is what they would reach
+SSH or a remote PowerShell session for — and the only reason it is routed through this agent is
+that SSH would need an inbound port on every managed machine, which is exactly what the relay
+design exists to avoid. So it reports `RemoteControlConsent.NotRequired` in place of a decision,
+and the compensating control is that the same `remote_control_sessions` row a screen request writes
+is written for it, naming who asked and when. Three things follow and none of them is optional.
+`NotRequired` is accepted **only** for a shell, checked in `RemoteControlSession.RecordConsent` and
+again in `RemoteControlRelaySession.LatchConsent` — the second is not belt-and-braces, it is the
+latch the socket gate actually reads, so enforcing it in the entity alone would let an agent open
+*capture, keyboard and pointer* on a host shown no dialog simply by claiming no permission was
+needed. The account differs by platform and is stated on the wire (`ShellInfo.user`) rather than
+left to be remembered: the **logged-in user** on macOS, **root** on Linux, **SYSTEM** on Windows.
+And the macOS case is the one worth noticing — it is a shell inside somebody's own login session,
+opened without asking them — which is why the screen says out loud that nobody was asked.
+
+**A terminal needs no desktop, and decoupling that from reachability is what makes the feature
+useful.** Both the Linux and Windows agents used to hold their control socket *only* while somebody
+was logged in, so "reachable" meant "somebody is sitting at a desktop". That is right for a screen
+session and quite wrong for a shell: most of a Linux fleet is servers with no graphical session at
+all, and those are precisely the hosts an administrator wants a terminal on. Both now hold the
+socket whenever the host has an identity, treat the desktop as a *capability* rather than a
+precondition, and answer a screen request that arrives without one with
+`ConsentOutcome::Unavailable` — the agent saying "there is nobody here" at once, rather than the
+host being invisible and the administrator being told the agent is unreachable. **macOS cannot be
+fixed the same way and is not**: its per-user process is the half holding the fleet identity, so a
+Mac with nobody logged in stays unreachable for both kinds.
+
+The PTY runs in whichever process already holds the identity and needs no helper: the per-user
+process on macOS, the resident root unit on Linux (no `remote_ipc` hop — nothing crosses it for a
+shell), and the **service itself** on Windows via ConPTY, with no `session_launcher` and no SYSTEM
+session helper. Everything the Windows helper exists for is about a desktop, and requiring one
+would put a logged-in user back in the way of the host most likely to want a shell.
+
+**Neither socket is new, and no nginx change was needed.** A shell session uses the same standing
+control socket and the same per-session media socket a screen session does; the media protocol
+gained two message kinds and one text message and nothing else. Keep it that way — a
+`/api/admin/remote-shell` location would be a second thing to keep in step with the agent regex for
+no gain.
+
+The rest of this section is about **screen** sessions, which are the ones with a consent rule.
 
 **Nothing happens until the person at the keyboard says yes.** The whole feature rests on three
 properties, and none of them is optional or configurable: consent is asked for every session and
@@ -1296,6 +1339,8 @@ original — then the others for what each platform forced to differ. The differ
 | Host identity | hardware serial, always present | SMBIOS serial, **often a placeholder** | DMI serial, **often a placeholder** |
 | Nobody logged in | nothing patches | nothing patches | root service patches unattended — see below |
 | Remote control | per-user process, consent + capture + input | service holds the socket, a **SYSTEM session helper** does the rest, named pipe between | resident root unit holds the socket, per-user process does the rest, unix socket between; X11 via XTEST, Wayland via a separate portal/PipeWire binary |
+| Remote shell | per-user process, as the **logged-in user** | the service itself, as **SYSTEM**, over ConPTY — no helper | the resident root unit, as **root** — nothing crosses `remote_ipc` |
+| Reachable with nobody logged in | no — the per-user process holds the identity | yes, for a shell; a screen request answers `Unavailable` | yes, for a shell; a screen request answers `Unavailable` |
 
 **Linux borrows its architecture from Windows, not macOS, and for the same forcing reason.** Every
 upgrade it can perform (`apt-get`, `dnf`, `flatpak update --system`, `snap refresh`) requires root,
@@ -1646,6 +1691,32 @@ wedged by a release before this one need `Restart-Service KintsugiAgent` by hand
   string in two places. Rename one and the helper starts, fails to recognise its own mode, runs an
   ordinary check-in instead, and the session times out having produced no frame — with nothing in
   either log saying why.
+- **The shell half of the media protocol is hand-mirrored the same way the tile half is, and has
+  the same nothing between its two ends.** `encode_shell_output`/`decode_shell_input` in each
+  agent's `remote_protocol.rs` and `remoteShellOutputFromBytes`/`remoteShellInputToBytes` in
+  `web/lib/data/models/remote_control_mapper.dart` are the whole description of it; the server
+  relays those bytes without parsing them, so a mismatch is invisible everywhere else. The two
+  leading bytes (version, kind) are what keeps a tile from being typed into a shell and a keystroke
+  from being drawn as a picture, which is why a shell frame carries them despite needing no
+  geometry. `web/test/data/remote_control_mapper_test.dart` asserts the exact bytes the agents'
+  own tests emit and accept, and is the only check that exists.
+- **Terminal output crosses the wire as bytes and must not be "simplified" to a string.** The agent
+  sends whatever the PTY produced when it produced it, so a frame can end mid-codepoint; decoding
+  per frame turns any character unlucky enough to straddle a boundary into a replacement mark. The
+  viewer holds **one** `Utf8Decoder` for the whole session (`remote_shell_view.dart`) for exactly
+  that reason.
+- **`pty.rs` is one file twice and a third that only matches its shape.** The macOS and Linux copies
+  are byte-identical — both reach a PTY through `openpty`, `setsid` and `TIOCSWINSZ` — and `diff`
+  should report nothing. The Windows one is ConPTY and shares no implementation at all; what is kept
+  identical is the six-call surface above it (`spawn`, `read_available`, `write_all`, `resize`,
+  `try_wait`, `terminate`), because the relay loop that drives it is meant to read the same on all
+  three. Its `try_wait` is not redundant with the EOF check beside it: a shell that exits while a
+  background process still holds the slave open produces no EOF at all, and without it the session
+  sits there attached to nothing.
+- The Windows ConPTY path is **compile-checked but never executed** by anything here — the
+  docker + mingw + wine arrangement has no console host, so `pty.rs`'s tests there cover the pure
+  half only (command-line quoting, the environment block). The Unix agents' `pty.rs` does have live
+  tests against a real shell for the behaviour the three share.
 - All three agents' `remote_protocol.rs` are copies of one another and must stay so. `diff` any two
   and exactly one line should differ outside the module comment — the cross-reference naming
   `virtual_key_for_hid`, `scan_code_for_hid` or `xtest_keycode_for_hid`, because the three platforms
@@ -1717,6 +1788,10 @@ wedged by a release before this one need `Restart-Service KintsugiAgent` by hand
   ad-hoc signed — so the profile cannot be used until `publish-release.sh` signs with a Developer ID.
   See `packaging/kintsugi-remote-control.mobileconfig.example`, which explains what breaks if
   somebody fills it in from an unsigned build anyway.
+- `xterm` is a **runtime dependency of the admin UI**, not a dev tool: it is the VT emulator the
+  remote terminal is drawn with, and it is pure Dart precisely so it works on web. Dropping it does
+  not degrade the terminal, it removes it — what arrives from the agent is escape sequences, and a
+  text widget renders them rather than obeying them.
 - `web/pubspec.yaml`'s `environment: sdk:` constraint and `FLUTTER_VERSION` in `nginx/Dockerfile`
   have to stay compatible. Bumping one without the other fails at image build time rather than at
   merge, which is the good failure but only if somebody builds the image.

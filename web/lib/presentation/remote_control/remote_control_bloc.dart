@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:bloc/bloc.dart';
@@ -17,14 +18,19 @@ sealed class RemoteControlEvent extends Equatable {
   List<Object?> get props => const [];
 }
 
-/// Pressing Connect: opens a session and starts the consent dialog on the host.
+/// Pressing Connect or Terminal: opens a session of that kind on the host.
+///
+/// A screen session puts a consent dialog in front of whoever is sitting at the host and waits for
+/// it. A shell session asks nobody — see `RemoteControlSessionKind` on the server for why, and what
+/// stands in for the dialog.
 final class RemoteControlRequested extends RemoteControlEvent {
-  const RemoteControlRequested(this.hostId);
+  const RemoteControlRequested(this.hostId, this.kind);
 
   final String hostId;
+  final RemoteControlSessionKind kind;
 
   @override
-  List<Object?> get props => [hostId];
+  List<Object?> get props => [hostId, kind];
 }
 
 /// The poll that watches for the host user's answer, and afterwards for the session ending.
@@ -45,6 +51,16 @@ final class RemoteControlTileDecoded extends RemoteControlEvent {
 
   @override
   List<Object?> get props => [key, tile];
+}
+
+/// The terminal's banner — which shell, and whose account. Arrives once, before any output.
+final class RemoteControlShellStarted extends RemoteControlEvent {
+  const RemoteControlShellStarted(this.shell);
+
+  final RemoteShellInfo shell;
+
+  @override
+  List<Object?> get props => [shell];
 }
 
 final class RemoteControlGeometryChanged extends RemoteControlEvent {
@@ -95,6 +111,7 @@ final class RemoteControlState extends Equatable {
   const RemoteControlState({
     this.session,
     this.geometry,
+    this.shell,
     this.tiles = const {},
     this.connecting = false,
     this.error,
@@ -102,6 +119,11 @@ final class RemoteControlState extends Equatable {
 
   final RemoteControlSession? session;
   final RemoteDisplayGeometry? geometry;
+
+  /// What the terminal at the far end is, on a shell session. Its arrival is what says the shell is
+  /// live — the same role [geometry] plays for a screen session. The output itself is *not* here:
+  /// see [RemoteControlBloc.shellOutput].
+  final RemoteShellInfo? shell;
 
   /// Decoded tiles, keyed by their top-left corner — except the full frame, which sits under
   /// [RemoteControlState.fullFrameKey] (see there for why).
@@ -127,7 +149,7 @@ final class RemoteControlState extends Equatable {
 
   bool get isAwaitingConsent => session?.isAwaitingConsent ?? false;
 
-  bool get isStreaming => geometry != null && (session?.endedAtUtc == null);
+  bool get isStreaming => (geometry != null || shell != null) && (session?.endedAtUtc == null);
 
   /// What the screen says while there is no picture. Null once there is one.
   String? get status {
@@ -141,8 +163,12 @@ final class RemoteControlState extends Equatable {
       return 'The session ended: ${session.endReason ?? 'the connection closed'}.';
     }
 
+    // Granted (a screen session) and NotRequired (a shell) are the two answers that open a
+    // session, so both mean "connecting" until the far end has said what it is.
     return switch (session.consent) {
       RemoteControlConsent.granted => geometry == null ? 'Connecting to ${session.hostname}…' : null,
+      RemoteControlConsent.notRequired =>
+        shell == null ? 'Opening a terminal on ${session.hostname}…' : null,
       final consent => consent.label,
     };
   }
@@ -150,6 +176,7 @@ final class RemoteControlState extends Equatable {
   RemoteControlState copyWith({
     RemoteControlSession? session,
     RemoteDisplayGeometry? geometry,
+    RemoteShellInfo? shell,
     Map<int, RemoteControlTileImage>? tiles,
     bool? connecting,
     String? error,
@@ -158,13 +185,14 @@ final class RemoteControlState extends Equatable {
       RemoteControlState(
         session: session ?? this.session,
         geometry: geometry ?? this.geometry,
+        shell: shell ?? this.shell,
         tiles: tiles ?? this.tiles,
         connecting: connecting ?? this.connecting,
         error: clearError ? null : (error ?? this.error),
       );
 
   @override
-  List<Object?> get props => [session, geometry, tiles, connecting, error];
+  List<Object?> get props => [session, geometry, shell, tiles, connecting, error];
 }
 
 /// Drives one remote control session from Connect to hang-up.
@@ -190,6 +218,7 @@ class RemoteControlBloc extends Bloc<RemoteControlEvent, RemoteControlState>
     on<RemoteControlSessionPolled>(_onPolled);
     on<RemoteControlDisconnectRequested>(_onDisconnectRequested);
     on<RemoteControlGeometryChanged>(_onGeometryChanged);
+    on<RemoteControlShellStarted>(_onShellStarted);
     on<RemoteControlTileDecoded>(_onTileDecoded);
     on<RemoteControlStreamClosed>(_onStreamClosed);
     on<RemoteControlInputSent>(_onInputSent);
@@ -202,6 +231,17 @@ class RemoteControlBloc extends Bloc<RemoteControlEvent, RemoteControlState>
 
   RemoteControlStream? _stream;
   StreamSubscription<RemoteScreenUpdate>? _subscription;
+
+  /// Terminal output, as a stream rather than as state.
+  ///
+  /// Deliberately not in [RemoteControlState]. A terminal emulator keeps its own scrollback and is
+  /// fed imperatively, so putting the bytes in state would mean either re-emitting an
+  /// ever-growing buffer on every keystroke or emitting a value whose equality is meaningless —
+  /// and this state is `Equatable` precisely so that a poll finding nothing new rebuilds nothing.
+  /// Broadcast, so a widget rebuilt by a state change can resubscribe.
+  final StreamController<Uint8List> _shellOutput = StreamController<Uint8List>.broadcast();
+
+  Stream<Uint8List> get shellOutput => _shellOutput.stream;
 
   /// The newest sequence number seen per tile position.
   ///
@@ -218,7 +258,7 @@ class RemoteControlBloc extends Bloc<RemoteControlEvent, RemoteControlState>
     emit(state.copyWith(connecting: true, clearError: true));
 
     try {
-      final session = await _requestSession(event.hostId);
+      final session = await _requestSession(event.hostId, event.kind);
       emit(state.copyWith(session: session, connecting: false));
 
       // Two seconds: the answer comes from a human clicking a dialog, so this is about being
@@ -275,6 +315,10 @@ class RemoteControlBloc extends Bloc<RemoteControlEvent, RemoteControlState>
     }
 
     add(const RemoteControlSessionPolled());
+  }
+
+  void _onShellStarted(RemoteControlShellStarted event, Emitter<RemoteControlState> emit) {
+    emit(state.copyWith(shell: event.shell));
   }
 
   void _onGeometryChanged(RemoteControlGeometryChanged event, Emitter<RemoteControlState> emit) {
@@ -349,6 +393,15 @@ class RemoteControlBloc extends Bloc<RemoteControlEvent, RemoteControlState>
           case RemoteDisplayGeometry():
             add(RemoteControlGeometryChanged(update));
 
+          case RemoteShellInfo():
+            add(RemoteControlShellStarted(update));
+
+          case RemoteShellOutput():
+            // Straight onto the stream rather than through an event: these are bytes to be written
+            // into a terminal, not state to be diffed, and a `yes` loop would otherwise put a
+            // thousand events a second through the bloc for a picture nothing compares.
+            if (!_shellOutput.isClosed) _shellOutput.add(update.bytes);
+
           case RemoteScreenTile():
             // Decoded here rather than in the painter: `instantiateImageCodec` is asynchronous, and
             // a painter cannot await. On the web this is the browser's own JPEG decoder.
@@ -397,6 +450,7 @@ class RemoteControlBloc extends Bloc<RemoteControlEvent, RemoteControlState>
   @override
   Future<void> close() async {
     await _detachStream();
+    await _shellOutput.close();
 
     // ui.Image holds a native texture that the garbage collector does not account for; a session
     // closed without this leaks the whole last screen.

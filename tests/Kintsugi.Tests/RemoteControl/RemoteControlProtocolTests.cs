@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Kintsugi.Domain.Enums;
 using Kintsugi.WebApi.RemoteControl;
 
 namespace Kintsugi.Tests.RemoteControl;
@@ -30,7 +31,7 @@ public class RemoteControlProtocolTests
     {
         var sessionId = Guid.NewGuid();
         var json = JsonSerializer.Serialize(
-            new RemoteControlProtocol.SessionRequested(sessionId, "admin@example.com", 90),
+            new RemoteControlProtocol.SessionRequested(sessionId, RemoteControlSessionKind.Screen, "admin@example.com", 90),
             RemoteControlProtocol.Json);
 
         var requested = JsonSerializer.Deserialize<RemoteControlProtocol.SessionRequested>(json, RemoteControlProtocol.Json);
@@ -40,5 +41,20 @@ public class RemoteControlProtocolTests
         Assert.Equal(sessionId, requested.SessionId);
         Assert.Equal("admin@example.com", requested.RequestedBy);
         Assert.Equal(90, requested.ConsentTimeoutSeconds);
+    }
+
+    [Theory]
+    [InlineData(RemoteControlSessionKind.Screen, "screen")]
+    [InlineData(RemoteControlSessionKind.Shell, "shell")]
+    public void SessionRequested_WritesTheKindTheAgentsMatchOn(RemoteControlSessionKind kind, string expected)
+    {
+        // The three agents' `parse_server_message` compares this against lowercase literals, and a
+        // kind they do not recognise is answered Unavailable — so a spelling change here reads on
+        // the host as a session kind it has never heard of, and nothing else would report it.
+        var json = JsonSerializer.Serialize(
+            new RemoteControlProtocol.SessionRequested(Guid.NewGuid(), kind, "admin@example.com", 90),
+            RemoteControlProtocol.Json);
+
+        Assert.Contains($"\"kind\":\"{expected}\"", json);
     }
 }

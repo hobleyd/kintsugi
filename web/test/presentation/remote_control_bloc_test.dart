@@ -1,6 +1,7 @@
 import 'dart:ui' as ui;
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:kintsugi_web/domain/entities/enums.dart';
 import 'package:kintsugi_web/domain/entities/remote_control_session.dart';
 import 'package:kintsugi_web/domain/repositories/repositories.dart';
 import 'package:kintsugi_web/domain/usecases/remote_control_usecases.dart';
@@ -10,7 +11,8 @@ import 'package:kintsugi_web/presentation/remote_control/remote_control_bloc.dar
 /// point where the picture is assembled and where the bug they pin lived.
 class UnusedRemoteControlRepository implements RemoteControlRepository {
   @override
-  Future<RemoteControlSession> request(String hostId) => throw UnimplementedError();
+  Future<RemoteControlSession> request(String hostId, RemoteControlSessionKind kind) =>
+      throw UnimplementedError();
 
   @override
   Future<RemoteControlSession?> session(String id) => throw UnimplementedError();

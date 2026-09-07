@@ -37,7 +37,18 @@ public interface IRemoteControlSessionBroker
     /// Asks the agent to put the consent dialog on screen, and opens the in-memory session the two
     /// sockets will later be joined through.
     /// </summary>
-    RemoteControlRequestOutcome TryRequestConsent(Guid sessionId, string serialNumber, string requestedBy, TimeSpan consentTimeout);
+    /// <remarks>
+    /// A shell session asks nobody — see <see cref="RemoteControlSessionKind.Shell"/> — so for that
+    /// kind this only opens the session and tells the agent to start a terminal. The name is kept
+    /// as it is because the *outcomes* are identical either way, and the agent still answers on the
+    /// same channel with <see cref="RemoteControlConsent.NotRequired"/> in place of a decision.
+    /// </remarks>
+    RemoteControlRequestOutcome TryRequestConsent(
+        Guid sessionId,
+        string serialNumber,
+        RemoteControlSessionKind kind,
+        string requestedBy,
+        TimeSpan consentTimeout);
 
     /// <summary>
     /// The live consent state, which runs ahead of the stored row: the agent reports the answer over
@@ -71,5 +82,11 @@ public enum RemoteControlRequestOutcome
     /// deliberately: two administrators driving the same mouse is not a feature, and a second
     /// dialog stacking on top of the first is how a user ends up approving the wrong request.
     /// </summary>
+    /// <remarks>
+    /// One session per host, not one per kind — so a shell session and a screen session cannot run
+    /// against the same host at once. That is the agents' constraint rather than this server's
+    /// preference: all three hold a single <c>ActiveSession</c> and refuse a second request
+    /// outright, so permitting a pair here would produce a request the host answers with a refusal.
+    /// </remarks>
     AlreadyInSession
 }

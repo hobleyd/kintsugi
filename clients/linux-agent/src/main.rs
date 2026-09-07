@@ -9,6 +9,7 @@ mod os_update;
 mod patch_cycle;
 mod policy;
 mod progress_window;
+mod pty;
 mod queue;
 mod backend;
 mod remote_control;

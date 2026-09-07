@@ -32,7 +32,7 @@ public class RemoteControlSessionBrokerTests
     {
         var broker = CreateBroker();
 
-        var outcome = broker.TryRequestConsent(Guid.NewGuid(), Serial, "admin@example.com", LongConsentTimeout);
+        var outcome = broker.TryRequestConsent(Guid.NewGuid(), Serial, RemoteControlSessionKind.Screen, "admin@example.com", LongConsentTimeout);
 
         Assert.Equal(RemoteControlRequestOutcome.AgentUnreachable, outcome);
     }
@@ -44,7 +44,7 @@ public class RemoteControlSessionBrokerTests
         await using var agent = await ConnectAgentAsync(broker);
         var sessionId = Guid.NewGuid();
 
-        var outcome = broker.TryRequestConsent(sessionId, Serial, "admin@example.com", LongConsentTimeout);
+        var outcome = broker.TryRequestConsent(sessionId, Serial, RemoteControlSessionKind.Screen, "admin@example.com", LongConsentTimeout);
 
         Assert.Equal(RemoteControlRequestOutcome.Requested, outcome);
 
@@ -69,7 +69,7 @@ public class RemoteControlSessionBrokerTests
         Assert.True(broker.IsHostReachable(Serial.ToUpperInvariant()));
         Assert.Equal(
             RemoteControlRequestOutcome.Requested,
-            broker.TryRequestConsent(Guid.NewGuid(), Serial.ToUpperInvariant(), "admin@example.com", LongConsentTimeout));
+            broker.TryRequestConsent(Guid.NewGuid(), Serial.ToUpperInvariant(), RemoteControlSessionKind.Screen, "admin@example.com", LongConsentTimeout));
     }
 
     [Fact]
@@ -77,9 +77,9 @@ public class RemoteControlSessionBrokerTests
     {
         var broker = CreateBroker();
         await using var agent = await ConnectAgentAsync(broker);
-        broker.TryRequestConsent(Guid.NewGuid(), Serial, "first@example.com", LongConsentTimeout);
+        broker.TryRequestConsent(Guid.NewGuid(), Serial, RemoteControlSessionKind.Screen, "first@example.com", LongConsentTimeout);
 
-        var outcome = broker.TryRequestConsent(Guid.NewGuid(), Serial, "second@example.com", LongConsentTimeout);
+        var outcome = broker.TryRequestConsent(Guid.NewGuid(), Serial, RemoteControlSessionKind.Screen, "second@example.com", LongConsentTimeout);
 
         Assert.Equal(RemoteControlRequestOutcome.AlreadyInSession, outcome);
     }
@@ -90,13 +90,13 @@ public class RemoteControlSessionBrokerTests
         var broker = CreateBroker();
         await using var agent = await ConnectAgentAsync(broker);
         var first = Guid.NewGuid();
-        broker.TryRequestConsent(first, Serial, "admin@example.com", LongConsentTimeout);
+        broker.TryRequestConsent(first, Serial, RemoteControlSessionKind.Screen, "admin@example.com", LongConsentTimeout);
 
         broker.EndSession(first, "the administrator disconnected");
 
         Assert.Equal(
             RemoteControlRequestOutcome.Requested,
-            broker.TryRequestConsent(Guid.NewGuid(), Serial, "admin@example.com", LongConsentTimeout));
+            broker.TryRequestConsent(Guid.NewGuid(), Serial, RemoteControlSessionKind.Screen, "admin@example.com", LongConsentTimeout));
     }
 
     [Fact]
@@ -116,7 +116,7 @@ public class RemoteControlSessionBrokerTests
         await using var agent = await ConnectAgentAsync(broker);
         var sessionId = Guid.NewGuid();
 
-        broker.TryRequestConsent(sessionId, Serial, "admin@example.com", TimeSpan.Zero);
+        broker.TryRequestConsent(sessionId, Serial, RemoteControlSessionKind.Screen, "admin@example.com", TimeSpan.Zero);
 
         Assert.Equal(RemoteControlConsent.TimedOut, broker.GetConsent(sessionId));
     }
@@ -133,7 +133,7 @@ public class RemoteControlSessionBrokerTests
         });
 
         var sessionId = Guid.NewGuid();
-        broker.TryRequestConsent(sessionId, Serial, "admin@example.com", LongConsentTimeout);
+        broker.TryRequestConsent(sessionId, Serial, RemoteControlSessionKind.Screen, "admin@example.com", LongConsentTimeout);
         agent.Socket.QueueText(ConsentMessage(sessionId, "Granted"));
 
         await WaitUntilAsync(() => recorded.Count == 1);
@@ -154,7 +154,7 @@ public class RemoteControlSessionBrokerTests
         });
 
         var sessionId = Guid.NewGuid();
-        broker.TryRequestConsent(sessionId, Serial, "admin@example.com", LongConsentTimeout);
+        broker.TryRequestConsent(sessionId, Serial, RemoteControlSessionKind.Screen, "admin@example.com", LongConsentTimeout);
         agent.Socket.QueueText(ConsentMessage(sessionId, "Denied"));
 
         await WaitUntilAsync(() => recorded.Count == 1);
@@ -164,7 +164,97 @@ public class RemoteControlSessionBrokerTests
         // And the host is free to be asked again, rather than stuck behind a dead session.
         Assert.Equal(
             RemoteControlRequestOutcome.Requested,
-            broker.TryRequestConsent(Guid.NewGuid(), Serial, "admin@example.com", LongConsentTimeout));
+            broker.TryRequestConsent(Guid.NewGuid(), Serial, RemoteControlSessionKind.Screen, "admin@example.com", LongConsentTimeout));
+    }
+
+    [Fact]
+    public async Task TryRequestConsent_ForAShell_TellsTheAgentWhichKindItIs()
+    {
+        var broker = CreateBroker();
+        await using var agent = await ConnectAgentAsync(broker);
+
+        broker.TryRequestConsent(Guid.NewGuid(), Serial, RemoteControlSessionKind.Shell, "admin@example.com", LongConsentTimeout);
+
+        var sent = await agent.Socket.ReadSentAsync(Patience);
+        Assert.NotNull(sent);
+
+        using var message = JsonDocument.Parse(sent!.Value.Text);
+        Assert.Equal("shell", message.RootElement.GetProperty("kind").GetString());
+    }
+
+    [Fact]
+    public async Task AgentReportingAShellNeededNoConsent_LeavesTheSessionOpen()
+    {
+        var broker = CreateBroker();
+        var recorded = new List<RemoteControlConsent>();
+        await using var agent = await ConnectAgentAsync(broker, Serial, onConsent: (_, outcome) =>
+        {
+            recorded.Add(outcome);
+            return Task.CompletedTask;
+        });
+
+        var sessionId = Guid.NewGuid();
+        broker.TryRequestConsent(sessionId, Serial, RemoteControlSessionKind.Shell, "admin@example.com", LongConsentTimeout);
+        agent.Socket.QueueText(ConsentMessage(sessionId, "NotRequired"));
+
+        await WaitUntilAsync(() => recorded.Count == 1);
+
+        Assert.Equal(RemoteControlConsent.NotRequired, broker.GetConsent(sessionId));
+        // Open, not ended: a shell session proceeds on this answer exactly as a screen session
+        // proceeds on a grant, which is what lets its two sockets be joined.
+        Assert.Equal(RemoteControlRequestOutcome.AlreadyInSession,
+            broker.TryRequestConsent(Guid.NewGuid(), Serial, RemoteControlSessionKind.Shell, "other@example.com", LongConsentTimeout));
+    }
+
+    [Fact]
+    public async Task AgentClaimingAScreenSessionNeededNoConsent_IsRefusedAndTheSessionEnded()
+    {
+        // The security property this whole feature rests on. The consent answer arrives over a
+        // socket the agent holds, so an agent could otherwise open capture, keyboard and pointer on
+        // a host whose user was shown no dialog at all, simply by reporting NotRequired.
+        var broker = CreateBroker();
+        var recorded = new List<RemoteControlConsent>();
+        await using var agent = await ConnectAgentAsync(broker, Serial, onConsent: (_, outcome) =>
+        {
+            recorded.Add(outcome);
+            return Task.CompletedTask;
+        });
+
+        var sessionId = Guid.NewGuid();
+        broker.TryRequestConsent(sessionId, Serial, RemoteControlSessionKind.Screen, "admin@example.com", LongConsentTimeout);
+        agent.Socket.QueueText(ConsentMessage(sessionId, "NotRequired"));
+
+        // Ended, so the host is free to be asked again — and never latched, so nothing was recorded
+        // as a decision and no socket can be attached to it.
+        await WaitUntilAsync(() => !broker.IsActive(sessionId) &&
+            broker.TryRequestConsent(Guid.NewGuid(), Serial, RemoteControlSessionKind.Screen, "again@example.com", LongConsentTimeout)
+                == RemoteControlRequestOutcome.Requested);
+
+        Assert.Empty(recorded);
+        Assert.NotEqual(RemoteControlConsent.NotRequired, broker.GetConsent(sessionId));
+    }
+
+    [Fact]
+    public async Task AgentReportingItCannotProvideTheSession_EndsItRatherThanWaiting()
+    {
+        // A screen session on a host with nobody logged in. Answered at once rather than left to
+        // time out, so the administrator hears "there is nobody there" now.
+        var broker = CreateBroker();
+        var recorded = new List<RemoteControlConsent>();
+        await using var agent = await ConnectAgentAsync(broker, Serial, onConsent: (_, outcome) =>
+        {
+            recorded.Add(outcome);
+            return Task.CompletedTask;
+        });
+
+        var sessionId = Guid.NewGuid();
+        broker.TryRequestConsent(sessionId, Serial, RemoteControlSessionKind.Screen, "admin@example.com", LongConsentTimeout);
+        agent.Socket.QueueText(ConsentMessage(sessionId, "Unavailable"));
+
+        await WaitUntilAsync(() => recorded.Count == 1);
+
+        Assert.Equal(RemoteControlConsent.Unavailable, broker.GetConsent(sessionId));
+        Assert.False(broker.IsActive(sessionId));
     }
 
     [Fact]
@@ -176,7 +266,7 @@ public class RemoteControlSessionBrokerTests
         await using var ours = await ConnectAgentAsync(broker, Serial);
 
         var sessionId = Guid.NewGuid();
-        broker.TryRequestConsent(sessionId, Serial, "admin@example.com", LongConsentTimeout);
+        broker.TryRequestConsent(sessionId, Serial, RemoteControlSessionKind.Screen, "admin@example.com", LongConsentTimeout);
         theirs.Socket.QueueText(ConsentMessage(sessionId, "Granted"));
 
         // Give the receive loop a chance to have acted on it before asserting that it did not.
@@ -197,7 +287,7 @@ public class RemoteControlSessionBrokerTests
         });
 
         var sessionId = Guid.NewGuid();
-        broker.TryRequestConsent(sessionId, Serial, "admin@example.com", LongConsentTimeout);
+        broker.TryRequestConsent(sessionId, Serial, RemoteControlSessionKind.Screen, "admin@example.com", LongConsentTimeout);
         agent.Socket.QueueClose();
 
         await WaitUntilAsync(() => endings.Count == 1);
@@ -221,7 +311,7 @@ public class RemoteControlSessionBrokerTests
         Assert.True(broker.IsHostReachable(Serial));
         Assert.Equal(
             RemoteControlRequestOutcome.Requested,
-            broker.TryRequestConsent(Guid.NewGuid(), Serial, "admin@example.com", LongConsentTimeout));
+            broker.TryRequestConsent(Guid.NewGuid(), Serial, RemoteControlSessionKind.Screen, "admin@example.com", LongConsentTimeout));
         Assert.NotNull(await second.Socket.ReadSentAsync(Patience));
 
         await first.DisposeAsync();
@@ -234,7 +324,7 @@ public class RemoteControlSessionBrokerTests
         var broker = CreateBroker();
         await using var agent = await ConnectAgentAsync(broker);
         var sessionId = Guid.NewGuid();
-        broker.TryRequestConsent(sessionId, Serial, "admin@example.com", LongConsentTimeout);
+        broker.TryRequestConsent(sessionId, Serial, RemoteControlSessionKind.Screen, "admin@example.com", LongConsentTimeout);
         agent.Socket.QueueText(ConsentMessage(sessionId, "Granted"));
         await WaitUntilAsync(() => broker.GetConsent(sessionId) == RemoteControlConsent.Granted);
 
@@ -277,7 +367,7 @@ public class RemoteControlSessionBrokerTests
         var broker = CreateBroker();
         await using var agent = await ConnectAgentAsync(broker);
         var sessionId = Guid.NewGuid();
-        broker.TryRequestConsent(sessionId, Serial, "admin@example.com", LongConsentTimeout);
+        broker.TryRequestConsent(sessionId, Serial, RemoteControlSessionKind.Screen, "admin@example.com", LongConsentTimeout);
 
         var viewerSide = new FakeWebSocket();
         await broker.RunViewerSocketAsync(sessionId, viewerSide, _ => Task.CompletedTask, CancellationToken.None)
@@ -293,7 +383,7 @@ public class RemoteControlSessionBrokerTests
         var broker = CreateBroker();
         await using var agent = await ConnectAgentAsync(broker);
         var sessionId = Guid.NewGuid();
-        broker.TryRequestConsent(sessionId, Serial, "admin@example.com", LongConsentTimeout);
+        broker.TryRequestConsent(sessionId, Serial, RemoteControlSessionKind.Screen, "admin@example.com", LongConsentTimeout);
         agent.Socket.QueueText(ConsentMessage(sessionId, "Granted"));
         await WaitUntilAsync(() => broker.GetConsent(sessionId) == RemoteControlConsent.Granted);
 

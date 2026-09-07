@@ -60,7 +60,12 @@ public class RemoteControlSessionBroker : IRemoteControlSessionBroker
         !string.IsNullOrWhiteSpace(serialNumber) && _agents.ContainsKey(serialNumber);
 
     /// <inheritdoc />
-    public RemoteControlRequestOutcome TryRequestConsent(Guid sessionId, string serialNumber, string requestedBy, TimeSpan consentTimeout)
+    public RemoteControlRequestOutcome TryRequestConsent(
+        Guid sessionId,
+        string serialNumber,
+        RemoteControlSessionKind kind,
+        string requestedBy,
+        TimeSpan consentTimeout)
     {
         if (!_agents.TryGetValue(serialNumber, out var agent))
         {
@@ -76,13 +81,13 @@ public class RemoteControlSessionBroker : IRemoteControlSessionBroker
             return RemoteControlRequestOutcome.AlreadyInSession;
         }
 
-        var session = new RemoteControlRelaySession(sessionId, serialNumber, requestedBy, consentTimeout);
+        var session = new RemoteControlRelaySession(sessionId, serialNumber, kind, requestedBy, consentTimeout);
         if (!_sessions.TryAdd(sessionId, session))
         {
             return RemoteControlRequestOutcome.AlreadyInSession;
         }
 
-        var message = new RemoteControlProtocol.SessionRequested(sessionId, requestedBy, (int)consentTimeout.TotalSeconds);
+        var message = new RemoteControlProtocol.SessionRequested(sessionId, kind, requestedBy, (int)consentTimeout.TotalSeconds);
         if (!agent.TrySend(JsonSerializer.Serialize(message, RemoteControlProtocol.Json)))
         {
             // The socket is in the dictionary but its send queue is closed or full — the agent is
@@ -93,8 +98,8 @@ public class RemoteControlSessionBroker : IRemoteControlSessionBroker
         }
 
         _logger.LogInformation(
-            "Remote control session {SessionId} requested for host {SerialNumber} by {RequestedBy}; awaiting the host user's consent",
-            sessionId, serialNumber, requestedBy);
+            "Remote {Kind} session {SessionId} requested for host {SerialNumber} by {RequestedBy}; awaiting the agent's answer",
+            kind, sessionId, serialNumber, requestedBy);
 
         return RemoteControlRequestOutcome.Requested;
     }
@@ -235,7 +240,7 @@ public class RemoteControlSessionBroker : IRemoteControlSessionBroker
             return CloseWithReasonAsync(socket, "no such remote control session for this host");
         }
 
-        if (session.ResolveConsent() != RemoteControlConsent.Granted || session.IsFinished)
+        if (!session.IsOpen)
         {
             return CloseWithReasonAsync(socket, "this remote control session is not open");
         }
@@ -260,7 +265,7 @@ public class RemoteControlSessionBroker : IRemoteControlSessionBroker
             return CloseWithReasonAsync(socket, "no such remote control session");
         }
 
-        if (session.ResolveConsent() != RemoteControlConsent.Granted || session.IsFinished)
+        if (!session.IsOpen)
         {
             return CloseWithReasonAsync(socket, "this remote control session is not open");
         }
@@ -361,6 +366,18 @@ public class RemoteControlSessionBroker : IRemoteControlSessionBroker
             return;
         }
 
+        // An agent claiming a screen session needed no permission. Refused by the latch and said
+        // out loud, because it is either a build whose kinds have drifted from this server's or an
+        // agent trying to open a capture session nobody was shown a dialog for.
+        if (outcome == RemoteControlConsent.NotRequired && session.Kind != RemoteControlSessionKind.Shell)
+        {
+            _logger.LogWarning(
+                "Host {SerialNumber} reported that remote {Kind} session {SessionId} needed no consent; only a shell session may",
+                serialNumber, session.Kind, reported.SessionId);
+            EndSession(reported.SessionId, "the host answered with an outcome this kind of session does not allow");
+            return;
+        }
+
         if (!session.LatchConsent(outcome))
         {
             return;
@@ -372,11 +389,14 @@ public class RemoteControlSessionBroker : IRemoteControlSessionBroker
 
         await onConsent(reported.SessionId, outcome);
 
-        if (outcome != RemoteControlConsent.Granted)
+        if (outcome is not (RemoteControlConsent.Granted or RemoteControlConsent.NotRequired))
         {
-            EndSession(reported.SessionId, outcome == RemoteControlConsent.TimedOut
-                ? "nobody answered the consent dialog"
-                : "the host user refused");
+            EndSession(reported.SessionId, outcome switch
+            {
+                RemoteControlConsent.TimedOut => "nobody answered the consent dialog",
+                RemoteControlConsent.Unavailable => "the host cannot provide this kind of session",
+                _ => "the host user refused"
+            });
         }
     }
 

@@ -50,8 +50,10 @@ use crate::dialogs::{self, RemoteControlChoice};
 use crate::identity::{self, AgentIdentity};
 use crate::input_injection::{self, CGPoint, InputInjector};
 use crate::logging;
+use crate::pty::{self, ProgramSpec, Pty, INITIAL_COLS, INITIAL_ROWS};
 use crate::remote_protocol::{
-    parse_server_message, parse_viewer_input, AgentMessage, ConsentOutcome, ServerMessage, ViewerInput,
+    encode_shell_output, decode_shell_input, parse_server_message, parse_viewer_input, AgentMessage,
+    ConsentOutcome, ServerMessage, SessionKind, ShellInfo, ViewerInput,
 };
 use crate::screen_capture::{self, FrameEncoder, ScreenCapture, DEFAULT_JPEG_QUALITY, DEFAULT_MAX_IMAGE_WIDTH};
 use crate::tray_menu;
@@ -87,6 +89,17 @@ const CONTROL_SILENCE_TIMEOUT: Duration = Duration::from_secs(90);
 /// upper bound on input latency, which is why it is small: at 20ms the remote pointer feels
 /// attached to the hand moving it.
 const FRAME_POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// How long a shell session's loop waits before looking again when the terminal had nothing to say.
+/// Smaller than [`FRAME_POLL_INTERVAL`] because this is the round trip a person feels between
+/// pressing a key and seeing it echoed, and a terminal is judged on that far more sharply than a
+/// remote pointer is.
+const SHELL_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// How much terminal output is carried in one frame. A screenful of `ls -R` arrives as a handful of
+/// these rather than one large one, which keeps a burst from stalling the socket the input travels
+/// back on.
+const SHELL_READ_BUFFER_BYTES: usize = 32 * 1024;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -350,7 +363,19 @@ fn handle_server_message(
     };
 
     match message {
-        ServerMessage::SessionRequested { session_id, requested_by, consent_timeout_seconds } => {
+        ServerMessage::SessionRequested { session_id, kind, requested_by, consent_timeout_seconds } => {
+            // A kind this build has never heard of. Answered rather than ignored, so the
+            // administrator is told at once instead of watching a dialog that is never coming time
+            // out ninety seconds later.
+            if kind == SessionKind::Unknown {
+                logging::warn("refusing a remote session of a kind this agent does not implement");
+                let _ = outbound.send(Outbound {
+                    message: AgentMessage::Consent { session_id, outcome: ConsentOutcome::Unavailable },
+                    flushed: None,
+                });
+                return;
+            }
+
             if active.is_running() {
                 // The server allows one session per host, so this should not happen; if it does,
                 // refusing is the answer that cannot go wrong. Reported as Denied rather than
@@ -379,16 +404,28 @@ fn handle_server_message(
                 // Any click that arrived before this session existed belongs to the last one.
                 end_session_requested.store(false, Ordering::SeqCst);
 
-                let outcome = negotiate_and_run_session(
-                    &config,
-                    &serial_number,
-                    &identity,
-                    &session_id,
-                    &requested_by,
-                    consent_timeout_seconds,
-                    &stop,
-                    &outbound,
-                );
+                let outcome = match kind {
+                    SessionKind::Shell => negotiate_and_run_shell_session(
+                        &config,
+                        &serial_number,
+                        &identity,
+                        &session_id,
+                        &requested_by,
+                        &stop,
+                        &outbound,
+                    ),
+                    // Unknown is answered above and never reaches this thread.
+                    _ => negotiate_and_run_session(
+                        &config,
+                        &serial_number,
+                        &identity,
+                        &session_id,
+                        &requested_by,
+                        consent_timeout_seconds,
+                        &stop,
+                        &outbound,
+                    ),
+                };
 
                 if let Err(err) = outcome {
                     logging::warn(&format!("remote control session {session_id} failed: {err:#}"));
@@ -468,6 +505,274 @@ fn negotiate_and_run_session(
     }
 
     run_session(config, serial_number, identity, session_id, requested_by, stop, outbound)
+}
+
+/// Opens a terminal on this Mac and relays it, without asking anybody.
+///
+/// # Why no dialog
+///
+/// This is the one place remote control's consent rule does not apply, and the difference is
+/// deliberate rather than an oversight. A shell session is the access an administrator of this
+/// fleet already has by other means — it is what they would reach SSH for — and the whole reason it
+/// is routed through this agent instead is that SSH would need an inbound port on every managed
+/// machine, which is exactly what the relay design exists to avoid. The compensating control is the
+/// server's: a shell request writes the same `remote_control_sessions` row a screen request does,
+/// naming who asked and when, and the row is written whatever becomes of the session.
+///
+/// **On macOS this is a shell inside the logged-in person's own session, opened without asking
+/// them** — the per-user process is the only half of this agent holding the fleet identity, so
+/// there is nowhere else for it to run. That is a materially different thing from the root shell
+/// the Linux and Windows agents give, and it is why [`ShellInfo`] reports the account: the viewer
+/// says whose shell this is rather than leaving an administrator to remember which platform does
+/// what.
+fn negotiate_and_run_shell_session(
+    config: &Config,
+    serial_number: &str,
+    identity: &AgentIdentity,
+    session_id: &str,
+    requested_by: &str,
+    stop: &Arc<AtomicBool>,
+    outbound: &Sender<Outbound>,
+) -> Result<()> {
+    // The shell is chosen before the answer is sent, so a Mac that cannot produce one reports
+    // `Unavailable` rather than accepting a session and then failing to open a terminal.
+    let (program, user) = match shell_program() {
+        Ok(program) => program,
+        Err(err) => {
+            logging::warn(&format!("cannot open a shell session: {err:#}"));
+            let _ = outbound.send(Outbound {
+                message: AgentMessage::Consent {
+                    session_id: session_id.to_string(),
+                    outcome: ConsentOutcome::Unavailable,
+                },
+                flushed: None,
+            });
+            return Ok(());
+        }
+    };
+
+    let (flushed_tx, flushed_rx) = mpsc::channel();
+    outbound
+        .send(Outbound {
+            message: AgentMessage::Consent {
+                session_id: session_id.to_string(),
+                outcome: ConsentOutcome::NotRequired,
+            },
+            flushed: Some(flushed_tx),
+        })
+        .map_err(|_| anyhow!("the control socket closed before the shell session could be answered"))?;
+
+    // The same race the granted path waits out, and for the same reason — the relay refuses a
+    // session socket for an answer it has not seen yet, and refuses it *after* accepting the
+    // upgrade, so the agent reads a healthy connection that immediately closes. "No dialog, just
+    // open the socket" is precisely the shape that loses this race every time.
+    if flushed_rx.recv_timeout(CONSENT_FLUSH_TIMEOUT).is_err() {
+        logging::warn("the shell session answer has not reached the server yet; opening the session socket regardless");
+    }
+
+    run_shell_session(config, serial_number, identity, session_id, requested_by, &program, &user, stop, outbound)
+}
+
+/// Runs the terminal until the shell exits or somebody hangs up.
+#[allow(clippy::too_many_arguments)]
+fn run_shell_session(
+    config: &Config,
+    serial_number: &str,
+    identity: &AgentIdentity,
+    session_id: &str,
+    requested_by: &str,
+    program: &ProgramSpec,
+    user: &str,
+    stop: &Arc<AtomicBool>,
+    outbound: &Sender<Outbound>,
+) -> Result<()> {
+    let mut terminal = Pty::spawn(program, INITIAL_COLS, INITIAL_ROWS)
+        .with_context(|| format!("could not start {} in a terminal", program.program.display()))?;
+
+    let mut socket = connect_session_socket(config, serial_number, identity, session_id)?;
+    set_nonblocking(&socket)?;
+
+    // Only now is anything actually running, which is the same point the screen session appears in
+    // the menu bar. A shell session was not consented to, so being visible while it runs is the
+    // only notice the person at this Mac gets that one is open.
+    tray_menu::report_remote_session(Some(requested_by.to_string()));
+    logging::info(&format!(
+        "remote shell session {session_id} started for {requested_by} ({} as {user})",
+        program.program.display()
+    ));
+
+    // Before the first output frame, so the viewer can say what it is attached to — the shell
+    // analogue of the display geometry a screen session sends first.
+    let info = serde_json::to_string(&ShellInfo::new(program.program.display().to_string(), user))
+        .context("could not describe the shell")?;
+    write_queued(&mut socket, Message::text(info)).context("could not tell the viewer what shell this is")?;
+
+    let started = Instant::now();
+    let mut buffer = vec![0u8; SHELL_READ_BUFFER_BYTES];
+    let mut bytes_out: u64 = 0;
+
+    let reason = loop {
+        if stop.load(Ordering::SeqCst) {
+            break "the session was ended on the host".to_string();
+        }
+
+        match pump_shell_input(&mut socket, &mut terminal) {
+            Ok(true) => {}
+            Ok(false) => break "the viewer disconnected".to_string(),
+            Err(err) => break format!("{err:#}"),
+        }
+
+        // Read once per turn rather than draining: a `yes` loop would otherwise never let the
+        // input half of this loop run again, and the administrator could not press Ctrl-C.
+        let produced = match terminal.read_available(&mut buffer) {
+            // The shell closed its end. The ordinary way a session finishes — somebody typed
+            // `exit` — and not a fault.
+            Ok(Some(0)) => break "the shell exited".to_string(),
+            Ok(Some(read)) => {
+                bytes_out += read as u64;
+                if let Err(err) = write_queued(&mut socket, Message::Binary(encode_shell_output(&buffer[..read]).into())) {
+                    break format!("{err:#}");
+                }
+                true
+            }
+            Ok(None) => false,
+            Err(err) => break format!("reading from the terminal failed: {err}"),
+        };
+
+        match flush(&mut socket) {
+            Ok(_) => {}
+            Err(err) => break format!("{err:#}"),
+        }
+
+        if !produced {
+            // Checked only once the terminal has nothing left to say, so the last of the output is
+            // on its way before the session closes. It is needed as well as the EOF above: a shell
+            // that exits while a background process still holds the slave open produces no EOF at
+            // all, and without this the session would sit there attached to nothing.
+            match terminal.try_wait() {
+                Ok(Some(_)) => break "the shell exited".to_string(),
+                Ok(None) => std::thread::sleep(SHELL_POLL_INTERVAL),
+                Err(err) => break format!("could not check on the shell: {err}"),
+            }
+        }
+    };
+
+    // Before the socket closes, so a shell still running a foreground job is hung up on rather
+    // than left holding this Mac's resources for as long as this process lives.
+    if let Err(err) = terminal.terminate() {
+        logging::warn(&format!("could not end the terminal for remote shell session {session_id}: {err}"));
+    }
+
+    let _ = socket.close(None);
+
+    logging::info(&format!(
+        "remote shell session {session_id} ended after {}s: {reason} (bytes sent: {bytes_out})",
+        started.elapsed().as_secs()
+    ));
+
+    let _ = outbound.send(Outbound {
+        message: AgentMessage::SessionEnded { session_id: session_id.to_string(), reason },
+        flushed: None,
+    });
+
+    Ok(())
+}
+
+/// Reads and applies everything the viewer has sent. `Ok(false)` means it hung up.
+///
+/// The mirror of [`pump_input`], and the one place in this protocol where a *binary* message
+/// travels from the browser to the agent: keystrokes are raw bytes rather than JSON, because a
+/// terminal carries arbitrary bytes and escaping every one of them into a string would double the
+/// traffic on the half of the connection latency is measured on.
+fn pump_shell_input(socket: &mut Socket, terminal: &mut Pty) -> Result<bool> {
+    loop {
+        match socket.read() {
+            Ok(Message::Binary(bytes)) => {
+                // Anything that is not shell input — a tile echoed back, a frame from a newer
+                // viewer — is dropped rather than typed. `decode_shell_input` is what decides.
+                if let Some(input) = decode_shell_input(&bytes) {
+                    terminal.write_all(input).context("writing to the terminal failed")?;
+                }
+            }
+            Ok(Message::Text(text)) => {
+                if let Some(ViewerInput::Resize { cols, rows }) = parse_viewer_input(&text) {
+                    // Failing to resize is not worth ending a session over: the shell keeps
+                    // working, it just wraps at the wrong width.
+                    if let Err(err) = terminal.resize(cols, rows) {
+                        logging::warn(&format!("could not resize the terminal: {err}"));
+                    }
+                }
+            }
+            Ok(Message::Close(_)) => return Ok(false),
+            Ok(_) => {}
+            Err(err) if is_would_block(&err) => return Ok(true),
+            Err(tungstenite::Error::ConnectionClosed) | Err(tungstenite::Error::AlreadyClosed) => return Ok(false),
+            Err(err) => return Err(anyhow!(err).context("reading from the remote shell session socket")),
+        }
+    }
+}
+
+/// The console user's own login shell, their home directory, and the smallest environment a shell
+/// needs to behave like one they opened themselves.
+///
+/// Read from the password database rather than from this process's own environment: a LaunchAgent
+/// is started by launchd with very little set, so `$SHELL` is frequently absent here and `$HOME`
+/// cannot be relied on either. `getpwuid` is what Terminal.app itself consults.
+fn shell_program() -> Result<(ProgramSpec, String)> {
+    let (user, home, shell) = passwd_entry().context("could not read this user's password database entry")?;
+
+    // A password entry naming a shell that is not installed is rare but survivable, and so is one
+    // naming `/usr/bin/false` for an account that is not meant to log in — in which case there is
+    // genuinely no shell to offer and this reports that rather than starting something else.
+    let program = pty::first_existing(&[shell.as_str()])
+        .or_else(|| pty::first_existing(&["/bin/zsh", "/bin/bash", "/bin/sh"]))
+        .ok_or_else(|| anyhow!("no usable login shell for {user} (the password database names {shell})"))?;
+
+    // A home directory that does not exist would make the shell fail to start at all, which reads
+    // as "remote shell is broken on this host" rather than as the misconfiguration it is.
+    let cwd = std::path::PathBuf::from(&home);
+    let cwd = if cwd.is_dir() { cwd } else { std::path::PathBuf::from("/") };
+
+    Ok((
+        ProgramSpec {
+            program,
+            // A login shell, so the same profile files run that would have on a terminal opened by
+            // hand — an administrator's `PATH` and aliases are most of what makes a shell useful.
+            args: vec!["-l".to_string()],
+            env: vec![
+                ("HOME".to_string(), home.clone()),
+                ("USER".to_string(), user.clone()),
+                ("LOGNAME".to_string(), user.clone()),
+                ("SHELL".to_string(), shell),
+                // Enough to find the login shell's own startup files; everything beyond this is the
+                // profile's business, which is the point of running one.
+                ("PATH".to_string(), "/usr/bin:/bin:/usr/sbin:/sbin".to_string()),
+            ],
+            cwd,
+        },
+        user,
+    ))
+}
+
+/// `(name, home directory, shell)` for the user this process is running as.
+fn passwd_entry() -> Result<(String, String, String)> {
+    // SAFETY: getpwuid returns a pointer into a static buffer owned by libc, valid until the next
+    // call to it on this thread. Everything is copied out before returning, so nothing borrows it.
+    unsafe {
+        let entry = libc::getpwuid(libc::getuid());
+        if entry.is_null() {
+            return Err(anyhow!("getpwuid returned nothing for uid {}", libc::getuid()));
+        }
+
+        let read = |pointer: *const libc::c_char| -> Result<String> {
+            if pointer.is_null() {
+                return Err(anyhow!("the password database entry is incomplete"));
+            }
+            Ok(std::ffi::CStr::from_ptr(pointer).to_string_lossy().into_owned())
+        };
+
+        Ok((read((*entry).pw_name)?, read((*entry).pw_dir)?, read((*entry).pw_shell)?))
+    }
 }
 
 /// What this session will not be able to do, in words the person deciding can act on.

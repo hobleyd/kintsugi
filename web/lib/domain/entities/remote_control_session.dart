@@ -12,6 +12,7 @@ class RemoteControlSession extends Equatable {
     required this.serialNumber,
     required this.hostname,
     required this.requestedBy,
+    required this.kind,
     required this.consent,
     required this.requestedAtUtc,
     required this.consentDecidedAtUtc,
@@ -30,6 +31,11 @@ class RemoteControlSession extends Equatable {
   /// supplied by this client. It is what the host user's own dialog names.
   final String requestedBy;
 
+  /// What was asked for. The two share every piece of machinery below this point and differ only
+  /// in what the agent does once the session is open — and in whether anybody at the host was
+  /// asked, which is the difference that matters.
+  final RemoteControlSessionKind kind;
+
   final RemoteControlConsent consent;
   final DateTime requestedAtUtc;
   final DateTime? consentDecidedAtUtc;
@@ -43,7 +49,12 @@ class RemoteControlSession extends Equatable {
 
   bool get isAwaitingConsent => consent == RemoteControlConsent.pending && endedAtUtc == null;
 
-  bool get isConnectable => consent == RemoteControlConsent.granted && endedAtUtc == null;
+  /// Whether the media socket may be opened. A shell session answers `notRequired` rather than
+  /// `granted` — nobody was asked — and it opens on that answer exactly as a screen session opens
+  /// on a grant, which is the same pair the server's own socket gate tests.
+  bool get isConnectable =>
+      (consent == RemoteControlConsent.granted || consent == RemoteControlConsent.notRequired) &&
+      endedAtUtc == null;
 
   @override
   List<Object?> get props => [
@@ -52,6 +63,7 @@ class RemoteControlSession extends Equatable {
         serialNumber,
         hostname,
         requestedBy,
+        kind,
         consent,
         requestedAtUtc,
         consentDecidedAtUtc,
@@ -134,6 +146,37 @@ class RemoteScreenTile extends RemoteScreenUpdate {
   List<Object?> get props => [x, y, width, height, sequence, jpeg.length];
 }
 
+/// What the terminal at the far end is. Arrives once, before the first output frame — the shell
+/// analogue of [RemoteDisplayGeometry].
+class RemoteShellInfo extends RemoteScreenUpdate {
+  const RemoteShellInfo({required this.shell, required this.user});
+
+  /// The program running: `/bin/zsh`, `/bin/bash`, `pwsh.exe`.
+  final String shell;
+
+  /// The account it runs as, and **the reason this is on the wire at all**: it is the logged-in
+  /// user on macOS, `root` on Linux and `SYSTEM` on Windows, which is far too large a difference to
+  /// leave an administrator to remember before typing a command.
+  final String user;
+
+  @override
+  List<Object?> get props => [shell, user];
+}
+
+/// Bytes the shell wrote to its terminal.
+///
+/// Deliberately not decoded to a `String` here. A frame may end mid-codepoint — the agent sends
+/// whatever the PTY produced, when it produced it — so decoding per frame would corrupt any
+/// character unlucky enough to straddle the boundary. The terminal emulator decodes the stream.
+class RemoteShellOutput extends RemoteScreenUpdate {
+  const RemoteShellOutput(this.bytes);
+
+  final Uint8List bytes;
+
+  @override
+  List<Object?> get props => [bytes];
+}
+
 /// Something to do to the host. Plain values — the mapping to the wire lives in `data/`.
 sealed class RemoteInput {
   const RemoteInput();
@@ -190,6 +233,25 @@ class RemoteQualityInput extends RemoteInput {
   const RemoteQualityInput({this.jpegQuality});
 
   final int? jpegQuality;
+}
+
+/// Bytes typed or pasted into the terminal, sent to the shell as they are.
+///
+/// Raw bytes rather than a string, and the only input in this protocol that travels as a binary
+/// message: a terminal carries arbitrary bytes, and escaping every one of them into JSON would
+/// double the traffic on the half of the connection latency is actually measured on.
+class RemoteShellInput extends RemoteInput {
+  const RemoteShellInput(this.bytes);
+
+  final Uint8List bytes;
+}
+
+/// The terminal in the browser changed size; the PTY's window size follows so the shell re-wraps.
+class RemoteShellResize extends RemoteInput {
+  const RemoteShellResize({required this.columns, required this.rows});
+
+  final int columns;
+  final int rows;
 }
 
 /// A live session's media channel. Implemented in `data/` over a WebSocket.

@@ -7,7 +7,7 @@ namespace Kintsugi.Tests.Domain;
 public class RemoteControlSessionTests
 {
     private static RemoteControlSession CreateValid() =>
-        RemoteControlSession.Request(Guid.NewGuid(), "C02ABC123DEF", "designer-mbp", "admin@example.com");
+        RemoteControlSession.Request(Guid.NewGuid(), "C02ABC123DEF", "designer-mbp", "admin@example.com", RemoteControlSessionKind.Screen);
 
     [Fact]
     public void Request_StartsPendingWithNothingDecided()
@@ -25,7 +25,7 @@ public class RemoteControlSessionTests
     {
         // The audit trail has to outlive its subject, so there is no requirement that a host row
         // exist — see the note on the entity.
-        var session = RemoteControlSession.Request(null, "C02ABC123DEF", "designer-mbp", "admin@example.com");
+        var session = RemoteControlSession.Request(null, "C02ABC123DEF", "designer-mbp", "admin@example.com", RemoteControlSessionKind.Screen);
 
         Assert.Null(session.HostId);
     }
@@ -37,7 +37,7 @@ public class RemoteControlSessionTests
     public void Request_WithoutASerialNumber_Throws(string? serialNumber)
     {
         Assert.Throws<DomainException>(() =>
-            RemoteControlSession.Request(Guid.NewGuid(), serialNumber!, "designer-mbp", "admin@example.com"));
+            RemoteControlSession.Request(Guid.NewGuid(), serialNumber!, "designer-mbp", "admin@example.com", RemoteControlSessionKind.Screen));
     }
 
     [Theory]
@@ -48,7 +48,7 @@ public class RemoteControlSessionTests
     {
         // Who asked is the whole point of the record; an anonymous one would be worse than none.
         Assert.Throws<DomainException>(() =>
-            RemoteControlSession.Request(Guid.NewGuid(), "C02ABC123DEF", "designer-mbp", requestedBy!));
+            RemoteControlSession.Request(Guid.NewGuid(), "C02ABC123DEF", "designer-mbp", requestedBy!, RemoteControlSessionKind.Screen));
     }
 
     [Fact]
@@ -166,4 +166,70 @@ public class RemoteControlSessionTests
 
         Assert.NotNull(session.EndedAtUtc);
     }
+
+    [Fact]
+    public void Request_DefaultsToNothingBeingAShell()
+    {
+        // Kind is part of the audit record, so the two must be distinguishable in the table rather
+        // than inferred from the consent column.
+        Assert.Equal(RemoteControlSessionKind.Screen, CreateValid().Kind);
+        Assert.Equal(RemoteControlSessionKind.Shell, CreateShell().Kind);
+    }
+
+    [Fact]
+    public void RecordConsent_LetsAShellSessionProceedWithoutAskingAnyone()
+    {
+        var session = CreateShell();
+
+        session.RecordConsent(RemoteControlConsent.NotRequired);
+
+        Assert.Equal(RemoteControlConsent.NotRequired, session.Consent);
+        Assert.NotNull(session.ConsentDecidedAtUtc);
+    }
+
+    [Fact]
+    public void RecordConsent_RefusesToLetAScreenSessionSkipConsent()
+    {
+        // The whole feature rests on nobody's screen being watched without them agreeing, and the
+        // answer arrives over a socket the *agent* holds — so this is checked rather than trusted.
+        // Without it an agent opens capture, keyboard and pointer on a host shown no dialog at all,
+        // simply by reporting that no permission was needed.
+        Assert.Throws<DomainException>(() => CreateValid().RecordConsent(RemoteControlConsent.NotRequired));
+    }
+
+    [Fact]
+    public void MarkStarted_AcceptsAShellSessionThatNobodyWasAskedAbout()
+    {
+        var session = CreateShell();
+        session.RecordConsent(RemoteControlConsent.NotRequired);
+
+        session.MarkStarted();
+
+        Assert.NotNull(session.StartedAtUtc);
+    }
+
+    [Fact]
+    public void MarkStarted_StillRefusesAScreenSessionNobodyGranted()
+    {
+        var session = CreateValid();
+        session.RecordConsent(RemoteControlConsent.Denied);
+
+        Assert.Throws<DomainException>(session.MarkStarted);
+    }
+
+    [Fact]
+    public void RecordConsent_RecordsThatTheHostCouldNotProvideTheSession()
+    {
+        // Distinct from AgentUnreachable, where nothing answered at all: here the agent answered
+        // and said no screen exists to share, which is a different fact about the host.
+        var session = CreateValid();
+
+        session.RecordConsent(RemoteControlConsent.Unavailable);
+
+        Assert.Equal(RemoteControlConsent.Unavailable, session.Consent);
+    }
+
+    private static RemoteControlSession CreateShell() =>
+        RemoteControlSession.Request(
+            Guid.NewGuid(), "C02ABC123DEF", "designer-mbp", "admin@example.com", RemoteControlSessionKind.Shell);
 }

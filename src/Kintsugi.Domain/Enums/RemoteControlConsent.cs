@@ -38,5 +38,28 @@ public enum RemoteControlConsent
     /// was ever asked. An enrolled host that is switched off, asleep, or has no logged-in user
     /// looks exactly like this.
     /// </summary>
-    AgentUnreachable
+    AgentUnreachable,
+
+    /// <summary>
+    /// Nobody was asked, because this kind of session does not ask — a
+    /// <see cref="RemoteControlSessionKind.Shell"/>, which is the SSH-equivalent access described
+    /// on that member. Recorded as its own outcome rather than as <see cref="Granted"/>, because a
+    /// row saying "granted" would claim a human agreed to something no human was shown.
+    /// </summary>
+    /// <remarks>
+    /// Accepted <strong>only</strong> for a shell session, and
+    /// <c>RemoteControlSession.RecordConsent</c> enforces that rather than trusting the agent: the
+    /// answer arrives over a socket the agent holds, so without the check an agent could open a
+    /// screen session by claiming it needed no permission.
+    /// </remarks>
+    NotRequired,
+
+    /// <summary>
+    /// The agent answered, and cannot provide this kind of session right now — a screen session on
+    /// a host with nobody logged in, or a kind that build has never heard of. Distinct from
+    /// <see cref="AgentUnreachable"/>, where no agent answered at all, and reported instead of
+    /// leaving the request to <see cref="TimedOut"/> so the administrator hears "there is nobody
+    /// there" at once rather than after ninety seconds.
+    /// </summary>
+    Unavailable
 }

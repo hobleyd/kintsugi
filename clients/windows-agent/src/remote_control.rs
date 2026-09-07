@@ -41,8 +41,17 @@ use crate::config::{self, Config};
 use crate::identity::{self, AgentIdentity};
 use crate::logging;
 use crate::remote_ipc::{self, FrameReader, IpcFrame, IpcMessage, PipeConnection, PipeListener};
-use crate::remote_protocol::{parse_server_message, AgentMessage, ConsentOutcome, ServerMessage};
+use crate::remote_protocol::{
+    decode_shell_input, encode_shell_output, parse_server_message, parse_viewer_input, AgentMessage,
+    ConsentOutcome, ServerMessage, SessionKind, ShellInfo, ViewerInput,
+};
+use crate::pty::{self, ProgramSpec, Pty, INITIAL_COLS, INITIAL_ROWS};
 use crate::session_launcher::{console_session_with_user, SessionHelper};
+
+/// How much terminal output is carried in one shell frame. Same value and reasoning as the other
+/// two agents': a burst of output arrives as a handful of frames rather than one large one, so it
+/// cannot stall the socket the keystrokes travel back on.
+const SHELL_READ_BUFFER_BYTES: usize = 32 * 1024;
 
 /// How long the relay waits between polls of its three channels.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -97,14 +106,17 @@ type Socket = WebSocket<MaybeTlsStream<std::net::TcpStream>>;
 
 /// Runs for the life of the service. Never returns until `shutdown` is set.
 ///
-/// # Reachability follows the console session now, not a connected process
+/// # Reachability no longer follows the console session
 ///
-/// It used to follow the tray process holding the pipe. With capture in a helper that exists only
-/// while a session runs, that signal is gone, so the service asks Windows directly:
-/// [`console_session_with_user`] answers "is there a console session with somebody logged into it",
-/// which is the same question as "is there a screen to share and somebody to ask". The control
-/// socket is held open exactly while the answer is yes, so a host with nobody logged in reports as
-/// unreachable — the same behaviour as before, arrived at more directly.
+/// It followed the tray process holding the pipe, then — once capture moved into a helper that
+/// exists only while a session runs — [`console_session_with_user`], so the socket was held open
+/// exactly while somebody was logged in. That is the right test for a *screen* session and quite
+/// wrong for a shell: a terminal needs no desktop, and a server with nobody signed in is precisely
+/// the host an administrator wants one on. So the socket is now held whenever this host has an
+/// identity, the console session is tracked as a *capability* rather than a precondition, and a
+/// screen request arriving with nobody logged in is answered `Unavailable` — the agent saying
+/// "there is nobody here" at once, rather than the host being invisible and the administrator being
+/// told the agent is unreachable.
 pub fn run(config: Config, serial_number: String, shutdown: Arc<AtomicBool>) {
     let listener = match PipeListener::create() {
         Ok(listener) => Arc::new(listener),
@@ -144,13 +156,6 @@ pub fn run(config: Config, serial_number: String, shutdown: Arc<AtomicBool>) {
     let mut backoff = INITIAL_RECONNECT_BACKOFF;
 
     while !shutdown.load(Ordering::SeqCst) {
-        let Some(session) = console_session_with_user() else {
-            // Nobody logged in. Not an error and not worth backing off over — it is the ordinary
-            // state of a server, and the moment somebody signs in the socket opens.
-            std::thread::sleep(SESSION_POLL_INTERVAL);
-            continue;
-        };
-
         // Re-read from disk each time rather than taking an identity once. The service starts before
         // enrollment has necessarily happened, and it outlives a re-enrollment.
         //
@@ -176,7 +181,7 @@ pub fn run(config: Config, serial_number: String, shutdown: Arc<AtomicBool>) {
             }
         };
 
-        match relay(&config, &serial_number, &identity, session, &connection_rx, &shutdown) {
+        match relay(&config, &serial_number, &identity, &connection_rx, &shutdown) {
             Ok(()) => {
                 logging::info("the remote control socket closed; reconnecting");
                 backoff = INITIAL_RECONNECT_BACKOFF;
@@ -204,6 +209,12 @@ struct Relay {
     /// and a pipe without a helper is a dead file handle.
     pipe: Option<PipeConnection>,
     helper: Option<SessionHelper>,
+    /// The terminal, on a shell session and only then. Its presence is what tells the loop which
+    /// kind of session is running: a screen session's bytes go to and from the helper, a shell
+    /// session's to and from this — no helper, no pipe and no desktop involved.
+    terminal: Option<Pty>,
+    /// Why a shell session finished, when [`pump_shell_session`] is the thing that found out.
+    shell_end_reason: Option<String>,
 }
 
 impl Relay {
@@ -219,6 +230,14 @@ impl Relay {
         if let Some(helper) = self.helper.take() {
             helper.stop();
         }
+
+        // A shell that outlived its session would go on holding a console host with it, in a
+        // service that runs for months.
+        if let Some(terminal) = self.terminal.take() {
+            if let Err(err) = terminal.terminate() {
+                logging::warn(&format!("could not end the terminal: {err}"));
+            }
+        }
     }
 }
 
@@ -226,7 +245,6 @@ fn relay(
     config: &Config,
     serial_number: &str,
     identity: &AgentIdentity,
-    console_session: u32,
     connections: &Receiver<(PipeConnection, u32)>,
     shutdown: &Arc<AtomicBool>,
 ) -> Result<()> {
@@ -251,8 +269,13 @@ fn relay(
         reader: FrameReader::new(),
         pipe: None,
         helper: None,
+        terminal: None,
+        shell_end_reason: None,
     };
 
+    // Which console session has somebody logged into it, if any. `None` is an ordinary state here
+    // rather than a fault — it only means screen sessions cannot be offered.
+    let mut console_session = console_session_with_user();
     let mut next_session_check = Instant::now() + SESSION_POLL_INTERVAL;
 
     // The last time anything at all arrived on the control socket — a message or the server's
@@ -267,10 +290,25 @@ fn relay(
         //    it is two syscalls and it cannot change between frames in any way that matters.
         if Instant::now() >= next_session_check {
             next_session_check = Instant::now() + SESSION_POLL_INTERVAL;
-            if console_session_with_user() != Some(console_session) {
-                logging::info("the console session ended; closing the remote control socket");
-                relay.end_session();
-                return Ok(());
+            let current = console_session_with_user();
+            if current != console_session {
+                console_session = current;
+
+                // A screen session cannot survive the desktop it was capturing. A shell session is
+                // untouched — it never had one — and neither is the control socket, which used to
+                // come down here and took this host's reachability with it.
+                if relay.helper.is_some() {
+                    logging::info("the console session ended; stopping the remote control session");
+                    let session_id = relay.session_id.clone().unwrap_or_default();
+                    relay.end_session();
+                    queue(
+                        &mut relay.control,
+                        &AgentMessage::SessionEnded {
+                            session_id,
+                            reason: "the host's desktop session ended".to_string(),
+                        },
+                    )?;
+                }
             }
         }
 
@@ -279,7 +317,7 @@ fn relay(
             SocketRead::Message(text) => {
                 last_heard = Instant::now();
                 if let Some(line) =
-                    handle_server_message(&text, console_session, connections, &mut relay)?
+                    handle_server_message(&text, console_session, config, serial_number, identity, connections, &mut relay)?
                 {
                     logging::info(&format!("remote control: {line}"));
                 }
@@ -339,8 +377,17 @@ fn relay(
             }
         }
 
-        // 3. The viewer's input, to the helper.
-        if let Some(session) = relay.session.as_mut() {
+        // 3. The viewer's input: into the terminal on a shell session, on to the helper on a
+        //    screen one.
+        if relay.terminal.is_some() {
+            if !pump_shell_session(&mut relay)? {
+                let session_id = relay.session_id.clone().unwrap_or_default();
+                let reason = relay.shell_end_reason.take().unwrap_or_else(|| "the viewer disconnected".to_string());
+                logging::info(&format!("remote shell session {session_id} ended: {reason}"));
+                relay.end_session();
+                queue(&mut relay.control, &AgentMessage::SessionEnded { session_id, reason })?;
+            }
+        } else if let Some(session) = relay.session.as_mut() {
             match read_text(session)? {
                 SocketRead::Message(json) => {
                     if let Some(pipe) = relay.pipe.as_mut() {
@@ -380,6 +427,256 @@ fn relay(
     Ok(())
 }
 
+/// Starts a shell and joins it to a session socket.
+///
+/// # Why nobody is asked
+///
+/// This is the one place remote control's consent rule does not apply, and it is deliberate. A shell
+/// session is the access an administrator of this fleet already has by other means — it is what they
+/// would reach a remote PowerShell session for — and the only reason it is routed through this agent
+/// is that WinRM or SSH would need an inbound port on every managed machine, which is exactly what
+/// the relay design exists to avoid. The compensating control is the server's: the same
+/// `remote_control_sessions` row a screen request writes is written here, naming who asked and when.
+///
+/// # Why it is not in the session helper
+///
+/// Everything the helper exists for is about a *desktop* — answering a consent dialog, capturing a
+/// screen, posting input, following Windows onto the secure desktop. A terminal needs none of it, so
+/// launching a helper would add a process, a named pipe and a logged-in user as requirements for
+/// something that has no use for any of them — and the logged-in user is the requirement that would
+/// hurt, because a server with nobody signed in is the host most likely to want a shell.
+///
+/// So the terminal runs here, in the service, as **SYSTEM**. That is the strongest of the three
+/// agents' shells (root on Linux, the logged-in user on macOS), and it is stated on the wire rather
+/// than left to be remembered: [`ShellInfo`] carries the account so the viewer can say which it is.
+fn start_shell_session(
+    config: &Config,
+    serial_number: &str,
+    identity: &AgentIdentity,
+    relay: &mut Relay,
+    session_id: &str,
+    requested_by: &str,
+) -> Result<()> {
+    // Everything that can fail locally is done before the answer is sent, so a host that cannot
+    // produce a terminal reports `Unavailable` rather than accepting a session and then failing.
+    let started = shell_program().and_then(|(program, user)| {
+        let terminal = Pty::spawn(&program, INITIAL_COLS, INITIAL_ROWS)
+            .with_context(|| format!("could not start {} in a terminal", program.program.display()))?;
+        Ok((program, user, terminal))
+    });
+
+    let (program, user, terminal) = match started {
+        Ok(started) => started,
+        Err(err) => {
+            logging::warn(&format!("cannot open a shell session: {err:#}"));
+            return queue(
+                &mut relay.control,
+                &AgentMessage::Consent {
+                    session_id: session_id.to_string(),
+                    outcome: ConsentOutcome::Unavailable,
+                },
+            );
+        }
+    };
+
+    queue(
+        &mut relay.control,
+        &AgentMessage::Consent {
+            session_id: session_id.to_string(),
+            outcome: ConsentOutcome::NotRequired,
+        },
+    )?;
+
+    // Flushed before the session socket is opened, the same race the granted path waits out and for
+    // the same reason: the relay refuses a session socket for an answer it has not seen, and refuses
+    // it *after* accepting the upgrade. See CONSENT_FLUSH_TIMEOUT.
+    let deadline = Instant::now() + CONSENT_FLUSH_TIMEOUT;
+    while Instant::now() < deadline {
+        if flush(&mut relay.control)? {
+            break;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+
+    match connect(&config.remote_control_url(serial_number, Some(session_id)), identity) {
+        Ok(mut session) => {
+            set_nonblocking(&session)?;
+
+            // Before the first output frame, so the viewer can say what it is attached to — the
+            // shell analogue of the display geometry a screen session sends first.
+            let info = serde_json::to_string(&ShellInfo::new(program.program.display().to_string(), &user))
+                .context("could not describe the shell")?;
+            write_queued(&mut session, Message::text(info))?;
+
+            relay.session = Some(session);
+            relay.session_id = Some(session_id.to_string());
+            relay.terminal = Some(terminal);
+            relay.shell_end_reason = None;
+
+            logging::info(&format!(
+                "remote shell session {session_id} started for {requested_by} ({} as {user})",
+                program.program.display()
+            ));
+            Ok(())
+        }
+        Err(err) => {
+            // The terminal is running by now and has to be hung up on, or a shell is left attached
+            // to a session that never happened.
+            logging::warn(&format!("could not open the remote shell session socket: {err:#}"));
+            let _ = terminal.terminate();
+            queue(
+                &mut relay.control,
+                &AgentMessage::SessionEnded {
+                    session_id: session_id.to_string(),
+                    reason: format!("the host could not open its session socket: {err:#}"),
+                },
+            )
+        }
+    }
+}
+
+/// Moves one pass of bytes between the terminal and the viewer. `Ok(false)` means the session is
+/// over, and [`Relay::shell_end_reason`] says why unless the viewer simply hung up.
+///
+/// Identical in shape to the Linux agent's function of the same name — a terminal is small enough
+/// that one function is both halves, unlike a tile stream, which needs the backpressure step 2
+/// performs.
+fn pump_shell_session(relay: &mut Relay) -> Result<bool> {
+    let Some(session) = relay.session.as_mut() else {
+        return Ok(false);
+    };
+    let Some(terminal) = relay.terminal.as_mut() else {
+        return Ok(false);
+    };
+
+    // The viewer, into the terminal. This is the one place in this protocol where a *binary*
+    // message travels from the browser to the agent: keystrokes are raw bytes rather than JSON,
+    // because a terminal carries arbitrary bytes and escaping each one would double the traffic on
+    // the half of the connection latency is measured on.
+    loop {
+        match session.read() {
+            Ok(Message::Binary(bytes)) => {
+                // Anything that is not shell input is dropped rather than typed.
+                if let Some(input) = decode_shell_input(&bytes) {
+                    if let Err(err) = terminal.write_all(input) {
+                        relay.shell_end_reason = Some(format!("writing to the terminal failed: {err}"));
+                        return Ok(false);
+                    }
+                }
+            }
+            Ok(Message::Text(text)) => {
+                if let Some(ViewerInput::Resize { cols, rows }) = parse_viewer_input(&text) {
+                    // Not worth ending a session over: the shell keeps working, it just wraps at
+                    // the wrong width.
+                    if let Err(err) = terminal.resize(cols, rows) {
+                        logging::warn(&format!("could not resize the terminal: {err}"));
+                    }
+                }
+            }
+            Ok(Message::Close(_)) => return Ok(false),
+            Ok(_) => {}
+            Err(err) if is_would_block(&err) => break,
+            Err(tungstenite::Error::ConnectionClosed) | Err(tungstenite::Error::AlreadyClosed) => return Ok(false),
+            Err(err) => {
+                relay.shell_end_reason = Some(format!("reading from the session socket failed: {err}"));
+                return Ok(false);
+            }
+        }
+    }
+
+    // The terminal, out to the viewer. Read once per pass rather than drained: a long-running
+    // command producing output continuously would otherwise never let the input half above run
+    // again, and the administrator could not press Ctrl-C.
+    let mut buffer = [0u8; SHELL_READ_BUFFER_BYTES];
+    match terminal.read_available(&mut buffer) {
+        // The console host has closed its end — the shell exited. The ordinary way a session
+        // finishes, and not a fault.
+        Ok(Some(0)) => {
+            relay.shell_end_reason = Some("the shell exited".to_string());
+            return Ok(false);
+        }
+        Ok(Some(read)) => write_queued(session, Message::Binary(encode_shell_output(&buffer[..read]).into()))?,
+        Ok(None) => {
+            // Checked only once the terminal has nothing left to say, so its last output is on its
+            // way first. Needed as well as the broken pipe above: a shell that exits while another
+            // process still holds the console open produces no broken pipe at all.
+            match terminal.try_wait() {
+                Ok(Some(_)) => {
+                    relay.shell_end_reason = Some("the shell exited".to_string());
+                    return Ok(false);
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    relay.shell_end_reason = Some(format!("could not check on the shell: {err}"));
+                    return Ok(false);
+                }
+            }
+        }
+        Err(err) => {
+            relay.shell_end_reason = Some(format!("reading from the terminal failed: {err}"));
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+/// Windows PowerShell, or PowerShell 7 where it is installed, and the account it will run as.
+///
+/// PowerShell rather than `cmd.exe` because it is what every script this agent runs is written in
+/// (see `ScriptLanguages.For` on the server) — an administrator opening a terminal on a Windows host
+/// is there to run the same kind of thing by hand. PowerShell 7 is preferred where present for its
+/// far better VT handling, which is what the viewer is reading.
+///
+/// The account is not looked up: this is the service, and `install.ps1` pins `obj= LocalSystem` on
+/// both its branches, which is load-bearing for two other reasons already (reading the identity
+/// directory, and `SE_TCB_NAME` for the session helper). Naming it here rather than querying the
+/// token keeps this honest if that ever changes — a wrong label in the viewer would be worse than
+/// none, and `sc.exe qc KintsugiAgent` is the thing to check.
+fn shell_program() -> Result<(ProgramSpec, String)> {
+    let system_root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+    let program_files = std::env::var("ProgramFiles").unwrap_or_else(|_| r"C:\Program Files".to_string());
+
+    let candidates = [
+        format!(r"{program_files}\PowerShell\7\pwsh.exe"),
+        format!(r"{system_root}\System32\WindowsPowerShell\v1.0\powershell.exe"),
+        format!(r"{system_root}\System32\cmd.exe"),
+    ];
+    let borrowed: Vec<&str> = candidates.iter().map(String::as_str).collect();
+
+    let program = pty::first_existing(&borrowed)
+        .ok_or_else(|| anyhow!("no usable shell was found on this host (looked for {})", candidates.join(", ")))?;
+
+    // `-NoLogo` because the banner is noise in a support session, and no `-NoProfile`: an
+    // administrator's profile is most of what makes their shell useful, exactly as the `-l` the two
+    // Unix agents pass gets them theirs.
+    let args = if program.to_string_lossy().to_lowercase().ends_with("cmd.exe") {
+        Vec::new()
+    } else {
+        vec!["-NoLogo".to_string()]
+    };
+
+    Ok((
+        ProgramSpec {
+            program,
+            args,
+            env: vec![
+                ("SystemRoot".to_string(), system_root.clone()),
+                ("SystemDrive".to_string(), std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string())),
+                ("ProgramFiles".to_string(), program_files),
+                // Enough for the shell to find its own modules and the usual tooling; anything
+                // beyond it is the profile's business.
+                (
+                    "PATH".to_string(),
+                    format!(r"{system_root}\System32;{system_root};{system_root}\System32\WindowsPowerShell\v1.0"),
+                ),
+            ],
+            cwd: std::path::PathBuf::from(&system_root),
+        },
+        "SYSTEM".to_string(),
+    ))
+}
+
 /// Launches the session helper and waits for it to connect.
 ///
 /// The process id is checked against the one just launched. That is a stronger guarantee than the
@@ -414,9 +711,13 @@ fn start_session_helper(
 }
 
 /// Forwards one server message onward, launching the helper if this is a new request.
+#[allow(clippy::too_many_arguments)]
 fn handle_server_message(
     text: &str,
-    console_session: u32,
+    console_session: Option<u32>,
+    config: &Config,
+    serial_number: &str,
+    identity: &AgentIdentity,
     connections: &Receiver<(PipeConnection, u32)>,
     relay: &mut Relay,
 ) -> Result<Option<String>> {
@@ -429,8 +730,8 @@ fn handle_server_message(
     };
 
     match message {
-        ServerMessage::SessionRequested { session_id, requested_by, consent_timeout_seconds } => {
-            if relay.helper.is_some() {
+        ServerMessage::SessionRequested { session_id, kind, requested_by, consent_timeout_seconds } => {
+            if relay.helper.is_some() || relay.terminal.is_some() {
                 // One session per host, which the server also enforces. Refusing is the answer that
                 // cannot go wrong.
                 queue(
@@ -439,6 +740,38 @@ fn handle_server_message(
                 )?;
                 return Ok(Some("refused a second session on a host already in one".to_string()));
             }
+
+            // A kind this build has never heard of. Answered rather than ignored, so the
+            // administrator is told now instead of waiting out a consent timeout.
+            if kind == SessionKind::Unknown {
+                queue(
+                    &mut relay.control,
+                    &AgentMessage::Consent { session_id: session_id.clone(), outcome: ConsentOutcome::Unavailable },
+                )?;
+                return Ok(Some(format!(
+                    "refusing session {session_id}: this agent does not implement that kind of session"
+                )));
+            }
+
+            // A terminal needs no desktop and no consent, and it runs as the account the service
+            // already is. So it is started here rather than in a session helper — see
+            // `start_shell_session`.
+            if kind == SessionKind::Shell {
+                let line = format!("shell session {session_id} requested by {requested_by}");
+                start_shell_session(config, serial_number, identity, relay, &session_id, &requested_by)?;
+                return Ok(Some(line));
+            }
+
+            // Nobody is logged in, so there is no screen to share and nobody to ask.
+            let Some(console_session) = console_session else {
+                queue(
+                    &mut relay.control,
+                    &AgentMessage::Consent { session_id: session_id.clone(), outcome: ConsentOutcome::Unavailable },
+                )?;
+                return Ok(Some(format!(
+                    "refusing screen session {session_id}: nobody is logged in at this host"
+                )));
+            };
 
             let line = format!("session {session_id} requested by {requested_by}");
 

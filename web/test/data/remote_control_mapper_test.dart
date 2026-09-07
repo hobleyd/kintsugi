@@ -199,13 +199,13 @@ void main() {
       final pointer = remoteInputToJson(
         const RemotePointerInput(action: RemotePointerAction.up, x: 0, y: 0),
       );
-      expect(pointer.keys, containsAll(['type', 'action', 'x', 'y', 'button']));
+      expect(pointer!.keys, containsAll(['type', 'action', 'x', 'y', 'button']));
 
       final scroll = remoteInputToJson(const RemoteScrollInput(x: 0, y: 0, deltaX: 0, deltaY: 0));
-      expect(scroll.keys, containsAll(['type', 'x', 'y', 'deltaX', 'deltaY']));
+      expect(scroll!.keys, containsAll(['type', 'x', 'y', 'deltaX', 'deltaY']));
 
       final key = remoteInputToJson(const RemoteKeyInput(usbHidUsage: 4, isDown: false));
-      expect(key.keys, containsAll(['type', 'hid', 'down']));
+      expect(key!.keys, containsAll(['type', 'hid', 'down']));
     });
   });
 
@@ -291,6 +291,134 @@ void main() {
       expect(session.isAwaitingConsent, isFalse);
       expect(session.isConnectable, isFalse);
       expect(session.endReason, 'the administrator disconnected');
+    });
+  });
+
+  group('the shell half of the media protocol', () {
+    // These assert the exact bytes the agents' own `frames_shell_output_behind_the_shared_two_byte_header`
+    // and `decodes_shell_input_and_refuses_every_other_binary_frame` tests produce and accept. There
+    // is nothing else checking that the two ends agree: the server relays these bytes without
+    // parsing them, so unlike every other mapper in this directory no C# definition sits between
+    // the two to make a mismatch visible.
+
+    test('reads a shell output frame behind the shared two-byte header', () {
+      final update = remoteShellOutputFromBytes(Uint8List.fromList([1, 2, 0x24, 0x20]));
+
+      expect(update, isA<RemoteShellOutput>());
+      expect(update!.bytes, [0x24, 0x20]);
+    });
+
+    test('an output frame with no payload is a frame, not a refusal', () {
+      // The agent sends one when the terminal produced nothing printable, and null here means
+      // "not shell output" — a different thing from "no bytes this time".
+      final update = remoteShellOutputFromBytes(Uint8List.fromList([1, 2]));
+
+      expect(update, isA<RemoteShellOutput>());
+      expect(update!.bytes, isEmpty);
+    });
+
+    test('refuses a tile, a stale version, an input frame echoed back, and nothing at all', () {
+      // A tile: kind 1, which must never be decoded as terminal output.
+      expect(remoteShellOutputFromBytes(Uint8List.fromList([1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0xFF])), isNull);
+      expect(remoteShellOutputFromBytes(Uint8List.fromList([2, 2, 0x61])), isNull);
+      expect(remoteShellOutputFromBytes(Uint8List.fromList([1, 3, 0x61])), isNull);
+      expect(remoteShellOutputFromBytes(Uint8List.fromList([])), isNull);
+      expect(remoteShellOutputFromBytes(Uint8List.fromList([1])), isNull);
+    });
+
+    test('frames typed input the way the agent decodes it', () {
+      final framed = remoteShellInputToBytes(RemoteShellInput(Uint8List.fromList([0x6C, 0x73, 0x0A])));
+
+      // version 1, kind 3, then "ls\n" — exactly what `decode_shell_input` matches on.
+      expect(framed, [1, 3, 0x6C, 0x73, 0x0A]);
+    });
+
+    test('every other input still travels as JSON', () {
+      expect(remoteShellInputToBytes(const RemoteQualityInput(jpegQuality: 50)), isNull);
+      expect(remoteShellInputToBytes(const RemoteShellResize(columns: 120, rows: 40)), isNull);
+    });
+
+    test('a resize names the fields the agent reads', () {
+      // `parse_viewer_input` requires both and refuses a zero-sized terminal, so the names have to
+      // be exactly these.
+      expect(
+        remoteInputToJson(const RemoteShellResize(columns: 120, rows: 40)),
+        {'type': 'resize', 'cols': 120, 'rows': 40},
+      );
+    });
+
+    test('typed input has no JSON form at all', () {
+      // Null rather than a message: it goes out as a binary frame, and a JSON shape here would put
+      // a keystroke on the wire in a form no agent reads.
+      expect(remoteInputToJson(RemoteShellInput(Uint8List.fromList([0x61]))), isNull);
+    });
+
+    test('reads the shell banner the agent sends before the first output frame', () {
+      final update = remoteTextUpdateFromJson('{"type":"shell","shell":"/bin/zsh","user":"david"}');
+
+      expect(update, isA<RemoteShellInfo>());
+      expect((update! as RemoteShellInfo).shell, '/bin/zsh');
+      expect((update as RemoteShellInfo).user, 'david');
+    });
+
+    test('a banner missing the account is dropped rather than shown blank', () {
+      // The account is the whole reason the banner exists — it is the logged-in user on macOS,
+      // root on Linux and SYSTEM on Windows — so a blank one would be worse than none.
+      expect(remoteTextUpdateFromJson('{"type":"shell","shell":"/bin/zsh"}'), isNull);
+    });
+  });
+
+  group('the session kind', () {
+    test('is read from the DTO, and an older server\'s silence means a screen', () {
+      Map<String, dynamic> dto(Map<String, dynamic> extra) => {
+            'id': 'abc',
+            'serialNumber': 'C02ABC',
+            'hostname': 'designer-mbp',
+            'requestedBy': 'admin@example.com',
+            'consent': 'Pending',
+            'requestedAtUtc': '2026-09-03T10:00:00+00:00',
+            'isActive': false,
+            ...extra,
+          };
+
+      expect(remoteControlSessionFromJson(dto({})).kind, RemoteControlSessionKind.screen);
+      expect(remoteControlSessionFromJson(dto({'kind': 'Screen'})).kind, RemoteControlSessionKind.screen);
+      expect(remoteControlSessionFromJson(dto({'kind': 'Shell'})).kind, RemoteControlSessionKind.shell);
+    });
+
+    test('a shell session is connectable on NotRequired, which is not a grant', () {
+      // The server's own socket gate tests exactly this pair, and a shell session never reports
+      // Granted — nobody was asked.
+      final session = remoteControlSessionFromJson({
+        'id': 'abc',
+        'serialNumber': 'C02ABC',
+        'hostname': 'web-01',
+        'requestedBy': 'admin@example.com',
+        'kind': 'Shell',
+        'consent': 'NotRequired',
+        'requestedAtUtc': '2026-09-03T10:00:00+00:00',
+        'isActive': true,
+      });
+
+      expect(session.consent, RemoteControlConsent.notRequired);
+      expect(session.isConnectable, isTrue);
+      expect(session.isAwaitingConsent, isFalse);
+    });
+
+    test('a host that cannot provide the session is neither waiting nor connectable', () {
+      final session = remoteControlSessionFromJson({
+        'id': 'abc',
+        'serialNumber': 'C02ABC',
+        'hostname': 'web-01',
+        'requestedBy': 'admin@example.com',
+        'consent': 'Unavailable',
+        'requestedAtUtc': '2026-09-03T10:00:00+00:00',
+        'isActive': false,
+      });
+
+      expect(session.consent, RemoteControlConsent.unavailable);
+      expect(session.isConnectable, isFalse);
+      expect(session.isAwaitingConsent, isFalse);
     });
   });
 }

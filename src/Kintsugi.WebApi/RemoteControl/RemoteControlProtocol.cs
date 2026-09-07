@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Kintsugi.Domain.Enums;
 
 namespace Kintsugi.WebApi.RemoteControl;
 
@@ -34,18 +35,38 @@ public static class RemoteControlProtocol
     public const string ConsentType = "consent";
     public const string HelloType = "hello";
 
-    /// <summary>Server to agent: put the consent dialog up.</summary>
+    /// <summary>Server to agent: put the consent dialog up, or — for a shell — open a terminal
+    /// without asking anyone.</summary>
+    /// <remarks>
+    /// <para>
+    /// <paramref name="Kind"/> is the name of a <see cref="Domain.Enums.RemoteControlSessionKind"/>
+    /// member, lowercased: <c>screen</c> or <c>shell</c>. It is written on every request even though
+    /// it is optional on the reading side, because an agent predating shell sessions treats its
+    /// absence as a screen — the only thing it could have meant — and an agent that does know the
+    /// field answers <c>Unavailable</c> to a kind it does not implement rather than ignoring it.
+    /// </para>
+    /// </remarks>
     [method: JsonConstructor]
     public sealed record SessionRequested(
         [property: JsonPropertyName("type")] string Type,
         [property: JsonPropertyName("sessionId")] Guid SessionId,
+        [property: JsonPropertyName("kind")] string Kind,
         [property: JsonPropertyName("requestedBy")] string RequestedBy,
         [property: JsonPropertyName("consentTimeoutSeconds")] int ConsentTimeoutSeconds)
     {
-        public SessionRequested(Guid sessionId, string requestedBy, int consentTimeoutSeconds)
-            : this(SessionRequestedType, sessionId, requestedBy, consentTimeoutSeconds)
+        public SessionRequested(Guid sessionId, RemoteControlSessionKind kind, string requestedBy, int consentTimeoutSeconds)
+            : this(SessionRequestedType, sessionId, WireNameFor(kind), requestedBy, consentTimeoutSeconds)
         {
         }
+
+        /// <summary>The spelling the three agents' <c>parse_server_message</c> matches on. Lowercase
+        /// because that is what they compare against, and a mismatch here reads on the host as a
+        /// session kind it has never heard of.</summary>
+        private static string WireNameFor(RemoteControlSessionKind kind) => kind switch
+        {
+            RemoteControlSessionKind.Shell => "shell",
+            _ => "screen"
+        };
     }
 
     /// <summary>Server to agent: stop capturing. Also sent agent to server, when the person at the

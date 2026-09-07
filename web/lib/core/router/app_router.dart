@@ -1,5 +1,6 @@
 import 'package:go_router/go_router.dart';
 
+import '../../domain/entities/enums.dart';
 import '../../presentation/applications/applications_screen.dart';
 import '../../presentation/clients/clients_screen.dart';
 import '../../presentation/hosts/hosts_screen.dart';
@@ -26,6 +27,11 @@ abstract final class Routes {
   /// address somebody can be sent, and so leaving it is an ordinary navigation that the screen can
   /// hang the session up on.
   static String remoteControl(String hostId) => '/hosts/${Uri.encodeComponent(hostId)}/remote';
+
+  /// One host's terminal. Its own address rather than a mode of the one above, for the same reason:
+  /// a support call is pointed at a link, and "open a shell on this machine" and "watch this
+  /// machine's screen" are different things to be sent to.
+  static String remoteShell(String hostId) => '/hosts/${Uri.encodeComponent(hostId)}/shell';
   static const applications = '/applications';
   static const clients = '/clients';
   static const upgradeScripts = '/upgrade-scripts';
@@ -102,6 +108,16 @@ GoRouter createRouter(SessionBloc sessionBloc) {
             path: '/hosts/:hostId/remote',
             builder: (context, state) => RemoteControlScreen(
               hostId: state.pathParameters['hostId']!,
+              hostname: state.uri.queryParameters['hostname'],
+            ),
+          ),
+          GoRoute(
+            // Beside /remote and deliberately not a query parameter on it: the two open different
+            // things, and one of them asks the host's user first.
+            path: '/hosts/:hostId/shell',
+            builder: (context, state) => RemoteControlScreen(
+              hostId: state.pathParameters['hostId']!,
+              kind: RemoteControlSessionKind.shell,
               hostname: state.uri.queryParameters['hostname'],
             ),
           ),

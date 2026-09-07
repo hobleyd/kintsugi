@@ -49,9 +49,10 @@ abstract interface class HostRepository {
 }
 
 abstract interface class RemoteControlRepository {
-  /// Asks a host's agent to put the consent dialog in front of whoever is sitting at it. Returns at
-  /// once — the answer arrives through [session], which the screen polls.
-  Future<RemoteControlSession> request(String hostId);
+  /// Opens a session of the given kind. A screen session asks the host's user first; a shell
+  /// session asks nobody. Returns at once either way — the answer arrives through [session], which
+  /// the screen polls.
+  Future<RemoteControlSession> request(String hostId, RemoteControlSessionKind kind);
 
   /// One session's current state, or null if the server has never heard of it.
   Future<RemoteControlSession?> session(String id);

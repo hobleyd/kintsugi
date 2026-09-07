@@ -54,6 +54,27 @@ pub enum ConsentOutcome {
     /// `Denied`, because "refused" and "was away from the desk" are different facts about a host —
     /// and because the effect is the same either way, there is no temptation to conflate them.
     TimedOut,
+    /// A shell session, which opens without asking anyone. This is not a consent — nobody at the
+    /// host was consulted, by design — and the server refuses it for any other session kind, so a
+    /// screen session can never be started by an agent claiming it needed no permission.
+    NotRequired,
+    /// The agent is connected but cannot provide this kind of session right now: a screen session
+    /// on a host where nobody is logged in (so there is no desktop to capture and nobody to ask),
+    /// or a kind this build has never heard of. Reported instead of `TimedOut` because the
+    /// administrator should hear "there is no one there" at once rather than after 90 seconds.
+    Unavailable,
+}
+
+/// Which kind of session the server is asking for. `Screen` is remote control as it has always
+/// been — consent, capture, input. `Shell` is an interactive terminal: no dialog, no desktop needed,
+/// the process holding the fleet identity spawns a PTY and pumps its bytes. `Unknown` is a kind this
+/// build does not implement, answered with [`ConsentOutcome::Unavailable`] rather than ignored so the
+/// administrator is told rather than left waiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionKind {
+    Screen,
+    Shell,
+    Unknown,
 }
 
 /// Server to agent. Deliberately not a `#[serde(tag = "type")]` enum: serde fails the whole parse
@@ -61,9 +82,10 @@ pub enum ConsentOutcome {
 /// must not take the socket down. See [`parse_server_message`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ServerMessage {
-    /// Put the consent dialog up.
+    /// Put the consent dialog up (a screen session), or open a shell (no dialog).
     SessionRequested {
         session_id: String,
+        kind: SessionKind,
         requested_by: String,
         consent_timeout_seconds: u64,
     },
@@ -116,6 +138,7 @@ pub fn parse_server_message(json: &str) -> Result<Option<ServerMessage>, serde_j
         requested_by: Option<String>,
         #[serde(rename = "consentTimeoutSeconds")]
         consent_timeout_seconds: Option<u64>,
+        kind: Option<String>,
         reason: Option<String>,
     }
 
@@ -124,6 +147,13 @@ pub fn parse_server_message(json: &str) -> Result<Option<ServerMessage>, serde_j
     Ok(match envelope.message_type.as_str() {
         "session-requested" => envelope.session_id.map(|session_id| ServerMessage::SessionRequested {
             session_id,
+            // Absent means a screen session: that is what every server before shell sessions
+            // existed asked for, and the only thing it could have meant.
+            kind: match envelope.kind.as_deref() {
+                None | Some("screen") => SessionKind::Screen,
+                Some("shell") => SessionKind::Shell,
+                Some(_) => SessionKind::Unknown,
+            },
             // A dialog that cannot say who is asking is unanswerable, so an absent value gets
             // wording that is honest rather than blank.
             requested_by: envelope.requested_by.unwrap_or_else(|| "an administrator".to_string()),
@@ -147,11 +177,23 @@ pub fn parse_server_message(json: &str) -> Result<Option<ServerMessage>, serde_j
 /// it does not understand rather than drawing noise.
 pub const PROTOCOL_VERSION: u8 = 1;
 
-/// A rectangle of the screen, JPEG-encoded.
+/// A rectangle of the screen, JPEG-encoded. Agent to browser.
 pub const KIND_JPEG_TILE: u8 = 1;
+
+/// Bytes the shell wrote to its terminal. Agent to browser.
+pub const KIND_SHELL_OUTPUT: u8 = 2;
+
+/// Bytes typed (or pasted) into the terminal. Browser to agent — the only binary message that
+/// travels in that direction.
+pub const KIND_SHELL_INPUT: u8 = 3;
 
 /// `version, kind, x, y, width, height, sequence` — see [`encode_tile`].
 pub const TILE_HEADER_BYTES: usize = 14;
+
+/// `version, kind` — see [`encode_shell_output`] and [`decode_shell_input`]. A shell frame carries
+/// raw terminal bytes and needs no geometry, but it keeps the same two leading bytes every binary
+/// message in this protocol has, so a frame of the wrong kind is refused rather than drawn or typed.
+pub const SHELL_FRAME_HEADER_BYTES: usize = 2;
 
 /// Sent as a text message whenever the geometry changes, and always once before the first tile.
 ///
@@ -238,6 +280,49 @@ pub fn encode_tile(x: u16, y: u16, width: u16, height: u16, sequence: u32, jpeg:
     message
 }
 
+/// Frames terminal output for the wire. The bytes are whatever the PTY produced — UTF-8 in practice,
+/// but a frame may end mid-codepoint, and the viewer decodes them as a stream for that reason.
+pub fn encode_shell_output(bytes: &[u8]) -> Vec<u8> {
+    let mut message = Vec::with_capacity(SHELL_FRAME_HEADER_BYTES + bytes.len());
+    message.push(PROTOCOL_VERSION);
+    message.push(KIND_SHELL_OUTPUT);
+    message.extend_from_slice(bytes);
+    message
+}
+
+/// The bytes to write to the PTY, or `None` for a binary frame that is not shell input. Never a
+/// panic: this is the one place the agent reads binary data from a browser.
+pub fn decode_shell_input(message: &[u8]) -> Option<&[u8]> {
+    match message {
+        [PROTOCOL_VERSION, KIND_SHELL_INPUT, input @ ..] => Some(input),
+        _ => None,
+    }
+}
+
+/// Sent as a text message once, before the first output frame, so the viewer can say what it is
+/// connected to. The shell analogue of [`DisplayInfo`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ShellInfo {
+    #[serde(rename = "type")]
+    pub message_type: &'static str,
+    /// The program running — `/bin/zsh`, `/bin/bash`, `powershell.exe`.
+    pub shell: String,
+    /// The account it runs as: the logged-in user on macOS, `root` on Linux, `SYSTEM` on Windows.
+    /// Stated rather than left to be inferred, because the three differ and an administrator about
+    /// to type a command should not have to remember which is which.
+    pub user: String,
+}
+
+impl ShellInfo {
+    pub fn new(shell: impl Into<String>, user: impl Into<String>) -> Self {
+        Self {
+            message_type: "shell",
+            shell: shell.into(),
+            user: user.into(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PointerAction {
     Move,
@@ -281,6 +366,9 @@ pub enum ViewerInput {
         jpeg_quality: Option<u8>,
         max_fps: Option<u8>,
     },
+    /// The terminal in the browser changed size; the PTY's window size follows so the shell
+    /// re-wraps. Shell sessions only.
+    Resize { cols: u16, rows: u16 },
 }
 
 /// Reads one input message, or `None` for anything unrecognised or malformed.
@@ -310,6 +398,8 @@ pub fn parse_viewer_input(json: &str) -> Option<ViewerInput> {
         jpeg_quality: Option<u8>,
         #[serde(rename = "maxFps")]
         max_fps: Option<u8>,
+        cols: Option<u16>,
+        rows: Option<u16>,
     }
 
     let envelope: Envelope = serde_json::from_str(json).ok()?;
@@ -355,6 +445,13 @@ pub fn parse_viewer_input(json: &str) -> Option<ViewerInput> {
             max_fps: envelope.max_fps,
         }),
 
+        "resize" => {
+            let (cols, rows) = (envelope.cols?, envelope.rows?);
+            // A zero-sized terminal is a viewer that has not laid out yet, and a PTY told it is zero
+            // columns wide makes some shells loop redrawing.
+            (cols > 0 && rows > 0).then_some(ViewerInput::Resize { cols, rows })
+        }
+
         _ => None,
     }
 }
@@ -375,10 +472,26 @@ mod tests {
             message,
             ServerMessage::SessionRequested {
                 session_id: "abc".to_string(),
+                kind: SessionKind::Screen,
                 requested_by: "admin@example.com".to_string(),
                 consent_timeout_seconds: 90,
             }
         );
+    }
+
+    #[test]
+    fn reads_the_session_kind_and_defaults_it_to_a_screen() {
+        // A server from before shell sessions sends no kind at all, and only ever meant a screen.
+        let kind_of = |json: &str| match parse_server_message(json).unwrap().unwrap() {
+            ServerMessage::SessionRequested { kind, .. } => kind,
+            other => panic!("expected a session request, got {other:?}"),
+        };
+
+        assert_eq!(kind_of(r#"{"type":"session-requested","sessionId":"a"}"#), SessionKind::Screen);
+        assert_eq!(kind_of(r#"{"type":"session-requested","sessionId":"a","kind":"screen"}"#), SessionKind::Screen);
+        assert_eq!(kind_of(r#"{"type":"session-requested","sessionId":"a","kind":"shell"}"#), SessionKind::Shell);
+        // Not None: an unknown kind gets answered Unavailable, so it has to reach the caller.
+        assert_eq!(kind_of(r#"{"type":"session-requested","sessionId":"a","kind":"clipboard"}"#), SessionKind::Unknown);
     }
 
     #[test]
@@ -447,6 +560,17 @@ mod tests {
     }
 
     #[test]
+    fn the_two_new_outcomes_serialise_to_the_server_enum_names_too() {
+        // Same trap as above, for the two values the server added with shell sessions.
+        let json_for = |outcome| {
+            serde_json::to_string(&AgentMessage::Consent { session_id: "abc".to_string(), outcome }).unwrap()
+        };
+
+        assert!(json_for(ConsentOutcome::NotRequired).contains(r#""outcome":"NotRequired""#));
+        assert!(json_for(ConsentOutcome::Unavailable).contains(r#""outcome":"Unavailable""#));
+    }
+
+    #[test]
     fn hello_omits_nothing_the_server_logs() {
         let message = AgentMessage::Hello {
             agent_version: "0.5.3".to_string(),
@@ -497,6 +621,43 @@ mod tests {
             ]
         );
         assert_eq!(TILE_HEADER_BYTES, message.len() - 2);
+    }
+
+    #[test]
+    fn frames_shell_output_behind_the_shared_two_byte_header() {
+        // Mirrored by web/test/data/remote_control_mapper_test.dart, which asserts these exact bytes.
+        assert_eq!(encode_shell_output(b"$ "), vec![PROTOCOL_VERSION, KIND_SHELL_OUTPUT, b'$', b' ']);
+        assert_eq!(encode_shell_output(b"").len(), SHELL_FRAME_HEADER_BYTES);
+    }
+
+    #[test]
+    fn decodes_shell_input_and_refuses_every_other_binary_frame() {
+        assert_eq!(decode_shell_input(&[PROTOCOL_VERSION, KIND_SHELL_INPUT, b'l', b's', b'\n']), Some(&b"ls\n"[..]));
+        assert_eq!(decode_shell_input(&[PROTOCOL_VERSION, KIND_SHELL_INPUT]), Some(&b""[..]));
+        // A tile, a shell *output* frame echoed back, a stale version, and nothing at all — none of
+        // these may reach the PTY.
+        assert_eq!(decode_shell_input(&encode_tile(0, 0, 1, 1, 0, &[0xFF])), None);
+        assert_eq!(decode_shell_input(&encode_shell_output(b"x")), None);
+        assert_eq!(decode_shell_input(&[PROTOCOL_VERSION + 1, KIND_SHELL_INPUT, b'x']), None);
+        assert_eq!(decode_shell_input(&[]), None);
+    }
+
+    #[test]
+    fn shell_info_names_the_shell_and_the_account_under_the_names_the_viewer_reads() {
+        assert_eq!(
+            serde_json::to_string(&ShellInfo::new("/bin/zsh", "david")).unwrap(),
+            r#"{"type":"shell","shell":"/bin/zsh","user":"david"}"#
+        );
+    }
+
+    #[test]
+    fn parses_a_resize_and_refuses_a_zero_sized_one() {
+        assert_eq!(
+            parse_viewer_input(r#"{"type":"resize","cols":120,"rows":40}"#),
+            Some(ViewerInput::Resize { cols: 120, rows: 40 })
+        );
+        assert_eq!(parse_viewer_input(r#"{"type":"resize","cols":0,"rows":40}"#), None);
+        assert_eq!(parse_viewer_input(r#"{"type":"resize","cols":80}"#), None);
     }
 
     #[test]

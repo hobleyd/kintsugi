@@ -27,10 +27,16 @@ internal sealed class RemoteControlRelaySession
     private int _relayClaimed;
     private int _startedInvoked;
 
-    public RemoteControlRelaySession(Guid id, string serialNumber, string requestedBy, TimeSpan consentTimeout)
+    public RemoteControlRelaySession(
+        Guid id,
+        string serialNumber,
+        RemoteControlSessionKind kind,
+        string requestedBy,
+        TimeSpan consentTimeout)
     {
         Id = id;
         SerialNumber = serialNumber;
+        Kind = kind;
         RequestedBy = requestedBy;
         _consentDeadlineUtc = DateTimeOffset.UtcNow.Add(consentTimeout);
     }
@@ -38,6 +44,8 @@ internal sealed class RemoteControlRelaySession
     public Guid Id { get; }
 
     public string SerialNumber { get; }
+
+    public RemoteControlSessionKind Kind { get; }
 
     public string RequestedBy { get; }
 
@@ -57,6 +65,15 @@ internal sealed class RemoteControlRelaySession
 
     public bool MatchesHost(string serialNumber) =>
         string.Equals(SerialNumber, serialNumber, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Whether a socket may still be attached to this session: somebody allowed it, and it has not
+    /// finished. The two acceptable answers are a granted screen session and a shell session that
+    /// needed no asking — and <see cref="LatchConsent"/> is what stops the second of those being
+    /// claimed for a screen.
+    /// </summary>
+    public bool IsOpen =>
+        (ResolveConsent() is RemoteControlConsent.Granted or RemoteControlConsent.NotRequired) && !IsFinished;
 
     /// <summary>
     /// The consent answer, latching <see cref="RemoteControlConsent.TimedOut"/> once the deadline
@@ -79,8 +96,20 @@ internal sealed class RemoteControlRelaySession
 
     /// <summary>Records the host user's answer. False means it was already decided — see the same
     /// first-answer-wins rule, and why it is a security property, on the domain entity.</summary>
+    /// <remarks>
+    /// Also refuses <see cref="RemoteControlConsent.NotRequired"/> on anything but a shell, and that
+    /// duplication of the domain entity's rule is deliberate: this latch is what
+    /// <see cref="IsOpen"/> reads, so it is what actually admits a socket. Enforcing it only in the
+    /// entity would leave the relay opening a screen session on an agent's say-so and the database
+    /// disagreeing with it afterwards.
+    /// </remarks>
     public bool LatchConsent(RemoteControlConsent outcome)
     {
+        if (outcome == RemoteControlConsent.NotRequired && Kind != RemoteControlSessionKind.Shell)
+        {
+            return false;
+        }
+
         lock (_lock)
         {
             if (_consent != RemoteControlConsent.Pending)

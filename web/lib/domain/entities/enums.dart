@@ -127,7 +127,9 @@ enum RemoteControlConsent {
   granted,
   denied,
   timedOut,
-  agentUnreachable;
+  agentUnreachable,
+  notRequired,
+  unavailable;
 
   /// What the remote-control screen says happened. Phrased as the outcome rather than the state,
   /// because every one of these is something the administrator has to react to.
@@ -139,5 +141,29 @@ enum RemoteControlConsent {
         RemoteControlConsent.agentUnreachable =>
           'This host is not reachable: its agent is not connected, which usually means it is asleep, '
               'switched off, or has nobody logged in',
+        // A shell session, which asks nobody — see RemoteControlSessionKind.shell. Never shown as a
+        // waiting state, because there is nothing to wait for.
+        RemoteControlConsent.notRequired => 'Connected without asking the host',
+        RemoteControlConsent.unavailable =>
+          'This host cannot provide that kind of session right now: for a screen session that means '
+              'nobody is logged in, so there is no desktop to share and nobody to ask',
+      };
+}
+
+/// Mirrors `RemoteControlSessionKind`. A name on the wire, like [RemoteControlConsent] beside it.
+enum RemoteControlSessionKind {
+  screen,
+  shell;
+
+  /// What the request body carries. The server parses this case-insensitively, but it is written
+  /// the way the C# member is spelled so a reader can match the two up.
+  String get wireName => switch (this) {
+        RemoteControlSessionKind.screen => 'Screen',
+        RemoteControlSessionKind.shell => 'Shell',
+      };
+
+  String get label => switch (this) {
+        RemoteControlSessionKind.screen => 'Screen control',
+        RemoteControlSessionKind.shell => 'Terminal',
       };
 }

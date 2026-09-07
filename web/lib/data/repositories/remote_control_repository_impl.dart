@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 import '../../core/network/api_client.dart';
+import '../../domain/entities/enums.dart';
 import '../../domain/entities/remote_control_session.dart';
 import '../../domain/repositories/repositories.dart';
 import '../models/remote_control_mapper.dart';
@@ -20,8 +21,10 @@ class RemoteControlRepositoryImpl implements RemoteControlRepository {
   final ApiClient _api;
 
   @override
-  Future<RemoteControlSession> request(String hostId) async => remoteControlSessionFromJson(
-        (await _api.postJson(_base, body: {'hostId': hostId})) as Map<String, dynamic>,
+  Future<RemoteControlSession> request(String hostId, RemoteControlSessionKind kind) async =>
+      remoteControlSessionFromJson(
+        (await _api.postJson(_base, body: {'hostId': hostId, 'kind': kind.wireName}))
+            as Map<String, dynamic>,
       );
 
   @override
@@ -69,7 +72,17 @@ class _WebSocketRemoteControlStream implements RemoteControlStream {
   @override
   void send(RemoteInput input) {
     if (_closed) return;
-    _channel.sink.add(jsonEncode(remoteInputToJson(input)));
+
+    // Typed input is binary; everything else is JSON. Asked in this order because it is the only
+    // input that has no JSON form at all.
+    final bytes = remoteShellInputToBytes(input);
+    if (bytes != null) {
+      _channel.sink.add(bytes);
+      return;
+    }
+
+    final json = remoteInputToJson(input);
+    if (json != null) _channel.sink.add(jsonEncode(json));
   }
 
   @override
@@ -94,10 +107,13 @@ class _WebSocketRemoteControlStream implements RemoteControlStream {
     }
 
     if (message is List<int>) {
-      final tile = remoteTileFromBytes(
-        message is Uint8List ? message : Uint8List.fromList(message),
-      );
-      if (tile != null) _updates.add(tile);
+      final bytes = message is Uint8List ? message : Uint8List.fromList(message);
+
+      // A tile or a shell frame, told apart by the kind byte both carry. A session only ever
+      // produces one of the two, but the reader does not need to know which kind it is in — the
+      // frame says so, which is what that byte is for.
+      final update = remoteTileFromBytes(bytes) ?? remoteShellOutputFromBytes(bytes);
+      if (update != null) _updates.add(update);
     }
   }
 

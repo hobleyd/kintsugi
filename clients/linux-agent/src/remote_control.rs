@@ -16,16 +16,32 @@
 //!
 //! # What this half is and is not
 //!
-//! It holds the WebSockets, because it holds this host's identity, and it does **nothing else**: no
-//! capture, no input, no decision about whether a session may go ahead. Those belong to the per-user
-//! process, which has the display. The one message it understands is a granted consent, because that
-//! is the moment the session socket has to be opened; everything else is copied between the socket
-//! and the local channel without being looked at.
+//! For a *screen* session it holds the WebSockets, because it holds this host's identity, and does
+//! **nothing else**: no capture, no input, no decision about whether the session may go ahead. Those
+//! belong to the per-user process, which has the display. The one message it understands is a
+//! granted consent, because that is the moment the session socket has to be opened; everything else
+//! is copied between the socket and the local channel without being looked at.
+//!
+//! For a *shell* session there is no per-user process involved at all. A terminal needs no display,
+//! and the shell wanted on a Linux host is root's — which is what this unit already runs as. So the
+//! PTY lives here, and nothing crosses `remote_ipc` for it.
+//!
+//! # The control socket is held whether or not anybody is logged in
+//!
+//! This used to wait for the per-user process to connect and only then open the socket to the
+//! server, which made "reachable for remote control" mean "somebody is sitting at a desktop". That
+//! is right for a screen session and quite wrong for a shell: most of a Linux fleet is servers with
+//! no graphical session at all, and those are precisely the hosts an administrator wants a terminal
+//! on. So the socket is now opened as soon as this host has an identity, a per-user connection is
+//! picked up if and when one appears, and a *screen* request arriving without one is answered
+//! `Unavailable` — the agent saying "there is nobody here" at once, rather than the host being
+//! invisible and the administrator being told the agent is unreachable.
 //!
 //! This is the Windows agent's `remote_control.rs` with a unix socket in place of a named pipe. The
 //! two are meant to read as the same program — see `remote_ipc`.
 
 use std::io::{Read, Write};
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
@@ -36,8 +52,12 @@ use tungstenite::{Connector, Message, WebSocket};
 use crate::config::{self, Config};
 use crate::identity::{self, AgentIdentity};
 use crate::logging;
+use crate::pty::{self, ProgramSpec, Pty, INITIAL_COLS, INITIAL_ROWS};
 use crate::remote_ipc::{self, FrameReader, IpcConnection, IpcFrame, IpcListener, IpcMessage};
-use crate::remote_protocol::{parse_server_message, AgentMessage, ConsentOutcome, ServerMessage};
+use crate::remote_protocol::{
+    decode_shell_input, encode_shell_output, parse_server_message, parse_viewer_input, AgentMessage,
+    ConsentOutcome, ServerMessage, SessionKind, ShellInfo, ViewerInput,
+};
 
 /// How long the relay waits between polls of its three channels.
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
@@ -53,6 +73,15 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// since timed it out and marked the host unreachable. Same value and reasoning as the macOS
 /// agent, where it was found. Keep it comfortably above the server's ping interval.
 const CONTROL_SILENCE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// How much terminal output is carried in one shell frame. Same value and reasoning as the macOS
+/// agent's: a burst of output arrives as a handful of frames rather than one large one, so it
+/// cannot stall the socket the keystrokes travel back on.
+const SHELL_READ_BUFFER_BYTES: usize = 32 * 1024;
+
+/// How long the accept thread waits before trying again after a failed accept, so a listener that
+/// is briefly unhappy cannot spin.
+const ACCEPT_RETRY_DELAY: Duration = Duration::from_secs(5);
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -89,19 +118,30 @@ pub fn run(config: Config, serial_number: String) {
 
     logging::info(&format!("listening for the per-user agent on {}", socket_path.display()));
 
+    // Accepting blocks, and this unit has to hold its socket to the server whether or not anybody
+    // is logged in — see the module note. So accepting happens on a thread of its own and hands
+    // each connection to the control loop through a channel. The listener moves in with it and
+    // lives as long as the process, which is what keeps its `Drop` from removing the socket file
+    // out from under a running host.
+    let (desktop_tx, desktop_rx) = mpsc::channel();
+    std::thread::spawn(move || loop {
+        match listener.accept() {
+            Ok(connection) => {
+                // The receiver is gone only if the control loop has, which it never does.
+                if desktop_tx.send(connection).is_err() {
+                    return;
+                }
+            }
+            Err(err) => {
+                logging::warn(&format!("could not accept a remote control client: {err:#}"));
+                std::thread::sleep(ACCEPT_RETRY_DELAY);
+            }
+        }
+    });
+
     let mut backoff = INITIAL_RECONNECT_BACKOFF;
 
     loop {
-        let connection = match listener.accept() {
-            Ok(connection) => connection,
-            Err(err) => {
-                logging::warn(&format!("could not accept a remote control client: {err:#}"));
-                std::thread::sleep(backoff);
-                backoff = (backoff * 2).min(MAX_RECONNECT_BACKOFF);
-                continue;
-            }
-        };
-
         // Re-read from disk each time rather than taking an identity once: this unit starts before
         // enrollment has necessarily happened, and it outlives a re-enrollment.
         let Some(identity) = identity::load(&config::identity_dir()) else {
@@ -111,9 +151,9 @@ pub fn run(config: Config, serial_number: String) {
             continue;
         };
 
-        match relay(&config, &serial_number, &identity, connection) {
+        match relay(&config, &serial_number, &identity, &desktop_rx) {
             Ok(()) => {
-                logging::info("the remote control connection closed; waiting for the per-user agent again");
+                logging::info("the remote control socket was closed by the server; reconnecting");
                 backoff = INITIAL_RECONNECT_BACKOFF;
             }
             Err(err) => {
@@ -128,19 +168,42 @@ pub fn run(config: Config, serial_number: String) {
     }
 }
 
-/// Everything in flight for one per-user connection.
+/// Everything in flight while the control socket is up.
 struct Relay {
     control: Socket,
     session: Option<Socket>,
     session_id: Option<String>,
     reader: FrameReader,
+    /// The terminal, on a shell session and only then. Its presence is what tells the loop which
+    /// kind of session is running: a screen session's bytes are relayed to and from the per-user
+    /// process, a shell session's to and from this.
+    terminal: Option<Pty>,
+    /// Why a shell session finished, when [`pump_shell_session`] is the thing that found out —
+    /// `exit` typed at the prompt reads very differently from a socket that failed, and the
+    /// administrator sees this text.
+    shell_end_reason: Option<String>,
+}
+
+impl Relay {
+    /// Drops whatever session is in flight, hanging up on a terminal if there was one. A shell that
+    /// outlived its session would go on holding this host's resources for as long as the unit runs.
+    fn end_session(&mut self) {
+        self.session = None;
+        self.session_id = None;
+
+        if let Some(terminal) = self.terminal.take() {
+            if let Err(err) = terminal.terminate() {
+                logging::warn(&format!("could not end the terminal: {err}"));
+            }
+        }
+    }
 }
 
 fn relay(
     config: &Config,
     serial_number: &str,
     identity: &AgentIdentity,
-    mut ipc: IpcConnection,
+    desktop_rx: &Receiver<IpcConnection>,
 ) -> Result<()> {
     let url = config.remote_control_url(serial_number, None);
     let mut control = connect(&url, identity)?;
@@ -158,7 +221,19 @@ fn relay(
         },
     )?;
 
-    let mut relay = Relay { control, session: None, session_id: None, reader: FrameReader::new() };
+    let mut relay = Relay {
+        control,
+        session: None,
+        session_id: None,
+        reader: FrameReader::new(),
+        terminal: None,
+        shell_end_reason: None,
+    };
+
+    // The per-user process, once it has connected. `None` on a server with no graphical session,
+    // which is an ordinary state here rather than a fault — it only means screen sessions cannot
+    // be offered.
+    let mut desktop: Option<IpcConnection> = None;
 
     // The last time anything at all arrived on the control socket — a message or the server's
     // keep-alive ping. See `CONTROL_SILENCE_TIMEOUT`.
@@ -167,11 +242,21 @@ fn relay(
     // Whether the session socket still holds bytes the network has not taken. See step 2.
     let mut session_backlogged = false;
     loop {
-        // 1. The server, to the per-user process.
+        // 0. A per-user process appearing, or reappearing. The latest connection wins: the only way
+        //    a second arrives is the first's process having been restarted, and holding on to the
+        //    older one would leave screen sessions going to a socket nobody is reading.
+        while let Ok(connection) = desktop_rx.try_recv() {
+            logging::info("the per-user agent connected; screen sessions are available on this host");
+            desktop = Some(connection);
+        }
+
+        // 1. The server, to the per-user process or to a terminal here.
         match read_text(&mut relay.control)? {
             SocketRead::Message(text) => {
                 last_heard = Instant::now();
-                if let Some(line) = handle_server_message(&text, &mut ipc, &mut relay)? {
+                let line = handle_server_message(
+                    &text, desktop.as_mut(), config, serial_number, identity, &mut relay)?;
+                if let Some(line) = line {
                     logging::info(&format!("remote control: {line}"));
                 }
             }
@@ -198,32 +283,72 @@ fn relay(
         // to the network without a message in either direction. Step 3 still runs, so a viewer that
         // hangs up mid-backlog is noticed and the backlog discarded with the socket.
         if !session_backlogged {
-            let chunk = ipc.read_available().context("the per-user agent's connection closed")?;
-            if !chunk.is_empty() {
-                relay.reader.push(&chunk);
-            }
+            if let Some(ipc) = desktop.as_mut() {
+                match ipc.read_available() {
+                    Ok(chunk) => {
+                        if !chunk.is_empty() {
+                            relay.reader.push(&chunk);
+                        }
 
-            while let Some(frame) = relay.reader.next_frame()? {
-                handle_agent_frame(frame, config, serial_number, identity, &mut relay)?;
+                        while let Some(frame) = relay.reader.next_frame()? {
+                            handle_agent_frame(frame, config, serial_number, identity, &mut relay)?;
+                        }
+                    }
+                    Err(err) => {
+                        // The desktop going away is no longer the end of the relay. It used to be,
+                        // because the control socket was only open while a per-user process was —
+                        // now losing the display costs this host screen sessions and nothing else,
+                        // and it must not cost it its reachability for a shell.
+                        logging::info(&format!("the per-user agent disconnected: {err:#}"));
+                        desktop = None;
+                        relay.reader = FrameReader::new();
+
+                        if let Some(session_id) = relay.session_id.clone() {
+                            if relay.terminal.is_none() {
+                                relay.end_session();
+                                queue(&mut relay.control, &AgentMessage::SessionEnded {
+                                    session_id,
+                                    reason: "the host's desktop session ended".to_string(),
+                                })?;
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        // 3. The viewer's input, to the per-user process.
-        if let Some(session) = relay.session.as_mut() {
+        // 3. The viewer's input: into the terminal on a shell session, on to the per-user process
+        //    on a screen one.
+        if relay.terminal.is_some() {
+            if !pump_shell_session(&mut relay)? {
+                let session_id = relay.session_id.clone().unwrap_or_default();
+                let reason = relay.shell_end_reason.take().unwrap_or_else(|| "the viewer disconnected".to_string());
+                logging::info(&format!("remote shell session {session_id} ended: {reason}"));
+                relay.end_session();
+                queue(&mut relay.control, &AgentMessage::SessionEnded { session_id, reason })?;
+            }
+        } else if let Some(session) = relay.session.as_mut() {
             match read_text(session)? {
-                SocketRead::Message(json) => write_ipc(&mut ipc, &IpcMessage::ViewerInput { json })?,
+                SocketRead::Message(json) => {
+                    // Dropped rather than queued when there is no per-user process: it can only
+                    // mean the desktop went away mid-session, and the session is being torn down.
+                    if let Some(ipc) = desktop.as_mut() {
+                        write_ipc(ipc, &IpcMessage::ViewerInput { json })?;
+                    }
+                }
                 SocketRead::Closed => {
                     let session_id = relay.session_id.clone().unwrap_or_default();
                     logging::info("the viewer disconnected");
-                    relay.session = None;
-                    relay.session_id = None;
-                    write_ipc(
-                        &mut ipc,
-                        &IpcMessage::SessionEnded {
-                            session_id,
-                            reason: "the viewer disconnected".to_string(),
-                        },
-                    )?;
+                    relay.end_session();
+                    if let Some(ipc) = desktop.as_mut() {
+                        write_ipc(
+                            ipc,
+                            &IpcMessage::SessionEnded {
+                                session_id,
+                                reason: "the viewer disconnected".to_string(),
+                            },
+                        )?;
+                    }
                 }
                 // A session socket carries frames outbound, so a dead one fails on the write and
                 // needs no silence watchdog of its own.
@@ -243,8 +368,15 @@ fn relay(
     }
 }
 
-/// Forwards one server message onward. Returns a line worth logging, if any.
-fn handle_server_message(text: &str, ipc: &mut IpcConnection, relay: &mut Relay) -> Result<Option<String>> {
+/// Acts on one server message. Returns a line worth logging, if any.
+fn handle_server_message(
+    text: &str,
+    desktop: Option<&mut IpcConnection>,
+    config: &Config,
+    serial_number: &str,
+    identity: &AgentIdentity,
+    relay: &mut Relay,
+) -> Result<Option<String>> {
     let message = match parse_server_message(text) {
         Ok(Some(message)) => message,
         // A newer server mentioning something this build has never heard of. Logged and ignored,
@@ -254,25 +386,242 @@ fn handle_server_message(text: &str, ipc: &mut IpcConnection, relay: &mut Relay)
     };
 
     match message {
-        ServerMessage::SessionRequested { session_id, requested_by, consent_timeout_seconds } => {
-            let line = format!("session {session_id} requested by {requested_by}");
-            write_ipc(
-                ipc,
-                &IpcMessage::SessionRequested { session_id, requested_by, consent_timeout_seconds },
-            )?;
-            Ok(Some(line))
+        ServerMessage::SessionRequested { session_id, kind, requested_by, consent_timeout_seconds } => {
+            match kind {
+                // A terminal needs no display and no consent, and root is what this unit already
+                // runs as — so it is started here rather than forwarded anywhere.
+                SessionKind::Shell => {
+                    let line = format!("shell session {session_id} requested by {requested_by}");
+                    start_shell_session(config, serial_number, identity, relay, &session_id, &requested_by)?;
+                    Ok(Some(line))
+                }
+
+                SessionKind::Screen => match desktop {
+                    Some(ipc) => {
+                        let line = format!("session {session_id} requested by {requested_by}");
+                        write_ipc(
+                            ipc,
+                            &IpcMessage::SessionRequested { session_id, requested_by, consent_timeout_seconds },
+                        )?;
+                        Ok(Some(line))
+                    }
+                    // Nobody is logged in, so there is no screen to share and nobody to ask.
+                    // Answered rather than left to time out — see the module note on why this host
+                    // is reachable at all in that state.
+                    None => {
+                        queue(&mut relay.control, &AgentMessage::Consent {
+                            session_id: session_id.clone(),
+                            outcome: ConsentOutcome::Unavailable,
+                        })?;
+                        Ok(Some(format!(
+                            "refusing screen session {session_id}: nobody is logged in at this host"
+                        )))
+                    }
+                },
+
+                // A kind this build has never heard of. Answered rather than ignored, so the
+                // administrator is told now instead of waiting out a consent timeout.
+                SessionKind::Unknown => {
+                    queue(&mut relay.control, &AgentMessage::Consent {
+                        session_id: session_id.clone(),
+                        outcome: ConsentOutcome::Unavailable,
+                    })?;
+                    Ok(Some(format!(
+                        "refusing session {session_id}: this agent does not implement that kind of session"
+                    )))
+                }
+            }
         }
 
         ServerMessage::SessionEnded { session_id, reason } => {
             // Dropped before the per-user process is told, so a frame arriving in the same pass has
             // nowhere to go rather than being written to a socket the server has finished with.
-            relay.session = None;
-            relay.session_id = None;
+            // `end_session` also hangs up on a terminal, if this was a shell session.
+            relay.end_session();
             let line = format!("the server ended session {session_id}: {reason}");
-            write_ipc(ipc, &IpcMessage::SessionEnded { session_id, reason })?;
+            if let Some(ipc) = desktop {
+                write_ipc(ipc, &IpcMessage::SessionEnded { session_id, reason })?;
+            }
             Ok(Some(line))
         }
     }
+}
+
+/// Starts a root shell and joins it to a session socket.
+///
+/// # Why nobody is asked
+///
+/// This is the one place remote control's consent rule does not apply, and it is deliberate. A shell
+/// session is the access an administrator of this fleet already has by other means — it is what they
+/// would reach SSH for — and the only reason it is routed through this agent is that SSH would need
+/// an inbound port on every managed machine, which is exactly what the relay design exists to avoid.
+/// The compensating control is the server's: the same `remote_control_sessions` row a screen request
+/// writes is written here, naming who asked and when.
+///
+/// The shell is **root's**, because this unit is root and every upgrade this agent performs already
+/// requires it. That is a stronger thing to hand out than the macOS agent's shell, which runs as the
+/// logged-in user because the per-user process is the only half of that agent holding the identity;
+/// [`ShellInfo`] reports the account for exactly that reason, so the viewer can say which it is.
+fn start_shell_session(
+    config: &Config,
+    serial_number: &str,
+    identity: &AgentIdentity,
+    relay: &mut Relay,
+    session_id: &str,
+    requested_by: &str,
+) -> Result<()> {
+    // Everything that can fail locally is done before the answer is sent, so a host that cannot
+    // produce a terminal reports `Unavailable` rather than accepting a session and then failing.
+    let started = shell_program().and_then(|(program, user)| {
+        let terminal = Pty::spawn(&program, INITIAL_COLS, INITIAL_ROWS)
+            .with_context(|| format!("could not start {} in a terminal", program.program.display()))?;
+        Ok((program, user, terminal))
+    });
+
+    let (program, user, terminal) = match started {
+        Ok(started) => started,
+        Err(err) => {
+            logging::warn(&format!("cannot open a shell session: {err:#}"));
+            return queue(&mut relay.control, &AgentMessage::Consent {
+                session_id: session_id.to_string(),
+                outcome: ConsentOutcome::Unavailable,
+            });
+        }
+    };
+
+    queue(&mut relay.control, &AgentMessage::Consent {
+        session_id: session_id.to_string(),
+        outcome: ConsentOutcome::NotRequired,
+    })?;
+
+    // Flushed before the session socket is opened, the same race the granted path waits out and for
+    // the same reason: the relay refuses a session socket for an answer it has not seen, and
+    // refuses it *after* accepting the upgrade. See CONSENT_FLUSH_TIMEOUT.
+    let deadline = Instant::now() + CONSENT_FLUSH_TIMEOUT;
+    while Instant::now() < deadline {
+        if flush(&mut relay.control)? {
+            break;
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+
+    match connect(&config.remote_control_url(serial_number, Some(session_id)), identity) {
+        Ok(mut session) => {
+            set_nonblocking(&session)?;
+
+            // Before the first output frame, so the viewer can say what it is attached to — the
+            // shell analogue of the display geometry a screen session sends first.
+            let info = serde_json::to_string(&ShellInfo::new(program.program.display().to_string(), &user))
+                .context("could not describe the shell")?;
+            write_queued(&mut session, Message::text(info))?;
+
+            relay.session = Some(session);
+            relay.session_id = Some(session_id.to_string());
+            relay.terminal = Some(terminal);
+            relay.shell_end_reason = None;
+
+            logging::info(&format!(
+                "remote shell session {session_id} started for {requested_by} ({} as {user})",
+                program.program.display()
+            ));
+            Ok(())
+        }
+        Err(err) => {
+            // The terminal is running by now and has to be hung up on, or a shell is left attached
+            // to a session that never happened.
+            logging::warn(&format!("could not open the remote shell session socket: {err:#}"));
+            let _ = terminal.terminate();
+            queue(&mut relay.control, &AgentMessage::SessionEnded {
+                session_id: session_id.to_string(),
+                reason: format!("the host could not open its session socket: {err:#}"),
+            })
+        }
+    }
+}
+
+/// Moves one pass of bytes between the terminal and the viewer. `Ok(false)` means the session is
+/// over, and [`Relay::shell_end_reason`] says why unless the viewer simply hung up.
+///
+/// The mirror of the screen path's step 2 and step 3 together, in one function because a terminal
+/// is small enough to be both halves: unlike a tile stream there is no backlog to pace, since a
+/// shell that produces faster than the network takes it is bounded by the PTY's own buffer.
+fn pump_shell_session(relay: &mut Relay) -> Result<bool> {
+    let Some(session) = relay.session.as_mut() else {
+        return Ok(false);
+    };
+    let Some(terminal) = relay.terminal.as_mut() else {
+        return Ok(false);
+    };
+
+    // The viewer, into the terminal. This is the one place in this protocol where a *binary*
+    // message travels from the browser to the agent: keystrokes are raw bytes rather than JSON,
+    // because a terminal carries arbitrary bytes and escaping each one would double the traffic on
+    // the half of the connection latency is measured on.
+    loop {
+        match session.read() {
+            Ok(Message::Binary(bytes)) => {
+                // Anything that is not shell input is dropped rather than typed.
+                if let Some(input) = decode_shell_input(&bytes) {
+                    if let Err(err) = terminal.write_all(input) {
+                        relay.shell_end_reason = Some(format!("writing to the terminal failed: {err}"));
+                        return Ok(false);
+                    }
+                }
+            }
+            Ok(Message::Text(text)) => {
+                if let Some(ViewerInput::Resize { cols, rows }) = parse_viewer_input(&text) {
+                    // Not worth ending a session over: the shell keeps working, it just wraps at
+                    // the wrong width.
+                    if let Err(err) = terminal.resize(cols, rows) {
+                        logging::warn(&format!("could not resize the terminal: {err}"));
+                    }
+                }
+            }
+            Ok(Message::Close(_)) => return Ok(false),
+            Ok(_) => {}
+            Err(err) if is_would_block(&err) => break,
+            Err(tungstenite::Error::ConnectionClosed) | Err(tungstenite::Error::AlreadyClosed) => return Ok(false),
+            Err(err) => {
+                relay.shell_end_reason = Some(format!("reading from the session socket failed: {err}"));
+                return Ok(false);
+            }
+        }
+    }
+
+    // The terminal, out to the viewer. Read once per pass rather than drained: a `yes` loop would
+    // otherwise never let the input half above run again, and the administrator could not press
+    // Ctrl-C.
+    let mut buffer = [0u8; SHELL_READ_BUFFER_BYTES];
+    match terminal.read_available(&mut buffer) {
+        // The shell closed its end — somebody typed `exit`. The ordinary way a session finishes.
+        Ok(Some(0)) => {
+            relay.shell_end_reason = Some("the shell exited".to_string());
+            return Ok(false);
+        }
+        Ok(Some(read)) => write_queued(session, Message::Binary(encode_shell_output(&buffer[..read]).into()))?,
+        Ok(None) => {
+            // Checked only once the terminal has nothing left to say, so its last output is on its
+            // way first. Needed as well as the EOF above: a shell that exits while a background
+            // process still holds the slave open produces no EOF at all.
+            match terminal.try_wait() {
+                Ok(Some(_)) => {
+                    relay.shell_end_reason = Some("the shell exited".to_string());
+                    return Ok(false);
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    relay.shell_end_reason = Some(format!("could not check on the shell: {err}"));
+                    return Ok(false);
+                }
+            }
+        }
+        Err(err) => {
+            relay.shell_end_reason = Some(format!("reading from the terminal failed: {err}"));
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
 }
 
 /// Acts on one message from the per-user process.
@@ -355,6 +704,71 @@ fn handle_agent_frame(
             logging::warn(&format!("ignoring an unexpected message from the per-user agent: {other:?}"));
             Ok(())
         }
+    }
+}
+
+/// This process's own login shell, home directory, and the smallest environment a shell needs to
+/// behave like one opened by hand.
+///
+/// Deliberately the *running* user's entry rather than a named one: on this agent that is root,
+/// because the resident unit is root, and on the macOS agent the identical function returns the
+/// logged-in user because that agent's per-user process is the half holding the identity. One
+/// function, two answers, because the two processes genuinely differ — which is exactly the split
+/// `pty.rs` describes when it says the choice of program belongs to each agent's `remote_control`.
+fn shell_program() -> Result<(ProgramSpec, String)> {
+    let (user, home, shell) = passwd_entry().context("could not read this user's password database entry")?;
+
+    // A password entry naming a shell that is not installed is rare but survivable, and so is one
+    // naming `/usr/sbin/nologin` — in which case there is genuinely no shell to offer and this says
+    // so rather than quietly starting something else.
+    let program = pty::first_existing(&[shell.as_str()])
+        .or_else(|| pty::first_existing(&["/bin/bash", "/bin/sh"]))
+        .ok_or_else(|| anyhow!("no usable login shell for {user} (the password database names {shell})"))?;
+
+    // A home directory that does not exist would make the shell fail to start at all, which reads
+    // as "remote shell is broken on this host" rather than as the misconfiguration it is.
+    let cwd = std::path::PathBuf::from(&home);
+    let cwd = if cwd.is_dir() { cwd } else { std::path::PathBuf::from("/") };
+
+    Ok((
+        ProgramSpec {
+            program,
+            // A login shell, so the same profile files run that would have on a terminal opened by
+            // hand — an administrator's `PATH` and aliases are most of what makes a shell useful.
+            args: vec!["-l".to_string()],
+            env: vec![
+                ("HOME".to_string(), home.clone()),
+                ("USER".to_string(), user.clone()),
+                ("LOGNAME".to_string(), user.clone()),
+                ("SHELL".to_string(), shell),
+                // Enough to find the login shell's own startup files; everything past this is the
+                // profile's business, which is the point of running one.
+                ("PATH".to_string(), "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string()),
+            ],
+            cwd,
+        },
+        user,
+    ))
+}
+
+/// `(name, home directory, shell)` for the user this process is running as.
+fn passwd_entry() -> Result<(String, String, String)> {
+    // SAFETY: getpwuid returns a pointer into a static buffer owned by libc, valid until the next
+    // call to it on this thread. Everything is copied out before returning, so nothing borrows it.
+    unsafe {
+        let entry = libc::getpwuid(libc::getuid());
+        if entry.is_null() {
+            return Err(anyhow!("getpwuid returned nothing for uid {}", libc::getuid()));
+        }
+
+        let read = |pointer: *const libc::c_char| -> Result<String> {
+            if pointer.is_null() {
+                return Err(anyhow!("the password database entry is incomplete"));
+            }
+            Ok(std::ffi::CStr::from_ptr(pointer).to_string_lossy().into_owned())
+        };
+
+        Ok((read((*entry).pw_name)?, read((*entry).pw_dir)?, read((*entry).pw_shell)?))
     }
 }
 

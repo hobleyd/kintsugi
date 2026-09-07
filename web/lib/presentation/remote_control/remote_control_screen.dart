@@ -8,20 +8,37 @@ import '../../core/widgets/alert_box.dart';
 import '../../core/widgets/buttons.dart';
 import '../../core/widgets/page_scaffold.dart';
 import '../../core/widgets/panel.dart';
+import '../../domain/entities/enums.dart';
 import '../../domain/entities/remote_control_session.dart';
 import '../../domain/usecases/remote_control_usecases.dart';
 import 'remote_control_bloc.dart';
 import 'remote_screen_view.dart';
+import 'remote_shell_view.dart';
 
-/// Controlling one host's screen.
+/// One host's remote session — its screen, or a terminal on it.
 ///
-/// Reached from the Hosts screen's Connect action, and it starts by *asking*: the host's own user
-/// gets a dialog naming the administrator, and nothing is captured or shown here until they allow
-/// it. Everything on this screen before that point is a waiting state.
+/// Both kinds are this screen because they are the same session underneath: the same request, the
+/// same poll, the same relayed socket, the same audit row. What differs is what the panel holds and
+/// whether anybody at the host was asked.
+///
+/// A **screen** session starts by *asking*: the host's own user gets a dialog naming the
+/// administrator, and nothing is captured or shown here until they allow it, so everything before
+/// that point is a waiting state. A **shell** session asks nobody and opens as soon as the agent
+/// answers — see `RemoteControlSessionKind` on the server for why, and what stands in for the
+/// dialog.
 class RemoteControlScreen extends StatelessWidget {
-  const RemoteControlScreen({required this.hostId, this.hostname, super.key});
+  const RemoteControlScreen({
+    required this.hostId,
+    this.kind = RemoteControlSessionKind.screen,
+    this.hostname,
+    super.key,
+  });
 
   final String hostId;
+
+  /// What to open. Fixed by the route rather than chosen here, so the two are separate addresses a
+  /// support call can be pointed at.
+  final RemoteControlSessionKind kind;
 
   /// Passed through from the Hosts screen so the heading names the host immediately, before the
   /// first response has arrived. Absent on a bookmarked or hand-typed URL, which is why the screen
@@ -35,14 +52,15 @@ class RemoteControlScreen extends StatelessWidget {
           getSession: locator<GetRemoteControlSession>(),
           endSession: locator<EndRemoteControlSession>(),
           openStream: locator<OpenRemoteControlStream>(),
-        )..add(RemoteControlRequested(hostId)),
-        child: _RemoteControlView(hostname: hostname),
+        )..add(RemoteControlRequested(hostId, kind)),
+        child: _RemoteControlView(kind: kind, hostname: hostname),
       );
 }
 
 class _RemoteControlView extends StatelessWidget {
-  const _RemoteControlView({this.hostname});
+  const _RemoteControlView({required this.kind, this.hostname});
 
+  final RemoteControlSessionKind kind;
   final String? hostname;
 
   @override
@@ -51,11 +69,18 @@ class _RemoteControlView extends StatelessWidget {
           final session = state.session;
           final name = session?.hostname.isNotEmpty == true ? session!.hostname : (hostname ?? 'this host');
 
+          final shell = state.shell;
+
           return PageScaffold(
-            title: 'Remote Control',
+            title: kind == RemoteControlSessionKind.shell ? 'Remote Terminal' : 'Remote Control',
             subtitle: session == null
                 ? 'Connecting to $name'
-                : '$name — requested by ${session.requestedBy}',
+                // The account is named the moment it is known, because it is not the same on every
+                // platform — the logged-in user on macOS, root on Linux, SYSTEM on Windows — and
+                // somebody about to type a command should not have to remember which.
+                : shell != null
+                    ? '$name — ${shell.shell} as ${shell.user}, requested by ${session.requestedBy}'
+                    : '$name — requested by ${session.requestedBy}',
             children: [
               if (state.error != null) AlertBox.error(state.error!),
               _buildConsentNotice(state),
@@ -82,6 +107,16 @@ class _RemoteControlView extends StatelessWidget {
     final session = state.session;
     if (session == null) return const SizedBox.shrink();
 
+    // Said plainly rather than left to be assumed from a screen that simply opened. Nobody at this
+    // host was asked, and an administrator should know that is what they are doing — the record of
+    // who opened it is the only thing standing in for the dialog a screen session shows.
+    if (session.kind == RemoteControlSessionKind.shell && session.isConnectable) {
+      return AlertBox.info(
+        'Nobody at ${session.hostname} was asked, and nothing on the host announces this session. '
+        'It has been recorded against your name.',
+      );
+    }
+
     if (session.isAwaitingConsent) {
       return AlertBox.info(
         'Waiting for the person at ${session.hostname} to allow this. They have been shown a dialog '
@@ -107,7 +142,7 @@ class _RemoteControlView extends StatelessWidget {
       runSpacing: 8,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
-        if (state.isStreaming)
+        if (state.isStreaming && state.geometry != null)
           _QualityPicker(
             // Keyed on the session, so a second session on this screen does not show the last
             // one's setting beside an agent that has gone back to its own default.
@@ -136,6 +171,18 @@ class _RemoteControlView extends StatelessWidget {
   }
 
   Widget _buildBody(BuildContext context, RemoteControlState state) {
+    final bloc = context.read<RemoteControlBloc>();
+
+    if (state.shell != null && state.isStreaming) {
+      return RemoteShellView(
+        // Keyed on the session, so a second session on this screen gets a fresh terminal rather
+        // than the last one's scrollback and its stale cursor position.
+        key: ValueKey(state.session?.id),
+        output: bloc.shellOutput,
+        onInput: (input) => bloc.add(RemoteControlInputSent(input)),
+      );
+    }
+
     final geometry = state.geometry;
 
     if (geometry == null || !state.isStreaming) {

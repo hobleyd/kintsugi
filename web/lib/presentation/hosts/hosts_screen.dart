@@ -61,10 +61,12 @@ class _HostsView extends StatelessWidget {
       const TableColumnSpec(label: 'IP Address', width: FlexColumnWidth(1)),
       const TableColumnSpec(label: 'Status', width: FixedColumnWidth(140)),
       const TableColumnSpec(label: 'Last Seen', width: FlexColumnWidth(1)),
-      // Two icons now (Connect and Remove), so wider than the 110 that fitted one plus the header
-      // word "ACTIONS". `KintsugiTable` floors the width at the header's own — this is comfortably
-      // above it either way.
-      const TableColumnSpec(label: 'Actions', width: FixedColumnWidth(150)),
+      // Three icons now (Connect, Terminal and Remove). The arithmetic is the reason this is not
+      // still 150: three 40px buttons plus two 24px gaps is 168, which is more than the 126 that
+      // width left after the gutters — and a `Wrap` that cannot fit its children does not shrink
+      // them, it breaks to a second line and makes every row in the table taller.
+      // `KintsugiTable` floors the width at the header's own, which is comfortably below this.
+      const TableColumnSpec(label: 'Actions', width: FixedColumnWidth(200)),
     ];
 
     final visible = state.visibleHosts;
@@ -157,10 +159,10 @@ class _HostsView extends StatelessWidget {
         ),
         LocalTimestamp(host.lastSeenUtc),
         Wrap(
-          // Deliberately wide: Connect and Remove sit side by side and only one of them is
-          // reversible from here, so a slip between them costs a host, not a mis-click. Two
-          // 40px buttons plus this gap is 104, inside the 126 the fixed 150 column leaves after
-          // the gutters, so the Wrap never breaks onto a second line.
+          // Deliberately wide: Remove is the only one of the three that is not reversible from
+          // here, so a slip into it costs a host rather than a mis-click. Three 40px buttons plus
+          // two of these gaps is 168, inside the 176 the fixed 200 column leaves after the
+          // gutters, so the Wrap never breaks onto a second line.
           spacing: 24,
           children: [
             IconActionButton(
@@ -177,6 +179,24 @@ class _HostsView extends StatelessWidget {
                   : () => context.go(
                         Uri(
                           path: Routes.remoteControl(host.id),
+                          queryParameters: {'hostname': host.hostname},
+                        ).toString(),
+                      ),
+            ),
+            IconActionButton(
+              icon: Icons.terminal_outlined,
+              tooltip: 'Open a terminal on this host',
+              // Offered on the same terms as Connect, and for the same reason: only the server can
+              // say whether an agent is holding a socket right now. It is offered on a host with
+              // nobody logged in as well, which is not true of a screen session — a terminal needs
+              // no desktop, and on Linux and Windows a host with nobody signed in can still provide
+              // one. macOS cannot: its agent's per-user process is the half holding the identity,
+              // so a Mac with nobody logged in is unreachable for either kind.
+              onPressed: host.removalRequested
+                  ? null
+                  : () => context.go(
+                        Uri(
+                          path: Routes.remoteShell(host.id),
                           queryParameters: {'hostname': host.hostname},
                         ).toString(),
                       ),

@@ -1,6 +1,7 @@
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
 using Kintsugi.Application.RemoteControl;
+using Kintsugi.Domain.Enums;
 using Kintsugi.Application.RemoteControl.Commands.EndRemoteControlSession;
 using Kintsugi.Application.RemoteControl.Commands.MarkRemoteControlSessionStarted;
 using Kintsugi.Application.RemoteControl.Commands.RequestRemoteControlSession;
@@ -72,7 +73,7 @@ public class AdminRemoteControlController : ControllerBase
         // a caller-supplied value here would be a caller-supplied answer to "who wants to watch your
         // screen".
         var session = await _sender.Send(
-            new RequestRemoteControlSessionCommand(request.HostId, DescribeRequester()),
+            new RequestRemoteControlSessionCommand(request.HostId, request.Kind, DescribeRequester()),
             cancellationToken);
 
         return CreatedAtAction(nameof(GetSession), new { id = session.Id }, session);
@@ -161,7 +162,9 @@ public class AdminRemoteControlController : ControllerBase
     }
 }
 
-/// <param name="HostId">The host to connect to. The only thing the caller gets to choose — see
-/// <c>AdminRemoteControlController.RequestSession</c> on why the requester's identity is not part of
-/// this body.</param>
-public record RemoteControlSessionRequest(Guid HostId);
+/// <param name="HostId">The host to connect to.</param>
+/// <param name="Kind">A screen or a shell. Defaults to a screen, so a caller predating shell
+/// sessions gets what it always got. Together with the host these are the only things the caller
+/// chooses — see <c>AdminRemoteControlController.RequestSession</c> on why the requester's identity
+/// is not part of this body.</param>
+public record RemoteControlSessionRequest(Guid HostId, RemoteControlSessionKind Kind = RemoteControlSessionKind.Screen);

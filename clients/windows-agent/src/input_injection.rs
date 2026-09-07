@@ -263,6 +263,8 @@ mod platform {
                 ViewerInput::Key { hid, down } => self.key(*hid, *down),
                 // The capture side's business, not this one's.
                 ViewerInput::Quality { .. } => {}
+                // A shell session's business, and a shell session has no injector at all.
+                ViewerInput::Resize { .. } => {}
             }
         }
 

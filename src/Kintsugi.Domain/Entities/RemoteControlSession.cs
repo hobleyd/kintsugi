@@ -52,6 +52,14 @@ public class RemoteControlSession : BaseEntity
     /// </summary>
     public string RequestedBy { get; private set; } = default!;
 
+    /// <summary>
+    /// What was asked for — a screen or a shell. Part of the audit record rather than a transport
+    /// detail: "an administrator opened a root shell on this server" and "an administrator watched
+    /// this laptop's screen" are different events, and a reader of this table should not have to
+    /// infer which from the consent column.
+    /// </summary>
+    public RemoteControlSessionKind Kind { get; private set; } = RemoteControlSessionKind.Screen;
+
     public RemoteControlConsent Consent { get; private set; } = RemoteControlConsent.Pending;
 
     public DateTimeOffset? ConsentDecidedAtUtc { get; private set; }
@@ -71,7 +79,12 @@ public class RemoteControlSession : BaseEntity
     {
     }
 
-    public static RemoteControlSession Request(Guid? hostId, string serialNumber, string hostname, string requestedBy)
+    public static RemoteControlSession Request(
+        Guid? hostId,
+        string serialNumber,
+        string hostname,
+        string requestedBy,
+        RemoteControlSessionKind kind)
     {
         if (string.IsNullOrWhiteSpace(serialNumber))
         {
@@ -93,7 +106,8 @@ public class RemoteControlSession : BaseEntity
             HostId = hostId,
             SerialNumber = serialNumber.Trim(),
             Hostname = hostname.Trim(),
-            RequestedBy = requestedBy.Trim()
+            RequestedBy = requestedBy.Trim(),
+            Kind = kind
         };
     }
 
@@ -111,6 +125,15 @@ public class RemoteControlSession : BaseEntity
             throw new DomainException("Pending is not a decision.");
         }
 
+        // Only a shell session may report that nobody needed asking, and this is checked here
+        // rather than trusted because the answer arrives over a socket the *agent* holds. Without
+        // it, an agent could open a screen session — capture, keyboard and pointer — on a host
+        // whose user was never shown a dialog, simply by claiming no permission was required.
+        if (outcome == RemoteControlConsent.NotRequired && Kind != RemoteControlSessionKind.Shell)
+        {
+            throw new DomainException("Only a shell session may proceed without the host user's consent.");
+        }
+
         if (Consent != RemoteControlConsent.Pending)
         {
             return;
@@ -121,12 +144,17 @@ public class RemoteControlSession : BaseEntity
         MarkUpdated();
     }
 
-    /// <summary>Marks the point the two sockets were joined and frames began. Refuses on a request
-    /// nobody granted, so a bug in the relay cannot produce a record of a session that ran without
-    /// consent.</summary>
+    /// <summary>Marks the point the two sockets were joined and the session became live. Refuses on
+    /// a request nobody allowed, so a bug in the relay cannot produce a record of a screen session
+    /// that ran without consent.</summary>
+    /// <remarks>
+    /// <see cref="RemoteControlConsent.NotRequired"/> passes here as well, and can only be set on a
+    /// shell session — <see cref="RecordConsent"/> is what enforces that, so this stays a single
+    /// test rather than repeating the pairing rule in two places.
+    /// </remarks>
     public void MarkStarted()
     {
-        if (Consent != RemoteControlConsent.Granted)
+        if (Consent is not (RemoteControlConsent.Granted or RemoteControlConsent.NotRequired))
         {
             throw new DomainException("A remote control session cannot start without the host user's consent.");
         }

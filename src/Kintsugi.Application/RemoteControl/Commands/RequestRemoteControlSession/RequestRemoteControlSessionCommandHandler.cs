@@ -30,7 +30,8 @@ public class RequestRemoteControlSessionCommandHandler : IRequestHandler<Request
         var host = await _hostRepository.GetByIdAsync(request.HostId, cancellationToken)
             ?? throw new NotFoundException($"No host is registered with id '{request.HostId}'.");
 
-        var session = RemoteControlSession.Request(host.Id, host.SerialNumber, host.Hostname, request.RequestedBy);
+        var session = RemoteControlSession.Request(
+            host.Id, host.SerialNumber, host.Hostname, request.RequestedBy, request.Kind);
 
         // Asked before the row is saved, so there is exactly one write on the ordinary path rather
         // than a Pending row followed by an update. The window this opens is real but small and
@@ -38,13 +39,16 @@ public class RequestRemoteControlSessionCommandHandler : IRequestHandler<Request
         // for a session with no row, which RecordRemoteControlConsentCommandHandler tolerates
         // explicitly. The reverse ordering would trade that for a stored request nobody was ever
         // asked about, which is the worse record to leave behind.
-        var outcome = _broker.TryRequestConsent(session.Id, host.SerialNumber, request.RequestedBy, RemoteControlDefaults.ConsentTimeout);
+        var outcome = _broker.TryRequestConsent(
+            session.Id, host.SerialNumber, request.Kind, request.RequestedBy, RemoteControlDefaults.ConsentTimeout);
 
         if (outcome == RemoteControlRequestOutcome.AlreadyInSession)
         {
             // No row: an attempt refused because a colleague got there first says nothing about
             // this host, and recording it would bury the requests that matter in retries.
-            throw new ConflictException($"'{host.Hostname}' is already in a remote control session.");
+            // Whatever the two kinds are: one session per host, because that is what the agents
+            // enforce. See the note on RemoteControlRequestOutcome.AlreadyInSession.
+            throw new ConflictException($"'{host.Hostname}' is already in a remote session.");
         }
 
         if (outcome == RemoteControlRequestOutcome.AgentUnreachable)

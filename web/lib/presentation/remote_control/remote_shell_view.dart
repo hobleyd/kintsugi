@@ -1,0 +1,158 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:flutter/material.dart';
+import 'package:xterm/xterm.dart';
+
+import '../../core/theme/kintsugi_palette.dart';
+import '../../domain/entities/remote_control_session.dart';
+
+/// The terminal itself: a real VT emulator fed by the agent's output frames, typing back into them.
+///
+/// # Why a terminal emulator rather than a text box
+///
+/// What arrives is not lines of text. It is whatever the shell wrote to its PTY — cursor moves,
+/// colour, scroll regions, alternate-screen switches, everything `top`, `vim`, `less` and a
+/// progress bar produce. Rendering that as text shows the escape sequences instead of obeying
+/// them, which makes exactly the programs an administrator opens a terminal for unusable. `xterm`
+/// is a pure-Dart emulator, so it works on web where nothing platform-specific would.
+///
+/// # The two things this widget owns that the BLoC deliberately does not
+///
+/// **The scrollback**, because a terminal is a mutable buffer fed imperatively, and putting it in
+/// an `Equatable` state would mean re-emitting a growing buffer on every keystroke — see
+/// `RemoteControlBloc.shellOutput`.
+///
+/// **The UTF-8 decoder**, and it has to be one decoder for the whole session rather than one per
+/// frame. The agent sends bytes when it has them, so a frame can end in the middle of a multi-byte
+/// character; decoding each frame on its own turns any such character into a replacement mark. A
+/// single `Utf8Decoder` in non-terminating mode holds the partial sequence over to the next frame,
+/// which is the whole reason [RemoteShellOutput] carries bytes rather than a string.
+class RemoteShellView extends StatefulWidget {
+  const RemoteShellView({
+    required this.output,
+    required this.onInput,
+    super.key,
+  });
+
+  /// The agent's terminal output. Subscribed to once, for the life of this widget.
+  final Stream<Uint8List> output;
+
+  final ValueChanged<RemoteInput> onInput;
+
+  @override
+  State<RemoteShellView> createState() => _RemoteShellViewState();
+}
+
+class _RemoteShellViewState extends State<RemoteShellView> {
+  /// Scrollback deep enough that the output of a build or a long `journalctl` is still there to
+  /// scroll back through, which is most of why anybody reads a terminal after the fact.
+  static const int _scrollbackLines = 5000;
+
+  late final Terminal _terminal = Terminal(maxLines: _scrollbackLines);
+  final TerminalController _controller = TerminalController();
+
+  StreamSubscription<Uint8List>? _subscription;
+
+  /// One decoder for the whole session. See the class note — per-frame decoding corrupts any
+  /// character that straddles a frame boundary.
+  final Converter<List<int>, String> _decoder = const Utf8Decoder(allowMalformed: true);
+
+  /// The last size reported to the host, so an identical resize is not sent again. `onResize` fires
+  /// on every layout pass, not only on a change.
+  int _columns = 0;
+  int _rows = 0;
+
+  @override
+  void initState() {
+    super.initState();
+
+    // Typing. `onOutput` is the emulator's own name for "the user produced these characters",
+    // already encoded the way a terminal expects — arrow keys as escape sequences, Ctrl-C as 0x03.
+    // Sent as UTF-8 bytes, which is what the PTY at the other end is written with.
+    _terminal.onOutput = (text) =>
+        widget.onInput(RemoteShellInput(Uint8List.fromList(const Utf8Encoder().convert(text))));
+
+    // The host re-wraps to whatever the browser is showing, so a window dragged wider is not a
+    // terminal still wrapping at 80 columns.
+    _terminal.onResize = (width, height, _, _) {
+      if (width == _columns && height == _rows) return;
+      _columns = width;
+      _rows = height;
+      widget.onInput(RemoteShellResize(columns: width, rows: height));
+    };
+
+    _subscription = widget.output.listen((bytes) => _terminal.write(_decoder.convert(bytes)));
+  }
+
+  @override
+  void dispose() {
+    unawaited(_subscription?.cancel());
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+
+    return Container(
+      // A fixed height rather than an unbounded one: this sits inside the page's vertical scroll
+      // view, which gives its children infinite height — a terminal laid out in that resolves to
+      // one row and reports it to the host, so the shell wraps at a single line.
+      height: 560,
+      decoration: BoxDecoration(
+        color: palette.background,
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: palette.border),
+      ),
+      padding: const EdgeInsets.all(8),
+      child: TerminalView(
+        _terminal,
+        controller: _controller,
+        // The terminal takes the keyboard as soon as the session opens, so an administrator can
+        // type straight away rather than having to click into it first.
+        autofocus: true,
+        backgroundOpacity: 0,
+        theme: _themeFor(palette),
+        // Not the browser's own text cursor: this is a terminal, and the pointer is used for
+        // selecting output to copy.
+        textStyle: const TerminalStyle(fontFamily: 'Share Tech Mono', fontSize: 13),
+      ),
+    );
+  }
+
+  /// The emulator's own 16-colour palette.
+  ///
+  /// Left as the standard xterm colours rather than themed to match the app: a shell's own prompt,
+  /// `ls --color` and every TUI choose from these by *index*, on the understanding that index 1 is
+  /// red and index 2 is green. Re-mapping them to a house palette would make a failing build print
+  /// its errors in whatever colour happened to sit at index 1 — so only the ground and the
+  /// foreground follow the theme, which is what a terminal application expects to vary.
+  TerminalTheme _themeFor(KintsugiPalette palette) => TerminalTheme(
+        cursor: palette.neon,
+        selection: palette.neon.withValues(alpha: 0.35),
+        foreground: palette.text,
+        background: palette.background,
+        black: const Color(0xFF000000),
+        red: const Color(0xFFCD3131),
+        green: const Color(0xFF0DBC79),
+        yellow: const Color(0xFFE5E510),
+        blue: const Color(0xFF2472C8),
+        magenta: const Color(0xFFBC3FBC),
+        cyan: const Color(0xFF11A8CD),
+        white: const Color(0xFFE5E5E5),
+        brightBlack: const Color(0xFF666666),
+        brightRed: const Color(0xFFF14C4C),
+        brightGreen: const Color(0xFF23D18B),
+        brightYellow: const Color(0xFFF5F543),
+        brightBlue: const Color(0xFF3B8EEA),
+        brightMagenta: const Color(0xFFD670D6),
+        brightCyan: const Color(0xFF29B8DB),
+        brightWhite: const Color(0xFFFFFFFF),
+        searchHitBackground: palette.neon,
+        searchHitBackgroundCurrent: palette.neon,
+        searchHitForeground: palette.background,
+      );
+}

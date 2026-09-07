@@ -56,6 +56,7 @@ dependencies:
   # performs the whole-page navigations sign-in and sign-out need. Declared rather than leaned on
   # as a transitive dependency of the framework, since this app does import it itself.
   web: ^1.1.1
+  xterm: ^4.0.0
 
 dev_dependencies:
   flutter_test:
