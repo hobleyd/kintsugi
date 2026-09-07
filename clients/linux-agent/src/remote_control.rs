@@ -387,6 +387,19 @@ fn handle_server_message(
 
     match message {
         ServerMessage::SessionRequested { session_id, kind, requested_by, consent_timeout_seconds } => {
+            // One session per host, which the server also enforces — but its session table is
+            // in-memory and single-process, so an API restart while a session is live loses that
+            // knowledge and a second request can arrive here. Refusing is the answer that cannot go
+            // wrong, and without it `start_shell_session` would overwrite the live session's socket
+            // and terminal and strand both. The other two agents check the same thing.
+            if relay.session.is_some() || relay.terminal.is_some() {
+                queue(&mut relay.control, &AgentMessage::Consent {
+                    session_id,
+                    outcome: ConsentOutcome::Denied,
+                })?;
+                return Ok(Some("refused a second session on a host already in one".to_string()));
+            }
+
             match kind {
                 // A terminal needs no display and no consent, and root is what this unit already
                 // runs as — so it is started here rather than forwarded anywhere.
@@ -707,6 +720,22 @@ fn handle_agent_frame(
     }
 }
 
+/// Accounts whose "shell" exists but refuses to be one.
+///
+/// Screened by name because `first_existing` only asks whether the path is a file, which every one
+/// of these is — so without this the password entry is taken at face value, the terminal starts,
+/// the program exits immediately, and the session opens and closes in the same breath reporting
+/// "the shell exited". Falling through to the ordinary candidates instead is the useful answer: the
+/// process asking already holds whatever privilege it holds, and a locked login shell is a
+/// statement about interactive logins rather than about this.
+const NOT_A_SHELL: [&str; 5] = [
+    "/usr/sbin/nologin",
+    "/sbin/nologin",
+    "/usr/bin/nologin",
+    "/usr/bin/false",
+    "/bin/false",
+];
+
 /// This process's own login shell, home directory, and the smallest environment a shell needs to
 /// behave like one opened by hand.
 ///
@@ -719,9 +748,10 @@ fn shell_program() -> Result<(ProgramSpec, String)> {
     let (user, home, shell) = passwd_entry().context("could not read this user's password database entry")?;
 
     // A password entry naming a shell that is not installed is rare but survivable, and so is one
-    // naming `/usr/sbin/nologin` — in which case there is genuinely no shell to offer and this says
-    // so rather than quietly starting something else.
+    // naming a refusal like `/usr/sbin/nologin` — see NOT_A_SHELL, which is screened by name because such
+    // a path is a perfectly real file and would otherwise be started and exit at once.
     let program = pty::first_existing(&[shell.as_str()])
+        .filter(|chosen| !NOT_A_SHELL.contains(&chosen.to_string_lossy().as_ref()))
         .or_else(|| pty::first_existing(&["/bin/bash", "/bin/sh"]))
         .ok_or_else(|| anyhow!("no usable login shell for {user} (the password database names {shell})"))?;
 

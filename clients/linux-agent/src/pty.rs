@@ -184,6 +184,31 @@ impl Pty {
     }
 }
 
+impl Drop for Pty {
+    /// A backstop for every path that does not reach [`Pty::terminate`] — a panic, or any `?` after
+    /// `spawn` succeeded. There are several of those in each agent's `remote_control.rs`: opening the
+    /// session socket, setting it non-blocking, and writing the shell banner all come *after* the
+    /// terminal exists. Without this each one leaves a shell running and an unreaped child in a
+    /// process that lives for months, which is exactly what `terminate`'s own note promises cannot
+    /// happen.
+    ///
+    /// Deliberately not `terminate`'s full grace period: a drop is not a place to sleep, so this
+    /// hangs up and reaps without waiting to be polite about it.
+    fn drop(&mut self) {
+        if self.child.try_wait().is_ok_and(|status| status.is_some()) {
+            return;
+        }
+
+        // SAFETY: signalling our own child by the pid we were given for it.
+        unsafe {
+            libc::kill(self.child.id() as libc::pid_t, libc::SIGHUP);
+        }
+
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 /// `openpty` with the size set at creation, both ends `CLOEXEC` so neither leaks into any *other*
 /// child this process spawns, and the master non-blocking.
 fn open_pty(cols: u16, rows: u16) -> io::Result<(OwnedFd, OwnedFd)> {

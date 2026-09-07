@@ -107,13 +107,19 @@ class _RemoteControlView extends StatelessWidget {
     final session = state.session;
     if (session == null) return const SizedBox.shrink();
 
-    // Said plainly rather than left to be assumed from a screen that simply opened. Nobody at this
+    // Said plainly rather than left to be assumed from a terminal that simply opened. Nobody at this
     // host was asked, and an administrator should know that is what they are doing — the record of
     // who opened it is the only thing standing in for the dialog a screen session shows.
+    //
+    // Deliberately says nothing about whether the host shows the session, because the three agents
+    // differ: the macOS one puts it in the menu bar (`tray_menu::report_remote_session`), and the
+    // Linux and Windows shells run outside any desktop and announce nothing at all. A sentence
+    // claiming either would be false on some of the fleet, and the honesty of this notice is the
+    // whole reason it exists.
     if (session.kind == RemoteControlSessionKind.shell && session.isConnectable) {
       return AlertBox.info(
-        'Nobody at ${session.hostname} was asked, and nothing on the host announces this session. '
-        'It has been recorded against your name.',
+        'Nobody at ${session.hostname} was asked before this terminal opened. The session has been '
+        'recorded against your name.',
       );
     }
 

@@ -712,6 +712,22 @@ fn pump_shell_input(socket: &mut Socket, terminal: &mut Pty) -> Result<bool> {
     }
 }
 
+/// Accounts whose "shell" exists but refuses to be one.
+///
+/// Screened by name because `first_existing` only asks whether the path is a file, which every one
+/// of these is — so without this the password entry is taken at face value, the terminal starts,
+/// the program exits immediately, and the session opens and closes in the same breath reporting
+/// "the shell exited". Falling through to the ordinary candidates instead is the useful answer: the
+/// process asking already holds whatever privilege it holds, and a locked login shell is a
+/// statement about interactive logins rather than about this.
+const NOT_A_SHELL: [&str; 5] = [
+    "/usr/sbin/nologin",
+    "/sbin/nologin",
+    "/usr/bin/nologin",
+    "/usr/bin/false",
+    "/bin/false",
+];
+
 /// The console user's own login shell, their home directory, and the smallest environment a shell
 /// needs to behave like one they opened themselves.
 ///
@@ -722,9 +738,10 @@ fn shell_program() -> Result<(ProgramSpec, String)> {
     let (user, home, shell) = passwd_entry().context("could not read this user's password database entry")?;
 
     // A password entry naming a shell that is not installed is rare but survivable, and so is one
-    // naming `/usr/bin/false` for an account that is not meant to log in — in which case there is
-    // genuinely no shell to offer and this reports that rather than starting something else.
+    // naming a refusal like `/usr/bin/false` — see NOT_A_SHELL, which is screened by name because such
+    // a path is a perfectly real file and would otherwise be started and exit at once.
     let program = pty::first_existing(&[shell.as_str()])
+        .filter(|chosen| !NOT_A_SHELL.contains(&chosen.to_string_lossy().as_ref()))
         .or_else(|| pty::first_existing(&["/bin/zsh", "/bin/bash", "/bin/sh"]))
         .ok_or_else(|| anyhow!("no usable login shell for {user} (the password database names {shell})"))?;
 
