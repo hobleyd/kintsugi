@@ -408,6 +408,17 @@ struct BrewInstalledInfo {
     /// stable version, or a cask's defined version) — not necessarily what's
     /// currently installed.
     latest_versions: HashMap<String, String>,
+    /// The newest keg installed per formula — the last entry of `installed`,
+    /// which Homebrew sorts by version. `brew list --versions` prints the same
+    /// kegs in directory order, which is *not* newest-last: with 3.6.3 and
+    /// 3.6.4 of `openssl@3` both present it printed `openssl@3 3.6.4 3.6.3`, so
+    /// taking its last token reported the host as still on 3.6.3, the server
+    /// kept counting it behind, and every cycle ran the script to be told
+    /// "Already up-to-date". The newest keg rather than `linked_keg` because
+    /// that is what `brew outdated` (and so `brew upgrade`) compares against;
+    /// a keg-only formula has no linked keg at all. Casks have one installed
+    /// version and are not here.
+    installed_versions: HashMap<String, String>,
     /// Basenames (e.g. "Slack.app") of every app bundle an installed cask
     /// places under /Applications, read from each cask's `artifacts` list.
     cask_app_bundle_names: HashSet<String>,
@@ -453,6 +464,7 @@ fn brew_installed_info(brew: &Path, run_as: Option<&str>) -> BrewInstalledInfo {
 
     let empty = || BrewInstalledInfo {
         latest_versions: HashMap::new(),
+        installed_versions: HashMap::new(),
         cask_app_bundle_names: HashSet::new(),
         root_required_casks: HashSet::new(),
     };
@@ -544,10 +556,16 @@ fn parse_brew_installed_info(json_text: &str) -> Result<BrewInstalledInfo> {
     let json: serde_json::Value = serde_json::from_str(json_text).context("not valid JSON")?;
 
     let mut latest_versions = HashMap::new();
+    let mut installed_versions = HashMap::new();
 
     for formula in json["formulae"].as_array().into_iter().flatten() {
-        if let (Some(name), Some(latest)) = (formula["name"].as_str(), formula["versions"]["stable"].as_str()) {
+        let Some(name) = formula["name"].as_str() else { continue };
+        if let Some(latest) = formula["versions"]["stable"].as_str() {
             latest_versions.insert(name.to_string(), latest.to_string());
+        }
+        let newest_keg = formula["installed"].as_array().and_then(|kegs| kegs.last()).and_then(|keg| keg["version"].as_str());
+        if let Some(version) = newest_keg {
+            installed_versions.insert(name.to_string(), version.to_string());
         }
     }
 
@@ -577,7 +595,7 @@ fn parse_brew_installed_info(json_text: &str) -> Result<BrewInstalledInfo> {
         }
     }
 
-    Ok(BrewInstalledInfo { latest_versions, cask_app_bundle_names, root_required_casks })
+    Ok(BrewInstalledInfo { latest_versions, installed_versions, cask_app_bundle_names, root_required_casks })
 }
 
 /// Homebrew installs to a fixed prefix depending on CPU architecture
@@ -690,11 +708,14 @@ fn parse_brew_list(listing: &str, info: &BrewInstalledInfo) -> Vec<InstalledApp>
         .filter_map(|line| {
             // Each line is "<name> <version>" for casks, or
             // "<name> <version1> [<version2> ...]" for formulae when more
-            // than one version is kept side by side — take the last as the
-            // most recently installed.
+            // than one keg is kept side by side. That list is in directory
+            // order, not version order, so the formula's newest keg comes from
+            // `brew info` (see `BrewInstalledInfo::installed_versions`); the
+            // last token is only the fallback when `brew info` failed.
             let mut tokens = line.split_whitespace();
             let name = tokens.next()?.to_string();
-            let version = tokens.last()?.to_string();
+            let listed_version = tokens.last()?.to_string();
+            let version = info.installed_versions.get(&name).cloned().unwrap_or(listed_version);
             let available_version = info.latest_versions.get(&name).cloned();
             let application_identifier = if info.root_required_casks.contains(&name) {
                 None
@@ -725,7 +746,13 @@ mod tests {
     /// one-element array.
     const BREW_INFO_JSON: &str = r#"{
       "formulae": [
-        { "name": "jq", "versions": { "stable": "1.7.1" } }
+        { "name": "jq", "versions": { "stable": "1.7.1" } },
+        {
+          "name": "openssl@3",
+          "versions": { "stable": "3.6.4" },
+          "linked_keg": "3.6.4",
+          "installed": [ { "version": "3.6.3" }, { "version": "3.6.4" } ]
+        }
       ],
       "casks": [
         {
@@ -832,10 +859,23 @@ mod tests {
     fn parse_brew_list_takes_the_newest_of_several_formula_versions() {
         let info = parse_brew_installed_info(BREW_INFO_JSON).expect("should parse");
 
-        let apps = parse_brew_list("jq 1.7 1.7.1\n", &info);
+        // The exact line `brew list --formula --versions` printed on a Mac with both kegs kept:
+        // directory order, newest first. Taking the last token reported 3.6.3, so the server
+        // never saw the upgrade land and re-ran the script every cycle.
+        let apps = parse_brew_list("openssl@3 3.6.4 3.6.3\n", &info);
 
-        assert_eq!(apps[0].version, "1.7.1");
-        assert_eq!(apps[0].application_identifier.as_deref(), Some("jq"));
+        assert_eq!(apps[0].version, "3.6.4");
+        assert_eq!(apps[0].application_identifier.as_deref(), Some("openssl@3"));
+    }
+
+    #[test]
+    fn parse_brew_list_falls_back_to_the_last_listed_version_without_brew_info() {
+        // `brew info` is best-effort; a formula it did not describe keeps the old reading.
+        let info = parse_brew_installed_info(BREW_INFO_JSON).expect("should parse");
+
+        let apps = parse_brew_list("zstd 1.5.7 1.5.7_1\n", &info);
+
+        assert_eq!(apps[0].version, "1.5.7_1");
     }
 
     #[test]
@@ -986,3 +1026,4 @@ mod tests {
         assert_eq!(parse_mdls_bool(""), None);
     }
 }
+
