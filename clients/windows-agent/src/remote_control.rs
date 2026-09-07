@@ -447,8 +447,8 @@ fn relay(
 /// hurt, because a server with nobody signed in is the host most likely to want a shell.
 ///
 /// So the terminal runs here, in the service, as **SYSTEM**. That is the strongest of the three
-/// agents' shells (root on Linux, the logged-in user on macOS), and it is stated on the wire rather
-/// than left to be remembered: [`ShellInfo`] carries the account so the viewer can say which it is.
+/// agents' shells (root on both macOS and Linux), and it is stated on the wire rather than left to
+/// be remembered: [`ShellInfo`] carries the account so the viewer can say which it is.
 fn start_shell_session(
     config: &Config,
     serial_number: &str,

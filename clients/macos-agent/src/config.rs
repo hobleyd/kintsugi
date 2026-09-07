@@ -25,6 +25,16 @@ const IDENTITY_DIR: &str = "/Library/Application Support/kintsugi-agent/identity
 /// user can request an install, and only root ever executes one.
 const QUEUE_DIR: &str = "/Library/Application Support/kintsugi-agent/queue";
 
+/// The per-user process's drop-box for "open a root shell for this session id" — deliberately a
+/// *second* queue rather than another `RequestKind` in the first one.
+///
+/// The main queue is drained by the check-in daemon, in the same invocation that registers this
+/// host and runs its patches, and launchd will not run two instances of one job. A shell session
+/// lasts as long as somebody is typing in it, so putting it there would stall this host's check-ins
+/// for the length of a support call. Its own directory, watched by its own LaunchDaemon
+/// (`REMOTE_SHELL_LAUNCHD_LABEL`), is what keeps the two independent.
+const REMOTE_SHELL_QUEUE_DIR: &str = "/Library/Application Support/kintsugi-agent/remote-shell";
+
 /// The root daemon's own durable action log — a guaranteed location regardless of how the
 /// process was invoked (launchd's `StandardOutPath` redirect on top of this is redundant but
 /// harmless). See `logging`.
@@ -46,6 +56,15 @@ const DAEMON_PLIST_PATH: &str = "/Library/LaunchDaemons/au.com.sharpblue.kintsug
 /// confirmed.
 const UI_PLIST_PATH: &str = "/Library/LaunchAgents/au.com.sharpblue.kintsugiagent-ui.plist";
 
+/// Where the remote-shell LaunchDaemon's job definition lives (see packaging/install.sh).
+///
+/// `self_update` writes this one **if and only if it is absent**, which is not tidiness: a Mac
+/// self-updating from a release that predates remote shells gets the new binary and no job to run
+/// it under, and would report every shell session as never connecting with nothing to explain why —
+/// the same gap the Linux agent's `restart_remote_control_unit` closes, and found there first.
+const REMOTE_SHELL_PLIST_PATH: &str =
+    "/Library/LaunchDaemons/au.com.sharpblue.kintsugiagent-remote-shell.plist";
+
 /// Where the root daemon installs itself (see packaging/install.sh) — also this agent's own
 /// self-update target: `self_update::check_and_apply` replaces exactly this path.
 const INSTALLED_BINARY_PATH: &str = "/usr/local/bin/kintsugi-agent";
@@ -64,6 +83,10 @@ const MAS_BINARY_PATH: &str = "/usr/local/bin/kintsugi-mas";
 /// once it's replaced the binary they both run.
 pub const DAEMON_LAUNCHD_LABEL: &str = "au.com.sharpblue.kintsugiagent";
 pub const UI_LAUNCHD_LABEL: &str = "au.com.sharpblue.kintsugiagent-ui";
+
+/// The third job: the root LaunchDaemon that runs one remote shell session and exits, started by
+/// `WatchPaths` on `REMOTE_SHELL_QUEUE_DIR`. See that constant for why it is not the first daemon.
+pub const REMOTE_SHELL_LAUNCHD_LABEL: &str = "au.com.sharpblue.kintsugiagent-remote-shell";
 
 #[derive(Debug, Deserialize, Default)]
 struct FileConfig {
@@ -224,6 +247,14 @@ pub fn daemon_plist_path() -> PathBuf {
 
 pub fn ui_plist_path() -> PathBuf {
     PathBuf::from(UI_PLIST_PATH)
+}
+
+pub fn remote_shell_plist_path() -> PathBuf {
+    PathBuf::from(REMOTE_SHELL_PLIST_PATH)
+}
+
+pub fn remote_shell_queue_dir() -> PathBuf {
+    PathBuf::from(REMOTE_SHELL_QUEUE_DIR)
 }
 
 pub fn installed_binary_path() -> PathBuf {

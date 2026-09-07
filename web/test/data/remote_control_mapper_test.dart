@@ -362,8 +362,8 @@ void main() {
     });
 
     test('a banner missing the account is dropped rather than shown blank', () {
-      // The account is the whole reason the banner exists — it is the logged-in user on macOS,
-      // root on Linux and SYSTEM on Windows — so a blank one would be worse than none.
+      // The account is the whole reason the banner exists — root on macOS and Linux, SYSTEM on
+      // Windows — so a blank one would be worse than none.
       expect(remoteTextUpdateFromJson('{"type":"shell","shell":"/bin/zsh"}'), isNull);
     });
   });

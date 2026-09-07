@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>au.com.sharpblue.kintsugiagent-remote-shell</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/kintsugi-agent</string>
+        <string>--remote-shell</string>
+    </array>
+
+    <!-- The third root job, and it exists because of one launchd rule: two instances of the same
+         job never run at once. A remote shell session lasts as long as somebody is typing in it, so
+         running it under the check-in daemon's label would stall this host's hourly check-ins, its
+         patch queue and its self-update for the length of a support call. Its own label, its own
+         watched directory, and no work of its own beyond holding one PTY on one socket.
+         See src/remote_shell.rs. -->
+
+    <!-- Nothing to do at load, and nothing on a schedule: this job is asleep until the per-user
+         kintsugi-agent (kintsugiagent-ui, which never runs as root) drops a request naming a
+         session the server has already opened. The shell is root's because this is the account
+         holding this host's identity — the same account the Linux and Windows agents run their
+         shells as, and not the logged-in user whose desktop the per-user process lives in. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>WatchPaths</key>
+    <array>
+        <string>/Library/Application Support/kintsugi-agent/remote-shell</string>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/var/log/kintsugi-agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>/var/log/kintsugi-agent.err.log</string>
+
+    <key>UserName</key>
+    <string>root</string>
+
+    <!-- Each run serves whatever is queued and exits; launchd must not restart it, or a Mac with a
+         request it cannot serve would respawn a root process in a loop. -->
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>

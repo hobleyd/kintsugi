@@ -41,15 +41,22 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 LABEL="au.com.sharpblue.kintsugiagent"
 UI_LABEL="au.com.sharpblue.kintsugiagent-ui"
+# The third root job. Its own label rather than a mode of $LABEL because launchd never runs two
+# instances of one job, and a remote shell session lasts as long as somebody is typing in it — under
+# $LABEL it would stall this host's check-ins, patches and self-update for the length of a support
+# call. See src/remote_shell.rs.
+REMOTE_SHELL_LABEL="au.com.sharpblue.kintsugiagent-remote-shell"
 BIN_DEST="/usr/local/bin/kintsugi-agent"
 # The agent's own copy of mas — see src/config.rs MAS_BINARY_PATH and the server's
 # AppStoreUpgradeScript, which runs exactly this path as root and refuses it unless root owns it.
 MAS_DEST="/usr/local/bin/kintsugi-mas"
 PLIST_DEST="/Library/LaunchDaemons/${LABEL}.plist"
 UI_PLIST_DEST="/Library/LaunchAgents/${UI_LABEL}.plist"
+REMOTE_SHELL_PLIST_DEST="/Library/LaunchDaemons/${REMOTE_SHELL_LABEL}.plist"
 CONFIG_DIR="/Library/Application Support/kintsugi-agent"
 CONFIG_DEST="${CONFIG_DIR}/config.toml"
 QUEUE_DIR="${CONFIG_DIR}/queue"
+REMOTE_SHELL_QUEUE_DIR="${CONFIG_DIR}/remote-shell"
 IDENTITY_DIR="${CONFIG_DIR}/identity"
 
 PREBUILT_BIN="$SCRIPT_DIR/kintsugi-agent"
@@ -132,6 +139,16 @@ mkdir -p "$QUEUE_DIR"
 chown root:admin "$QUEUE_DIR"
 chmod 0770 "$QUEUE_DIR"
 
+# The second handoff directory, for the one privileged step that is not a patch: opening a root
+# shell for a remote session the server has already authorised. Same root:admin 0770 as QUEUE_DIR
+# and for the same reason — the per-user agent drops a request naming a session id, and only root
+# acts on one. Separate from QUEUE_DIR because a separate job watches it; see the note on
+# REMOTE_SHELL_LABEL above and src/remote_shell.rs.
+echo "Creating remote shell queue directory at ${REMOTE_SHELL_QUEUE_DIR}..."
+mkdir -p "$REMOTE_SHELL_QUEUE_DIR"
+chown root:admin "$REMOTE_SHELL_QUEUE_DIR"
+chmod 0770 "$REMOTE_SHELL_QUEUE_DIR"
+
 # This host's mutual-TLS identity (certificate, private key, pinned CA and artifact-signing
 # public key — see src/identity.rs): written once by the root daemon at enrollment, read by both
 # the daemon and the per-user agent on every request from then on. Same root:admin 0770 pattern as
@@ -163,6 +180,15 @@ fi
 launchctl bootout system "$PLIST_DEST" 2>/dev/null || true
 launchctl bootstrap system "$PLIST_DEST"
 launchctl enable "system/${LABEL}"
+
+# The remote-shell job. Unlike $PLIST_DEST this one is never rewritten by the agent — it carries no
+# schedule to preserve — so it is always overwritten with the packaged copy.
+echo "Installing remote shell LaunchDaemon to ${REMOTE_SHELL_PLIST_DEST}..."
+install -o root -g wheel -m 644 "$SCRIPT_DIR/${REMOTE_SHELL_LABEL}.plist" "$REMOTE_SHELL_PLIST_DEST"
+
+launchctl bootout system "$REMOTE_SHELL_PLIST_DEST" 2>/dev/null || true
+launchctl bootstrap system "$REMOTE_SHELL_PLIST_DEST"
+launchctl enable "system/${REMOTE_SHELL_LABEL}"
 
 echo "Installing per-user patching LaunchAgent to ${UI_PLIST_DEST}..."
 install -o root -g wheel -m 644 "$SCRIPT_DIR/${UI_LABEL}.plist" "$UI_PLIST_DEST"

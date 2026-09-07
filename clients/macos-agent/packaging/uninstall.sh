@@ -11,13 +11,17 @@ fi
 
 LABEL="au.com.sharpblue.kintsugiagent"
 UI_LABEL="au.com.sharpblue.kintsugiagent-ui"
+REMOTE_SHELL_LABEL="au.com.sharpblue.kintsugiagent-remote-shell"
 PLIST_DEST="/Library/LaunchDaemons/${LABEL}.plist"
 UI_PLIST_DEST="/Library/LaunchAgents/${UI_LABEL}.plist"
+REMOTE_SHELL_PLIST_DEST="/Library/LaunchDaemons/${REMOTE_SHELL_LABEL}.plist"
 BIN_DEST="/usr/local/bin/kintsugi-agent"
 MAS_DEST="/usr/local/bin/kintsugi-mas"
 CONFIG_DIR="/Library/Application Support/kintsugi-agent"
 
 launchctl bootout system "$PLIST_DEST" 2>/dev/null || true
+# Booted out before the plist is removed: launchd keeps running a job whose file has gone.
+launchctl bootout system "$REMOTE_SHELL_PLIST_DEST" 2>/dev/null || true
 
 CONSOLE_USER="$(stat -f '%Su' /dev/console 2>/dev/null || true)"
 if [[ -n "$CONSOLE_USER" && "$CONSOLE_USER" != "root" ]]; then
@@ -26,6 +30,7 @@ if [[ -n "$CONSOLE_USER" && "$CONSOLE_USER" != "root" ]]; then
 fi
 
 rm -f "$PLIST_DEST"
+rm -f "$REMOTE_SHELL_PLIST_DEST"
 rm -f "$UI_PLIST_DEST"
 rm -f "$BIN_DEST" "$MAS_DEST"
 rm -f /var/log/kintsugi-agent.log /var/log/kintsugi-agent.err.log

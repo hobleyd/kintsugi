@@ -75,9 +75,10 @@ class _RemoteControlView extends StatelessWidget {
             title: kind == RemoteControlSessionKind.shell ? 'Remote Terminal' : 'Remote Control',
             subtitle: session == null
                 ? 'Connecting to $name'
-                // The account is named the moment it is known, because it is not the same on every
-                // platform — the logged-in user on macOS, root on Linux, SYSTEM on Windows — and
-                // somebody about to type a command should not have to remember which.
+                // The account is named the moment it is known: root on macOS and Linux, SYSTEM on
+                // Windows, never the logged-in user. Shown rather than assumed because a shell
+                // running as somebody's own account would be a different thing to hand out, and an
+                // administrator should be able to see which they have.
                 : shell != null
                     ? '$name — ${shell.shell} as ${shell.user}, requested by ${session.requestedBy}'
                     : '$name — requested by ${session.requestedBy}',

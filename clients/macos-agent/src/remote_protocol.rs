@@ -290,9 +290,10 @@ pub struct ShellInfo {
     pub message_type: &'static str,
     /// The program running — `/bin/zsh`, `/bin/bash`, `powershell.exe`.
     pub shell: String,
-    /// The account it runs as: the logged-in user on macOS, `root` on Linux, `SYSTEM` on Windows.
-    /// Stated rather than left to be inferred, because the three differ and an administrator about
-    /// to type a command should not have to remember which is which.
+    /// The account it runs as: `root` on macOS and Linux, `SYSTEM` on Windows. Stated rather than
+    /// left to be inferred, because an administrator about to type a command should not have to
+    /// remember which — and because a host that ever answered with a *user* account would be worth
+    /// noticing rather than being reported as if it were the same thing.
     pub user: String,
 }
 

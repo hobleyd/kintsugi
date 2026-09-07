@@ -1,6 +1,6 @@
 #!/bin/bash
 # Builds the release binary, bundles it with everything a brand-new install needs (config.toml,
-# both LaunchDaemon/LaunchAgent plists, install.sh, uninstall.sh, and kintsugi-mas — the same set
+# all three LaunchDaemon/LaunchAgent plists, install.sh, uninstall.sh, and kintsugi-mas — the same set
 # dist/ has always held as kintsugi-agent-macos-installer.tar.gz), and publishes that one bundle to
 # the server.
 #
@@ -130,6 +130,11 @@ codesign --display --requirements - "$WORK_DIR/kintsugi-agent"
 cp "$SCRIPT_DIR/config.toml" "$WORK_DIR/config.toml"
 cp "$SCRIPT_DIR/au.com.sharpblue.kintsugiagent.plist" "$WORK_DIR/au.com.sharpblue.kintsugiagent.plist"
 cp "$SCRIPT_DIR/au.com.sharpblue.kintsugiagent-ui.plist" "$WORK_DIR/au.com.sharpblue.kintsugiagent-ui.plist"
+# The remote-shell job. It has to travel in the archive as well as be installed by install.sh,
+# because self_update installs it on a host that has not got one — see
+# self_update::install_remote_shell_job_if_absent, without which a Mac updating from a release that
+# predates remote shells would report every terminal session as never connecting.
+cp "$SCRIPT_DIR/au.com.sharpblue.kintsugiagent-remote-shell.plist" "$WORK_DIR/au.com.sharpblue.kintsugiagent-remote-shell.plist"
 cp "$SCRIPT_DIR/install.sh" "$WORK_DIR/install.sh"
 cp "$SCRIPT_DIR/uninstall.sh" "$WORK_DIR/uninstall.sh"
 
@@ -180,6 +185,7 @@ ARCHIVE_PATH="$WORK_DIR/$ARCHIVE_NAME"
 tar -czf "$ARCHIVE_PATH" -C "$WORK_DIR" \
     kintsugi-agent kintsugi-mas config.toml \
     au.com.sharpblue.kintsugiagent.plist au.com.sharpblue.kintsugiagent-ui.plist \
+    au.com.sharpblue.kintsugiagent-remote-shell.plist \
     install.sh uninstall.sh
 
 # --output-dir stops here: the archive is the deliverable, and there is no server to send it to.

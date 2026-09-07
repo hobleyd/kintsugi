@@ -30,6 +30,7 @@ pub fn run(client: &reqwest::blocking::Client, config: &Config, serial_number: &
     logging::info("server marked this host for removal — uninstalling completely from this machine");
 
     bootout_ui_agent();
+    bootout_remote_shell();
     remove_files();
     report_removed(client, config, serial_number);
 
@@ -42,6 +43,7 @@ pub fn run(client: &reqwest::blocking::Client, config: &Config, serial_number: &
 /// subset `packaging/uninstall.sh` leaves behind for a human to clean up manually.
 fn remove_files() {
     remove_path(&config::ui_plist_path());
+    remove_path(&config::remote_shell_plist_path());
     remove_path(&config::daemon_plist_path());
     remove_path(&config::installed_binary_path());
     remove_path(&config::mas_binary_path());
@@ -87,6 +89,15 @@ fn bootout_ui_agent() {
     let target = format!("gui/{uid}/{}", config::UI_LAUNCHD_LABEL);
     logging::info(&format!("stopping {target}"));
     run_launchctl(&["bootout", &target]);
+}
+
+/// Unloads the remote-shell job, so a session in flight during a removal is ended rather than left
+/// holding a root shell on a host that is being decommissioned.
+///
+/// Booted out before `remove_files`, for the same reason the per-user agent is: a plist deleted from
+/// under a loaded job leaves launchd still running it.
+fn bootout_remote_shell() {
+    run_launchctl(&["bootout", &format!("system/{}", config::REMOTE_SHELL_LAUNCHD_LABEL)]);
 }
 
 /// The last thing `run` does — unloads this very LaunchDaemon, which ends this process.

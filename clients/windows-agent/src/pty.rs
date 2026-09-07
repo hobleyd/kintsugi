@@ -6,8 +6,8 @@
 //! `read_available`, `write_all`, `resize`, `try_wait` and `terminate`; what is kept identical is
 //! the shape those six present, because the relay loop above them is meant to read the same on all
 //! three. What the program *is* stays the caller's decision and lives in `remote_control.rs`, which
-//! is exactly where the three platforms differ: the logged-in user's shell on macOS, root's on
-//! Linux, and `powershell.exe` as SYSTEM here.
+//! is exactly where the three platforms differ: root's shell on macOS and Linux, and
+//! `powershell.exe` as SYSTEM here.
 //!
 //! # ConPTY, and the two pipes around it
 //!

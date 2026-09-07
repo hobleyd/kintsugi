@@ -39,11 +39,16 @@ public enum RemoteControlSessionKind
     /// same <c>remote_control_sessions</c> row a screen request does, naming who asked and when.
     /// </para>
     /// <para>
-    /// What the shell runs as differs by platform, and is stated in the viewer rather than left to
-    /// be remembered: the logged-in user on macOS (the only agent whose per-user half holds the
-    /// fleet identity), <c>root</c> on Linux, and <c>SYSTEM</c> on Windows. The macOS case is the
-    /// one worth noticing — it is a shell inside somebody's own login session, opened without
-    /// asking them.
+    /// The shell runs as the account that already holds this host's fleet identity, which is
+    /// <c>root</c> on macOS and Linux and <c>SYSTEM</c> on Windows — never the logged-in user, on
+    /// any platform. It is stated in the viewer rather than left to be remembered, because a shell
+    /// running as somebody's own account would be a materially different thing to hand out and
+    /// should be visible as such if one ever appeared.</para>
+    /// <para>
+    /// macOS reaches that through a handoff the other two do not need: remote control lives in its
+    /// per-user process (the screen belongs to a GUI session), so that process answers the request
+    /// and asks a root LaunchDaemon to open the terminal and the media socket. See
+    /// <c>clients/macos-agent/src/remote_shell.rs</c>.
     /// </para>
     /// </remarks>
     Shell

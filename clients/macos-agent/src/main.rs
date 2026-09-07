@@ -12,6 +12,7 @@ mod pty;
 mod queue;
 mod remote_control;
 mod remote_protocol;
+mod remote_shell;
 mod schedule;
 mod screen_capture;
 mod self_removal;
@@ -117,7 +118,32 @@ fn main() -> Result<()> {
         return run_ui_agent();
     }
 
+    // A root shell session, started by launchd's `WatchPaths` on the remote-shell queue rather than
+    // on a schedule. Its own mode and its own job because it runs for as long as somebody is typing:
+    // launchd will not run two instances of one job, so sharing the check-in daemon's would stall
+    // this host's check-ins for the length of a support call. See `remote_shell`.
+    if std::env::args().any(|arg| arg == "--remote-shell") {
+        return run_remote_shell();
+    }
+
     run_daemon()
+}
+
+/// One invocation of the remote-shell daemon: run whatever sessions are queued, then exit.
+///
+/// Deliberately does **not** check in, register, or touch the patch queue. It is a second root entry
+/// point that exists only to hold a PTY on a socket, and giving it any of the daemon's other work
+/// would mean a support call could trigger a patch cycle.
+fn run_remote_shell() -> Result<()> {
+    // Into the daemon's own log, not the per-user agent's: this runs as root and its lines belong
+    // beside the check-in daemon's. Without this call `logging::info` here would reach only the
+    // stderr launchd captures, which is the file nobody is pointed at first.
+    logging::init(&config::daemon_log_path());
+
+    let config = Config::load();
+    let serial_number = system_info::serial_number().context("could not determine serial number")?;
+
+    remote_shell::run(&config, &serial_number)
 }
 
 /// What a check-in leaves behind for the schedule step in `run_daemon`.

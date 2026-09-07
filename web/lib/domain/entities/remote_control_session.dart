@@ -154,9 +154,10 @@ class RemoteShellInfo extends RemoteScreenUpdate {
   /// The program running: `/bin/zsh`, `/bin/bash`, `pwsh.exe`.
   final String shell;
 
-  /// The account it runs as, and **the reason this is on the wire at all**: it is the logged-in
-  /// user on macOS, `root` on Linux and `SYSTEM` on Windows, which is far too large a difference to
-  /// leave an administrator to remember before typing a command.
+  /// The account it runs as, and **the reason this is on the wire at all**: `root` on macOS and
+  /// Linux, `SYSTEM` on Windows — never the logged-in user, on any platform. Shown rather than
+  /// assumed, because a shell running as somebody's own account would be a materially different
+  /// thing to hand out and ought to be visible as such if one ever appeared.
   final String user;
 
   @override

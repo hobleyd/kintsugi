@@ -868,10 +868,12 @@ is written for it, naming who asked and when. Three things follow and none of th
 again in `RemoteControlRelaySession.LatchConsent` — the second is not belt-and-braces, it is the
 latch the socket gate actually reads, so enforcing it in the entity alone would let an agent open
 *capture, keyboard and pointer* on a host shown no dialog simply by claiming no permission was
-needed. The account differs by platform and is stated on the wire (`ShellInfo.user`) rather than
-left to be remembered: the **logged-in user** on macOS, **root** on Linux, **SYSTEM** on Windows.
-And the macOS case is the one worth noticing — it is a shell inside somebody's own login session,
-opened without asking them — which is why the screen says out loud that nobody was asked.
+needed. The shell always runs as the account that already holds this host's fleet identity —
+**root** on macOS and Linux, **SYSTEM** on Windows, and **never the logged-in user on any
+platform** — which is what makes "nobody is asked" defensible: it is not a session inside somebody
+else's desktop, it is the administrative access an SSH key would already give. It is stated on the
+wire (`ShellInfo.user`) and shown in the viewer rather than left to be remembered, so a host that
+ever answered with a user account would be visible as the different thing it is.
 
 **A terminal needs no desktop, and decoupling that from reachability is what makes the feature
 useful.** Both the Linux and Windows agents used to hold their control socket *only* while somebody
@@ -881,15 +883,45 @@ all, and those are precisely the hosts an administrator wants a terminal on. Bot
 socket whenever the host has an identity, treat the desktop as a *capability* rather than a
 precondition, and answer a screen request that arrives without one with
 `ConsentOutcome::Unavailable` — the agent saying "there is nobody here" at once, rather than the
-host being invisible and the administrator being told the agent is unreachable. **macOS cannot be
-fixed the same way and is not**: its per-user process is the half holding the fleet identity, so a
-Mac with nobody logged in stays unreachable for both kinds.
+host being invisible and the administrator being told the agent is unreachable. **macOS is still unreachable with nobody logged
+in**, for both kinds: its *control* socket is held by the per-user process, so there is nothing to
+receive the request in the first place. Only the shell's execution moved to root, not the
+negotiation — moving the control socket too would mean porting the Linux split (root holds the
+socket, per-user connects back over a local one) to macOS wholesale.
 
-The PTY runs in whichever process already holds the identity and needs no helper: the per-user
-process on macOS, the resident root unit on Linux (no `remote_ipc` hop — nothing crosses it for a
-shell), and the **service itself** on Windows via ConPTY, with no `session_launcher` and no SYSTEM
-session helper. Everything the Windows helper exists for is about a desktop, and requiring one
-would put a logged-in user back in the way of the host most likely to want a shell.
+The PTY runs in whichever process already holds the identity and needs no helper: the resident root
+unit on Linux (no `remote_ipc` hop — nothing crosses it for a shell) and the **service itself** on
+Windows via ConPTY, with no `session_launcher` and no SYSTEM session helper. Everything the Windows
+helper exists for is about a desktop, and requiring one would put a logged-in user back in the way of
+the host most likely to want a shell.
+
+**macOS needs a handoff for that, and it is a third root job.** Remote control lives in its per-user
+process, because the screen belongs to a GUI session the root daemon has not got — so the per-user
+process answers the request on the control socket it already holds, flushes that answer, and drops a
+request naming the session id into `remote-shell/`. launchd's `WatchPaths` starts
+`kintsugi-agent --remote-shell`, which opens the **media socket itself** and runs a root PTY on it.
+That needs no server change at all, and the reason is worth holding onto: the two sockets of a
+session are independent, and the server pairs a media socket by `(serialNumber, sessionId)` and
+authenticates it by the certificate nginx verified — which the root daemon presents because it reads
+the same `identity/` directory. Nothing server-side can tell, or needs to.
+
+Three things about that follow. It is **its own launchd job**, not a fourth `queue::RequestKind`:
+the main queue is drained by the check-in daemon, launchd never runs two instances of one job, and a
+session held open for a support call would otherwise stall this host's check-ins, patches and
+self-update for its whole length. A **forged request buys nothing** — the server refuses a media
+socket for a session it did not create for this serial and has not seen answered, so the only id
+that works is one an administrator has already opened a shell for; this is the main queue's "the
+worst it can do is start an already-approved upgrade early" in its narrowest form, and it is why the
+request carries a session id and nothing else. And `self_update` installs that plist **if and only
+if it is absent**, exactly as Linux's `restart_remote_control_unit` does — a Mac updating from a
+release that predates this would otherwise get a binary that understands `--remote-shell` and no job
+to run it under, and report every terminal session as never connecting with nothing to explain why.
+
+**Nothing is shown on the Mac while a shell session runs**, deliberately. The menu bar reports a
+*screen* session, because somebody's screen is being watched; a root shell is not a session inside
+anyone's desktop, the other two agents announce nothing either, and a notice the per-user process
+raised it could not reliably clear — the session runs in a different process, on a socket that one
+cannot see.
 
 **Neither socket is new, and no nginx change was needed.** A shell session uses the same standing
 control socket and the same per-session media socket a screen session does; the media protocol
@@ -1383,7 +1415,7 @@ original — then the others for what each platform forced to differ. The differ
 | Host identity | hardware serial, always present | SMBIOS serial, **often a placeholder** | DMI serial, **often a placeholder** |
 | Nobody logged in | nothing patches | nothing patches | root service patches unattended — see below |
 | Remote control | per-user process, consent + capture + input | service holds the socket, a **SYSTEM session helper** does the rest, named pipe between | resident root unit holds the socket, per-user process does the rest, unix socket between; X11 via XTEST, Wayland via a separate portal/PipeWire binary |
-| Remote shell | per-user process, as the **logged-in user** | the service itself, as **SYSTEM**, over ConPTY — no helper | the resident root unit, as **root** — nothing crosses `remote_ipc` |
+| Remote shell | a third root LaunchDaemon, as **root**, asked by the per-user process through its own queue | the service itself, as **SYSTEM**, over ConPTY — no helper | the resident root unit, as **root** — nothing crosses `remote_ipc` |
 | Reachable with nobody logged in | no — the per-user process holds the identity | yes, for a shell; a screen request answers `Unavailable` | yes, for a shell; a screen request answers `Unavailable` |
 
 **Linux borrows its architecture from Windows, not macOS, and for the same forcing reason.** Every
@@ -1581,6 +1613,17 @@ wedged by a release before this one need `Restart-Service KintsugiAgent` by hand
   fresh install. Both agents publish `.tar.gz` — Windows included — because
   `AgentPackageArchiveRewriter` reads gzip-tar specifically, and `tar.exe` has shipped in Windows
   since 10 1803.
+- **The macOS remote-shell handoff is four names that nothing checks agree.** The request suffix
+  (`remote_shell::REQUEST_EXTENSION`), the directory (`config::REMOTE_SHELL_QUEUE_DIR`), the job
+  label (`config::REMOTE_SHELL_LAUNCHD_LABEL`) and the `WatchPaths` entry plus `ProgramArguments`
+  in `packaging/au.com.sharpblue.kintsugiagent-remote-shell.plist` all have to line up, and so does
+  the `--remote-shell` arm in `main`. Change one and the per-user process writes a request nothing
+  ever reads: the session is reported as never connecting, and neither log says why. A test pins the
+  suffix; nothing pins the rest.
+- The macOS archive carries **three** plists, not two. `publish-release.sh` packages the
+  remote-shell one because `self_update::install_remote_shell_job_if_absent` installs it on a host
+  that has not got one — drop it from the archive and hosts installed before remote shells never
+  gain them, however many times they self-update.
 - `/usr/local/bin/kintsugi-mas` is named in four places that nothing checks agree: the macOS agent's
   `config::MAS_BINARY_PATH` (what `self_update` replaces and `self_removal` deletes), its
   `MAS_BINARY_NAME` (the tarball entry `self_update` extracts and `publish-release.sh` writes),
