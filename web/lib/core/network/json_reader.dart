@@ -5,9 +5,9 @@
 ///
 ///   * **Enums arrive as either a name or an ordinal.** `UpgradePathStatus`, `UpgradeMethod` and
 ///     `ScriptApprovalPublishOutcome` carry converters that write their names; `HostStatus`,
-///     `AiProvider`, `AuthProvider` and `PatchingTimeUnit` have none, so System.Text.Json writes
-///     their ordinals. That asymmetry must *not* be fixed by turning on a global string-enum
-///     converter: all three Rust agents parse some of these by ordinal — see
+///     `AiProvider`, `AuthProvider`, `AuditProvider` and `PatchingTimeUnit` have none, so
+///     System.Text.Json writes their ordinals. That asymmetry must *not* be fixed by turning on a
+///     global string-enum converter: all three Rust agents parse some of these by ordinal — see
 ///     `clients/*/src/policy.rs`, which reads `interval_unit` as a `u8` — so flipping it would
 ///     break the fleet. [enumFromJson] reads whichever form arrives instead.
 ///   * **Dates are ISO 8601 with an offset** (`DateTimeOffset`), which [dateTimeFromJson] parses

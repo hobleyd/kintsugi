@@ -41,6 +41,7 @@ public static class DependencyInjection
         // may capture these values in a constructor any more.
         services.AddScoped<IGitHubSettingsProvider, GitHubSettingsProvider>();
         services.AddScoped<IAuthenticationSettingsRepository, AuthenticationSettingsRepository>();
+        services.AddScoped<IAuditSettingsRepository, AuditSettingsRepository>();
         services.AddScoped<IVantaSettingsRepository, VantaSettingsRepository>();
         services.AddScoped<IRemoteControlSessionRepository, RemoteControlSessionRepository>();
         // Scoped and read per call, for the same reason IGitHubSettingsProvider is: these values are

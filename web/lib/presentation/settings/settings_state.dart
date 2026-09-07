@@ -3,8 +3,8 @@ import 'package:equatable/equatable.dart';
 /// The state every settings screen is in: the stored values, whether a read or a save is in
 /// flight, and how the last save went.
 ///
-/// Shared across the four screens because the shape genuinely is the same — and because the two
-/// things worth getting right are worth getting right once. Those are [saved], which drives the
+/// Shared across the settings screens because the shape genuinely is the same — and because the
+/// two things worth getting right are worth getting right once. Those are [saved], which drives the
 /// "Settings saved." confirmation and has to clear again as soon as the form is edited or it will
 /// still be sitting there over unsaved changes; and [fieldErrors], which is what lets a validation
 /// failure appear under the field that caused it.

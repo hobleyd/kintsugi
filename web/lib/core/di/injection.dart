@@ -57,6 +57,7 @@ Future<void> configureDependencies() async {
     ..registerSingleton<AgentPackageRepository>(AgentPackageRepositoryImpl(api))
     ..registerSingleton<UpgradeScriptRepository>(UpgradeScriptRepositoryImpl(api))
     ..registerSingleton<AiAgentSettingsRepository>(AiAgentSettingsRepositoryImpl(api))
+    ..registerSingleton<AuditSettingsRepository>(AuditSettingsRepositoryImpl(api))
     ..registerSingleton<AuthenticationSettingsRepository>(AuthenticationSettingsRepositoryImpl(api))
     ..registerSingleton<GitHubSettingsRepository>(GitHubSettingsRepositoryImpl(api))
     ..registerSingleton<PatchingPolicySettingsRepository>(PatchingPolicySettingsRepositoryImpl(api))
@@ -74,6 +75,7 @@ void _registerUseCases() {
   final packages = locator<AgentPackageRepository>();
   final scripts = locator<UpgradeScriptRepository>();
   final ai = locator<AiAgentSettingsRepository>();
+  final audit = locator<AuditSettingsRepository>();
   final auth = locator<AuthenticationSettingsRepository>();
   final gitHub = locator<GitHubSettingsRepository>();
   final policy = locator<PatchingPolicySettingsRepository>();
@@ -113,6 +115,8 @@ void _registerUseCases() {
     ..registerSingleton(GetOllamaModels(ai))
     ..registerSingleton(CheckGooseCliStatus(ai))
     ..registerSingleton(CheckClaudeAgentSdkStatus(ai))
+    ..registerSingleton(GetAuditSettings(audit))
+    ..registerSingleton(UpdateAuditSettings(audit))
     ..registerSingleton(GetAuthenticationSettings(auth))
     ..registerSingleton(UpdateAuthenticationSettings(auth))
     ..registerSingleton(GetGitHubSettings(gitHub))

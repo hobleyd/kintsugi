@@ -63,6 +63,33 @@ enum AuthProvider {
       };
 }
 
+/// Mirrors `AuditProvider`. Sent as an ordinal, like `AuthProvider`.
+enum AuditProvider {
+  datadog,
+  grafanaLoki,
+  googleCloudLogging,
+  awsCloudWatch,
+  azureMonitor,
+  splunkHec,
+  genericHttp;
+
+  String get label => switch (this) {
+        AuditProvider.datadog => 'Datadog',
+        AuditProvider.grafanaLoki => 'Grafana Loki (Grafana Cloud or self-hosted)',
+        AuditProvider.googleCloudLogging => 'Google Cloud Logging',
+        AuditProvider.awsCloudWatch => 'AWS CloudWatch Logs',
+        AuditProvider.azureMonitor => 'Azure Monitor (Log Analytics)',
+        AuditProvider.splunkHec => 'Splunk (HTTP Event Collector)',
+        AuditProvider.genericHttp => 'Other (generic HTTP endpoint)',
+      };
+
+  /// Whether the provider cannot be used without a secret. Mirrors
+  /// `AuditSettings.RequiresSecret`: Loki and a generic endpoint may be unauthenticated; every
+  /// other entry is a hosted service with a key. Decides whether the secret field says
+  /// "required" or "optional", and nothing more — the server is what enforces it.
+  bool get requiresSecret => this != AuditProvider.grafanaLoki && this != AuditProvider.genericHttp;
+}
+
 /// Mirrors `PatchingTimeUnit`. Sent as an ordinal — and this one's ordinal is read by all three
 /// Rust agents (`policy.rs` parses `interval_unit` as a `u8`), so it is the clearest example of
 /// why the wire format here is not ours to change.

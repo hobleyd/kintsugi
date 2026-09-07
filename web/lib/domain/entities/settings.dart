@@ -50,6 +50,57 @@ class AuthenticationSettings extends Equatable {
       [provider, clientId, authority, tenantId, hostedDomain, isEnabled, hasClientSecret];
 }
 
+/// Mirrors `AuditSettingsDto`.
+///
+/// Which field a provider reads is documented on the C# entity `AuditSettings`; the ones the
+/// selected provider does not use arrive null. The secret is never carried — [hasSecret] reports
+/// only whether one is stored.
+class AuditSettings extends Equatable {
+  const AuditSettings({
+    required this.provider,
+    required this.isEnabled,
+    required this.endpoint,
+    required this.region,
+    required this.clientId,
+    required this.hasSecret,
+    required this.tenantId,
+    required this.projectId,
+    required this.logGroup,
+    required this.dataCollectionRuleId,
+    required this.stream,
+    required this.index,
+  });
+
+  final AuditProvider provider;
+  final bool isEnabled;
+  final String? endpoint;
+  final String? region;
+  final String? clientId;
+  final bool hasSecret;
+  final String? tenantId;
+  final String? projectId;
+  final String? logGroup;
+  final String? dataCollectionRuleId;
+  final String? stream;
+  final String? index;
+
+  @override
+  List<Object?> get props => [
+        provider,
+        isEnabled,
+        endpoint,
+        region,
+        clientId,
+        hasSecret,
+        tenantId,
+        projectId,
+        logGroup,
+        dataCollectionRuleId,
+        stream,
+        index,
+      ];
+}
+
 /// Mirrors `GitHubSettingsDto`.
 class GitHubSettings extends Equatable {
   const GitHubSettings({

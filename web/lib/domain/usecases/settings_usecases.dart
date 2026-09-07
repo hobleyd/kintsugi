@@ -82,6 +82,51 @@ class UpdateAuthenticationSettings {
       );
 }
 
+class GetAuditSettings {
+  const GetAuditSettings(this._repository);
+
+  final AuditSettingsRepository _repository;
+
+  Future<AuditSettings> call() => _repository.read();
+}
+
+class UpdateAuditSettings {
+  const UpdateAuditSettings(this._repository);
+
+  final AuditSettingsRepository _repository;
+
+  Future<AuditSettings> call({
+    required AuditProvider provider,
+    required bool isEnabled,
+    required String? endpoint,
+    required String? region,
+    required String? clientId,
+    required String? secret,
+    required bool clearSecret,
+    required String? tenantId,
+    required String? projectId,
+    required String? logGroup,
+    required String? dataCollectionRuleId,
+    required String? stream,
+    required String? index,
+  }) =>
+      _repository.update(
+        provider: provider,
+        isEnabled: isEnabled,
+        endpoint: endpoint,
+        region: region,
+        clientId: clientId,
+        secret: secret,
+        clearSecret: clearSecret,
+        tenantId: tenantId,
+        projectId: projectId,
+        logGroup: logGroup,
+        dataCollectionRuleId: dataCollectionRuleId,
+        stream: stream,
+        index: index,
+      );
+}
+
 class GetGitHubSettings {
   const GetGitHubSettings(this._repository);
 

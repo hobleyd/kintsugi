@@ -81,6 +81,51 @@ class AuthenticationSettingsRepositoryImpl implements AuthenticationSettingsRepo
       );
 }
 
+class AuditSettingsRepositoryImpl implements AuditSettingsRepository {
+  const AuditSettingsRepositoryImpl(this._api);
+
+  final ApiClient _api;
+
+  @override
+  Future<AuditSettings> read() async => auditSettingsFromJson(
+        await _api.getJson('/api/admin/settings/auditing') as Map<String, dynamic>,
+      );
+
+  @override
+  Future<AuditSettings> update({
+    required AuditProvider provider,
+    required bool isEnabled,
+    required String? endpoint,
+    required String? region,
+    required String? clientId,
+    required String? secret,
+    required bool clearSecret,
+    required String? tenantId,
+    required String? projectId,
+    required String? logGroup,
+    required String? dataCollectionRuleId,
+    required String? stream,
+    required String? index,
+  }) async =>
+      auditSettingsFromJson(
+        await _api.putJson('/api/admin/settings/auditing', body: {
+          'provider': provider.index,
+          'isEnabled': isEnabled,
+          'endpoint': endpoint,
+          'region': region,
+          'clientId': clientId,
+          'secret': secret,
+          'clearSecret': clearSecret,
+          'tenantId': tenantId,
+          'projectId': projectId,
+          'logGroup': logGroup,
+          'dataCollectionRuleId': dataCollectionRuleId,
+          'stream': stream,
+          'index': index,
+        }) as Map<String, dynamic>,
+      );
+}
+
 class GitHubSettingsRepositoryImpl implements GitHubSettingsRepository {
   const GitHubSettingsRepositoryImpl(this._api);
 

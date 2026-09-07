@@ -4,6 +4,15 @@ import '../../domain/entities/settings.dart';
 
 const _aiProviderNames = ['Anthropic', 'OpenAI', 'Ollama', 'GooseCli', 'ClaudeAgentSdk'];
 const _authProviderNames = ['GoogleWorkspace', 'MicrosoftEntra', 'GenericOidc', 'Clerk'];
+const _auditProviderNames = [
+  'Datadog',
+  'GrafanaLoki',
+  'GoogleCloudLogging',
+  'AwsCloudWatch',
+  'AzureMonitor',
+  'SplunkHec',
+  'GenericHttp',
+];
 const _timeUnitNames = ['Hours', 'Days'];
 
 /// Reads an `AiAgentSettingsDto`.
@@ -30,6 +39,27 @@ AuthenticationSettings authenticationSettingsFromJson(Map<String, dynamic> json)
       hostedDomain: json['hostedDomain'] as String?,
       isEnabled: json['isEnabled'] as bool? ?? false,
       hasClientSecret: json['hasClientSecret'] as bool? ?? false,
+    );
+
+/// Reads an `AuditSettingsDto`.
+AuditSettings auditSettingsFromJson(Map<String, dynamic> json) => AuditSettings(
+      provider: enumFromJson(
+        json['provider'],
+        AuditProvider.values,
+        _auditProviderNames,
+        AuditProvider.datadog,
+      ),
+      isEnabled: json['isEnabled'] as bool? ?? false,
+      endpoint: json['endpoint'] as String?,
+      region: json['region'] as String?,
+      clientId: json['clientId'] as String?,
+      hasSecret: json['hasSecret'] as bool? ?? false,
+      tenantId: json['tenantId'] as String?,
+      projectId: json['projectId'] as String?,
+      logGroup: json['logGroup'] as String?,
+      dataCollectionRuleId: json['dataCollectionRuleId'] as String?,
+      stream: json['stream'] as String?,
+      index: json['index'] as String?,
     );
 
 /// Reads a `GitHubSettingsDto`.

@@ -523,14 +523,14 @@ pins all of it at a width narrow enough to force every case; none of them throws
 build, and none is visible in a table whose labels happen to be short.
 
 **Enums cross the wire as names or as ordinals depending on the type, and that must not be
-"fixed".** `UpgradePathStatus`, `UpgradeMethod` and `ScriptApprovalPublishOutcome` carry converters
-and write their names; `HostStatus`, `AiProvider`, `AuthProvider`, `PatchingTimeUnit` and
-`AgentPackageImportOutcome` have none, so System.Text.Json writes their ordinals. Turning on a
-global string-enum converter would break the fleet: all three agents read some of these as ordinals
-— `clients/*/src/policy.rs` parses `interval_unit` as a `u8`. `web/lib/core/network/json_reader.dart`
-reads whichever form arrives; declaration order in `web/lib/domain/entities/enums.dart` is therefore
-load-bearing. `UpgradeMethod` is written back as a *name*, because `LenientEnumConverter` reads
-nothing else.
+"fixed".** `UpgradePathStatus`, `UpgradeMethod` and `ScriptApprovalPublishOutcome` carry
+converters and write their names; `HostStatus`, `AiProvider`, `AuthProvider`, `AuditProvider`,
+`PatchingTimeUnit` and `AgentPackageImportOutcome` have none, so System.Text.Json writes their
+ordinals. Turning on a global string-enum converter would break the fleet: all three agents read
+some of these as ordinals — `clients/*/src/policy.rs` parses `interval_unit` as a `u8`.
+`web/lib/core/network/json_reader.dart` reads whichever form arrives; declaration order in
+`web/lib/domain/entities/enums.dart` is therefore load-bearing. `UpgradeMethod` is written back as
+a *name*, because `LenientEnumConverter` reads nothing else.
 
 **Two things about the image build that each cost a build to learn.** The Flutter stage is pinned to
 `linux/amd64` because Flutter publishes no arm64 Linux SDK, so on Apple Silicon it runs under
@@ -686,9 +686,9 @@ configuration, which is precisely what cannot be captured. Callers that need to 
 provider, which is also where the `hobleyd/kintsugi` default is resolved — at read time, so the
 default lives in one place rather than being written into every row.
 
-**The settings subnav is alphabetical by label.** AI Agent, Authentication, GitHub, Patching Policy,
-Vanta. It is a lookup rather than a workflow, so there is no other order a reader could predict; keep
-it that way when adding one.
+**The settings subnav is alphabetical by label.** AI Agent, Auditing, Authentication, GitHub,
+Patching Policy, Vanta. It is a lookup rather than a workflow, so there is no other order a reader
+could predict; keep it that way when adding one.
 
 **Fresh deploys lock everything to the Authentication screen, and nothing redirects any more.**
 With no `AuthenticationSettings` row saved, the client pins itself to `/settings/authentication`.
@@ -766,6 +766,45 @@ address every synced record links back to, so it must be the *browser's* door, n
 — see "The fallback is a guess" above. It cannot be derived from the request either, because the
 sync normally runs on a timer with nothing in flight. HTTPS is enforced at save time in the domain
 entity, because Vanta requires it and the alternative is an opaque rejection a day later.
+
+## Audit event shipping: the Auditing settings
+
+Settings > Auditing names the logging platform a record of what happens here is shipped to —
+Datadog, Grafana Loki, Google Cloud Logging, AWS CloudWatch Logs, Azure Monitor, Splunk HEC, or any
+endpoint that takes JSON over HTTP. It is modelled on the Authentication screen: one provider chosen
+from a list, the fields that provider needs, and setup instructions for exactly that provider beside
+them.
+
+**Nothing ships events yet, and that is the current state rather than an oversight.** `AuditSettings`
+is written and read and nothing consumes it; the configuration was built first so the credential and
+the destination exist before there is anything to send. What the screen's instructions promise is
+therefore a specification for whatever implements the sending — the URL paths, header names and
+label values named there (`/api/v2/logs` with `DD-API-KEY`, `/loki/api/v1/push` under a single
+`app="kintsugi"` label, `Authorization: Splunk <token>` with sourcetype `_json`, …) are what an
+operator granting a credential from those steps is entitled to have arrive. Change one and change
+the instructions with it.
+
+**Changing the provider drops the stored secret, unlike every other settings screen.** A blank secret
+on the way in means "keep the stored one" — the page never received the real value, so it cannot send
+it back unchanged — but that only holds for the *same* provider. A Datadog API key is not an AWS
+secret access key, and carrying one across would ship a credential issued by one vendor to another on
+the first event. `AuditSettings.Apply` is where that happens, and the screen says so beside the field.
+
+**Three places state which fields a provider needs, and they must agree.** `AuditSettings.Apply`
+keeps the invariant true whoever writes to it; `UpdateAuditSettingsCommandValidator` duplicates it
+deliberately, so a bad save lands under the field that caused it rather than as one sentence at the
+top; and `auditing_screen.dart` decides which boxes to show and restates the requirements as
+instructions. The validator's messages are keyed by C# property name, which is how a field error
+finds its box — so `Region` is the Datadog site *and* the AWS region, and `ClientId` is the AWS access
+key ID, the Azure application ID and the Grafana Cloud username. Those columns are shared on purpose;
+renaming one to suit a single provider breaks the other two.
+
+**`AuditProvider` crosses the wire as an ordinal**, like `AuthProvider` and for the same reason, so
+declaration order in `web/lib/domain/entities/enums.dart` mirrors the C# enum and new members are
+appended, never inserted. The secret is never returned by any route — `AuditSettingsDto` carries
+`HasSecret` instead, which is what lets the form honestly offer "leave blank to keep the existing
+one".
+
 
 ## Remote control
 

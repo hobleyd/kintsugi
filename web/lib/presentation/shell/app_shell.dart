@@ -136,6 +136,11 @@ class _Sidebar extends StatelessWidget {
                       selected: location == Routes.settingsAiAgent,
                     ),
                     _SubNavLink(
+                      label: 'Auditing',
+                      path: Routes.settingsAuditing,
+                      selected: location == Routes.settingsAuditing,
+                    ),
+                    _SubNavLink(
                       label: 'Authentication',
                       path: Routes.settingsAuthentication,
                       selected: location == Routes.settingsAuthentication,

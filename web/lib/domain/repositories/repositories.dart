@@ -180,6 +180,29 @@ abstract interface class AuthenticationSettingsRepository {
   });
 }
 
+abstract interface class AuditSettingsRepository {
+  Future<AuditSettings> read();
+
+  /// A blank [secret] means "keep the stored one" for the same provider — changing the provider
+  /// drops it server-side regardless. [clearSecret] is how one is removed from a provider whose
+  /// secret is optional, since blank cannot mean both.
+  Future<AuditSettings> update({
+    required AuditProvider provider,
+    required bool isEnabled,
+    required String? endpoint,
+    required String? region,
+    required String? clientId,
+    required String? secret,
+    required bool clearSecret,
+    required String? tenantId,
+    required String? projectId,
+    required String? logGroup,
+    required String? dataCollectionRuleId,
+    required String? stream,
+    required String? index,
+  });
+}
+
 abstract interface class VantaSettingsRepository {
   Future<VantaSettings> read();
 

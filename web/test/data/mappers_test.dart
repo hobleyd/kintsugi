@@ -169,6 +169,33 @@ void main() {
     );
   });
 
+  group('auditSettingsFromJson', () {
+    test('reads the provider as an ordinal or a name', () {
+      // AuditProvider carries no converter, like AuthProvider, so the server writes the ordinal;
+      // declaration order in enums.dart is what makes 4 mean Azure Monitor on both ends.
+      expect(auditSettingsFromJson({'provider': 4}).provider, AuditProvider.azureMonitor);
+      expect(auditSettingsFromJson({'provider': 'SplunkHec'}).provider, AuditProvider.splunkHec);
+    });
+
+    test('never carries the secret, only whether one is stored', () {
+      final settings = auditSettingsFromJson({'provider': 0, 'hasSecret': true, 'region': 'datadoghq.eu'});
+
+      expect(settings.hasSecret, isTrue);
+      expect(settings.region, 'datadoghq.eu');
+      expect(settings.endpoint, isNull);
+    });
+
+    test('an unconfigured server reads as Datadog, disabled', () {
+      final settings = auditSettingsFromJson(const {});
+
+      // Matches AuditSettingsDto.NotConfigured(), so the form opens on the same provider whether
+      // the server answered explicitly or the mapper filled the gap.
+      expect(settings.provider, AuditProvider.datadog);
+      expect(settings.isEnabled, isFalse);
+      expect(settings.hasSecret, isFalse);
+    });
+  });
+
   group('vantaSettingsFromJson', () {
     test('never carries the client secret, only whether one is stored', () {
       final settings = vantaSettingsFromJson({'hasClientSecret': true, 'clientId': 'abc'});

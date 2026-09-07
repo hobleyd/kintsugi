@@ -2,6 +2,9 @@ using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
+using Kintsugi.Application.Auditing;
+using Kintsugi.Application.Auditing.Commands.UpdateAuditSettings;
+using Kintsugi.Application.Auditing.Queries.GetAuditSettings;
 using Kintsugi.Application.Authentication;
 using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Application.Authentication.Commands.UpdateAuthenticationSettings;
@@ -20,8 +23,8 @@ using Kintsugi.WebApi.Filters;
 namespace Kintsugi.WebApi.Controllers;
 
 /// <summary>
-/// The settings screens that had no REST surface of their own — authentication, GitHub, patching
-/// policy and Vanta. (The AI agent's already has one: see <see cref="AiSettingsController"/>.)
+/// The settings screens that had no REST surface of their own — auditing, authentication, GitHub,
+/// patching policy and Vanta. (The AI agent's already has one: see <see cref="AiSettingsController"/>.)
 /// </summary>
 /// <remarks>
 /// <para>
@@ -57,6 +60,18 @@ public class AdminSettingsController : ControllerBase
         _oidcOptionsCache = oidcOptionsCache;
         _vantaSyncCoordinator = vantaSyncCoordinator;
     }
+
+    [HttpGet("auditing")]
+    [ProducesResponseType(typeof(AuditSettingsDto), StatusCodes.Status200OK)]
+    public async Task<ActionResult<AuditSettingsDto>> GetAuditing(CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(new GetAuditSettingsQuery(), cancellationToken));
+
+    [HttpPut("auditing")]
+    [ProducesResponseType(typeof(AuditSettingsDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<AuditSettingsDto>> UpdateAuditing(
+        UpdateAuditSettingsCommand command, CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(command, cancellationToken));
 
     [HttpGet("authentication")]
     [ProducesResponseType(typeof(AuthenticationSettingsDto), StatusCodes.Status200OK)]
