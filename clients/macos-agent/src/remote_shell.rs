@@ -32,6 +32,18 @@
 //! instances of one job — so a shell session held open for a support call would stall this host's
 //! check-ins for its whole length. See `config::REMOTE_SHELL_QUEUE_DIR`.
 //!
+//! # One session at a time, and the retry that can fall through it
+//!
+//! launchd will not run two instances of this job either, so a request arriving *while* a session
+//! is running is not served until that session ends — by which point it has very likely aged past
+//! [`REQUEST_TIMEOUT`] and is discarded. The server's one-session-per-host rule covers the ordinary
+//! case, so the way to reach this is narrow: a session ends server-side (a dropped tab, a viewer
+//! reconnecting) and the administrator asks again before this daemon has finished winding the last
+//! one down. The symptom is a session reported as "the other end never connected", which points
+//! nowhere near launchd — so it is written down here rather than left to be rediscovered. Fixing it
+//! means either a resident job (which is the Linux shape, and a much larger change) or a longer
+//! timeout traded against how long an abandoned request may sit here waiting to open a root shell.
+//!
 //! # What a forged request can do
 //!
 //! The queue directory is `root:admin 0770`, like the main one, so a local administrator can write
