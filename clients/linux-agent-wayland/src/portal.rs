@@ -39,6 +39,19 @@
 //! `PersistMode::ExplicitlyRevoked` plus a restore token means the *portal's* half is asked once per
 //! host rather than once per session, which is what keeps that from being a nuisance. The agent's is
 //! asked every time, always, and must never be persisted — see the comment on `restore_token_path`.
+//!
+//! **Persistence belongs to whichever portal created the session, and only that one.** On a
+//! `RemoteDesktop` session the persist mode and restore token go on `SelectDevices`; the
+//! `SelectSources` call made against that same session must carry *neither*, because
+//! xdg-desktop-portal refuses a `ScreenCast.SelectSources` that names either on a remote-desktop
+//! session (`desktop-portal/screen-cast.c`, "Remote desktop sessions cannot persist"). The first cut
+//! sent both on every `SelectSources`, and the result was not an error anyone saw: the refusal was
+//! caught by the view-only fallback below, logged as the compositor lacking `RemoteDesktop`, and every
+//! Wayland host — GNOME and KDE included — reported itself as watchable and not drivable. The two
+//! paths therefore keep separate tokens as well (`RestoreTokenFor`): the portal files them in
+//! separate permission tables, so a token from one presented to the other is silently dropped, and
+//! one file holding whichever path ran last would lose the remote-desktop grant the moment a session
+//! fell back for any transient reason.
 
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
@@ -95,10 +108,14 @@ impl PortalSession {
             Ok(session) => Ok(session),
             Err(error) => {
                 // Logged at info rather than warn: on a wlroots host this is the normal, expected
-                // outcome and a warning every session would train people to ignore the log.
+                // outcome and a warning every session would train people to ignore the log. It
+                // states which call failed and how, not a diagnosis — the first cut said "this
+                // compositor does not offer RemoteDesktop" here, and that is exactly the wording
+                // that let a refused `SelectSources` pass as a compositor limitation for a release.
                 eprintln!(
-                    "remote control: this compositor's portal does not offer usable RemoteDesktop \
-                     ({error:#}); continuing with a view-only session"
+                    "remote control: the RemoteDesktop negotiation failed ({error:#}); continuing \
+                     with a view-only session, which is the expected outcome only on a compositor \
+                     without RemoteDesktop (wlroots)"
                 );
                 Self::negotiate_capture_only().await
             }
@@ -125,20 +142,21 @@ impl PortalSession {
         let session =
             remote_desktop.create_session(Default::default()).await.context("creating a portal session")?;
 
-        // Devices before sources, and both before Start — the portal's own ordering.
+        // Devices before sources, and both before Start — the portal's own ordering. Persistence is
+        // requested here and here only; see the module note on why `select_sources` must not.
         let devices = remote_desktop
             .select_devices(
                 &session,
                 SelectDevicesOptions::default()
                     .set_devices(DeviceType::Keyboard | DeviceType::Pointer)
                     .set_persist_mode(PERSIST_MODE)
-                    .set_restore_token(stored_restore_token().as_deref()),
+                    .set_restore_token(stored_restore_token(RestoreTokenFor::RemoteDesktop).as_deref()),
             )
             .await
             .context("asking the portal for keyboard and pointer")?;
         devices.response().context("the portal refused keyboard and pointer")?;
 
-        select_sources(&screencast, &session).await?;
+        select_sources(&screencast, &session, None).await?;
 
         let started = remote_desktop
             .start(&session, None, Default::default())
@@ -167,7 +185,7 @@ impl PortalSession {
         }
 
         if let Some(token) = started.restore_token() {
-            store_restore_token(token);
+            store_restore_token(RestoreTokenFor::RemoteDesktop, token);
         }
 
         let pipewire_fd = screencast
@@ -190,7 +208,7 @@ impl PortalSession {
             .await
             .context("creating a screen-cast session")?;
 
-        select_sources(&screencast, &session).await?;
+        select_sources(&screencast, &session, Some(RestoreTokenFor::ScreenCast)).await?;
 
         let started = screencast
             .start(&session, None, Default::default())
@@ -206,7 +224,7 @@ impl PortalSession {
             .pipe_wire_node_id();
 
         if let Some(token) = started.restore_token() {
-            store_restore_token(token);
+            store_restore_token(RestoreTokenFor::ScreenCast, token);
         }
 
         let pipewire_fd = screencast
@@ -309,28 +327,38 @@ impl PortalSession {
     }
 }
 
-async fn select_sources<T>(screencast: &Screencast, session: &Session<T>) -> Result<()>
+/// `persistence` is `Some` only when `ScreenCast` itself owns the session. On a `RemoteDesktop`
+/// session the persist mode and restore token have already gone on `SelectDevices`, and repeating
+/// them here is the call the portal rejects outright — see the module note.
+async fn select_sources<T>(
+    screencast: &Screencast,
+    session: &Session<T>,
+    persistence: Option<RestoreTokenFor>,
+) -> Result<()>
 where
     T: IsScreencastSession + SessionPortal,
 {
+    let options = SelectSourcesOptions::default()
+        // Monitor only. A window stream would be a smaller attack surface but is not what
+        // remote *control* means — an administrator fixing a machine needs the desktop,
+        // including whatever dialog is currently covering it.
+        .set_sources(BitFlags::from(SourceType::Monitor))
+        // Embedded, so the cursor is drawn into the frames. The agent's X11 path composites
+        // it by hand from XFIXES because X11 has no equivalent; here the compositor does it,
+        // which is both cheaper and correct for scaled outputs.
+        .set_cursor_mode(CursorMode::Embedded)
+        // One monitor. Multiple would mean several PipeWire streams and a coordinate space
+        // spanning them, which the media protocol has no way to describe.
+        .set_multiple(false);
+
+    let stored = persistence.and_then(stored_restore_token);
+    let options = match persistence {
+        Some(_) => options.set_persist_mode(PERSIST_MODE).set_restore_token(stored.as_deref()),
+        None => options,
+    };
+
     screencast
-        .select_sources(
-            session,
-            SelectSourcesOptions::default()
-                // Monitor only. A window stream would be a smaller attack surface but is not what
-                // remote *control* means — an administrator fixing a machine needs the desktop,
-                // including whatever dialog is currently covering it.
-                .set_sources(BitFlags::from(SourceType::Monitor))
-                // Embedded, so the cursor is drawn into the frames. The agent's X11 path composites
-                // it by hand from XFIXES because X11 has no equivalent; here the compositor does it,
-                // which is both cheaper and correct for scaled outputs.
-                .set_cursor_mode(CursorMode::Embedded)
-                // One monitor. Multiple would mean several PipeWire streams and a coordinate space
-                // spanning them, which the media protocol has no way to describe.
-                .set_multiple(false)
-                .set_persist_mode(PERSIST_MODE)
-                .set_restore_token(stored_restore_token().as_deref()),
-        )
+        .select_sources(session, options)
         .await
         .context("asking the portal for the screen")?
         .response()
@@ -348,6 +376,24 @@ where
 /// asked every single time and cannot be persisted at all.
 const PERSIST_MODE: PersistMode = PersistMode::ExplicitlyRevoked;
 
+/// Which portal a restore token was issued by. The portal keeps the two in separate permission
+/// tables (`remote-desktop` and `screencast`), so they are separate files here too — see the module
+/// note on why one file would lose the remote-desktop grant.
+#[derive(Clone, Copy)]
+enum RestoreTokenFor {
+    RemoteDesktop,
+    ScreenCast,
+}
+
+impl RestoreTokenFor {
+    fn file_name(self) -> &'static str {
+        match self {
+            Self::RemoteDesktop => "portal-restore-token-remote-desktop",
+            Self::ScreenCast => "portal-restore-token-screen-cast",
+        }
+    }
+}
+
 /// Where the portal's restore token is kept.
 ///
 /// In the per-user state directory rather than the agent's, because it is the *user's* grant to
@@ -355,16 +401,20 @@ const PERSIST_MODE: PersistMode = PersistMode::ExplicitlyRevoked;
 /// and is not: it lets the helper reopen a stream the user has already permitted, and it grants
 /// nothing on its own — the agent's consent dialog stands in front of every session regardless, so
 /// a copied token buys an attacker nothing they could use.
-fn restore_token_path() -> Option<PathBuf> {
+///
+/// Hosts from before the split may still hold a `portal-restore-token` beside these. It is never
+/// read: it only ever held a screen-cast token (every session then fell back), and presenting a
+/// token from the wrong table is a no-op in the portal, so nothing is gained by migrating it.
+fn restore_token_path(portal: RestoreTokenFor) -> Option<PathBuf> {
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state")))?;
 
-    Some(base.join("kintsugi-agent").join("portal-restore-token"))
+    Some(base.join("kintsugi-agent").join(portal.file_name()))
 }
 
-fn stored_restore_token() -> Option<String> {
-    let path = restore_token_path()?;
+fn stored_restore_token(portal: RestoreTokenFor) -> Option<String> {
+    let path = restore_token_path(portal)?;
     let token = std::fs::read_to_string(path).ok()?;
     let token = token.trim().to_string();
 
@@ -373,8 +423,8 @@ fn stored_restore_token() -> Option<String> {
     (!token.is_empty()).then_some(token)
 }
 
-fn store_restore_token(token: &str) {
-    let Some(path) = restore_token_path() else {
+fn store_restore_token(portal: RestoreTokenFor, token: &str) {
+    let Some(path) = restore_token_path(portal) else {
         return;
     };
 

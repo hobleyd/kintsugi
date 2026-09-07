@@ -1014,6 +1014,23 @@ security boundary. The portal's uses `PersistMode::ExplicitlyRevoked` with a sto
 it is asked once per host rather than once per session; the agent's is asked every time and must
 never be persisted.
 
+**That persistence goes on whichever portal created the session, and nowhere else — and getting it
+wrong reads as a compositor limitation, not a bug.** On a `RemoteDesktop` session the persist mode
+and restore token belong on `SelectDevices`; the `ScreenCast.SelectSources` call made against that
+same session must carry neither, because xdg-desktop-portal refuses it outright
+(`desktop-portal/screen-cast.c`: `IS_REMOTE_DESKTOP_SESSION` → "Remote desktop sessions cannot
+persist"). The helper's first cut sent both on every `SelectSources`, and nothing errored where anyone
+looked: the refusal was caught by the view-only fallback, logged as "this compositor's portal does
+not offer usable RemoteDesktop", and reported to the viewer as `canControlInput: false` — so every
+Wayland host, GNOME and KDE included, showed the "watched but not controlled" notice that is meant
+for wlroots. Two things keep it from coming back. `portal::select_sources` takes the persistence
+explicitly and the `RemoteDesktop` path passes `None`; and the fallback's log line now states which
+call failed and how, rather than asserting a cause. The tokens are two files
+(`portal-restore-token-remote-desktop`, `portal-restore-token-screen-cast`) because the portal keeps
+them in separate permission tables — one file would lose the remote-desktop grant whenever a session
+fell back for a transient reason. When a GNOME or KDE host reports view-only, the journal line above
+the agent's "started" entry is the diagnosis; do not start with the compositor.
+
 **Three PipeWire mistakes that each fail silently, all found by running it rather than reading it.**
 `clients/linux-agent-wayland/examples/capture-node.rs` streams any PipeWire node with the real
 capture module, so the negotiation can be exercised against `gst-launch-1.0 videotestsrc ...

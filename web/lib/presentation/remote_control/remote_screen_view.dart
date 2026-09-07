@@ -52,10 +52,15 @@ class _RemoteScreenViewState extends State<RemoteScreenView> {
             _buildKeyCombinationBar(context),
             const SizedBox(height: 12),
           ] else ...[
+            // Says what the agent reported and no more. The flag means the desktop portal granted
+            // screen sharing without remote input; a compositor lacking RemoteDesktop (wlroots) is
+            // the expected reason, but an earlier build reported every Wayland host this way because
+            // of a refused portal call, and copy that named the compositor as the cause hid that.
             const AlertBox.info(
-              'This host can be watched but not controlled. Its desktop is running Wayland with a '
-              'compositor that allows screen sharing and not remote input, so the keyboard and '
-              'mouse are unavailable for this session.',
+              'This host can be watched but not controlled. Its desktop portal granted screen '
+              'sharing without remote input — expected on a Wayland compositor without RemoteDesktop '
+              '(Sway, Hyprland, river) — so the keyboard and mouse are unavailable for this session. '
+              'On GNOME or KDE, check the agent\'s journal for the RemoteDesktop negotiation error.',
             ),
             const SizedBox(height: 12),
           ],
