@@ -1,13 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use serde::Serialize;
 
 use crate::config::{self, Config};
 use crate::logging;
-use crate::self_update::detached_powershell;
 
 const REPORT_ATTEMPTS: u32 = 3;
 const REPORT_BACKOFF: Duration = Duration::from_secs(5);
@@ -99,9 +98,15 @@ fn remove_ui_task() {
 ///
 /// Both have to happen from *outside* this process, and for the same reason as
 /// `self_update::restart_service`: stopping the service kills the process executing the stop, and
-/// Windows won't delete a running image at all. So this hands the whole teardown to a detached
-/// PowerShell process that sleeps first, letting this one finish and exit, and then removes what's
-/// left. Nothing after this call is guaranteed to run.
+/// Windows won't delete a running image at all. So this hands the whole teardown to a PowerShell
+/// process that sleeps first, letting this one finish and exit, and then removes what's left.
+/// Nothing after this call is guaranteed to run.
+///
+/// PowerShell rather than the native helper `self_update` uses, because the teardown ends by
+/// deleting the agent binary, and a helper that *is* that binary could not. `Stop-Service` is safe to
+/// rely on here only because the control handler in `main` reports `StopPending`: without that it
+/// gives up after two seconds and the `sc.exe delete` that follows would mark a still-running
+/// service for deletion rather than removing it.
 fn remove_service_and_binary() {
     let service = config::SERVICE_NAME;
     let binary = config::installed_binary_path();
@@ -122,8 +127,8 @@ fn remove_service_and_binary() {
         install_dir = install_dir.display(),
     );
 
-    match detached_powershell(&script).spawn() {
-        Ok(_) => logging::info("handed off the final service and binary removal to a detached helper"),
+    match background_powershell(&script).spawn() {
+        Ok(_) => logging::info("handed off the final service and binary removal to a background helper"),
         Err(err) => {
             // Not silent: the machine is already fully uninstalled apart from the service
             // registration and one file, and an administrator needs to know those are left.
@@ -134,6 +139,30 @@ fn remove_service_and_binary() {
             ));
         }
     }
+}
+
+/// Builds a PowerShell invocation that outlives this process and shows no window.
+///
+/// `CREATE_NO_WINDOW`, deliberately not `DETACHED_PROCESS`. Both hide the console; only the first
+/// gives the child one at all. Windows PowerShell's console host does not reliably run with no
+/// console and null standard handles, which is how the self-update restart helper — the same flags,
+/// the same spawn — came to be started and never do anything, on a host that then ran an old build
+/// for days (see `self_update::restart_service`). With a windowless console and `NUL` on all three
+/// standard handles the child is in the same shape as every `Command::output` invocation of
+/// PowerShell this service makes, all of which work. Nothing else is needed for it to outlive the
+/// service: the SCM stops the service's own process, not its children.
+fn background_powershell(script: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+
+    let mut command = Command::new(crate::os_update::POWERSHELL);
+    command
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
+    command
 }
 
 fn run_command(program: &str, args: &[&str]) {

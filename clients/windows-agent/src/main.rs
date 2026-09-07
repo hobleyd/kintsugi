@@ -70,6 +70,12 @@ fn main() -> Result<()> {
         return run_remote_session_helper();
     }
 
+    // The restart helper a self-update spawns from the newly installed binary — see
+    // `self_update::restart_service` for why the service cannot restart itself inline.
+    if args.iter().any(|arg| arg == self_update::RESTART_HELPER_ARGUMENT) {
+        return run_service_restart_helper();
+    }
+
     if args.iter().any(|arg| arg == "--agent") {
         return run_ui_agent();
     }
@@ -89,6 +95,19 @@ fn run_single_check_in() -> Result<()> {
     logging::init(&config::service_log_path());
 
     service::Agent::new()?.check_in()
+}
+
+/// Stops and starts the service, from outside it, on behalf of the process that just replaced its
+/// own binary. Logs to the service's log, since the story it tells is the service's.
+fn run_service_restart_helper() -> Result<()> {
+    logging::init(&config::service_log_path());
+    logging::info(&format!("kintsugi-agent ({}) starting", self_update::RESTART_HELPER_ARGUMENT));
+
+    let result = self_update::run_restart_helper();
+    if let Err(err) = &result {
+        logging::error(&format!("the service restart helper failed: {err:#}"));
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -115,25 +134,54 @@ fn service_main(_arguments: Vec<std::ffi::OsString>) {
 }
 
 fn run_service_inner() -> Result<()> {
+    use std::sync::OnceLock;
     use windows_service::service::{ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType};
-    use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
+    use windows_service::service_control_handler::{self, ServiceControlHandlerResult, ServiceStatusHandle};
 
     let shutdown = Arc::new(AtomicBool::new(false));
 
+    // The handler needs the status handle `register` is about to return, so it reads it through a
+    // slot filled in immediately afterwards. A stop cannot arrive before that: the SCM refuses to
+    // send controls the service has not yet declared it accepts, and that declaration is the
+    // `Running` report below.
+    let status_slot: Arc<OnceLock<ServiceStatusHandle>> = Arc::new(OnceLock::new());
+
     let handler_shutdown = Arc::clone(&shutdown);
+    let handler_status = Arc::clone(&status_slot);
     let status_handle = service_control_handler::register(config::SERVICE_NAME, move |control| match control {
         // Interrogate must be answered for the SCM to consider the service responsive at all.
         ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
         // Shutdown (the machine is going down) is accepted alongside Stop so an in-flight check-in
         // is wound up rather than killed — during a patch cycle that matters, since the queue would
         // otherwise be left holding a half-answered request.
+        //
+        // Reporting StopPending here, rather than leaving the state at Running until `run_loop`
+        // returns, is what makes that winding-up survive contact with the tools that stop this
+        // service. `Stop-Service` — and so `Restart-Service`, which `install.ps1` and the older
+        // self-update helper both relied on — waits two seconds for Stopped and then gives up unless
+        // the service is reporting StopPending (PowerShell's `Service.cs`, `DoWaitForStatus`); the
+        // loop below polls this flag every two seconds, and may be minutes into a check-in. Without
+        // this the stop half of a restart timed out and the start half was never attempted, leaving
+        // a freshly updated host running the old binary out of `kintsugi-agent.exe.old` for days.
         ServiceControl::Stop | ServiceControl::Shutdown => {
             handler_shutdown.store(true, Ordering::SeqCst);
+            if let Some(handle) = handler_status.get() {
+                let _ = handle.set_service_status(ServiceStatus {
+                    service_type: ServiceType::OWN_PROCESS,
+                    current_state: ServiceState::StopPending,
+                    controls_accepted: ServiceControlAccept::empty(),
+                    exit_code: ServiceExitCode::Win32(0),
+                    checkpoint: 0,
+                    wait_hint: service::STOP_WAIT_HINT,
+                    process_id: None,
+                });
+            }
             ServiceControlHandlerResult::NoError
         }
         _ => ServiceControlHandlerResult::NotImplemented,
     })
     .context("could not register the service control handler")?;
+    let _ = status_slot.set(status_handle);
 
     let running_status = ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,

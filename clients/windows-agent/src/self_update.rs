@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -33,6 +33,17 @@ struct AgentPackageInfo {
     sha256_signature: String,
 }
 
+/// What one `check_and_apply` pass did, so the caller can log it accurately.
+enum Outcome {
+    /// This build is the published one; nothing to do.
+    UpToDate,
+    /// A newer build was downloaded, verified and installed, and the restart handed off.
+    Installed,
+    /// A newer build was installed at an *earlier* check-in but this process is still the old one
+    /// — the restart was handed off again. See `pending_restart`.
+    RestartReissued,
+}
+
 /// Checks whether a newer kintsugi-agent build than `current_version` has been published for this
 /// platform, and — if so — downloads, verifies, and installs it over this agent's own binary, then
 /// restarts both halves so the update actually takes effect. Called once at the end of every
@@ -49,17 +60,33 @@ pub fn check_and_apply(client: &reqwest::blocking::Client, config: &Config, iden
     };
 
     match check_and_apply_inner(client, config, identity, current_version) {
-        Ok(true) => logging::info("self-update applied successfully"),
-        Ok(false) => {}
+        Ok(Outcome::Installed) => logging::info("self-update applied successfully"),
+        Ok(Outcome::RestartReissued) => logging::info("handed off the outstanding service restart again"),
+        Ok(Outcome::UpToDate) => {}
         Err(err) => logging::warn(&format!("self-update check failed, will retry at the next check-in: {err:#}")),
     }
 }
 
-fn check_and_apply_inner(client: &reqwest::blocking::Client, config: &Config, identity: &AgentIdentity, current_version: &str) -> Result<bool> {
+fn check_and_apply_inner(client: &reqwest::blocking::Client, config: &Config, identity: &AgentIdentity, current_version: &str) -> Result<Outcome> {
+    // Before asking the server anything: if an earlier check-in already put a newer build on disk,
+    // the only useful thing this process can do is get out of its way. Re-downloading would fail
+    // regardless — `replace_running_binary` cannot move a `.exe.old` that this very process is
+    // still executing — and it did, once an hour for days, on a host whose restart helper never
+    // ran, while the Hosts screen went on showing the old version. Whatever the server publishes
+    // in the meantime is the *new* process's business, on its own first check-in.
+    if let Some(installed_version) = pending_restart(&config::self_update_restart_marker_path()) {
+        logging::warn(&format!(
+            "kintsugi-agent {installed_version} was installed at an earlier check-in, but this service is still \
+             running {current_version} — the restart never happened; handing it off again"
+        ));
+        restart_service();
+        return Ok(Outcome::RestartReissued);
+    }
+
     let info = fetch_latest(client, config)?;
 
     if !needs_update(current_version, &info.version) {
-        return Ok(false);
+        return Ok(Outcome::UpToDate);
     }
 
     logging::info(&format!("self-update available: {current_version} -> {}", info.version));
@@ -85,9 +112,38 @@ fn check_and_apply_inner(client: &reqwest::blocking::Client, config: &Config, id
     let _ = fs::remove_file(&downloaded_path);
     install_result?;
 
+    // From here on the file at the installed path is no longer the program running this code, and
+    // the marker is what lets the next check-in tell — see `pending_restart`. Written before the
+    // hand-off so a helper that dies immediately still leaves the retry armed.
+    if let Err(err) = record_pending_restart(&config::self_update_restart_marker_path(), &info.version) {
+        logging::warn(&format!("could not record the pending service restart: {err}"));
+    }
+
     restart_both_halves();
 
-    Ok(true)
+    Ok(Outcome::Installed)
+}
+
+/// Records that a newer build has been installed over this process's binary and the service is
+/// waiting to be restarted onto it; the content is the version installed, for the log line that
+/// reports a restart that never came.
+fn record_pending_restart(marker: &Path, installed_version: &str) -> std::io::Result<()> {
+    fs::write(marker, installed_version)
+}
+
+/// The version an earlier check-in installed, if the service has not been restarted since.
+///
+/// The marker's existence is the whole test — no version comparison against this process, and no
+/// probing of `kintsugi-agent.exe.old` for a lock. `clean_up_previous_update` deletes the marker on
+/// every service start, so a process that finds it at check-in time was already running when the
+/// marker was written: it is the displaced build, by construction. A lock probe on `.exe.old` would
+/// misread an antivirus scanner holding the old file open as "still running the old build" and
+/// restart a perfectly current service once an hour. The content is only for the log, so a marker
+/// whose write was cut short still counts.
+fn pending_restart(marker: &Path) -> Option<String> {
+    let version = fs::read_to_string(marker).ok()?;
+    let version = version.trim();
+    Some(if version.is_empty() { "(version not recorded)".to_string() } else { version.to_string() })
 }
 
 fn needs_update(current_version: &str, latest_version: &str) -> bool {
@@ -236,45 +292,119 @@ fn restart_ui_task() {
     run_command("schtasks", &["/Run", "/TN", config::UI_TASK_NAME]);
 }
 
-/// Restarts this service, from a detached helper process that outlives it.
+/// The argument the service passes to the freshly installed binary to make it act as the restart
+/// helper — matched in `main`, which dispatches to [`run_restart_helper`]. One constant so the two
+/// cannot drift: a helper started under a name `main` does not recognise would run as a service
+/// entry point, fail to reach the SCM, and exit — with the old process left running exactly as if
+/// no helper had been spawned at all.
+pub const RESTART_HELPER_ARGUMENT: &str = "--restart-service";
+
+/// How long the helper gives the displaced service to stop. Generous on purpose: the service winds
+/// up whatever it is doing rather than being killed (see the stop handler in `main`), and what it
+/// is doing may be a queued Windows update install. Nothing is waiting on the helper except the
+/// helper, so a long wait costs nothing; exceeding it means the retry in `check_and_apply` runs.
+const STOP_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// The service reports `Running` as soon as its control handler is registered, so a start that
+/// takes longer than this is a start that has failed.
+const START_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Restarts this service, from a helper process that outlives it.
 ///
 /// This cannot be done inline for the same reason the macOS agent can't reload its own LaunchDaemon
 /// inline (see that agent's `checkin_schedule::reload_launchd`): stopping the service kills the
 /// process executing the stop, with no guarantee execution ever reaches the start that follows —
-/// which would leave the agent stopped until someone noticed. So the restart is handed to a
-/// short-lived PowerShell process that sleeps first, letting this check-in finish and this process
-/// exit normally, then performs the stop and start from outside.
+/// which would leave the agent stopped until someone noticed. So the stop and start are performed
+/// from outside, by the *newly installed* binary running as [`run_restart_helper`].
+///
+/// It used to be a detached PowerShell running `Restart-Service -Force -ErrorAction
+/// SilentlyContinue`, and that shipped a host stuck on 0.5.2 for days with a 0.7.0 binary beside it:
+/// the helper was spawned, the service never received a stop, and `SilentlyContinue` had made sure
+/// nothing said why. Two things about it were wrong independently. A process created with
+/// `DETACHED_PROCESS` has no console and null standard handles, which Windows PowerShell's console
+/// host does not reliably survive — the WUA and CIM scripts this service runs work because
+/// `Command::output` gives them pipes. And `Restart-Service` waits exactly two seconds for
+/// `Stopped`, then gives up unless the service is reporting `StopPending`, and on giving up never
+/// calls `Start` (PowerShell's `Service.cs`, `DoWaitForStatus`) — this service polls its shutdown
+/// flag every two seconds. The helper here needs no console, talks to the SCM directly, waits as
+/// long as the service needs, and logs every step to the service's own log.
 fn restart_service() {
-    let service = config::SERVICE_NAME;
-    let script = format!(
-        "Start-Sleep -Seconds 5; Restart-Service -Name '{service}' -Force -ErrorAction SilentlyContinue"
-    );
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS};
 
-    logging::info("handing off a service restart to a detached helper");
+    let helper = config::installed_binary_path();
+    logging::info(&format!("handing off a service restart to {} {RESTART_HELPER_ARGUMENT}", helper.display()));
 
     // spawn (not output): returns immediately rather than waiting for a process that is deliberately
-    // going to outlive this one.
-    match detached_powershell(&script).spawn() {
-        Ok(_) => {}
-        Err(err) => logging::warn(&format!("could not spawn the service restart helper: {err}")),
+    // going to outlive this one. DETACHED_PROCESS is safe for *this* program where it was not for
+    // PowerShell: Rust discards writes to absent standard handles, and the helper's real output is
+    // the log file. CREATE_NEW_PROCESS_GROUP keeps it out of this process's console group, the
+    // counterpart to the macOS agent's `process_group(0)`.
+    let spawned = Command::new(&helper)
+        .arg(RESTART_HELPER_ARGUMENT)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+        .spawn();
+    if let Err(err) = spawned {
+        logging::warn(&format!("could not spawn the service restart helper: {err}"));
     }
 }
 
-/// Builds a PowerShell invocation detached from this process, so it survives this process exiting —
-/// and, crucially, being *stopped by the SCM*, which terminates the service's whole process tree.
-pub fn detached_powershell(script: &str) -> Command {
-    use std::os::windows::process::CommandExt;
-    use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS};
+/// The helper's whole job: stop the `KintsugiAgent` service, wait for it to actually stop, start
+/// it again, and say what happened. Runs as SYSTEM, since it was spawned by the service.
+///
+/// The stop arrives while the displaced service is still finishing the check-in that spawned this
+/// process. That is fine and intended — the service's control handler only sets a flag and reports
+/// `StopPending`; the loop finishes the check-in, drains the queue once more, and exits — which is
+/// why the wait below is bounded by what a check-in can take rather than by a fixed sleep.
+pub fn run_restart_helper() -> Result<()> {
+    use windows_service::service::{ServiceAccess, ServiceState};
+    use windows_service::service_manager::{ServiceManager, ServiceManagerAccess};
 
-    let mut command = Command::new(crate::os_update::POWERSHELL);
-    command
-        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script])
-        // DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP is the Windows counterpart to the macOS
-        // agent's `process_group(0)`: it takes the helper out of this process's group so the
-        // cleanup that follows a service stop doesn't take it out too. CREATE_NO_WINDOW keeps a
-        // console from flashing up in a logged-in user's face.
-        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
-    command
+    let manager = ServiceManager::local_computer(None::<&str>, ServiceManagerAccess::CONNECT)
+        .context("could not connect to the Service Control Manager")?;
+    let service = manager
+        .open_service(config::SERVICE_NAME, ServiceAccess::QUERY_STATUS | ServiceAccess::STOP | ServiceAccess::START)
+        .with_context(|| format!("could not open the {} service", config::SERVICE_NAME))?;
+
+    let state = service.query_status().context("could not query the service status")?.current_state;
+    if state != ServiceState::Stopped {
+        logging::info(&format!("restart helper: asking the service to stop (currently {state:?})"));
+        if let Err(err) = service.stop() {
+            // Lost the race with a stop that was already under way — an administrator's, or the
+            // service exiting on its own — which is the outcome wanted anyway.
+            let now = service.query_status().context("could not query the service status")?.current_state;
+            if now != ServiceState::Stopped && now != ServiceState::StopPending {
+                return Err(err).context("could not ask the service to stop");
+            }
+        }
+        let waited = wait_for_state(&service, ServiceState::Stopped, STOP_TIMEOUT)?;
+        logging::info(&format!("restart helper: the service stopped after {}s", waited.as_secs()));
+    }
+
+    service.start::<&str>(&[]).context("could not start the service")?;
+    wait_for_state(&service, ServiceState::Running, START_TIMEOUT)?;
+    logging::info(&format!("restart helper: the service is running again (agent {})", env!("CARGO_PKG_VERSION")));
+
+    Ok(())
+}
+
+/// Polls until the service reports `wanted`, returning how long that took; fails, naming the state
+/// it was left in, once `timeout` has passed.
+fn wait_for_state(service: &windows_service::service::Service, wanted: windows_service::service::ServiceState, timeout: Duration) -> Result<Duration> {
+    let started = Instant::now();
+    loop {
+        let state = service.query_status().context("could not query the service status")?.current_state;
+        if state == wanted {
+            return Ok(started.elapsed());
+        }
+        if started.elapsed() >= timeout {
+            anyhow::bail!("the service is still {state:?} after {}s", timeout.as_secs());
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
 }
 
 fn run_command(program: &str, args: &[&str]) {
@@ -290,14 +420,23 @@ fn run_command(program: &str, args: &[&str]) {
     }
 }
 
-/// Deletes the copy of the previous binary that `replace_running_binary` moved aside. Called once at
-/// service startup, which is the first moment nothing can still be running it.
-pub fn clean_up_displaced_binary() {
+/// Deletes what the previous self-update left behind: the copy of the old binary that
+/// `replace_running_binary` moved aside, and the pending-restart marker. Called once at service
+/// startup, which is the first moment nothing can still be running the old binary — and the moment
+/// that proves the restart the marker was waiting for has happened.
+pub fn clean_up_previous_update() {
     let displaced_path = config::installed_binary_path().with_extension("exe.old");
     match fs::remove_file(&displaced_path) {
         Ok(()) => logging::info(&format!("removed the previous agent binary at {}", displaced_path.display())),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
         Err(err) => logging::warn(&format!("could not remove {}: {err}", displaced_path.display())),
+    }
+
+    let marker = config::self_update_restart_marker_path();
+    match fs::remove_file(&marker) {
+        Ok(()) => logging::info("the service has restarted onto the build the previous self-update installed"),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => logging::warn(&format!("could not remove {}: {err}", marker.display())),
     }
 }
 
@@ -389,5 +528,34 @@ mod tests {
         assert_eq!(fs::read(&installed).unwrap(), b"old");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_recorded_pending_restart_names_the_installed_version_until_it_is_cleared() {
+        // The retry in check_and_apply keys on this alone: a marker that did not survive to the next
+        // check-in, or read back empty, would leave a never-restarted service re-downloading the
+        // same package once an hour forever.
+        let marker = std::env::temp_dir().join(format!("kintsugi-restart-marker-{}", std::process::id()));
+        let _ = fs::remove_file(&marker);
+        assert_eq!(pending_restart(&marker), None);
+
+        record_pending_restart(&marker, "0.7.3").unwrap();
+        assert_eq!(pending_restart(&marker), Some("0.7.3".to_string()));
+
+        fs::remove_file(&marker).unwrap();
+        assert_eq!(pending_restart(&marker), None);
+    }
+
+    #[test]
+    fn an_empty_marker_is_still_a_pending_restart() {
+        // Existence is the signal; the version is only for the log. A write cut short before any
+        // bytes landed still means this process was displaced, and treating it as "nothing pending"
+        // would recreate the very wedge the marker exists to break.
+        let marker = std::env::temp_dir().join(format!("kintsugi-restart-marker-empty-{}", std::process::id()));
+        fs::write(&marker, b"  \n").unwrap();
+
+        assert_eq!(pending_restart(&marker), Some("(version not recorded)".to_string()));
+
+        let _ = fs::remove_file(&marker);
     }
 }

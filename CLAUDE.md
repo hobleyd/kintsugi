@@ -1420,6 +1420,29 @@ the path empty would break the agent permanently. Linux also has nothing to rest
 side: it is a oneshot that is about to exit, and the next timer firing execs whatever is at the path
 by then — only the long-running per-user units get restarted.
 
+**The Windows service cannot restart itself, and the hand-off that does it has to be watched.** A
+process that stops its own service is killed by that stop before it reaches the start, so
+`self_update` spawns the *newly installed* binary as `kintsugi-agent.exe --restart-service`
+(`self_update::run_restart_helper`), which stops the service through the SCM, waits for `Stopped`
+for as long as a check-in can take, starts it, and logs every step to `service.log`. It used to be a
+detached PowerShell running `Restart-Service -Force -ErrorAction SilentlyContinue`, and that left a
+host on 0.5.2 for days with a 0.7.0 binary beside it, its tray (restarted separately, by `schtasks`)
+on the new build and every "Check In Now" timing out because a 0.5.2 service does not know that
+request kind. Two independent faults, neither of which logged anything: `DETACHED_PROCESS` gives
+PowerShell no console and null standard handles, which its console host does not reliably start
+under; and `Restart-Service` waits exactly two seconds for `Stopped`, then errors out — never
+calling `Start` — unless the service is reporting `StopPending`, which this service's control handler
+did not do while its loop polled the shutdown flag every two seconds. Three things now hold. The
+control handler in `main.rs` reports `StopPending` (`service::STOP_WAIT_HINT`), which is also what
+makes `install.ps1`'s own `Stop-Service` reliable; `self_removal`'s PowerShell helper, which cannot
+be the native binary because it deletes it, runs with `CREATE_NO_WINDOW` and `NUL` handles instead.
+And the install writes `config::self_update_restart_marker_path()` before handing off, which the
+service deletes on every start — so a check-in that finds it is, by construction, the displaced
+build still running out of `kintsugi-agent.exe.old`, and re-issues the restart instead of trying to
+move a file it is executing. The tell for a host in that state is the hourly
+`could not move the running binary aside to ...kintsugi-agent.exe.old: Access is denied` line; hosts
+wedged by a release before this one need `Restart-Service KintsugiAgent` by hand.
+
 ## Couplings nothing enforces
 
 - nginx's `default.conf` hardcodes the HTTPS redirect port `8443` (both server blocks match any

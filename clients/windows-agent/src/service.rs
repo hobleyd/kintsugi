@@ -26,6 +26,15 @@ use crate::{checkin_schedule, MAX_ATTEMPTS, INITIAL_BACKOFF};
 /// window waiting for the request to be answered.
 const QUEUE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
+/// What the service tells the SCM to expect between a stop request and `Stopped` — see the control
+/// handler in `main`. `run_loop` notices the request within `QUEUE_POLL_INTERVAL` when idle, but a
+/// stop that lands mid-check-in waits for the check-in (two POSTs with retries, a Windows Update
+/// search, a package download), and one that lands mid-queue-request waits for that request, which
+/// may be a Windows update install. Nothing that stops this service enforces the hint — the SCM only
+/// does so at system shutdown, under its own `WaitToKillServiceTimeout` — so it is an honest
+/// estimate for tools that display it, not a deadline.
+pub const STOP_WAIT_HINT: Duration = Duration::from_secs(5 * 60);
+
 /// How long a cached patching policy is trusted before the service bothers re-fetching it — the
 /// policy changes rarely, so there's no need to hit the server on every check-in.
 const POLICY_REFRESH_INTERVAL: u64 = 60 * 60;
@@ -400,8 +409,9 @@ pub fn run_loop(shutdown: Arc<AtomicBool>) {
     // Anything left from before a restart or a reboot has an owner that is long gone; acting on it
     // would start an unannounced patch cycle with nothing showing progress.
     queue::discard_stale(&config::queue_dir());
-    // The first moment nothing can still be running the copy a previous self-update displaced.
-    self_update::clean_up_displaced_binary();
+    // The first moment nothing can still be running the copy a previous self-update displaced — and
+    // the proof that the restart that update was waiting for has happened.
+    self_update::clean_up_previous_update();
 
     let mut agent = match Agent::new() {
         Ok(agent) => agent,

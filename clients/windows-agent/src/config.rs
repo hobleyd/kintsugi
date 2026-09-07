@@ -233,6 +233,17 @@ pub fn installed_binary_path() -> PathBuf {
     program_files_root().join("kintsugi-agent.exe")
 }
 
+/// Written by `self_update` the moment it has put a newer build at `installed_binary_path` and is
+/// about to hand the service restart to a helper; removed by `self_update::clean_up_previous_update`
+/// when the service next starts. If a check-in finds it still present, the helper never restarted
+/// this service and the process reading it is the *displaced* build still running out of
+/// `kintsugi-agent.exe.old` — see `self_update::check_and_apply` for why that has to be retried
+/// rather than reported. Under the state directory rather than beside the binary because nothing
+/// (an antivirus scanner holding `.exe.old` open, say) ever locks a plain text file here.
+pub fn self_update_restart_marker_path() -> PathBuf {
+    program_data_root().join("self-update-restart-pending")
+}
+
 /// Where the per-user tray process (`--agent`) keeps its own state: the scheduling state (next due
 /// time, delays used) and its log. Under the invoking user's own profile since, unlike the
 /// service's config, this process never runs with elevated rights.
