@@ -106,6 +106,7 @@ void _registerUseCases() {
     ..registerSingleton(SignUpgradePathScript(upgradePaths))
     ..registerSingleton(GetClientsView(packages))
     ..registerSingleton(RefreshClients(packages))
+    ..registerSingleton(GetWindowsBootstrapScript(packages))
     ..registerSingleton(GetUpgradeScriptsView(scripts))
     ..registerSingleton(RefreshApprovedScripts(scripts))
     ..registerSingleton(AdoptApprovedScript(scripts))

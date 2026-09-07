@@ -21,7 +21,8 @@ void main() {
     packages = FakeAgentPackageRepository(clientsView());
     locator
       ..registerSingleton(GetClientsView(packages))
-      ..registerSingleton(RefreshClients(packages));
+      ..registerSingleton(RefreshClients(packages))
+      ..registerSingleton(GetWindowsBootstrapScript(packages));
   });
 
   tearDown(() => locator.reset());
@@ -49,6 +50,36 @@ void main() {
     expect(open, findsNWidgets(2));
     expect(close, findsNothing);
     expect(find.text('Seventh.'), findsNothing);
+  });
+
+  testWidgets('the Windows deployment script opens in a dialog with its pinned checksum in the title',
+      (tester) async {
+    // The pin is the whole security property, so it is shown beside the script rather than only
+    // buried in the body — a reader should be able to see what is being vouched for.
+    packages.bootstrapScript = const WindowsBootstrapScript(
+      script: "\$ExpectedSha256  = 'b' * 64",
+      version: '0.7.4',
+      sha256: 'bbbb',
+      unavailableReason: null,
+    );
+    await pumpScreen(tester);
+
+    await tester.tap(find.text('WINDOWS DEPLOYMENT SCRIPT'));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('pins SHA-256 bbbb'), findsOneWidget);
+    expect(find.text('COPY TO CLIPBOARD'), findsOneWidget);
+  });
+
+  testWidgets('a package with no upstream checksum says so instead of opening an empty dialog',
+      (tester) async {
+    await pumpScreen(tester);
+
+    await tester.tap(find.text('WINDOWS DEPLOYMENT SCRIPT'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('No upstream checksum has been recorded for this package.'), findsOneWidget);
+    expect(find.text('COPY TO CLIPBOARD'), findsNothing);
   });
 
   testWidgets('expanding a row behind upstream lists each newer build, highest first, with its notes',
@@ -167,13 +198,27 @@ AgentPackage package(String platform) => AgentPackage(
     );
 
 class FakeAgentPackageRepository implements AgentPackageRepository {
-  FakeAgentPackageRepository(this.current);
+  FakeAgentPackageRepository(this.current, {this.bootstrapScript});
 
   ClientsView current;
+
+  /// What the Windows deployment script button is handed. Defaults to the state a server that has
+  /// not recorded an upstream checksum yet is in — the reason, and no script.
+  WindowsBootstrapScript? bootstrapScript;
 
   @override
   Future<ClientsView> view() async => current;
 
   @override
   Future<ClientsView> refresh() async => current;
+
+  @override
+  Future<WindowsBootstrapScript> windowsBootstrapScript() async =>
+      bootstrapScript ??
+      const WindowsBootstrapScript(
+        script: null,
+        version: '0.5.0',
+        sha256: null,
+        unavailableReason: 'No upstream checksum has been recorded for this package.',
+      );
 }

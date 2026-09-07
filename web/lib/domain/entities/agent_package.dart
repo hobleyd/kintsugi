@@ -29,6 +29,34 @@ class AgentPackage extends Equatable {
   List<Object?> get props => [platform, version, fileName, fileSizeBytes, sha256, releaseNotes, publishedUtc];
 }
 
+/// The silent PowerShell installer for the published Windows build — what an administrator pastes
+/// into CrowdStrike to install the agent across a fleet. Mirrors `WindowsBootstrapScriptDto`.
+///
+/// Exactly one of [script] and [unavailableReason] is ever set, so the screen never has to choose
+/// between showing an empty box and showing nothing.
+class WindowsBootstrapScript extends Equatable {
+  const WindowsBootstrapScript({
+    required this.script,
+    required this.version,
+    required this.sha256,
+    required this.unavailableReason,
+  });
+
+  final String? script;
+  final String? version;
+
+  /// The checksum the script pins over the archive it downloads from GitHub. Shown beside the
+  /// script so a reader can see what is being vouched for without reading the body — and it is
+  /// deliberately *not* the published package's own `AgentPackage.sha256`, which is over the
+  /// rewritten archive stored on this server.
+  final String? sha256;
+
+  final String? unavailableReason;
+
+  @override
+  List<Object?> get props => [script, version, sha256, unavailableReason];
+}
+
 /// What the upstream repository currently offers. Mirrors `AgentPackageSourceStatusDto`.
 class AgentPackageSourceStatus extends Equatable {
   const AgentPackageSourceStatus({

@@ -19,6 +19,11 @@ class AgentPackageRepositoryImpl implements AgentPackageRepository {
         await _api.postJson('/api/admin/clients/refresh') as Map<String, dynamic>,
       );
 
+  @override
+  Future<WindowsBootstrapScript> windowsBootstrapScript() async => windowsBootstrapScriptFromJson(
+        await _api.getJson('/api/admin/clients/windows/bootstrap-script') as Map<String, dynamic>,
+      );
+
   /// Where a package is downloaded from.
   ///
   /// Anonymous by design on the server side: an already-enrolled agent's self-update has to be

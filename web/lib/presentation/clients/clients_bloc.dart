@@ -20,6 +20,18 @@ final class ClientsRefreshRequested extends ClientsEvent {
   const ClientsRefreshRequested();
 }
 
+/// Fetches the Windows deployment script for CrowdStrike. Requested on demand rather than carried
+/// in the screen's own load, because the rendered script contains the current enrollment token.
+final class ClientsBootstrapScriptRequested extends ClientsEvent {
+  const ClientsBootstrapScriptRequested();
+}
+
+/// Clears the script once the dialog showing it has been opened, so the same state cannot open it
+/// a second time on the next unrelated rebuild.
+final class ClientsBootstrapScriptDismissed extends ClientsEvent {
+  const ClientsBootstrapScriptDismissed();
+}
+
 /// Opens the release-notes panel under one platform's row, or closes it if it is already open.
 final class ClientsRowExpansionToggled extends ClientsEvent {
   const ClientsRowExpansionToggled(this.platform);
@@ -37,6 +49,8 @@ final class ClientsState extends Equatable {
     this.refreshing = false,
     this.error,
     this.expandedPlatform,
+    this.fetchingBootstrapScript = false,
+    this.bootstrapScript,
   });
 
   final ClientsView? view;
@@ -53,8 +67,16 @@ final class ClientsState extends Equatable {
   /// table's full width, and two open at once is a page of notes with the table lost between them.
   final String? expandedPlatform;
 
+  final bool fetchingBootstrapScript;
+
+  /// The script the screen has just been handed, or null once it has been shown. Held in state
+  /// rather than returned from the button's own handler so the fetch is the bloc's, like every
+  /// other request this screen makes.
+  final WindowsBootstrapScript? bootstrapScript;
+
   @override
-  List<Object?> get props => [view, loading, refreshing, error, expandedPlatform];
+  List<Object?> get props =>
+      [view, loading, refreshing, error, expandedPlatform, fetchingBootstrapScript, bootstrapScript];
 }
 
 /// The Clients screen.
@@ -63,12 +85,24 @@ final class ClientsState extends Equatable {
 /// server performs on every read costs a GitHub API call. The old page checked once per page load
 /// and this does the same — once per visit.
 class ClientsBloc extends Bloc<ClientsEvent, ClientsState> {
-  ClientsBloc({required GetClientsView getClientsView, required RefreshClients refreshClients})
-      : _getClientsView = getClientsView,
+  ClientsBloc({
+    required GetClientsView getClientsView,
+    required RefreshClients refreshClients,
+    required GetWindowsBootstrapScript getWindowsBootstrapScript,
+  })  : _getClientsView = getClientsView,
         _refreshClients = refreshClients,
+        _getWindowsBootstrapScript = getWindowsBootstrapScript,
         super(const ClientsState()) {
     on<ClientsRequested>(_onRequested);
     on<ClientsRefreshRequested>(_onRefresh);
+    on<ClientsBootstrapScriptRequested>(_onBootstrapScript);
+    on<ClientsBootstrapScriptDismissed>((event, emit) => emit(ClientsState(
+          view: state.view,
+          loading: state.loading,
+          refreshing: state.refreshing,
+          error: state.error,
+          expandedPlatform: state.expandedPlatform,
+        )));
     on<ClientsRowExpansionToggled>((event, emit) => emit(ClientsState(
           view: state.view,
           loading: state.loading,
@@ -80,6 +114,7 @@ class ClientsBloc extends Bloc<ClientsEvent, ClientsState> {
 
   final GetClientsView _getClientsView;
   final RefreshClients _refreshClients;
+  final GetWindowsBootstrapScript _getWindowsBootstrapScript;
 
   Future<void> _onRequested(ClientsRequested event, Emitter<ClientsState> emit) async {
     emit(const ClientsState(loading: true));
@@ -107,6 +142,31 @@ class ClientsBloc extends Bloc<ClientsEvent, ClientsState> {
         view: await _refreshClients(),
         loading: false,
         expandedPlatform: state.expandedPlatform,
+      ));
+    } on ApiException catch (error) {
+      emit(ClientsState(
+        view: state.view,
+        loading: false,
+        error: error.message,
+        expandedPlatform: state.expandedPlatform,
+      ));
+    }
+  }
+
+  Future<void> _onBootstrapScript(
+      ClientsBootstrapScriptRequested event, Emitter<ClientsState> emit) async {
+    emit(ClientsState(
+      view: state.view,
+      loading: false,
+      expandedPlatform: state.expandedPlatform,
+      fetchingBootstrapScript: true,
+    ));
+    try {
+      emit(ClientsState(
+        view: state.view,
+        loading: false,
+        expandedPlatform: state.expandedPlatform,
+        bootstrapScript: await _getWindowsBootstrapScript(),
       ));
     } on ApiException catch (error) {
       emit(ClientsState(

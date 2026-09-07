@@ -4,6 +4,7 @@ using Kintsugi.Application.AgentPackages;
 using Kintsugi.Application.AgentPackages.Commands.ImportAgentPackagesFromSource;
 using Kintsugi.Application.AgentPackages.Queries.GetAgentPackages;
 using Kintsugi.Application.AgentPackages.Queries.GetAgentPackageSourceStatus;
+using Kintsugi.Application.AgentPackages.Queries.GetWindowsBootstrapScript;
 using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.WebApi.Filters;
 
@@ -78,6 +79,32 @@ public class AdminClientsController : ControllerBase
 
         return Ok(await LoadAsync(results, refreshError, cancellationToken));
     }
+
+    /// <summary>
+    /// The silent PowerShell installer for the published Windows build — what an administrator
+    /// pastes into CrowdStrike to install the agent across a fleet without anyone downloading a
+    /// tarball.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Gated by this class's <see cref="RequireAdminSessionAttribute"/>, and that is not incidental:
+    /// the rendered script carries the current <c>AGENT_ENROLLMENT_TOKEN</c>, so this route hands out
+    /// a live credential. It sits under <c>/api/admin/</c> for the same reason every browser-driven
+    /// route does — <c>/api/agent-packages</c> is proxied on a prefix match with no client
+    /// certificate required, and <c>Program.cs</c> exempts all of <c>/api</c> from the sign-in gate,
+    /// so an anonymous sibling of the download route is exactly what this must not be.
+    /// </para>
+    /// <para>
+    /// Answers 200 with a reason rather than a 404 when no script can be rendered — the states are
+    /// "nothing published yet" and "published without an upstream checksum", both of which the
+    /// screen resolves with a button it is already showing. See
+    /// <see cref="WindowsBootstrapScriptDto"/>.
+    /// </para>
+    /// </remarks>
+    [HttpGet("windows/bootstrap-script")]
+    [ProducesResponseType(typeof(WindowsBootstrapScriptDto), StatusCodes.Status200OK)]
+    public async Task<ActionResult<WindowsBootstrapScriptDto>> WindowsBootstrapScript(CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(new GetWindowsBootstrapScriptQuery(ResolveAgentApiBaseUrl()), cancellationToken));
 
     private async Task<ClientsViewDto> LoadAsync(
         IReadOnlyList<AgentPackageImportResultDto> importResults,

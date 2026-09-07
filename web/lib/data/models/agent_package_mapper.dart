@@ -25,6 +25,14 @@ AgentPackage agentPackageFromJson(Map<String, dynamic> json) => AgentPackage(
       publishedUtc: dateTimeRequiredFromJson(json['publishedUtc']),
     );
 
+/// Reads a `WindowsBootstrapScriptDto`.
+WindowsBootstrapScript windowsBootstrapScriptFromJson(Map<String, dynamic> json) => WindowsBootstrapScript(
+      script: json['script'] as String?,
+      version: json['version'] as String?,
+      sha256: json['sha256'] as String?,
+      unavailableReason: json['unavailableReason'] as String?,
+    );
+
 AgentPackageSourceStatus sourceStatusFromJson(Map<String, dynamic> json) => AgentPackageSourceStatus(
       sourceDescription: json['sourceDescription'] as String? ?? '',
       platforms: listFromJson(json['platforms'], sourceRowFromJson),

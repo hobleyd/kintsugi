@@ -19,6 +19,12 @@ public class AgentPackageConfiguration : IEntityTypeConfiguration<AgentPackage>
         builder.Property(p => p.Sha256Signature).HasMaxLength(256).IsRequired();
         builder.Property(p => p.ReleaseNotes).HasMaxLength(2000);
 
+        // Nullable, and stays that way: a package published by a release script has no upstream at
+        // all, and rows imported before these columns existed carry no pin until a refresh
+        // backfills one. See AgentPackage.UpstreamSha256.
+        builder.Property(p => p.UpstreamSha256).HasMaxLength(64);
+        builder.Property(p => p.UpstreamDownloadUrl).HasMaxLength(1024);
+
         builder.HasIndex(p => new { p.Platform, p.Version }).IsUnique();
     }
 }

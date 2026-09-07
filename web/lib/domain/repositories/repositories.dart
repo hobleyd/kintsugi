@@ -112,6 +112,14 @@ abstract interface class AgentPackageRepository {
   /// Downloads whatever the upstream repository has that this server does not, points it at this
   /// server, and publishes it locally.
   Future<ClientsView> refresh();
+
+  /// The silent PowerShell installer for the published Windows build, for deployment through
+  /// CrowdStrike.
+  ///
+  /// Fetched on demand rather than carried in [view]: the rendered script contains the current
+  /// enrollment token, so it should reach the browser when somebody asks to see it and not on
+  /// every load of a screen that is mostly about something else.
+  Future<WindowsBootstrapScript> windowsBootstrapScript();
 }
 
 abstract interface class UpgradeScriptRepository {

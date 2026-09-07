@@ -58,7 +58,9 @@ public class PublishAgentPackageCommandHandler : IRequestHandler<PublishAgentPac
         var signature = _signingService.Sign(sha256Hex)
             ?? throw new InvalidOperationException("Failed to sign the published package's checksum.");
 
-        var package = AgentPackage.Create(platform, version, request.FileName, fileSizeBytes, sha256Hex, signature, request.ReleaseNotes);
+        var package = AgentPackage.Create(
+            platform, version, request.FileName, fileSizeBytes, sha256Hex, signature, request.ReleaseNotes,
+            request.UpstreamSha256, request.UpstreamDownloadUrl);
 
         await _repository.AddAsync(package, cancellationToken);
         await _unitOfWork.SaveChangesAsync(cancellationToken);

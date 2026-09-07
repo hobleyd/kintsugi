@@ -645,6 +645,50 @@ resolution now happens server-side in `AdminClientsController.ResolveAgentApiBas
 a value the client supplies, which would be a client-supplied instruction about what to bake into
 signed packages — and the screen says out loud when it is falling back.
 
+**A CrowdStrike-managed Windows estate installs from a rendered script instead, and the pinned
+checksum is the whole security design.** An estate that pushes software through CrowdStrike does not
+have someone downloading a tarball from the Clients screen on each host, so the Windows row also
+offers a "Windows deployment script" — a silent PowerShell installer
+(`WindowsBootstrapScript`, `GET /api/admin/clients/windows/bootstrap-script`) that downloads the
+release archive **from GitHub** and refuses to install it unless its SHA-256 matches a literal
+written into the script. Nothing here terminates that GitHub connection, so TLS alone vouches for
+nothing — and the realistic threat in an estate running CrowdStrike at all is its own
+TLS-inspecting proxy, which holds a certificate the host's trust store accepts. What makes the pin
+worth something is that the script arrives through CrowdStrike, a separately authenticated channel,
+so the literal is independent of the connection it is checking.
+
+Three consequences follow, and each is a way to break this without noticing.
+
+- **The pin must never be something an administrator types.** A hand-transcribed hash fails closed
+  on a wrong paste, and the obvious fix for that failure — re-deriving it from whatever downloaded
+  — is not a control at all. So the script is rendered by the server with the hash, `api_base_url`
+  and the current enrollment token already in it. That is also why the route is on
+  `AdminClientsController` and inherits its `[RequireAdminSession]`: the rendered script carries a
+  live credential.
+- **`AgentPackage.UpstreamSha256` is not `AgentPackage.Sha256`, and using the latter would fail
+  every install.** `Sha256` is over the archive stored here, *after* `api_base_url` was rewritten
+  into it; the script downloads the pristine bytes GitHub serves. The import records the upstream
+  hash and the URL it came from before the rewriter touches the stream, and
+  `RecordUpstreamProvenance` backfills a Windows row that predates the column on the next "Refresh
+  clients" — Windows only, since spending a download per platform on a pin nothing else reads would
+  be waste on a button people press often. A row that carries no pin renders a reason, never a
+  script with an empty one.
+- **The script installs; it does not upgrade, and it does not reimplement `install.ps1`.** It
+  verifies, extracts into a directory stripped to SYSTEM and Administrators (SYSTEM's `$env:TEMP` is
+  `C:\Windows\Temp`, which any user may write to — verifying and then extracting somewhere writable
+  leaves a window in which the checked bytes and the executed ones are different files), points the
+  packaged `config.toml` at this server, and hands off to the archive's own `install.ps1`. A second
+  copy of that installer would drift on three things that each fail quietly: `obj= LocalSystem`, the
+  queue ACL granted by SID rather than by the localized name "Users", and the BOM-less
+  `config.toml` write. A re-run against an installed host exits 0 — the agent self-updates from this
+  server, so reinstalling an older pinned build over a newer running one is a step backwards.
+
+Authenticode is the answer this replaces and is unavailable: nothing signs the Windows binary today.
+The verification is written so a signature check can be added beside the hash rather than instead of
+it. And be precise about what the pin proves — it is only as good as this server's own fetch from
+GitHub at import time, which went over ordinary TLS. That is one fetch at a controlled point rather
+than one per endpoint behind whatever proxy each site runs; it is not an attestation.
+
 A deployment where something else already owns 443 therefore needs agents routed to nginx *without*
 that hop terminating them, which is what `nginx/edge-sni-router.conf.example` documents: an
 `ssl_preread` stream server that reads the SNI hostname off the ClientHello and hands the agent
@@ -1544,6 +1588,15 @@ wedged by a release before this one need `Restart-Service KintsugiAgent` by hand
   `AppStoreUpgradeScript`. Move one and App Store rows fail with "kintsugi-mas is not installed" on a
   host that plainly has it — a signed script's text is not rewritten by a deployment, so the server
   side of that rename only reaches a host after a human takes and re-signs the new script.
+- **The Windows bootstrap script's pinned hash is coupled to the GitHub asset's bytes and to
+  nothing that checks it.** `WindowsBootstrapScript` renders `AgentPackage.UpstreamSha256`, recorded
+  when the import fetched that release; if a release is ever re-cut under the same tag, every host
+  the script is pushed to refuses to install and the only correct fix is a re-import and a
+  re-render. The script is also kept **ASCII-only**, like every other server-written script here,
+  because Windows PowerShell 5.1 decodes a BOM-less `.ps1` with the system ANSI code page and this
+  is a file an operator saves themselves — a test asserts it. And it names `install.ps1`,
+  `config.toml` and `kintsugi-agent.exe` as top-level archive entries, so it is coupled to
+  `publish-release.ps1`'s `tar` invocation exactly as `self_update.rs` is.
 - The enrollment token is not baked into published packages — `AgentPackageArchiveRewriter` writes
   the current `AGENT_ENROLLMENT_TOKEN` into `config.toml` on every download, so rotation never
   staleness-breaks a published package. `AgentPackagesController.Download` skips that rewrite for a

@@ -15,6 +15,7 @@ public class ImportAgentPackagesFromSourceCommandHandlerTests
     private readonly Mock<IAgentPackageSourceClient> _sourceClient = new();
     private readonly Mock<IAgentPackageArchiveRewriter> _archiveRewriter = new();
     private readonly Mock<IAgentPackageRepository> _repository = new();
+    private readonly Mock<IUnitOfWork> _unitOfWork = new();
     private readonly Mock<ISender> _sender = new();
 
     public ImportAgentPackagesFromSourceCommandHandlerTests()
@@ -30,10 +31,15 @@ public class ImportAgentPackagesFromSourceCommandHandlerTests
     }
 
     private ImportAgentPackagesFromSourceCommandHandler CreateHandler() =>
-        new(_sourceClient.Object, _archiveRewriter.Object, _repository.Object, _sender.Object);
+        new(_sourceClient.Object, _archiveRewriter.Object, _repository.Object, _unitOfWork.Object, _sender.Object);
 
     private static AgentPackageDto Published(string platform, string version) =>
         new(platform, version, $"kintsugi-agent-{platform}-{version}.tar.gz", 1024, new string('a', 64), "sig", null, DateTimeOffset.UtcNow);
+
+    /// <summary>The SHA-256 of the three bytes the fake source client serves — what the handler
+    /// must record as the *upstream* pin, as opposed to the rewriter's own 4/5/6 bytes.</summary>
+    private const string UpstreamSha256OfOneTwoThree =
+        "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81";
 
     private static AgentPackageSourceRelease Release(string platform = "macos", string version = "0.5.0", string? notes = "Build notes.") =>
         new(platform, version, $"kintsugi-agent-{platform}-{version}.tar.gz",
@@ -108,6 +114,96 @@ public class ImportAgentPackagesFromSourceCommandHandlerTests
         Assert.Equal(AgentPackageImportOutcome.AlreadyPublished, result.Outcome);
         _sourceClient.Verify(c => c.DownloadAsync(It.IsAny<AgentPackageSourceRelease>(), It.IsAny<CancellationToken>()), Times.Never);
         _sender.Verify(s => s.Send(It.IsAny<PublishAgentPackageCommand>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Handle_RecordsTheUpstreamChecksum_NotTheRewrittenOne()
+    {
+        // The pin WindowsBootstrapScript carries has to describe what GitHub serves, because that
+        // is what the script downloads. The archive stored here has had its api_base_url rewritten
+        // by then, so its own checksum — the one the agent's self-update verifies — is over
+        // different bytes entirely.
+        SourceHas(Release("windows", "0.7.4"));
+        PublishAgentPackageCommand? published = null;
+        _sender.Setup(s => s.Send(It.IsAny<PublishAgentPackageCommand>(), It.IsAny<CancellationToken>()))
+            .Callback((object c, CancellationToken _) => published = (PublishAgentPackageCommand)c)
+            .ReturnsAsync(Published("windows", "0.7.4"));
+
+        await CreateHandler().Handle(new ImportAgentPackagesFromSourceCommand(ApiBaseUrl), CancellationToken.None);
+
+        Assert.Equal(UpstreamSha256OfOneTwoThree, published!.UpstreamSha256);
+        Assert.Equal(Release("windows", "0.7.4").DownloadUrl, published.UpstreamDownloadUrl);
+    }
+
+    [Fact]
+    public async Task Handle_HashingTheDownload_LeavesItReadableForTheRewriter()
+    {
+        // Hashing consumes the stream, and the very next thing the handler does is hand the same
+        // stream to the rewriter. A missing rewind would publish an empty archive, which nothing
+        // else here would notice.
+        SourceHas(Release("windows", "0.7.4"));
+        byte[]? rewritten = null;
+        _archiveRewriter.Setup(r => r.WithApiBaseUrl(It.IsAny<Stream>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((Stream source, string _, CancellationToken __) =>
+            {
+                var buffer = new MemoryStream();
+                source.CopyTo(buffer);
+                rewritten = buffer.ToArray();
+                return new MemoryStream(new byte[] { 4, 5, 6 });
+            });
+
+        await CreateHandler().Handle(new ImportAgentPackagesFromSourceCommand(ApiBaseUrl), CancellationToken.None);
+
+        Assert.Equal(new byte[] { 1, 2, 3 }, rewritten);
+    }
+
+    [Fact]
+    public async Task Handle_WindowsRowWithNoUpstreamChecksum_IsBackfilledOnRefresh()
+    {
+        // A server that imported its Windows package before the pin existed would otherwise have no
+        // deployment script until the next agent release. One refresh fixes it.
+        SourceHas(Release("windows", "0.7.4"));
+        var existing = AgentPackage.Create("windows", "0.7.4", "f.tar.gz", 1024, new string('a', 64), "sig", null);
+        _repository.Setup(r => r.GetByPlatformAndVersionAsync("windows", "0.7.4", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(existing);
+
+        var result = Assert.Single(await CreateHandler().Handle(new ImportAgentPackagesFromSourceCommand(ApiBaseUrl), CancellationToken.None));
+
+        Assert.Equal(AgentPackageImportOutcome.AlreadyPublished, result.Outcome);
+        Assert.Equal(UpstreamSha256OfOneTwoThree, existing.UpstreamSha256);
+        _unitOfWork.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Once);
+        // Backfilled, not republished — the stored archive is untouched.
+        _sender.Verify(s => s.Send(It.IsAny<PublishAgentPackageCommand>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Handle_WindowsRowThatAlreadyHasAChecksum_IsNotDownloadedAgain()
+    {
+        SourceHas(Release("windows", "0.7.4"));
+        _repository.Setup(r => r.GetByPlatformAndVersionAsync("windows", "0.7.4", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(AgentPackage.Create(
+                "windows", "0.7.4", "f.tar.gz", 1024, new string('a', 64), "sig", null,
+                new string('b', 64), "https://github.com/hobleyd/kintsugi/releases/download/x/y.tar.gz"));
+
+        await CreateHandler().Handle(new ImportAgentPackagesFromSourceCommand(ApiBaseUrl), CancellationToken.None);
+
+        _sourceClient.Verify(c => c.DownloadAsync(It.IsAny<AgentPackageSourceRelease>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Handle_BackfillFailing_DoesNotFailTheRefresh()
+    {
+        // The archive already published here is installable whether or not this convenience works,
+        // so a GitHub blip must not turn an up-to-date refresh into a reported error.
+        SourceHas(Release("windows", "0.7.4"));
+        _repository.Setup(r => r.GetByPlatformAndVersionAsync("windows", "0.7.4", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(AgentPackage.Create("windows", "0.7.4", "f.tar.gz", 1024, new string('a', 64), "sig", null));
+        _sourceClient.Setup(c => c.DownloadAsync(It.IsAny<AgentPackageSourceRelease>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new HttpRequestException("502 from the asset host"));
+
+        var result = Assert.Single(await CreateHandler().Handle(new ImportAgentPackagesFromSourceCommand(ApiBaseUrl), CancellationToken.None));
+
+        Assert.Equal(AgentPackageImportOutcome.AlreadyPublished, result.Outcome);
     }
 
     [Fact]

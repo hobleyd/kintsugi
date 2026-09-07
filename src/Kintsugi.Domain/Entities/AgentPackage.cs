@@ -34,6 +34,25 @@ public class AgentPackage : BaseEntity
 
     public string? ReleaseNotes { get; private set; }
 
+    /// <summary>Lowercase hex SHA-256 of the <em>pristine upstream</em> archive — the bytes GitHub
+    /// serves — as opposed to <see cref="Sha256"/>, which is over the rewritten archive stored
+    /// here. The two are deliberately different: the import rewrites <c>api_base_url</c> before
+    /// storing, so the stored bytes describe this server and the upstream bytes do not.
+    ///
+    /// <para>This is the pin the Windows bootstrap script carries (see
+    /// <c>WindowsBootstrapScript</c>): that script downloads from GitHub rather than from here, so
+    /// the only checksum that can vouch for what it receives is one taken over what GitHub sent.
+    /// Null on a package published by a release script rather than imported — there is no upstream
+    /// for those — and on any row imported before this was recorded, which is why every consumer
+    /// treats null as "no script can be rendered yet" rather than as an error.</para></summary>
+    public string? UpstreamSha256 { get; private set; }
+
+    /// <summary>The URL the archive above was fetched from, recorded rather than rebuilt from the
+    /// configured repository at render time: the pin and the address it pins have to travel
+    /// together, or a repository setting edited between import and render would produce a script
+    /// pointing at one artifact and checking another's hash.</summary>
+    public string? UpstreamDownloadUrl { get; private set; }
+
     private AgentPackage()
     {
     }
@@ -45,11 +64,40 @@ public class AgentPackage : BaseEntity
         long fileSizeBytes,
         string sha256,
         string sha256Signature,
-        string? releaseNotes)
+        string? releaseNotes,
+        string? upstreamSha256 = null,
+        string? upstreamDownloadUrl = null)
     {
         var entity = new AgentPackage();
-        entity.Apply(platform, version, fileName, fileSizeBytes, sha256, sha256Signature, releaseNotes);
+        entity.Apply(
+            platform, version, fileName, fileSizeBytes, sha256, sha256Signature, releaseNotes,
+            upstreamSha256, upstreamDownloadUrl);
         return entity;
+    }
+
+    /// <summary>
+    /// Fills in the upstream provenance of a package that was published before it was recorded —
+    /// the import's backfill, so an existing deployment gains a renderable bootstrap script on the
+    /// next "Refresh clients" rather than only on the next agent release.
+    /// </summary>
+    /// <remarks>
+    /// Only ever fills a gap: a row that already carries a pin keeps it. Overwriting one would let
+    /// a later import silently move the pin of a version whose bytes are, by
+    /// <c>PublishAgentPackageCommandHandler</c>'s own rule, never allowed to change.
+    /// </remarks>
+    /// <returns>True when this call actually recorded something.</returns>
+    public bool RecordUpstreamProvenance(string upstreamSha256, string upstreamDownloadUrl)
+    {
+        if (UpstreamSha256 is not null
+            || string.IsNullOrWhiteSpace(upstreamSha256)
+            || string.IsNullOrWhiteSpace(upstreamDownloadUrl))
+        {
+            return false;
+        }
+
+        UpstreamSha256 = upstreamSha256.Trim().ToLowerInvariant();
+        UpstreamDownloadUrl = upstreamDownloadUrl.Trim();
+        return true;
     }
 
     private void Apply(
@@ -59,7 +107,9 @@ public class AgentPackage : BaseEntity
         long fileSizeBytes,
         string sha256,
         string sha256Signature,
-        string? releaseNotes)
+        string? releaseNotes,
+        string? upstreamSha256,
+        string? upstreamDownloadUrl)
     {
         if (string.IsNullOrWhiteSpace(platform))
         {
@@ -98,5 +148,19 @@ public class AgentPackage : BaseEntity
         Sha256 = sha256;
         Sha256Signature = sha256Signature;
         ReleaseNotes = string.IsNullOrWhiteSpace(releaseNotes) ? null : releaseNotes;
+
+        // Both or neither. A hash with no address to fetch, or an address with nothing to check it
+        // against, is not half a pin — it is a script that would download without verifying, which
+        // is the one outcome this whole path exists to prevent.
+        if (string.IsNullOrWhiteSpace(upstreamSha256) || string.IsNullOrWhiteSpace(upstreamDownloadUrl))
+        {
+            UpstreamSha256 = null;
+            UpstreamDownloadUrl = null;
+        }
+        else
+        {
+            UpstreamSha256 = upstreamSha256.Trim().ToLowerInvariant();
+            UpstreamDownloadUrl = upstreamDownloadUrl.Trim();
+        }
     }
 }

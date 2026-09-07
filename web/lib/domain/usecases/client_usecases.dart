@@ -17,3 +17,13 @@ class RefreshClients {
 
   Future<ClientsView> call() => _repository.refresh();
 }
+
+/// The Windows deployment script for CrowdStrike, rendered by the server with this build's
+/// checksum, this server's address and the current enrollment token already in it.
+class GetWindowsBootstrapScript {
+  const GetWindowsBootstrapScript(this._repository);
+
+  final AgentPackageRepository _repository;
+
+  Future<WindowsBootstrapScript> call() => _repository.windowsBootstrapScript();
+}

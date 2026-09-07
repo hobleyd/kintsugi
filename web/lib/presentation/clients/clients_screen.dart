@@ -14,6 +14,7 @@ import '../../data/repositories/agent_package_repository_impl.dart';
 import '../../domain/entities/agent_package.dart';
 import '../../domain/entities/enums.dart';
 import '../../domain/usecases/client_usecases.dart';
+import '../applications/widgets/script_dialog.dart';
 import 'clients_bloc.dart';
 
 /// Installable agent packages, and the refresh that pulls newer builds in.
@@ -26,6 +27,7 @@ class ClientsScreen extends StatelessWidget {
         create: (_) => ClientsBloc(
           getClientsView: locator<GetClientsView>(),
           refreshClients: locator<RefreshClients>(),
+          getWindowsBootstrapScript: locator<GetWindowsBootstrapScript>(),
         )..add(const ClientsRequested()),
         child: const _ClientsView(),
       );
@@ -35,8 +37,37 @@ class _ClientsView extends StatelessWidget {
   const _ClientsView();
 
   @override
-  Widget build(BuildContext context) =>
-      const BlocBuilder<ClientsBloc, ClientsState>(builder: _build);
+  Widget build(BuildContext context) => BlocConsumer<ClientsBloc, ClientsState>(
+        // Only when the script arrives, not on every rebuild — and the bloc is told to drop it as
+        // soon as the dialog has it, so a later unrelated state change cannot reopen the same one.
+        listenWhen: (previous, current) =>
+            previous.bootstrapScript != current.bootstrapScript && current.bootstrapScript != null,
+        listener: _showBootstrapScript,
+        builder: _build,
+      );
+
+  static void _showBootstrapScript(BuildContext context, ClientsState state) {
+    final result = state.bootstrapScript!;
+    context.read<ClientsBloc>().add(const ClientsBootstrapScriptDismissed());
+
+    final script = result.script;
+    if (script == null) {
+      // Nothing published, or published without an upstream checksum. Both are fixed by the
+      // "Refresh clients" button already on this screen, so the reason belongs beside it rather
+      // than inside a dialog that would only be able to say the same thing.
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(result.unavailableReason ?? 'No deployment script could be rendered.'),
+      ));
+      return;
+    }
+
+    showScriptDialog(
+      context,
+      applicationName: 'Install-KintsugiAgent.ps1',
+      platform: 'Windows agent v${result.version} - pins SHA-256 ${result.sha256}',
+      script: script,
+    );
+  }
 
   static Widget _build(BuildContext context, ClientsState state) {
     final view = state.view;
@@ -61,6 +92,23 @@ class _ClientsView extends StatelessWidget {
               ),
           ],
           actions: [
+            // Windows only, and unconditional rather than hidden when no package is published:
+            // pressing it then explains why there is nothing to render, whereas an absent button
+            // explains nothing. See WindowsBootstrapScript for why this platform has one at all.
+            //
+            // A tooltip rather than a fourth paragraph of hint text above the table: the script's
+            // own synopsis is the first thing in the dialog and says all of this at length, and the
+            // hints here are already the tallest part of a screen whose point is the table.
+            SecondaryButton(
+              label: 'Windows deployment script',
+              tooltip: 'A silent PowerShell installer for CrowdStrike. It downloads the published '
+                  'build from GitHub and refuses to install it unless the SHA-256 written into the '
+                  'script matches. Contains the current enrollment token - treat it as a credential.',
+              busy: state.fetchingBootstrapScript,
+              onPressed: state.loading
+                  ? null
+                  : () => context.read<ClientsBloc>().add(const ClientsBootstrapScriptRequested()),
+            ),
             PrimaryButton(
               label: 'Refresh clients',
               busy: state.refreshing,
