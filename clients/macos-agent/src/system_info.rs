@@ -330,8 +330,9 @@ fn read_plist_as_json(path: &Path) -> Result<serde_json::Value> {
 /// Name reported for Homebrew's own entry, and the `packageManager` value
 /// every formula/cask it manages is tagged with — the backend links a child
 /// to its manager by matching this name against another entry's `name` in
-/// the same report.
-const HOMEBREW_NAME: &str = "Homebrew";
+/// the same report. `upgrade::runs_as_root` recognizes the manager's own row
+/// by it too, since that row carries no `packageManager` of its own.
+pub const HOMEBREW_NAME: &str = "Homebrew";
 
 /// Result of [`scan_homebrew`]: the Homebrew-managed apps to report, plus
 /// the set of /Applications bundle names those casks already account for.
@@ -383,7 +384,8 @@ pub fn scan_homebrew() -> HomebrewScan {
             package_manager: None,
             // Homebrew's own row runs the same shared script every formula does (`brew update` is
             // Homebrew upgrading itself — see HomebrewUpgradeScript on the server), as the same
-            // user, so it is as patchable as they are.
+            // user, so it is as patchable as they are — and `upgrade::runs_as_root` keeps it with
+            // that user by name, since `package_manager: None` alone reads as AI-researched.
             application_identifier: Some("brew".to_string()),
             available_version: None,
             update_available: None,

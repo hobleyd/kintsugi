@@ -60,7 +60,13 @@ pub struct UpgradeStatus {
 /// - A **Homebrew** row stays with the logged-in user: Homebrew refuses to run as root outright
 ///   ("Running Homebrew as root is extremely dangerous and no longer supported"), and its installs
 ///   are user-owned, so the logged-in user is the right — and only — process for it. A legacy
-///   `PackageManagerCommand` row is a bare `brew upgrade ...` for the same reason.
+///   `PackageManagerCommand` row is a bare `brew upgrade ...` for the same reason. That covers
+///   Homebrew's *own* row too, which is recognized by name (`system_info::HOMEBREW_NAME`) rather
+///   than by owner: the inventory reports the manager with no `packageManager` of its own, so on
+///   that field alone it reads as an AI-researched row and was queued to the daemon — which
+///   rightly refused it, and every patch cycle then logged Homebrew as failed. Its upgrade is the
+///   same shared script every formula runs (`brew update` is Homebrew upgrading itself — see
+///   `HomebrewUpgradeScript` on the server), as the same user.
 /// - An **AI-researched** row (no package manager) installs into `/Applications` the way the
 ///   server's prompt tells it to — replace the bundle in place, or `installer -pkg ... -target /` —
 ///   and a bundle that arrived by MDM, `.pkg` or any installer that asked for a password is owned
@@ -83,6 +89,7 @@ pub struct UpgradeStatus {
 /// and refuses a Homebrew row, so a forged request cannot get `brew` run as root either.
 pub fn runs_as_root(status: &UpgradeStatus) -> bool {
     status.method == UpgradeMethod::Script
+        && !status.application_name.eq_ignore_ascii_case(system_info::HOMEBREW_NAME)
         && status.package_manager.as_deref().is_none_or(|manager| manager.eq_ignore_ascii_case(system_info::APP_STORE_NAME))
 }
 
@@ -423,6 +430,21 @@ mod tests {
     fn a_homebrew_script_stays_with_the_logged_in_user() {
         // Homebrew refuses to run as root, so this must never reach the daemon.
         assert!(!runs_as_root(&status(UpgradeMethod::Script, Some("Homebrew"))));
+    }
+
+    #[test]
+    fn homebrews_own_row_stays_with_the_logged_in_user() {
+        // The manager's own row is reported with no package manager (it *is* the manager — see
+        // `system_info::scan_homebrew`), so on that field alone it looks AI-researched. It was
+        // queued to the daemon, which refused it, and every cycle logged "failed to patch
+        // Homebrew". Matched by name, case-insensitively like every other row name.
+        let mut homebrew = status(UpgradeMethod::Script, None);
+        homebrew.application_name = "Homebrew".to_string();
+        homebrew.application_identifier = Some("brew".to_string());
+        assert!(!runs_as_root(&homebrew));
+
+        homebrew.application_name = "homebrew".to_string();
+        assert!(!runs_as_root(&homebrew));
     }
 
     #[test]
