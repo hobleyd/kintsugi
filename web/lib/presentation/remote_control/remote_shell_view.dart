@@ -54,7 +54,34 @@ class _RemoteShellViewState extends State<RemoteShellView> {
   late final Terminal _terminal = Terminal(maxLines: _scrollbackLines);
   final TerminalController _controller = TerminalController();
 
+  /// Supplied rather than left to xterm to create, because [Listener] above needs something to
+  /// focus. Disposed here for the same reason: a node this widget made is a node this widget owns.
+  final FocusNode _focusNode = FocusNode(debugLabel: 'remote terminal');
+
   StreamSubscription<Uint8List>? _subscription;
+
+  /// Takes the keyboard on a press, whatever that press later turns out to be.
+  ///
+  /// Two things conspire to lose it otherwise, and together they are why clicking back into a
+  /// terminal took a random number of attempts.
+  ///
+  /// xterm focuses from `onTapDown`, so it needs the press to be recognised as a *tap*. A press
+  /// that drifts a pixel or two — which is most real clicks — is a drag instead, and drives its
+  /// selection; nothing focuses. Worse, that drag leaves a selection behind, and xterm's next
+  /// `onTapDown` is spent clearing it rather than focusing, so the click after a drifting one is
+  /// wasted too. Listening for the raw pointer event side-steps all of it: a [Listener] does not
+  /// compete in the gesture arena, so it fires on every press however the press is later
+  /// interpreted, and xterm's own tap, drag-to-select and scroll handling are untouched.
+  ///
+  /// The microtask is the other half, and without it this does nothing at all when it is most
+  /// needed. A focused text field anywhere on the page unfocuses itself on any pointer down
+  /// outside it (`TapRegion`, via `onTapOutside`), and that runs *after* this handler — so a
+  /// request made inline is immediately undone and focus lands on the route's modal scope, with
+  /// the keyboard going nowhere. Deferring to the end of the current event dispatch puts this
+  /// last, which is the only position that survives.
+  void _takeKeyboard() => scheduleMicrotask(() {
+        if (mounted) _focusNode.requestFocus();
+      });
 
   /// One decoder for the whole session. See the class note — per-frame decoding corrupts any
   /// character that straddles a frame boundary.
@@ -89,6 +116,7 @@ class _RemoteShellViewState extends State<RemoteShellView> {
 
   @override
   void dispose() {
+    _focusNode.dispose();
     unawaited(_subscription?.cancel());
     _controller.dispose();
     super.dispose();
@@ -109,20 +137,24 @@ class _RemoteShellViewState extends State<RemoteShellView> {
         border: Border.all(color: palette.border),
       ),
       padding: const EdgeInsets.all(8),
-      child: TerminalView(
-        _terminal,
-        controller: _controller,
-        // The terminal takes the keyboard as soon as the session opens, so an administrator can
-        // type straight away rather than having to click into it first.
-        autofocus: true,
-        backgroundOpacity: 0,
-        theme: _themeFor(palette),
-        // Asked for by the family `google_fonts` registers, not by the human name of the face —
-        // see AppTheme.monoFamily, which is where that distinction and its consequence are written
-        // down. Naming `'Share Tech Mono'` here matched nothing, and the terminal rendered in the
-        // proportional default. xterm's own fallback list is left alone below it, which costs
-        // nothing on web and is what a desktop build would land on.
-        textStyle: TerminalStyle(fontFamily: AppTheme.monoFamily, fontSize: 13),
+      child: Listener(
+        onPointerDown: (_) => _takeKeyboard(),
+        child: TerminalView(
+          _terminal,
+          controller: _controller,
+          focusNode: _focusNode,
+          // The terminal takes the keyboard as soon as the session opens, so an administrator can
+          // type straight away rather than having to click into it first.
+          autofocus: true,
+          backgroundOpacity: 0,
+          theme: _themeFor(palette),
+          // Asked for by the family `google_fonts` registers, not by the human name of the face —
+          // see AppTheme.monoFamily, which is where that distinction and its consequence are written
+          // down. Naming `'Share Tech Mono'` here matched nothing, and the terminal rendered in the
+          // proportional default. xterm's own fallback list is left alone below it, which costs
+          // nothing on web and is what a desktop build would land on.
+          textStyle: TerminalStyle(fontFamily: AppTheme.monoFamily, fontSize: 13),
+        ),
       ),
     );
   }
