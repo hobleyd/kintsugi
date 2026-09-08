@@ -1,5 +1,5 @@
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -164,7 +164,19 @@ fn install_binary(downloaded_path: &Path) -> Result<()> {
 }
 
 fn extract_and_install(downloaded_path: &Path, extract_dir: &Path) -> Result<()> {
+    // `--no-same-owner` is load-bearing, and its absence was invisible for months. Extracting as
+    // root, tar restores the uid and gid *recorded in the archive* — which is whichever account
+    // built the release, not root. Everything below then installs those files with `fs::copy`,
+    // which on APFS is `fclonefileat` and clones the owner and the timestamps along with the
+    // bytes, so a self-update quietly replaced three root-owned files with user-owned ones:
+    // the daemon's own binary (a local user could then rewrite the code launchd runs as root),
+    // `kintsugi-mas` (whose owner AppStoreUpgradeScript checks before executing, so App Store rows
+    // stopped patching), and the remote-shell plist (which launchd refuses to load unless root owns
+    // it, so terminal sessions were requested and never served). packaging/install.sh had it right
+    // with `install -o root -g wheel`; every self-update since has undone that. `install_over`
+    // asserts the ownership as well, because this flag only fixes hosts from here on.
     let output = Command::new("tar")
+        .arg("--no-same-owner")
         .arg("-xzf")
         .arg(downloaded_path)
         .arg("-C")
@@ -215,8 +227,62 @@ fn install_over(extracted: &Path, installed_path: &Path) -> Result<()> {
 
     fs::rename(&staged_path, installed_path).with_context(|| format!("failed to install {}", installed_path.display()))?;
 
+    // Ownership is asserted rather than assumed. `fs::copy` above is `fclonefileat` on APFS, which
+    // clones the source's owner along with its bytes, and the source came out of a tarball that
+    // records whoever built the release — so without this a self-update hands root's own binary to
+    // a local account. See the `--no-same-owner` note in `extract_and_install`, which is the other
+    // half of the same defect.
+    chown_root_wheel(installed_path);
+
     logging::info(&format!("installed new binary at {}", installed_path.display()));
     Ok(())
+}
+
+/// `root:wheel` on a path, the ownership packaging/install.sh gives everything it installs.
+///
+/// Shelled out to for the same reason `remote_shell`'s `root:admin` twin is, and kept beside it in
+/// spirit: one place per ownership this agent has to assert.
+fn chown_root_wheel(path: &Path) {
+    match Command::new("/usr/sbin/chown").arg("root:wheel").arg(path).output() {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => logging::warn(&format!(
+            "chown root:wheel {} exited with {}: {}",
+            path.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Err(err) => logging::warn(&format!("failed to run chown on {}: {err}", path.display())),
+    }
+}
+
+/// Puts `root:wheel` back on the two files this agent installs outside its own state directory, on
+/// every root check-in.
+///
+/// The repair half of the `--no-same-owner` defect, and it is needed for the same reason
+/// `remote_shell::ensure_job_installed` is: a fix that only applies to future self-updates leaves
+/// every host that has *already* self-updated holding user-owned copies, and nothing re-runs the
+/// installer. What it repairs is not cosmetic — `/usr/local/bin/kintsugi-agent` is executed as root
+/// by launchd, so an account that owns it owns this host's root daemon, and `kintsugi-mas` is
+/// refused outright by AppStoreUpgradeScript unless root owns it.
+///
+/// Silent when there is nothing to do, which is every check-in after the first.
+pub fn repair_installed_ownership() {
+    for path in [config::installed_binary_path(), config::mas_binary_path()] {
+        let Ok(metadata) = fs::metadata(&path) else {
+            continue;
+        };
+        if metadata.uid() == 0 && metadata.gid() == 0 {
+            continue;
+        }
+
+        chown_root_wheel(&path);
+        logging::info(&format!(
+            "corrected the ownership of {} from uid {} gid {} to root:wheel",
+            path.display(),
+            metadata.uid(),
+            metadata.gid()
+        ));
+    }
 }
 
 /// Restarts both launchd jobs that run this binary so the update actually takes effect: the root

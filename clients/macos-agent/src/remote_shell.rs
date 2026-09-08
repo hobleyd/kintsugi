@@ -57,7 +57,7 @@
 
 use std::fs;
 use std::io::Read;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -127,8 +127,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 // The root side: installing the job that serves a request.
 // =================================================================================================
 
-/// Creates the drop-box and installs the LaunchDaemon that drains it, if this host has not got
-/// them. Root only, and called from every root check-in (`main::run_daemon`).
+/// Makes sure this host can actually serve a terminal: the drop-box exists, the LaunchDaemon that
+/// drains it is installed and owned by root, and launchd has it loaded. Root only, and called from
+/// every root check-in (`main::run_daemon`).
 ///
 /// # Why a check-in and not the installer
 ///
@@ -137,8 +138,19 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// `config::repair_directory_modes`, and found the same way. It is worse than that here, though:
 /// the self-update is performed by the *old* binary, so a job introduced in release N is installed
 /// by nothing at all on a host that self-updates from N-1 into it. That is not hypothetical, it is
-/// what shipped in 0.9.5 — see `LAUNCHD_JOB_PLIST`. A check-in is the one thing every Mac in the
-/// fleet runs hourly as root under whatever binary it currently has.
+/// what shipped in 0.9.5 — see `LAUNCHD_JOB_PLIST`.
+///
+/// # Why it repairs rather than only installs
+///
+/// The version that only installed when absent was not enough, and the host it failed on is the one
+/// this was written from. 0.9.5's own installer copied the plist out of the release archive, and
+/// both `tar -xzf` as root and `fs::copy` on APFS preserve the *archive builder's* ownership — so
+/// the file landed owned by a user account, and **launchd refuses a LaunchDaemon it does not find
+/// root-owned**, with `Bootstrap failed: 5: Input/output error` and nothing about ownership in it.
+/// An if-absent check then sees a plist and leaves the host broken forever. So ownership is
+/// asserted on the file whoever wrote it, and the job is bootstrapped whenever launchd has not got
+/// it — both idempotent, and silent on the overwhelming majority of check-ins where neither is
+/// needed. `self_update::repair_installed_ownership` is the same repair for the two binaries.
 ///
 /// # Nothing here is fatal
 ///
@@ -146,11 +158,11 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// in over a terminal it may never be asked for would be the worse trade. Failures are logged,
 /// because the symptom otherwise is a session that never connects.
 ///
-/// Installed only when absent, so an administrator's own edits to the plist are never clobbered —
-/// which also means a change to the packaged job's *contents* does not reach a host that already
-/// has one. Both of those are deliberate; a job that had to be rewritten would need a version
-/// marker in it and a reason to be worth the risk of stamping on a local edit.
-pub fn install_job_if_absent() {
+/// The plist's *contents* are written only when there is no file at all, so an administrator's own
+/// edits are never clobbered — which also means a change to the packaged job does not reach a host
+/// that already has one. That is deliberate; a job that had to be rewritten would need a version
+/// marker in it and a reason worth the risk of stamping on a local edit.
+pub fn ensure_job_installed() {
     // The directory `WatchPaths` watches has to exist before the job is loaded, or nothing wakes it.
     // `root:admin 0770`, matching the main queue: the logged-in administrator's process drops a
     // request in, and only root reads one.
@@ -168,23 +180,51 @@ pub fn install_job_if_absent() {
     }
 
     let installed = config::remote_shell_plist_path();
-    if installed.exists() {
-        return;
+    if !installed.exists() {
+        if let Err(err) = fs::write(&installed, LAUNCHD_JOB_PLIST) {
+            logging::warn(&format!("could not install {}: {err}", installed.display()));
+            return;
+        }
+        let _ = fs::set_permissions(&installed, fs::Permissions::from_mode(0o644));
+        logging::info(&format!("installed the remote shell job at {}", installed.display()));
+    } else if let Ok(metadata) = fs::metadata(&installed) {
+        // The case launchd will not tell you about in words it means.
+        if metadata.uid() != 0 || metadata.gid() != 0 {
+            chown_root_wheel(&installed);
+            logging::info(&format!(
+                "corrected the ownership of {} from uid {} gid {} to root:wheel; launchd refuses a LaunchDaemon it does not own",
+                installed.display(),
+                metadata.uid(),
+                metadata.gid()
+            ));
+        }
     }
 
-    if let Err(err) = fs::write(&installed, LAUNCHD_JOB_PLIST) {
-        logging::warn(&format!("could not install {}: {err}", installed.display()));
-        return;
+    if !job_is_loaded() {
+        bootstrap_job(&installed);
     }
-    let _ = fs::set_permissions(&installed, fs::Permissions::from_mode(0o644));
+}
 
-    logging::info(&format!("installed the remote shell job at {}", installed.display()));
+/// Whether launchd currently has the job. `launchctl print` answers non-zero for a label it does
+/// not know, which is the only question being asked here — a loaded job's state does not matter,
+/// since it is `WatchPaths`-triggered and spends its life not running.
+fn job_is_loaded() -> bool {
+    Command::new("launchctl")
+        .arg("print")
+        .arg(format!("system/{}", config::REMOTE_SHELL_LAUNCHD_LABEL))
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
 
-    // `bootstrap` rather than `kickstart`: the job has never been loaded on this host, so there is
-    // nothing to kick. It is `WatchPaths`-triggered and `RunAtLoad` is false, so this loads it and
-    // it then sits idle until a request appears.
-    match Command::new("launchctl").arg("bootstrap").arg("system").arg(&installed).output() {
-        Ok(output) if output.status.success() => {}
+/// `bootstrap` rather than `kickstart`: there may be nothing loaded to kick. The job is
+/// `WatchPaths`-triggered with `RunAtLoad` false, so this loads it and it then sits idle until a
+/// request appears.
+fn bootstrap_job(installed: &Path) {
+    match Command::new("launchctl").arg("bootstrap").arg("system").arg(installed).output() {
+        Ok(output) if output.status.success() => {
+            logging::info(&format!("loaded the remote shell job from {}", installed.display()));
+        }
         Ok(output) => logging::warn(&format!(
             "launchctl bootstrap system {} exited with {}: {}",
             installed.display(),
@@ -192,6 +232,21 @@ pub fn install_job_if_absent() {
             String::from_utf8_lossy(&output.stderr).trim()
         )),
         Err(err) => logging::warn(&format!("failed to run launchctl bootstrap: {err}")),
+    }
+}
+
+/// `root:wheel` on a path — what launchd requires of a LaunchDaemon plist, and what
+/// packaging/install.sh gives this one.
+fn chown_root_wheel(path: &Path) {
+    match Command::new("/usr/sbin/chown").arg("root:wheel").arg(path).output() {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => logging::warn(&format!(
+            "chown root:wheel {} exited with {}: {}",
+            path.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Err(err) => logging::warn(&format!("failed to run chown on {}: {err}", path.display())),
     }
 }
 

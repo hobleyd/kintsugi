@@ -171,12 +171,14 @@ fn run_daemon() -> Result<()> {
         config::default_config_path().display()
     ));
 
-    // Before anything that can fail over the network: make sure this host has the third root job,
-    // the one a terminal session is served by. It is here rather than in `self_update` because a
-    // self-update runs under the *old* binary, which is how 0.9.5 shipped a `--remote-shell` arm to
-    // hosts with no job to run it under — see `remote_shell::install_job_if_absent`. Cheap on the
-    // overwhelming majority of check-ins, where both the directory and the plist already exist.
-    remote_shell::install_job_if_absent();
+    // Before anything that can fail over the network: put right what a self-update cannot. Both of
+    // these are repairs rather than installations, and both exist because `self_update` runs under
+    // the *old* binary and never re-runs packaging/install.sh — so a host in the field has no other
+    // path back to a correct state. The first restores `root:wheel` on the binary launchd executes
+    // as root and on `kintsugi-mas`; the second makes sure a terminal session has a job to be
+    // served by. Silent on the overwhelming majority of check-ins, where there is nothing to do.
+    self_update::repair_installed_ownership();
+    remote_shell::ensure_job_installed();
 
     let checkin_schedule_path = config::checkin_schedule_path();
     let checkin_minute = checkin_schedule::load_or_assign(&checkin_schedule_path);

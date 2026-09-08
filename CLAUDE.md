@@ -935,9 +935,26 @@ connected", and only the per-user log names a path. So this is the macOS spellin
 `config::repair_directory_modes`, and it is required for the same documented reason — `self_update`
 never re-runs the installer, so a host in the field has no other repair path. Two consequences. The
 job description is compiled into the binary (`remote_shell::LAUNCHD_JOB_PLIST`, an `include_str!` of
-the packaged file), because a check-in has no archive to read from; and it is still installed **only
-when absent**, so an administrator's edits survive and a change to the packaged plist's *contents*
+the packaged file), because a check-in has no archive to read from; and its *contents* are still
+written **only when absent**, so an administrator's edits survive and a change to the packaged plist
 reaches no host that already has one.
+
+**Installing when absent was not enough, and what it missed is an ownership defect the whole
+self-update shares.** `tar -xzf` run as root restores the uid and gid recorded *in the archive* —
+whichever account built the release — and `fs::copy` on APFS is `fclonefileat`, which clones the
+owner and the timestamps with the bytes. So every macOS self-update quietly replaced three
+root-owned files with user-owned ones, and each failed in its own unrelated-looking way: **launchd
+refuses a LaunchDaemon it does not find root-owned** (`Bootstrap failed: 5: Input/output error`,
+which says nothing about ownership), so terminal sessions were requested and never served;
+`AppStoreUpgradeScript` refuses a `kintsugi-mas` not owned by root, so App Store rows stopped
+patching; and `/usr/local/bin/kintsugi-agent` — the binary launchd executes as root — became
+writable by a local account, which is a root escalation for whoever owns it. packaging/install.sh
+had this right with `install -o root -g wheel` all along; every self-update since undid it.
+`extract_and_install` now passes `--no-same-owner` and `install_over` asserts `root:wheel`, but a
+flag only helps future updates — so `self_update::repair_installed_ownership` and
+`remote_shell::ensure_job_installed` re-assert both on every check-in, and the latter also
+bootstraps the job whenever launchd has not got it. That is what makes a host that has *already*
+self-updated into the broken state heal itself rather than needing a reinstall.
 
 **Nothing is shown on the Mac while a shell session runs**, deliberately. The menu bar reports a
 *screen* session, because somebody's screen is being watched; a root shell is not a session inside
