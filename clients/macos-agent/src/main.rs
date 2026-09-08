@@ -171,6 +171,13 @@ fn run_daemon() -> Result<()> {
         config::default_config_path().display()
     ));
 
+    // Before anything that can fail over the network: make sure this host has the third root job,
+    // the one a terminal session is served by. It is here rather than in `self_update` because a
+    // self-update runs under the *old* binary, which is how 0.9.5 shipped a `--remote-shell` arm to
+    // hosts with no job to run it under — see `remote_shell::install_job_if_absent`. Cheap on the
+    // overwhelming majority of check-ins, where both the directory and the plist already exist.
+    remote_shell::install_job_if_absent();
+
     let checkin_schedule_path = config::checkin_schedule_path();
     let checkin_minute = checkin_schedule::load_or_assign(&checkin_schedule_path);
 

@@ -55,11 +55,14 @@
 //! form, and it is why the request carries a session id and nothing else — never a command, never a
 //! shell to run, never an address to connect to.
 
+use std::fs;
 use std::io::Read;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 
 use tungstenite::Message;
 
@@ -76,6 +79,19 @@ use crate::remote_protocol::{
 /// the plist watches the directory and this module dispatches on the name, so it is load-bearing
 /// rather than cosmetic.
 const REQUEST_EXTENSION: &str = "remote-shell.request";
+
+/// The LaunchDaemon's own job description, compiled into the binary rather than read out of the
+/// installation archive.
+///
+/// It has to be here because of *when* the job now gets installed. A self-update is performed by
+/// the binary that is already running, so the release that first shipped this job could not install
+/// it on any host that reached that release by self-updating — 0.9.4's `self_update` had never
+/// heard of a third plist, and every Mac it updated arrived at a binary understanding
+/// `--remote-shell` with no job to run it under. Those hosts have no archive to read, so the repair
+/// (`install_job_if_absent`, run on every root check-in) has to carry the file it installs. The
+/// packaged copy is the same bytes: `include_str!` reads the very file packaging/publish-release.sh
+/// puts in the archive and packaging/install.sh installs, so the two can no longer disagree.
+const LAUNCHD_JOB_PLIST: &str = include_str!("../packaging/au.com.sharpblue.kintsugiagent-remote-shell.plist");
 
 /// How old a request may be and still be run.
 ///
@@ -108,6 +124,95 @@ const READ_BUFFER_BYTES: usize = 32 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 // =================================================================================================
+// The root side: installing the job that serves a request.
+// =================================================================================================
+
+/// Creates the drop-box and installs the LaunchDaemon that drains it, if this host has not got
+/// them. Root only, and called from every root check-in (`main::run_daemon`).
+///
+/// # Why a check-in and not the installer
+///
+/// `self_update` replaces the binary and never re-runs packaging/install.sh, so a host in the field
+/// has no other repair path — the same reasoning as the Linux agent's
+/// `config::repair_directory_modes`, and found the same way. It is worse than that here, though:
+/// the self-update is performed by the *old* binary, so a job introduced in release N is installed
+/// by nothing at all on a host that self-updates from N-1 into it. That is not hypothetical, it is
+/// what shipped in 0.9.5 — see `LAUNCHD_JOB_PLIST`. A check-in is the one thing every Mac in the
+/// fleet runs hourly as root under whatever binary it currently has.
+///
+/// # Nothing here is fatal
+///
+/// A host without this job still checks in, patches and answers screen sessions; refusing to check
+/// in over a terminal it may never be asked for would be the worse trade. Failures are logged,
+/// because the symptom otherwise is a session that never connects.
+///
+/// Installed only when absent, so an administrator's own edits to the plist are never clobbered —
+/// which also means a change to the packaged job's *contents* does not reach a host that already
+/// has one. Both of those are deliberate; a job that had to be rewritten would need a version
+/// marker in it and a reason to be worth the risk of stamping on a local edit.
+pub fn install_job_if_absent() {
+    // The directory `WatchPaths` watches has to exist before the job is loaded, or nothing wakes it.
+    // `root:admin 0770`, matching the main queue: the logged-in administrator's process drops a
+    // request in, and only root reads one.
+    let queue_dir = config::remote_shell_queue_dir();
+    if !queue_dir.is_dir() {
+        if let Err(err) = fs::create_dir_all(&queue_dir) {
+            logging::warn(&format!("could not create {}: {err}", queue_dir.display()));
+            return;
+        }
+        if let Err(err) = fs::set_permissions(&queue_dir, fs::Permissions::from_mode(0o770)) {
+            logging::warn(&format!("could not set the mode on {}: {err}", queue_dir.display()));
+        }
+        chown_root_admin(&queue_dir);
+        logging::info(&format!("created the remote shell queue directory at {}", queue_dir.display()));
+    }
+
+    let installed = config::remote_shell_plist_path();
+    if installed.exists() {
+        return;
+    }
+
+    if let Err(err) = fs::write(&installed, LAUNCHD_JOB_PLIST) {
+        logging::warn(&format!("could not install {}: {err}", installed.display()));
+        return;
+    }
+    let _ = fs::set_permissions(&installed, fs::Permissions::from_mode(0o644));
+
+    logging::info(&format!("installed the remote shell job at {}", installed.display()));
+
+    // `bootstrap` rather than `kickstart`: the job has never been loaded on this host, so there is
+    // nothing to kick. It is `WatchPaths`-triggered and `RunAtLoad` is false, so this loads it and
+    // it then sits idle until a request appears.
+    match Command::new("launchctl").arg("bootstrap").arg("system").arg(&installed).output() {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => logging::warn(&format!(
+            "launchctl bootstrap system {} exited with {}: {}",
+            installed.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Err(err) => logging::warn(&format!("failed to run launchctl bootstrap: {err}")),
+    }
+}
+
+/// `root:admin` on a path, the same ownership packaging/install.sh gives the two queue directories.
+///
+/// Shelled out to rather than done with `chown(2)`, because the group id for `admin` has to be
+/// looked up and `chown` on the command line does that itself.
+fn chown_root_admin(path: &Path) {
+    match Command::new("/usr/sbin/chown").arg("root:admin").arg(path).output() {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => logging::warn(&format!(
+            "chown root:admin {} exited with {}: {}",
+            path.display(),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+        Err(err) => logging::warn(&format!("failed to run chown on {}: {err}", path.display())),
+    }
+}
+
+// =================================================================================================
 // The per-user side: dropping a request.
 // =================================================================================================
 
@@ -120,11 +225,22 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 pub fn request(session_id: &str) -> Result<()> {
     let queue_dir = config::remote_shell_queue_dir();
 
-    // Created here as well as by the installer, because a Mac that self-updated from a release
-    // predating remote shells has the new binary and no directory — and a request that cannot be
-    // written is reported to the server as `Unavailable` rather than left to time out.
-    std::fs::create_dir_all(&queue_dir)
-        .with_context(|| format!("could not create {}", queue_dir.display()))?;
+    // Reported rather than created. This process is the logged-in user's, and the directory's
+    // parent is root's, so creating it here cannot work — an earlier version tried, and on every
+    // Mac that self-updated into remote shells (see `LAUNCHD_JOB_PLIST`) each terminal session died
+    // with a bare "Permission denied" naming a path, which reads as an ownership mistake in the
+    // directory rather than as the absence of the whole job. And creating it would not have helped
+    // if it had worked: a directory nothing watches collects requests nobody reads. Its absence
+    // means exactly one thing, so that is what this says. `install_job_if_absent` fixes it on the
+    // next root check-in.
+    if !queue_dir.is_dir() {
+        bail!(
+            "the remote shell LaunchDaemon is not installed on this host: there is no {}. \
+             The root daemon installs it on its next check-in (within the hour), or \
+             packaging/install.sh installs it now",
+            queue_dir.display()
+        );
+    }
 
     let path = queue_dir.join(format!("{}-{}.{REQUEST_EXTENSION}", now_epoch(), std::process::id()));
 
@@ -447,6 +563,34 @@ mod tests {
         let path = dir.join(name);
         std::fs::write(&path, body).expect("write");
         path
+    }
+
+    /// CLAUDE.md calls the remote-shell handoff "four names that nothing checks agree": the request
+    /// suffix, the queue directory, the job label and what the plist says about both. A test pinned
+    /// the suffix and nothing pinned the rest, so this pins the rest — the plist is compiled in
+    /// (see `LAUNCHD_JOB_PLIST`), which is what makes it checkable at all. Get one of these wrong
+    /// and the per-user process writes a request nothing ever reads: the session is reported as
+    /// never connecting, and neither log says why.
+    #[test]
+    fn the_packaged_job_watches_the_directory_requests_are_written_to() {
+        assert!(
+            LAUNCHD_JOB_PLIST.contains(&format!("<string>{}</string>", config::remote_shell_queue_dir().display())),
+            "the plist's WatchPaths does not name config::remote_shell_queue_dir()"
+        );
+        assert!(
+            LAUNCHD_JOB_PLIST.contains(&format!("<string>{}</string>", config::REMOTE_SHELL_LAUNCHD_LABEL)),
+            "the plist's Label does not match config::REMOTE_SHELL_LAUNCHD_LABEL"
+        );
+        assert!(
+            LAUNCHD_JOB_PLIST.contains(&format!("<string>{}</string>", config::installed_binary_path().display())),
+            "the plist runs a binary this agent does not install"
+        );
+        // The arm in `main` that this module is reached through. Renaming one and not the other
+        // starts the daemon, which then runs an ordinary check-in and never opens the session.
+        assert!(
+            LAUNCHD_JOB_PLIST.contains("<string>--remote-shell</string>"),
+            "the plist does not pass --remote-shell"
+        );
     }
 
     #[test]

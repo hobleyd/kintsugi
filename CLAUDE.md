@@ -921,10 +921,23 @@ self-update for its whole length. A **forged request buys nothing** — the serv
 socket for a session it did not create for this serial and has not seen answered, so the only id
 that works is one an administrator has already opened a shell for; this is the main queue's "the
 worst it can do is start an already-approved upgrade early" in its narrowest form, and it is why the
-request carries a session id and nothing else. And `self_update` installs that plist **if and only
-if it is absent**, exactly as Linux's `restart_remote_control_unit` does — a Mac updating from a
-release that predates this would otherwise get a binary that understands `--remote-shell` and no job
-to run it under, and report every terminal session as never connecting with nothing to explain why.
+request carries a session id and nothing else. And **the root check-in installs that plist, not
+`self_update`** — `remote_shell::install_job_if_absent`, called from `run_daemon` before anything
+that can fail over the network, creating the drop-box `root:admin 0770` and `launchctl
+bootstrap`ping the job when either is missing. Putting it in `self_update` is the obvious place and
+it does not work, for a reason worth stating once: **a self-update is performed by the binary that
+is already installed**, so an update path can only install a job the *previous* release knew about.
+0.9.5 shipped exactly that mistake — its own `install_binary` installed the plist, 0.9.4's did not,
+and every Mac that reached 0.9.5 by self-updating got a binary understanding `--remote-shell` with
+no job to run it under. What that looks like is a terminal that never opens: the per-user process
+cannot create the drop-box (its parent is root's), the server reports "the other end never
+connected", and only the per-user log names a path. So this is the macOS spelling of Linux's
+`config::repair_directory_modes`, and it is required for the same documented reason — `self_update`
+never re-runs the installer, so a host in the field has no other repair path. Two consequences. The
+job description is compiled into the binary (`remote_shell::LAUNCHD_JOB_PLIST`, an `include_str!` of
+the packaged file), because a check-in has no archive to read from; and it is still installed **only
+when absent**, so an administrator's edits survive and a change to the packaged plist's *contents*
+reaches no host that already has one.
 
 **Nothing is shown on the Mac while a shell session runs**, deliberately. The menu bar reports a
 *screen* session, because somebody's screen is being watched; a root shell is not a session inside
@@ -1664,17 +1677,20 @@ wedged by a release before this one need `Restart-Service KintsugiAgent` by hand
   fresh install. Both agents publish `.tar.gz` — Windows included — because
   `AgentPackageArchiveRewriter` reads gzip-tar specifically, and `tar.exe` has shipped in Windows
   since 10 1803.
-- **The macOS remote-shell handoff is four names that nothing checks agree.** The request suffix
-  (`remote_shell::REQUEST_EXTENSION`), the directory (`config::REMOTE_SHELL_QUEUE_DIR`), the job
-  label (`config::REMOTE_SHELL_LAUNCHD_LABEL`) and the `WatchPaths` entry plus `ProgramArguments`
-  in `packaging/au.com.sharpblue.kintsugiagent-remote-shell.plist` all have to line up, and so does
-  the `--remote-shell` arm in `main`. Change one and the per-user process writes a request nothing
-  ever reads: the session is reported as never connecting, and neither log says why. A test pins the
-  suffix; nothing pins the rest.
-- The macOS archive carries **three** plists, not two. `publish-release.sh` packages the
-  remote-shell one because `self_update::install_remote_shell_job_if_absent` installs it on a host
-  that has not got one — drop it from the archive and hosts installed before remote shells never
-  gain them, however many times they self-update.
+- **The macOS remote-shell handoff is four names that have to agree, and they are checked now.** The
+  request suffix (`remote_shell::REQUEST_EXTENSION`), the directory
+  (`config::REMOTE_SHELL_QUEUE_DIR`), the job label (`config::REMOTE_SHELL_LAUNCHD_LABEL`) and the
+  `WatchPaths` entry plus `ProgramArguments` in
+  `packaging/au.com.sharpblue.kintsugiagent-remote-shell.plist` all have to line up, and so does the
+  `--remote-shell` arm in `main`. Change one and the per-user process writes a request nothing ever
+  reads: the session is reported as never connecting, and neither log says why. Two tests in
+  `remote_shell` pin all of it — the suffix, and then the label, the watched directory, the binary
+  path and the argument — and they can only do so because the plist is compiled into the binary
+  rather than read from the archive. Keep it that way when editing the plist.
+- The macOS archive carries **three** plists, not two, and `packaging/install.sh` is now the only
+  thing that reads the third out of it — `self_update` installs the job from
+  `remote_shell::LAUNCHD_JOB_PLIST` instead (see "Remote control"). Dropping it from the archive
+  would leave a fresh install with no remote-shell job until its first check-in repaired it.
 - `/usr/local/bin/kintsugi-mas` is named in four places that nothing checks agree: the macOS agent's
   `config::MAS_BINARY_PATH` (what `self_update` replaces and `self_removal` deletes), its
   `MAS_BINARY_NAME` (the tarball entry `self_update` extracts and `publish-release.sh` writes),

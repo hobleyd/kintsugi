@@ -193,90 +193,14 @@ fn extract_and_install(downloaded_path: &Path, extract_dir: &Path) -> Result<()>
         install_over(&extracted_mas, &config::mas_binary_path())?;
     }
 
-    // Same reasoning as `mas` above, and the same gap it closes: a Mac self-updating from a release
-    // that predates remote shells would get a binary that understands `--remote-shell` and no job to
-    // run it under, so every terminal session would be reported as never connecting with nothing
-    // anywhere to explain why. Installed only when absent, so an administrator's own edits to the
-    // plist are never clobbered — exactly what the Linux agent's `restart_remote_control_unit` does
-    // for its fourth unit, which is where this failure mode was found.
-    install_remote_shell_job_if_absent(extract_dir);
+    // The remote-shell LaunchDaemon is deliberately *not* installed from here, though it travels in
+    // this archive for packaging/install.sh's benefit. A self-update runs under the binary that is
+    // already installed, so an update path can only ever install a job the *previous* release knew
+    // about — which is why 0.9.5's own copy of this code reached no host that self-updated into it.
+    // `remote_shell::install_job_if_absent`, on every root check-in, is what actually closes that
+    // gap, and it carries the plist rather than reading it from here.
 
     install_over(&extracted_binary, &config::installed_binary_path())
-}
-
-/// Installs and loads the remote-shell LaunchDaemon, if this host has not got one.
-///
-/// Nothing here is fatal: a host without this job still checks in, patches, and answers screen
-/// sessions, and losing the update over a terminal it may never be asked for would be the worse
-/// trade. Every failure is logged instead, because the symptom otherwise is a session that simply
-/// never connects.
-fn install_remote_shell_job_if_absent(extract_dir: &Path) {
-    let installed = config::remote_shell_plist_path();
-    if installed.exists() {
-        return;
-    }
-
-    // The directory `WatchPaths` watches has to exist before the job is loaded, or nothing wakes it.
-    // `root:admin 0770`, matching the main queue: the logged-in administrator's process drops a
-    // request, and only root reads one.
-    let queue_dir = config::remote_shell_queue_dir();
-    if let Err(err) = fs::create_dir_all(&queue_dir) {
-        logging::warn(&format!("could not create {}: {err}", queue_dir.display()));
-        return;
-    }
-    if let Err(err) = fs::set_permissions(&queue_dir, fs::Permissions::from_mode(0o770)) {
-        logging::warn(&format!("could not set the mode on {}: {err}", queue_dir.display()));
-    }
-    chown_root_admin(&queue_dir);
-
-    let Some(file_name) = installed.file_name() else {
-        return;
-    };
-    let extracted = extract_dir.join(file_name);
-    if !extracted.is_file() {
-        // A release built before the job existed. Nothing to install and nothing to report — this
-        // host simply has no remote shells, which is what it already had.
-        return;
-    }
-
-    if let Err(err) = fs::copy(&extracted, &installed) {
-        logging::warn(&format!("could not install {}: {err}", installed.display()));
-        return;
-    }
-    let _ = fs::set_permissions(&installed, fs::Permissions::from_mode(0o644));
-
-    logging::info(&format!("installed the remote shell job at {}", installed.display()));
-
-    // `bootstrap` rather than `kickstart`: the job has never been loaded on this host, so there is
-    // nothing to kick. It is `WatchPaths`-triggered and `RunAtLoad` is false, so this loads it and
-    // it then sits idle until a request appears.
-    match Command::new("launchctl").arg("bootstrap").arg("system").arg(&installed).output() {
-        Ok(output) if output.status.success() => {}
-        Ok(output) => logging::warn(&format!(
-            "launchctl bootstrap system {} exited with {}: {}",
-            installed.display(),
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        )),
-        Err(err) => logging::warn(&format!("failed to run launchctl bootstrap: {err}")),
-    }
-}
-
-/// `root:admin` on a path, the same ownership packaging/install.sh gives the two queue directories.
-///
-/// Shelled out to rather than done with `chown(2)`, because the group id for `admin` has to be
-/// looked up and `chown` on the command line does that itself.
-fn chown_root_admin(path: &Path) {
-    match Command::new("/usr/sbin/chown").arg("root:admin").arg(path).output() {
-        Ok(output) if output.status.success() => {}
-        Ok(output) => logging::warn(&format!(
-            "chown root:admin {} exited with {}: {}",
-            path.display(),
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        )),
-        Err(err) => logging::warn(&format!("failed to run chown on {}: {err}", path.display())),
-    }
 }
 
 /// Staged next to the final destination, then renamed over it — a same-filesystem rename is atomic,
