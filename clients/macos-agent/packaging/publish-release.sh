@@ -18,6 +18,19 @@
 #   packaging/publish-release.sh --api-base-url https://kintsugi.example.com:8443
 #   packaging/publish-release.sh --release-notes "Fixes the menu bar version label"
 #   packaging/publish-release.sh --mas-binary /path/to/universal/mas   # offline; skips the download
+#   packaging/publish-release.sh --ad-hoc            # a throwaway build; orphans every TCC grant
+#
+# Everything it packages is code-signed with the fleet identity when one is reachable — one
+# certificate, minted once by packaging/create-signing-identity.sh. That is not packaging tidiness:
+# the designated requirement of an ad-hoc signature is a hash of that exact build, and TCC records
+# it verbatim, so an ad-hoc package orphans the Screen Recording and Accessibility grants remote
+# control needs on every host that installs it, and again on its next self-update.
+#
+# **The fleet's key lives in this repository's GitHub Actions secrets and nowhere else**, because
+# the release job is the only thing that builds the binary hosts install and self-update to. So a
+# hand-run publish from a machine that has no such identity signs ad hoc, says so, and carries on:
+# what it produces is a package for one server, and the person reading the warning can decide.
+# CI, where nobody is reading, fails instead. --ad-hoc says you meant it.
 #
 # The version published is always this crate's own Cargo.toml version — bump that first. Run from
 # a plain (non-root) shell; unlike install.sh this never needs sudo, since it's talking to the
@@ -53,6 +66,15 @@ RELEASE_NOTES=""
 PREBUILT_BINARY=""
 PREBUILT_MAS=""
 OUTPUT_DIR=""
+# The fleet's code-signing identity, by name — minted once by
+# packaging/create-signing-identity.sh, held only as a GitHub Actions secret, and imported by
+# .github/workflows/ci.yml for the length of the release job. Looked up by name here so that job's
+# `--signing-identity` and a hand-run publish resolve the same thing. That name is a string this
+# script, install.sh, create-signing-identity.sh and ci.yml all have to agree on; nothing checks
+# that they do.
+SIGNING_IDENTITY_NAME="Kintsugi Agent Signing"
+SIGNING_IDENTITY="${KINTSUGI_CODESIGN_IDENTITY:-}"
+AD_HOC=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --api-base-url)
@@ -80,6 +102,18 @@ while [[ $# -gt 0 ]]; do
             PREBUILT_MAS="$2"
             shift 2
             ;;
+        --signing-identity)
+            [[ $# -ge 2 ]] || { echo "--signing-identity requires a value" >&2; exit 1; }
+            SIGNING_IDENTITY="$2"
+            shift 2
+            ;;
+        --ad-hoc)
+            # For a throwaway package that is never going near a real host. It says so out loud
+            # below, because a package built this way orphans every TCC grant on whatever installs
+            # it, and does so unattended.
+            AD_HOC="yes"
+            shift
+            ;;
         *)
             echo "Unknown argument: $1" >&2
             exit 1
@@ -89,6 +123,70 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# An explicit --ad-hoc wins; then --signing-identity/$KINTSUGI_CODESIGN_IDENTITY, which is what the
+# release job passes; then the identity by name if this machine happens to hold it at all. It
+# normally does not, and that is the design rather than a gap — see the note on custody above.
+if [[ -n "$AD_HOC" ]]; then
+    SIGNING_IDENTITY=""
+elif [[ -z "$SIGNING_IDENTITY" ]] \
+        && security find-identity -v -p codesigning 2>/dev/null | grep -qF "$SIGNING_IDENTITY_NAME"; then
+    SIGNING_IDENTITY="$SIGNING_IDENTITY_NAME"
+fi
+
+if [[ -z "$SIGNING_IDENTITY" ]]; then
+    echo "WARNING: no code-signing identity here; signing ad hoc." >&2
+    echo "  Every host installing this package must re-grant Screen Recording and Accessibility by" >&2
+    echo "  hand, and will have to again on its next self-update: an ad-hoc designated requirement" >&2
+    echo "  is a hash of this exact build, so no later build ever satisfies the grant TCC recorded." >&2
+    if [[ -z "$AD_HOC" ]]; then
+        echo "  The fleet identity lives in the repository's Actions secrets, so the build to hand a" >&2
+        echo "  fleet is the GitHub release (Clients screen > Refresh clients). Pass --ad-hoc to say" >&2
+        echo "  you meant this one." >&2
+    fi
+fi
+
+# Signs one file and then *asserts* what the signature actually says, in the same spirit as the
+# `lipo -archs` check below: the point of a real identity is a designated requirement that names
+# the certificate rather than this build's hash, and a signature that quietly came out cdhash-only
+# would be a fleet-wide grant wipe with nothing in any log naming the cause.
+#
+# --timestamp=none is stated rather than left to a default: nothing here is notarized, so a
+# timestamp buys nothing, and a signing step that reaches a timestamp authority is one that can fail
+# a release for reasons that have nothing to do with the build. The identifier is fixed rather than
+# derived from the file name, so it is the same whether the input came from CI's lipo output or a
+# local target/release build.
+#
+# install.sh signs the same way, for the same reasons, in its build-from-source path — which is the
+# path a developer's `cargo build --release && sudo ./install.sh` loop takes, and it never comes
+# near this script.
+sign_file() {
+    local path="$1" identifier="$2" requirement
+    if [[ -n "$SIGNING_IDENTITY" ]]; then
+        codesign --sign "$SIGNING_IDENTITY" --force --identifier "$identifier" --timestamp=none "$path"
+    else
+        codesign --sign - --force --identifier "$identifier" "$path"
+    fi
+    codesign --verify --strict "$path"
+
+    requirement="$(codesign --display --requirements - "$path" 2>&1)"
+    echo "$requirement"
+    # The property being asserted is the absence of `cdhash`, not the presence of any particular
+    # spelling: a self-signed leaf comes out as `certificate leaf = H"..."`, an Apple-anchored one
+    # names `anchor apple generic` as well, and betting on either wording would fail a release for
+    # a signature that was perfectly good. A cdhash clause is the one thing that must not be there
+    # — that is the per-build requirement whose whole problem is that no later build satisfies it.
+    # The certificate/anchor test beside it only catches output that named nothing at all.
+    if [[ -n "$SIGNING_IDENTITY" ]]; then
+        if grep -q 'cdhash' <<<"$requirement" \
+                || ! grep -qE 'certificate|anchor' <<<"$requirement"; then
+            echo "Refusing to publish: $(basename "$path") was signed with '$SIGNING_IDENTITY' but its" >&2
+            echo "designated requirement does not name that certificate. A per-build requirement" >&2
+            echo "orphans every host's Screen Recording and Accessibility grant on install." >&2
+            exit 1
+        fi
+    fi
+}
 
 VERSION="$(grep -m1 '^version' "$PROJECT_DIR/Cargo.toml" | sed -E 's/version *= *"([^"]+)"/\1/')"
 if [[ -z "$VERSION" ]]; then
@@ -111,22 +209,19 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 
 cp "$BUILT_BIN" "$WORK_DIR/kintsugi-agent"
 
-# Ad-hoc signed here, on the copy, so every slice of whatever was built carries a real signature.
-# `cargo build` alone does not give one: the linker signs the arm64 slice (macOS will not exec an
-# unsigned arm64 image) but as "linker-signed" — no designated requirement — and leaves an x86_64
-# slice unsigned altogether. TCC does not accept either as an identity. System Settings records a
+# Signed here, on the copy, so every slice of whatever was built carries one signature over the
+# whole file. `cargo build` alone does not give one: the linker signs the arm64 slice (macOS will
+# not exec an unsigned arm64 image) but as "linker-signed" — no designated requirement — and leaves
+# an x86_64 slice unsigned altogether. TCC accepts neither as an identity. System Settings records a
 # Screen Recording or Accessibility grant against a requirement it synthesises, the running process
 # never satisfies it, and remote control reports both permissions missing however many times the
-# administrator re-adds the binary — which is how 0.6.0 shipped. A proper ad-hoc signature has a
-# designated requirement (`cdhash H"..."`, one per slice) that TCC records verbatim and the process
-# then matches. The identifier is fixed rather than derived from the file name, so it is the same
-# whether the input came from CI's lipo output or a local target/release build.
+# administrator re-adds the binary — which is how 0.6.0 shipped.
 #
-# Still a per-build identity: a new release changes the cdhash and every grant has to be redone.
-# Signing with a Developer ID is what fixes that, and is the prerequisite the PPPC profile in
-# kintsugi-remote-control.mobileconfig.example is waiting on.
-codesign --sign - --force --identifier kintsugi-agent "$WORK_DIR/kintsugi-agent"
-codesign --display --requirements - "$WORK_DIR/kintsugi-agent"
+# It used to be signed *ad hoc*, which fixed that only until the next release: an ad-hoc designated
+# requirement is `cdhash H"..."` per slice, a hash of that exact build, so `self_update` replacing
+# the binary unattended wiped both grants across the fleet on every release. The fleet identity
+# above makes the requirement name the certificate instead, and every future build satisfies it.
+sign_file "$WORK_DIR/kintsugi-agent" kintsugi-agent
 cp "$SCRIPT_DIR/config.toml" "$WORK_DIR/config.toml"
 cp "$SCRIPT_DIR/au.com.sharpblue.kintsugiagent.plist" "$WORK_DIR/au.com.sharpblue.kintsugiagent.plist"
 cp "$SCRIPT_DIR/au.com.sharpblue.kintsugiagent-ui.plist" "$WORK_DIR/au.com.sharpblue.kintsugiagent-ui.plist"
@@ -171,10 +266,11 @@ if ! lipo -archs "$WORK_DIR/kintsugi-mas" | grep -q 'x86_64' || ! lipo -archs "$
     echo "kintsugi-mas is not universal: $(lipo -archs "$WORK_DIR/kintsugi-mas")" >&2
     exit 1
 fi
-# Ad-hoc signed like the agent, for the same reason: lipo keeps each slice's original ad-hoc
-# signature, but one identity over the whole file is what a fleet CodeRequirement would name.
-# mas carries no entitlements, so re-signing loses nothing.
-codesign --sign - --force --identifier kintsugi-mas "$WORK_DIR/kintsugi-mas"
+# Signed like the agent, for the same reason: lipo keeps each slice's original signature, but one
+# identity over the whole file is what a fleet CodeRequirement names. mas carries no entitlements,
+# so re-signing loses nothing. It needs no TCC grant of its own — it is signed with the fleet
+# identity to be the one kind of artifact this archive ships, rather than two.
+sign_file "$WORK_DIR/kintsugi-mas" kintsugi-mas
 lipo -info "$WORK_DIR/kintsugi-mas"
 
 ARCHIVE_NAME="kintsugi-agent-macos-${VERSION}.tar.gz"

@@ -4,35 +4,47 @@
     permissions remote control needs, so a support session works without anyone visiting the Mac.
 
     ============================================================================================
-    READ THIS FIRST: this profile cannot be used as it stands, and the reason is not a placeholder
-    address. It is that CodeRequirement below has to match a real code signature, and the agent
-    this repository builds does not have one.
+    READ THIS FIRST: the prerequisite this profile was blocked on is met, but nobody has yet
+    confirmed the profile itself works on an enrolled Mac. Treat the CodeRequirement below as
+    fillable and the result as unverified.
     ============================================================================================
 
     Every PPPC entry needs a CodeRequirement, and macOS checks it against the binary's signature
-    before honouring the grant. `publish-release.sh` signs the packaged binary *ad hoc*, so its
-    designated requirement is a bare `cdhash` per slice — a hash of that exact build:
+    before honouring the grant. The agent used to be signed *ad hoc*, so its designated requirement
+    was a bare `cdhash` per slice — a hash of that exact build:
+
+        # designated => cdhash H"fbb593c395e2cce91c9305cbae4316c29d309883" or cdhash H"105d13..."
+
+    A profile written against that would have worked until the next agent release and then silently
+    stopped, because `self_update` replaces the binary unattended and the new build hashes
+    differently. Every released build is now signed with one long-lived certificate instead — minted
+    once by packaging/create-signing-identity.sh and held only as this repository's Actions secret,
+    since the release job is the only thing that builds what a host installs — so the requirement
+    names the certificate and every future build satisfies it:
 
         $ codesign -d -r- /usr/local/bin/kintsugi-agent
-        # designated => cdhash H"fbb593c395e2cce91c9305cbae4316c29d309883" or cdhash H"105d13709a204541759dc41561f4300c763c182d"
+        # designated => identifier "kintsugi-agent" and certificate leaf = H"<one hash, forever>"
 
-    A profile written against that hash would work until the next agent release and then silently
-    stop, because `self_update` replaces the binary unattended and the new build hashes differently.
-    The symptom would be remote control quietly failing across the fleet on an upgrade, with
-    `icacls`-style tooling reporting the profile as installed and correct.
+    Read it off a host running a *released* build. A binary somebody built locally is ad-hoc signed
+    (the key is not on any laptop), so its requirement is a hash and a profile written from it would
+    grant nothing to anyone else.
 
-    So there is a prerequisite: **the agent has to be signed with a Developer ID Application
-    certificate**, which nothing in `publish-release.sh` or CI currently does. Once it is, its
-    designated requirement becomes stable across builds and the two placeholders below can be
-    filled in for real:
+    Paste that `designated =>` clause (without the `designated => ` prefix) into both
+    CodeRequirement strings below. It is stable across releases, which is the whole property this
+    profile needed.
 
-        $ codesign --force --options runtime \
-              --sign "Developer ID Application: YOUR ORG (TEAMID)" \
-              /path/to/kintsugi-agent
-        $ codesign -d -r- /path/to/kintsugi-agent     # <- paste into CodeRequirement
+    What is *not* established is that a PPPC profile honours a requirement naming a self-signed
+    leaf. Apple's own guidance assumes a Developer ID, and this repository's certificate is not one:
+    it is a self-signed code-signing certificate whose only job is to be the same certificate every
+    time. Nothing about it is trusted anywhere except on the machine that signs with it — which is
+    fine for TCC, since the requirement above only compares the leaf's hash, but it has not been
+    tried through MDM here. Verify on one enrolled Mac before deploying fleet-wide, and read the
+    note below about `kTCCServiceScreenCapture` specifically: the agent falls back to prompting the
+    logged-in user, so a profile that quietly does not apply looks like an unexplained prompt rather
+    than an error.
 
-    Until then, remote control needs a human at each Mac to grant both permissions by hand — which
-    is the cost the own-capture-stack design accepted, and the thing this profile exists to remove.
+    Until it is verified, remote control still needs a human at each Mac to grant both permissions
+    by hand — but only once, rather than once per release, which is what changed.
 
     ---------------------------------------------------------------------------------------------
 
@@ -110,7 +122,7 @@
                         <key>IdentifierType</key>
                         <string>path</string>
                         <key>CodeRequirement</key>
-                        <string>REPLACE WITH THE OUTPUT OF: codesign -d -r- /usr/local/bin/kintsugi-agent</string>
+                        <string>REPLACE WITH THE designated =&gt; CLAUSE FROM: codesign -d -r- /usr/local/bin/kintsugi-agent</string>
                         <key>Allowed</key>
                         <true/>
                     </dict>
@@ -129,7 +141,7 @@
                         <key>IdentifierType</key>
                         <string>path</string>
                         <key>CodeRequirement</key>
-                        <string>REPLACE WITH THE OUTPUT OF: codesign -d -r- /usr/local/bin/kintsugi-agent</string>
+                        <string>REPLACE WITH THE designated =&gt; CLAUSE FROM: codesign -d -r- /usr/local/bin/kintsugi-agent</string>
                         <key>Allowed</key>
                         <true/>
                     </dict>

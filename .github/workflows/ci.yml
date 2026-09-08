@@ -210,9 +210,88 @@ jobs:
               target/aarch64-apple-darwin/release/kintsugi-agent \
               target/x86_64-apple-darwin/release/kintsugi-agent
           lipo -info target/universal/kintsugi-agent
-          # Not signed here: publish-release.sh ad-hoc signs whatever binary it packages, so a
-          # hand-run publish and this one produce the same kind of artifact. See the note there on
-          # why a linker-signed slice is not enough for TCC.
+          # Not signed here: publish-release.sh signs whatever binary it packages, so a hand-run
+          # publish and this one produce the same kind of artifact. See the note there on why a
+          # linker-signed slice is not enough for TCC.
+
+      # The fleet code-signing identity, which is what makes a released build's designated
+      # requirement name a certificate rather than that build's own hash. TCC records the
+      # requirement when somebody grants Screen Recording or Accessibility, so an ad-hoc release
+      # orphaned both grants on every host `self_update` touched — unattended, with System Settings
+      # still showing the binary switched on. One certificate, minted once by
+      # clients/macos-agent/packaging/create-signing-identity.sh, fixes that for every future
+      # release.
+      #
+      # **This job is the only thing that holds that key.** It is the only thing that builds the
+      # binary a host installs and self-updates to, so nothing else needs to sign — and a second
+      # copy of the identity on somebody's laptop would be a second copy of a fleet credential, for
+      # no gain. The keychain below exists for the length of this job and the secrets are the only
+      # durable home of the key.
+      #
+      # Missing secrets fail the job rather than falling back to ad-hoc signing: a quiet fallback
+      # is a fleet-wide grant wipe with nothing in any log naming the cause, which is exactly the
+      # failure this whole arrangement exists to end. publish-release.sh does fall back when run by
+      # hand, because there a human reads the warning — and what it produces is a package for one
+      # server rather than the fleet's release.
+      - name: Import the fleet signing identity
+        env:
+          P12_BASE64: ${{ secrets.MACOS_SIGNING_CERTIFICATE_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGNING_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          IDENTITY_NAME="Kintsugi Agent Signing"
+
+          if [[ -z "${P12_BASE64:-}" || -z "${P12_PASSWORD:-}" ]]; then
+              echo "::error::MACOS_SIGNING_CERTIFICATE_P12 and MACOS_SIGNING_CERTIFICATE_PASSWORD are not set. Run clients/macos-agent/packaging/create-signing-identity.sh --export-p12 <path> and load both secrets the way its closing output describes."
+              exit 1
+          fi
+
+          KEYCHAIN="$RUNNER_TEMP/kintsugi-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          P12="$RUNNER_TEMP/identity.p12"
+
+          printf '%s' "$P12_BASE64" | base64 --decode > "$P12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # -u: no idle auto-lock. The default relocks after five minutes, which is well inside the
+          # time the two-architecture build above takes, and codesign against a locked keychain
+          # fails rather than asking anyone.
+          security set-keychain-settings -u "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$P12" -k "$KEYCHAIN" -P "$P12_PASSWORD" -T /usr/bin/codesign -A
+          rm -f "$P12"
+          # Without a partition list, codesign blocks on a keychain prompt no one can see and the
+          # job hangs until the step times out.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          # codesign looks through the search list, so the new keychain has to join it — ahead of
+          # the runner's own, which stays where it is.
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          # A self-signed certificate arrives untrusted, and an untrusted identity is one codesign
+          # refuses outright (CSSMERR_TP_NOT_TRUSTED). Read back out of the keychain rather than
+          # carried as a third secret. This is local to whatever *signs*: no host that merely runs
+          # the agent needs the certificate, because validating a signature is not trusting a
+          # signer, and the requirement only compares the leaf's hash.
+          security find-certificate -c "$IDENTITY_NAME" -p "$KEYCHAIN" > "$RUNNER_TEMP/signing-cert.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign \
+              -k /Library/Keychains/System.keychain "$RUNNER_TEMP/signing-cert.pem"
+          # Asserted rather than assumed, in the same spirit as the `lipo -archs` check in
+          # publish-release.sh: every step above can succeed and still leave an identity codesign
+          # will not use, and the next place that would show up is a released build carrying a
+          # per-build requirement — i.e. the bug this replaced, silently back. An import with no
+          # trust behind it is exactly that case, and it is quiet: `security import` reports "1
+          # identity imported" and `find-identity -v` then reports 0 valid identities.
+          if ! security find-identity -v -p codesigning | grep -F "$IDENTITY_NAME"; then
+              echo "::error::'$IDENTITY_NAME' imported but is not valid for code signing, which means the add-trusted-cert step above did not take effect. codesign refuses an untrusted identity with CSSMERR_TP_NOT_TRUSTED."
+              exit 1
+          fi
+
+          # And then sign something with it, because the line above is not the same test: an
+          # identity find-identity lists can still be one codesign refuses, over a key ACL or a
+          # partition list. Failing here names the setup; failing later reads as a broken build.
+          # The requirement it prints is also the answer to what a self-signed leaf's designated
+          # requirement actually looks like, which is worth having in the log once.
+          cp /bin/echo "$RUNNER_TEMP/signing-probe"
+          codesign --sign "$IDENTITY_NAME" --force --identifier signing-probe --timestamp=none "$RUNNER_TEMP/signing-probe"
+          codesign --display --requirements - "$RUNNER_TEMP/signing-probe" 2>&1
 
       # Packaged by the agent's own publish script rather than a `tar` call written here: the
       # archive's top-level entry names are load-bearing (self_update.rs extracts "kintsugi-agent"
@@ -221,6 +300,7 @@ jobs:
         run: |
           clients/macos-agent/packaging/publish-release.sh \
               --binary "$PWD/clients/macos-agent/target/universal/kintsugi-agent" \
+              --signing-identity "Kintsugi Agent Signing" \
               --output-dir "$PWD/dist"
 
       - name: Publish release

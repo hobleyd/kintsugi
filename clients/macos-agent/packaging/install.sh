@@ -59,10 +59,75 @@ QUEUE_DIR="${CONFIG_DIR}/queue"
 REMOTE_SHELL_QUEUE_DIR="${CONFIG_DIR}/remote-shell"
 IDENTITY_DIR="${CONFIG_DIR}/identity"
 
+# The fleet's code-signing identity, by name — see packaging/create-signing-identity.sh, which
+# mints it, and .github/workflows/ci.yml, which is the only thing that holds its key. One of four
+# places that have to agree on this string (CLAUDE.md's couplings list is the fourth).
+SIGNING_IDENTITY_NAME="Kintsugi Agent Signing"
+
+# Signs a locally built binary with that identity if this machine holds it — which it normally does
+# not, since the key is a GitHub Actions secret — and ad hoc otherwise. Only the build-from-source
+# path below calls it: a binary out of a published archive is already signed by the release job,
+# whose key neither this host nor the person running this script has.
+#
+# `cargo build` leaves nothing usable behind — the linker signs an arm64 slice as "linker-signed",
+# with no designated requirement at all, which TCC will not accept as an identity. So the choice
+# here is between a requirement naming the certificate (grants survive every rebuild, which is the
+# point of the identity) and one naming this build's hash (grants have to be re-added after every
+# `cargo build`, which is what the identity replaced).
+#
+# Both branches sign as $SUDO_USER, for two separate reasons. The identity lives in *their* login
+# keychain, and root's is a different keychain entirely. And `codesign` rewrites the file through a
+# `.cstemp` copy it renames into place, so signing as root would leave a root-owned binary in that
+# user's target/ directory and their next `cargo build` would fail with Permission denied — which
+# is why even the ad-hoc branch, needing no keychain at all, is run the same way.
+sign_locally_built_binary() {
+    local path="$1" builder="${SUDO_USER:-}"
+    # Expanded as ${as_builder[@]+"${as_builder[@]}"} below, not "${as_builder[@]}": macOS ships
+    # bash 3.2, where an empty array expanded under `set -u` is an unbound variable and aborts.
+    local -a as_builder=()
+    [[ -n "$builder" ]] && as_builder=(sudo -u "$builder")
+
+    if [[ -n "$builder" ]] \
+            && sudo -u "$builder" security find-identity -v -p codesigning 2>/dev/null \
+                | grep -qF "$SIGNING_IDENTITY_NAME"; then
+        echo "Signing ${path} with '${SIGNING_IDENTITY_NAME}'..."
+        # --timestamp=none: nothing here is notarized, so a timestamp buys nothing and reaching a
+        # timestamp authority would make this need the network.
+        ${as_builder[@]+"${as_builder[@]}"} codesign --sign "$SIGNING_IDENTITY_NAME" --force \
+            --identifier kintsugi-agent --timestamp=none "$path"
+    else
+        ${as_builder[@]+"${as_builder[@]}"} codesign --sign - --force --identifier kintsugi-agent "$path"
+        echo "WARNING: signed ad hoc — a locally built agent has no stable code-signing identity." >&2
+        echo "  Its designated requirement is a hash of these exact bytes, so Screen Recording and" >&2
+        echo "  Accessibility have to be granted again after every rebuild. That is expected here:" >&2
+        echo "  the fleet identity is a GitHub Actions secret, held by the release job that builds" >&2
+        echo "  what hosts actually install. Install a release build to keep those grants." >&2
+    fi
+
+    codesign --display --requirements - "$path" 2>&1 || true
+}
+
+# Says so when the packaged binary carries a per-build requirement, which is the one thing about a
+# published archive that decides whether this host keeps its remote-control grants across the next
+# self-update. Diagnostic only: there is nothing an installer can do about it, and the symptom
+# otherwise is remote control reporting both permissions missing weeks later with the profile and
+# the System Settings rows both looking correct.
+warn_if_signed_per_build() {
+    local path="$1" requirement
+    requirement="$(codesign --display --requirements - "$path" 2>&1 || true)"
+    if grep -q 'cdhash' <<<"$requirement"; then
+        echo "WARNING: ${path##*/} is ad-hoc signed (designated requirement: a hash of this build)." >&2
+        echo "  Screen Recording and Accessibility grants for it will not survive this host's next" >&2
+        echo "  self-update. A package built by the release job is signed with" >&2
+        echo "  '${SIGNING_IDENTITY_NAME}' and does not have that problem; this one was not." >&2
+    fi
+}
+
 PREBUILT_BIN="$SCRIPT_DIR/kintsugi-agent"
 if [[ -f "$PREBUILT_BIN" ]]; then
     echo "Using prebuilt binary at ${PREBUILT_BIN}..."
     SRC_BIN="$PREBUILT_BIN"
+    warn_if_signed_per_build "$SRC_BIN"
 else
     echo "No prebuilt binary found; building from source (release)..."
     # Build as the invoking (non-root) user so cargo's registry/target caches
@@ -73,6 +138,7 @@ else
         (cd "$PROJECT_DIR" && cargo build --release)
     fi
     SRC_BIN="$PROJECT_DIR/target/release/kintsugi-agent"
+    sign_locally_built_binary "$SRC_BIN"
 fi
 
 echo "Installing binary to ${BIN_DEST}..."

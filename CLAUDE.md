@@ -75,6 +75,10 @@ cd web && flutter build web --release
 docker compose up -d --build
 
 # macOS agent (inline #[cfg(test)] modules — checkin_schedule, identity, self_update, ...)
+# Once, ever: mints the fleet code-signing identity straight into this repository's Actions secrets,
+# which is what keeps a host's Screen Recording and Accessibility grants across releases. Nothing
+# local holds the key. See "One certificate signs every build" under Remote control.
+clients/macos-agent/packaging/create-signing-identity.sh --set-secrets
 cd clients/macos-agent && cargo build --release
 cd clients/macos-agent && cargo test
 cd clients/macos-agent && cargo test load_or_assign_persists_a_fresh_minute_when_nothing_is_saved_yet
@@ -1003,29 +1007,71 @@ either nothing or a desktop with every window missing. So `describe_restrictions
 front and the consent dialog lists whatever will not work, rather than leaving it to be discovered
 mid-call.
 
-**Pre-approving those permissions by MDM needs the agent code-signed with a Developer ID, and it is
-not.** `packaging/kintsugi-remote-control.mobileconfig.example` is a complete PPPC profile bar one
-field: every entry needs a `CodeRequirement` matched against the binary's signature, and the
-ad-hoc signature `publish-release.sh` applies has a designated requirement that is a bare `cdhash`
-of that exact build. A profile written against it would work until the next release and then stop,
-because `self_update` replaces the binary unattended — remote control failing across the fleet on an
-upgrade, with the profile still reporting as installed. Signing with a Developer ID Application
-certificate (which nothing in `publish-release.sh` or CI does today) is the prerequisite; until then
-both permissions need a human at each Mac, and Accessibility specifically **cannot be granted from
-its prompt at all** — macOS only offers to open System Settings, where someone then has to find the
-binary in a list (`/usr` is hidden in the file picker; ⌘⇧G and type `/usr/local/bin`).
+**The signature in `publish-release.sh` is load-bearing, and `cargo build` alone is not enough.**
+The linker signs an arm64 slice as "linker-signed" — no designated requirement — and signs an
+x86_64 slice not at all, and TCC accepts neither as an identity. What that looks like is not an
+error: System Settings shows the binary added and switched on under both Screen Recording and
+Accessibility, and the process still fails both checks, however many times the rows are removed and
+re-added, restarted or not. 0.6.0 shipped that way; the tell was the system `TCC.db` holding a
+`csreq` naming two cdhashes that matched neither slice of the installed file.
 
-**The ad-hoc signature in `publish-release.sh` is load-bearing, and `cargo build` alone is not
-enough.** The linker signs an arm64 slice as "linker-signed" — no designated requirement — and
-signs an x86_64 slice not at all, and TCC accepts neither as an identity. What that looks like is
-not an error: System Settings shows the binary added and switched on under both Screen Recording
-and Accessibility, and the process still fails both checks, however many times the rows are removed
-and re-added, restarted or not. 0.6.0 shipped that way; the tell was the system `TCC.db` holding a
-`csreq` naming two cdhashes that matched neither slice of the installed file. `codesign --sign -`
-on the packaged binary gives it a requirement TCC records verbatim. A grant is still per build, so
-after every agent release the two rows have to be removed and re-added — and the per-user process
-relaunched (`launchctl kickstart -k gui/$(id -u)/au.com.sharpblue.kintsugiagent-ui`), because a
-process that was denied stays denied until it reconnects to WindowServer.
+**One certificate signs every build, and that is what makes a grant outlive a release.** TCC
+records a binary's designated requirement when somebody grants Screen Recording or Accessibility
+and re-checks the running process against it on every access. An *ad-hoc* signature's requirement is
+`cdhash H"..."` per slice — a hash of that exact build — so it satisfied the grant it was given and
+nothing afterwards: `self_update` replaces the binary unattended, so **every release used to orphan
+both permissions across the whole fleet**, with System Settings still showing the agent switched on.
+So `packaging/create-signing-identity.sh` mints one long-lived self-signed code-signing certificate
+(`Kintsugi Agent Signing`) and `release-macos` signs every published build with it — so the
+requirement is `identifier "kintsugi-agent" and certificate leaf = H"..."`, which every future
+build satisfies. Four things follow.
+
+- **The key lives in the repository's Actions secrets and nowhere else.** The release job is the
+  only thing that builds the binary a host installs and self-updates to, so it is the only thing
+  that needs to sign; a copy on somebody's laptop would be a second copy of a fleet credential for
+  no gain, and a *second identity* there would be worse than none — a host hand-installed from a
+  locally signed build and then self-updating from a differently-signed release loses its grants
+  anyway, for a reason neither log explains. So the setup script pushes the PKCS#12 straight into
+  `MACOS_SIGNING_CERTIFICATE_P12` / `_PASSWORD` and keeps nothing, `release-macos` **fails** when
+  those are missing rather than quietly signing ad hoc, and `publish-release.sh` run by hand signs
+  ad hoc and says so — what that produces is a package for one server, not the fleet's release, and
+  a human is reading the warning. There is no backup of the key: losing it costs the fleet another
+  re-grant, which is cheaper than a copy of it existing somewhere.
+- **Signing asserts what it produced.** `publish-release.sh` refuses to publish a package whose
+  requirement carries a `cdhash` clause, in the same spirit as the `lipo -archs` and
+  not-dynamically-linked assertions elsewhere — a signature that quietly came out cdhash-only is a
+  fleet-wide grant wipe that no log names. It asserts the *absence* of `cdhash` rather than any
+  particular wording, because a self-signed leaf reads `certificate leaf = H"..."` and an
+  Apple-anchored one says more, and betting on a spelling would fail a release over a good
+  signature. The release job checks its own end too: an imported certificate with no trust behind
+  it is *quiet* — `security import` reports "1 identity imported" and `find-identity -v` then finds
+  0 valid ones — so it asserts the listing and then signs a throwaway file, because an identity
+  `find-identity` lists can still be one `codesign` refuses. `install.sh` says the same thing about
+  a packaged binary it is handed, as a diagnostic: there is nothing an installer can do about it.
+- **Nothing on a managed Mac needs the certificate.** Validating a signature is not trusting its
+  signer, and the requirement only compares the leaf's hash; only the thing that *signs* needs the
+  private key and the `add-trusted-cert` line (without which `codesign` refuses the identity with
+  `CSSMERR_TP_NOT_TRUSTED`) — which is the release job, for the length of one run, in a keychain it
+  creates and throws away. A locally built agent is therefore ad-hoc signed and its grants last
+  until the next `cargo build`; `install.sh` says so rather than leaving it to be discovered.
+- **Moving to it costs one final re-grant per Mac**, since the requirement changed — both rows
+  removed and re-added, and the per-user process relaunched
+  (`launchctl kickstart -k gui/$(id -u)/au.com.sharpblue.kintsugiagent-ui`), because a process that
+  was denied stays denied until it reconnects to WindowServer. After that a release should cost
+  nothing. TCC keys its row on the path as well as the requirement, so it is the installed
+  `/usr/local/bin/kintsugi-agent` that keeps its grants; a binary run out of `target/release` is a
+  different row and asks again however it was signed.
+
+**MDM pre-approval is now fillable and still unverified.**
+`packaging/kintsugi-remote-control.mobileconfig.example` needs a `CodeRequirement` matched against
+the binary's signature, and the stable requirement above is exactly what it was waiting on. What is
+not established is that a PPPC profile honours a requirement naming a *self-signed* leaf — Apple's
+guidance assumes a Developer ID, and nobody has tried this through MDM here, so verify it on one
+enrolled Mac rather than deploying it fleet-wide (the file says so at length, including how far back
+`kTCCServiceScreenCapture` is grantable at all). Until then both permissions need a human at each
+Mac — once, rather than once per release — and Accessibility specifically **cannot be granted from
+its prompt at all**: macOS only offers to open System Settings, where someone then has to find the
+binary in a list (`/usr` is hidden in the file picker; ⌘⇧G and type `/usr/local/bin`).
 
 **A browser cannot forward every keystroke, and that is permanent.** ⌘W, ⌘Q, ⌘T and ⌘Tab are claimed
 by the browser and the OS before any page handler runs, so `RemoteKeyCombinations` offers them as
@@ -1326,20 +1372,20 @@ the job in `gui/<uid>` and proves nothing about the daemon; only a plist bootstr
 packaging tidiness.** A root daemon executing Homebrew's `/opt/homebrew/bin/mas` — user-writable — is
 root for whoever owns the Homebrew prefix. `publish-release.sh` fetches mas-cli's two per-architecture
 `.pkg`s pinned by digest, extracts the Mach-O (`libexec/bin/mas`; `bin/mas` is a zsh formatting
-wrapper), `lipo`s them into one universal file, ad-hoc signs it like the agent, and refuses to build a
-single-architecture one; `install.sh` installs it `root:wheel 0755`, `self_update` replaces it from the
-same archive whenever one is present (so a host installed before it gains App Store patching on its
-next update), and the script checks owner *and* mode before executing it — on an Intel Mac
-`/usr/local/bin` is Homebrew's user-owned prefix, so a swapped file there would be owned by whoever
-swapped it, which is exactly what the check catches. Bumping `MAS_VERSION` means re-pinning both
-digests and re-running the LaunchDaemon check above: mas drives private frameworks and has broken on
-macOS majors before; mas 7 needs macOS 13. Two behaviours of `mas` are load-bearing in the script:
-it resolves installed apps through Spotlight and re-indexes any it finds unindexed (noisy, harmless),
-and a `mas update` with nothing to do **exits 0 having printed nothing** — so the script treats
-empty output as failure, because exit 0 is what makes `patch_cycle::run_patches` report the server's
-latest version as installed, and a silent no-op would be a patch result the next inventory
-contradicts. A store dialog is still possible (an app owned by a different Apple Account); that is the
-honest outcome, and nothing here can answer it.
+wrapper), `lipo`s them into one universal file, signs it with the fleet identity like the agent, and
+refuses to build a single-architecture one; `install.sh` installs it `root:wheel 0755`, `self_update`
+replaces it from the same archive whenever one is present (so a host installed before it gains App
+Store patching on its next update), and the script checks owner *and* mode before executing it — on
+an Intel Mac `/usr/local/bin` is Homebrew's user-owned prefix, so a swapped file there would be
+owned by whoever swapped it, which is exactly what the check catches. Bumping `MAS_VERSION` means
+re-pinning both digests and re-running the LaunchDaemon check above: mas drives private frameworks
+and has broken on macOS majors before; mas 7 needs macOS 13. Two behaviours of `mas` are
+load-bearing in the script: it resolves installed apps through Spotlight and re-indexes any it
+finds unindexed (noisy, harmless), and a `mas update` with nothing to do **exits 0 having printed
+nothing** — so the script treats empty output as failure, because exit 0 is what makes
+`patch_cycle::run_patches` report the server's latest version as installed, and a silent no-op would
+be a patch result the next inventory contradicts. A store dialog is still possible (an app owned by
+a different Apple Account); that is the honest outcome, and nothing here can answer it.
 
 **A signed script is never rewritten by a deployment, and editing one of those bodies changes
 nothing until a human says so.** `RegisterApplicationsCommandHandler` used to rewrite `Script` from
@@ -1880,10 +1926,20 @@ wedged by a release before this one need `Restart-Service KintsugiAgent` by hand
   agent regex — the only agent route that is. A new agent route still belongs in the regex; this one
   is separate because a WebSocket needs an hour-long `proxy_read_timeout` that must not apply to
   `/api/host`. The regex's own comment says so, and both need to keep saying it.
-- The PPPC profile's `CodeRequirement` is tied to the agent's code signature, and the agent is only
-  ad-hoc signed — so the profile cannot be used until `publish-release.sh` signs with a Developer ID.
-  See `packaging/kintsugi-remote-control.mobileconfig.example`, which explains what breaks if
-  somebody fills it in from an unsigned build anyway.
+- **The code-signing identity's name is one string in five places that nothing checks agree**:
+  `packaging/create-signing-identity.sh` (which mints it, as both the PKCS#12's friendly name and
+  its CN), `.github/workflows/ci.yml` (which looks the certificate up by it after importing, and
+  passes it as `--signing-identity`), `packaging/publish-release.sh` and `packaging/install.sh`
+  (which resolve an identity by it), and this list. Rename it in one and the release job fails at
+  its own assertions — which is the good outcome, and deliberate: the alternative is a package that
+  installs perfectly and orphans every host's Screen Recording and Accessibility grant on the next
+  self-update. The two secret names (`MACOS_SIGNING_CERTIFICATE_P12`, `_PASSWORD`) are the same kind
+  of pair, shared between that script and that workflow.
+- The PPPC profile's `CodeRequirement` is tied to the agent's code signature, which is now stable
+  across releases — so the profile is fillable, but with a self-signed leaf rather than the
+  Developer ID Apple's guidance assumes, and nobody has confirmed MDM honours that. See
+  `packaging/kintsugi-remote-control.mobileconfig.example`, which says what to verify before
+  deploying it and what breaks if somebody fills it in from an ad-hoc build anyway.
 - `xterm` is a **runtime dependency of the admin UI**, not a dev tool: it is the VT emulator the
   remote terminal is drawn with, and it is pure Dart precisely so it works on web. Dropping it does
   not degrade the terminal, it removes it — what arrives from the agent is escape sequences, and a
