@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:xterm/xterm.dart';
 
+import '../../core/theme/app_theme.dart';
 import '../../core/theme/kintsugi_palette.dart';
 import '../../domain/entities/remote_control_session.dart';
 
@@ -116,9 +117,12 @@ class _RemoteShellViewState extends State<RemoteShellView> {
         autofocus: true,
         backgroundOpacity: 0,
         theme: _themeFor(palette),
-        // Not the browser's own text cursor: this is a terminal, and the pointer is used for
-        // selecting output to copy.
-        textStyle: const TerminalStyle(fontFamily: 'Share Tech Mono', fontSize: 13),
+        // Asked for by the family `google_fonts` registers, not by the human name of the face —
+        // see AppTheme.monoFamily, which is where that distinction and its consequence are written
+        // down. Naming `'Share Tech Mono'` here matched nothing, and the terminal rendered in the
+        // proportional default. xterm's own fallback list is left alone below it, which costs
+        // nothing on web and is what a desktop build would land on.
+        textStyle: TerminalStyle(fontFamily: AppTheme.monoFamily, fontSize: 13),
       ),
     );
   }

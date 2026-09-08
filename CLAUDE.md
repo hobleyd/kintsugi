@@ -1982,6 +1982,14 @@ wedged by a release before this one need `Restart-Service KintsugiAgent` by hand
   remote terminal is drawn with, and it is pure Dart precisely so it works on web. Dropping it does
   not degrade the terminal, it removes it — what arrives from the agent is escape sequences, and a
   text widget renders them rather than obeying them.
+- **The terminal's font family is `AppTheme.monoFamily`, never the name of the face.** `google_fonts`
+  fetches Share Tech Mono at runtime and registers it as `ShareTechMono_regular`, keeping the human
+  name only as a fallback for an asset-bundled copy that does not exist here — so a widget naming
+  `'Share Tech Mono'` matches no registered font, and on web there is nothing to fall back to,
+  because Flutter's canvas renderer cannot see Menlo, Consolas or any other system face. The text
+  silently lands in the proportional default, which for a terminal breaks every aligned column, box
+  drawing and progress bar. Nothing in `flutter analyze` or a release build says a word about it;
+  `test/presentation/remote_shell_font_test.dart` is the only check.
 - `web/pubspec.yaml`'s `environment: sdk:` constraint and `FLUTTER_VERSION` in `nginx/Dockerfile`
   have to stay compatible. Bumping one without the other fails at image build time rather than at
   merge, which is the good failure but only if somebody builds the image.

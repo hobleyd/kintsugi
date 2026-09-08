@@ -33,6 +33,20 @@ abstract final class AppTheme {
   static TextStyle mono({required Color color, double size = 14.4}) =>
       GoogleFonts.shareTechMono(color: color, fontSize: size);
 
+  /// The family name [mono] actually resolves to, for the one place that needs a family *string*
+  /// rather than a [TextStyle]: xterm's `TerminalStyle`, in the remote terminal.
+  ///
+  /// It is **not** `'Share Tech Mono'`. `google_fonts` fetches the face at runtime and registers it
+  /// under a family of its own making (`ShareTechMono_regular`), keeping the human name only as a
+  /// fallback for a copy bundled as an asset — and nothing here bundles one. So a widget naming the
+  /// human family matches no registered font, and on web there is nothing to fall back *to*:
+  /// Flutter's canvas renderer cannot see Menlo or Consolas or any other system face, so the text
+  /// lands in the default proportional one. The remote terminal shipped exactly that, and a
+  /// terminal in a proportional font is not a cosmetic complaint — every box-drawing TUI, every
+  /// column of `ls -l`, and every progress bar is drawn on the assumption that cells are equal
+  /// width.
+  static String get monoFamily => GoogleFonts.shareTechMono().fontFamily ?? 'monospace';
+
   static ThemeData _build(KintsugiPalette palette, Brightness brightness) {
     final body = GoogleFonts.rajdhaniTextTheme().apply(
       bodyColor: palette.text,
