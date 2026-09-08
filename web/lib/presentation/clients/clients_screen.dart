@@ -84,23 +84,6 @@ class _ClientsView extends StatelessWidget {
               ),
           ],
           actions: [
-            // Windows only, and unconditional rather than hidden when no package is published:
-            // pressing it then explains why there is nothing to render, whereas an absent button
-            // explains nothing. See WindowsBootstrapScript for why this platform has one at all.
-            //
-            // A tooltip rather than a fourth paragraph of hint text above the table: the script's
-            // own synopsis is the first thing in the dialog and says all of this at length, and the
-            // hints here are already the tallest part of a screen whose point is the table.
-            SecondaryButton(
-              label: 'Windows deployment script',
-              tooltip: 'A silent PowerShell installer for CrowdStrike. It downloads the published '
-                  'build from GitHub and refuses to install it unless the SHA-256 written into the '
-                  'script matches. Contains the current enrollment token - treat it as a credential.',
-              busy: state.fetchingBootstrapScript,
-              onPressed: state.loading
-                  ? null
-                  : () => context.read<ClientsBloc>().add(const ClientsBootstrapScriptRequested()),
-            ),
             PrimaryButton(
               label: 'Refresh clients',
               busy: state.refreshing,
@@ -119,7 +102,11 @@ class _ClientsView extends StatelessWidget {
         else if (view.packages.isEmpty)
           const EmptyPanel('No client packages have been published yet.')
         else
-          _PackagesTable(view: view, expandedPlatform: state.expandedPlatform),
+          _PackagesTable(
+            view: view,
+            expandedPlatform: state.expandedPlatform,
+            fetchingBootstrapScript: state.fetchingBootstrapScript,
+          ),
       ],
     );
   }
@@ -199,16 +186,27 @@ class _ClientsView extends StatelessWidget {
 }
 
 class _PackagesTable extends StatelessWidget {
-  const _PackagesTable({required this.view, required this.expandedPlatform});
+  const _PackagesTable({
+    required this.view,
+    required this.expandedPlatform,
+    required this.fetchingBootstrapScript,
+  });
 
   final ClientsView view;
   final String? expandedPlatform;
+  final bool fetchingBootstrapScript;
+
+  /// The agent-package namespace's name for Windows — the same lowercase string
+  /// `GetWindowsBootstrapScriptQueryHandler` looks the package up by, and deliberately not
+  /// `PlatformBucket`'s `Windows`. Compared case-insensitively all the same, because this value
+  /// arrives over the wire.
+  static const _windowsPlatform = 'windows';
 
   @override
   Widget build(BuildContext context) => KintsugiTable(
-        // 940 plus the chevron column. The release-notes panel does not bear on it, being spliced
+        // 990 plus the chevron column. The release-notes panel does not bear on it, being spliced
         // in at the table's full width rather than laid out in a column.
-        minWidth: 1050,
+        minWidth: 1100,
         columns: const [
           TableColumnSpec(label: 'Platform', width: FlexColumnWidth(0.8)),
           TableColumnSpec(label: 'Version', width: FlexColumnWidth(0.8)),
@@ -216,7 +214,10 @@ class _PackagesTable extends StatelessWidget {
           TableColumnSpec(label: 'Size', width: FlexColumnWidth(0.7)),
           TableColumnSpec(label: 'Published', width: FlexColumnWidth(1)),
           TableColumnSpec(label: 'Notes', width: FlexColumnWidth(1.4)),
-          TableColumnSpec(label: 'Download', width: FixedColumnWidth(150)),
+          // 200 rather than 150: the Windows row carries a second action beside Download, and the
+          // two stack rather than sitting side by side at this width. Sized so they stack
+          // predictably instead of depending on how wide a label renders.
+          TableColumnSpec(label: 'Download', width: FixedColumnWidth(200)),
           // 110 for the same reason the Applications table's Actions column is: one 34px icon
           // needs 90, and the label over it does not fit in that. `KintsugiTable` floors the
           // column at its label either way; the number says so rather than being overridden.
@@ -246,12 +247,9 @@ class _PackagesTable extends StatelessWidget {
       HintText(formatFileSize(package.fileSizeBytes)),
       LocalTimestamp(package.publishedUtc),
       package.releaseNotes == null ? const NoValue() : HintText(package.releaseNotes!),
-      SecondaryButton(
-        label: 'Download',
-        // A link the browser follows, not a request: the response is a file, and the
-        // route is anonymous by design so an enrolled agent's own self-update can reach
-        // it before it has proven anything.
-        onPressed: () => _download(AgentPackageRepositoryImpl.downloadUrl(package.platform)),
+      _DownloadCell(
+        package: package,
+        fetchingBootstrapScript: fetchingBootstrapScript,
       ),
       IconActionButton(
         icon: expanded ? Icons.expand_less : Icons.expand_more,
@@ -259,6 +257,51 @@ class _PackagesTable extends StatelessWidget {
         onPressed: () => context.read<ClientsBloc>().add(ClientsRowExpansionToggled(package.platform)),
       ),
     ];
+  }
+
+}
+
+/// The Download column. Every row offers the package; the Windows row also offers the silent
+/// PowerShell installer for CrowdStrike.
+///
+/// That action lives here, on the row it applies to, rather than beside "Refresh clients" in the
+/// section header. It was in the header first, and that was wrong twice over: it is one platform's
+/// action sitting among page-level ones, and a reader looking for something to do with the Windows
+/// build looks at the Windows build's row. Both buttons are labelled rather than reduced to an
+/// icon, because being found is the whole problem this placement fixes.
+class _DownloadCell extends StatelessWidget {
+  const _DownloadCell({required this.package, required this.fetchingBootstrapScript});
+
+  final AgentPackage package;
+  final bool fetchingBootstrapScript;
+
+  @override
+  Widget build(BuildContext context) {
+    final isWindows = package.platform.toLowerCase() == _PackagesTable._windowsPlatform;
+
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        SecondaryButton(
+          label: 'Download',
+          // A link the browser follows, not a request: the response is a file, and the
+          // route is anonymous by design so an enrolled agent's own self-update can reach
+          // it before it has proven anything.
+          onPressed: () => _download(AgentPackageRepositoryImpl.downloadUrl(package.platform)),
+        ),
+        if (isWindows)
+          SecondaryButton(
+            label: 'Deploy Script',
+            tooltip: 'A silent PowerShell installer for CrowdStrike. It downloads this build from '
+                'GitHub and refuses to install it unless the SHA-256 written into the script '
+                'matches. Contains the current enrollment token - treat it as a credential.',
+            busy: fetchingBootstrapScript,
+            onPressed: () =>
+                context.read<ClientsBloc>().add(const ClientsBootstrapScriptRequested()),
+          ),
+      ],
+    );
   }
 
   /// Navigating to the URL rather than fetching it, because the response is a file with a

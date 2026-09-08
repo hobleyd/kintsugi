@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kintsugi_web/core/di/locator.dart';
 import 'package:kintsugi_web/core/theme/app_theme.dart';
+import 'package:kintsugi_web/core/widgets/buttons.dart';
 import 'package:kintsugi_web/domain/entities/agent_package.dart';
 import 'package:kintsugi_web/domain/repositories/repositories.dart';
 import 'package:kintsugi_web/domain/usecases/client_usecases.dart';
@@ -30,8 +31,8 @@ void main() {
   final open = find.byTooltip('Release notes for newer builds');
   final close = find.byTooltip('Hide release notes');
 
-  Future<void> pumpScreen(WidgetTester tester) async {
-    tester.view.physicalSize = const Size(1400, 900);
+  Future<void> pumpScreen(WidgetTester tester, {double height = 900}) async {
+    tester.view.physicalSize = Size(1400, height);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
 
@@ -52,19 +53,40 @@ void main() {
     expect(find.text('Seventh.'), findsNothing);
   });
 
-  testWidgets('the Windows deployment script opens in a dialog with its pinned checksum in the title',
+  testWidgets('only the Windows row offers the deployment script', (tester) async {
+    // The action belongs on the row it applies to. It sat beside "Refresh clients" in the section
+    // header first, and was missed entirely: a reader looking for something to do with the Windows
+    // build looks at the Windows build's row, not at the page-level actions.
+    packages.current = clientsView(withWindows: true);
+    await pumpScreen(tester, height: 1200);
+
+    // widgetWithText, not find.text: the column's own header label renders as "DOWNLOAD" too, so
+    // a bare text count would be one higher and would pass for the wrong reason.
+    expect(find.widgetWithText(SecondaryButton, 'DOWNLOAD'), findsNWidgets(3));
+    expect(find.widgetWithText(SecondaryButton, 'DEPLOY SCRIPT'), findsOneWidget);
+  });
+
+  testWidgets('no Windows package published means no deployment script button anywhere',
+      (tester) async {
+    await pumpScreen(tester);
+
+    expect(find.text('DEPLOY SCRIPT'), findsNothing);
+  });
+
+  testWidgets('the deployment script opens in a dialog with its pinned checksum in the title',
       (tester) async {
     // The pin is the whole security property, so it is shown beside the script rather than only
     // buried in the body — a reader should be able to see what is being vouched for.
+    packages.current = clientsView(withWindows: true);
     packages.bootstrapScript = const WindowsBootstrapScript(
       script: "\$ExpectedSha256  = 'b' * 64",
       version: '0.7.4',
       sha256: 'bbbb',
       unavailableReason: null,
     );
-    await pumpScreen(tester);
+    await pumpScreen(tester, height: 1200);
 
-    await tester.tap(find.text('WINDOWS DEPLOYMENT SCRIPT'));
+    await tester.tap(find.text('DEPLOY SCRIPT'));
     await tester.pumpAndSettle();
 
     expect(find.textContaining('pins SHA-256 bbbb'), findsOneWidget);
@@ -76,14 +98,15 @@ void main() {
     // Pumped without the wrapping Scaffold the other tests use, because the reason must reach the
     // reader through the screen's own AlertBox rather than through anything the harness supplies.
     // A transient toast would be the wrong shape for it besides: the remedy is the "Refresh
-    // clients" button a few pixels away, so the message should stay on screen beside it.
-    tester.view.physicalSize = const Size(1400, 900);
+    // clients" button on the same screen, so the message should stay on screen beside it.
+    packages.current = clientsView(withWindows: true);
+    tester.view.physicalSize = const Size(1400, 1200);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
     await tester.pumpWidget(MaterialApp(theme: AppTheme.light(), home: const ClientsScreen()));
     await tester.pumpAndSettle();
 
-    await tester.tap(find.text('WINDOWS DEPLOYMENT SCRIPT'));
+    await tester.tap(find.text('DEPLOY SCRIPT'));
     await tester.pumpAndSettle();
 
     expect(find.text('No upstream checksum has been recorded for this package.'), findsOneWidget);
@@ -159,10 +182,12 @@ void main() {
   });
 }
 
-ClientsView clientsView({AgentPackageSourceStatus? sourceStatus}) => ClientsView(
+ClientsView clientsView({AgentPackageSourceStatus? sourceStatus, bool withWindows = false}) =>
+    ClientsView(
       packages: [
         package('macos'),
         package('linux'),
+        if (withWindows) package('windows'),
       ],
       sourceStatus: sourceStatus ??
           const AgentPackageSourceStatus(

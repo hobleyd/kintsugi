@@ -651,8 +651,8 @@ signed packages — and the screen says out loud when it is falling back.
 
 **A CrowdStrike-managed Windows estate installs from a rendered script instead, and the pinned
 checksum is the whole security design.** An estate that pushes software through CrowdStrike does not
-have someone downloading a tarball from the Clients screen on each host, so the Windows row also
-offers a "Windows deployment script" — a silent PowerShell installer
+have someone downloading a tarball from the Clients screen on each host, so the Windows row's
+Download cell carries a second button, "Deploy Script" — a silent PowerShell installer
 (`WindowsBootstrapScript`, `GET /api/admin/clients/windows/bootstrap-script`) that downloads the
 release archive **from GitHub** and refuses to install it unless its SHA-256 matches a literal
 written into the script. Nothing here terminates that GitHub connection, so TLS alone vouches for
@@ -677,6 +677,11 @@ Three consequences follow, and each is a way to break this without noticing.
   clients" — Windows only, since spending a download per platform on a pin nothing else reads would
   be waste on a button people press often. A row that carries no pin renders a reason, never a
   script with an empty one.
+- **The button belongs on the row, not in the section header.** It went in beside "Refresh
+  clients" first and was missed outright — a reader looking for something to do with the Windows
+  build looks at the Windows build's row, and a page-level action bar is where global actions live.
+  Both buttons in that cell stay labelled rather than collapsing to an icon, since being found is
+  the whole problem the placement fixes.
 - **The script installs; it does not upgrade, and it does not reimplement `install.ps1`.** It
   verifies, extracts into a directory stripped to SYSTEM and Administrators (SYSTEM's `$env:TEMP` is
   `C:\Windows\Temp`, which any user may write to — verifying and then extracting somewhere writable
