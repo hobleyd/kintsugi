@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:xterm/xterm.dart';
 
 import '../../core/theme/app_theme.dart';
@@ -139,21 +139,49 @@ class _RemoteShellViewState extends State<RemoteShellView> {
       padding: const EdgeInsets.all(8),
       child: Listener(
         onPointerDown: (_) => _takeKeyboard(),
-        child: TerminalView(
-          _terminal,
-          controller: _controller,
-          focusNode: _focusNode,
-          // The terminal takes the keyboard as soon as the session opens, so an administrator can
-          // type straight away rather than having to click into it first.
-          autofocus: true,
-          backgroundOpacity: 0,
-          theme: _themeFor(palette),
-          // Asked for by the family `google_fonts` registers, not by the human name of the face —
-          // see AppTheme.monoFamily, which is where that distinction and its consequence are written
-          // down. Naming `'Share Tech Mono'` here matched nothing, and the terminal rendered in the
-          // proportional default. xterm's own fallback list is left alone below it, which costs
-          // nothing on web and is what a desktop build would land on.
-          textStyle: TerminalStyle(fontFamily: AppTheme.monoFamily, fontSize: 13),
+        // **Space, and space alone, has to be taken back from the framework — on web this is the
+        // difference between a terminal that types spaces and one that does not.**
+        //
+        // A printable character does not reach xterm as a key event at all: the emulator attaches a
+        // `TextInput` connection and reads what the browser's own hidden input element receives,
+        // which is why every other character works with no help from here. But Flutter web asks the
+        // framework whether it consumed each key press and calls `preventDefault()` on the browser
+        // event when the answer is yes — and `WidgetsApp`'s web shortcuts map a bare space to
+        // `PrioritizedIntents([ActivateIntent, ScrollIntent(page down)])`. The scroll half is always
+        // enabled, because there is a `Scrollable` above this widget (the page's, and xterm's own),
+        // so every space was claimed, prevented, and never typed: the input element saw nothing and
+        // the page nudged down instead. Nothing else was affected, which is what makes it read as a
+        // terminal fault rather than as a shortcut.
+        //
+        // `DoNothingAndStopPropagationIntent` is the answer, and both halves of its name are
+        // load-bearing: its action reports the key *unhandled*, so the embedding lets the browser
+        // insert the character, and it stops the event climbing any higher, so `WidgetsApp`'s
+        // mapping never runs. It is what a `TextField` gets for the same collision by being an
+        // `EditableText`; xterm's text input is not one, so it inherits none of that.
+        //
+        // No other key needs this. Every key xterm cares about is answered by `Terminal.keyInput`,
+        // which writes the escape sequence itself and reports the press handled — the
+        // `preventDefault` that follows is then right, because the character has already been sent.
+        child: Shortcuts(
+          shortcuts: const <ShortcutActivator, Intent>{
+            SingleActivator(LogicalKeyboardKey.space): DoNothingAndStopPropagationIntent(),
+          },
+          child: TerminalView(
+            _terminal,
+            controller: _controller,
+            focusNode: _focusNode,
+            // The terminal takes the keyboard as soon as the session opens, so an administrator can
+            // type straight away rather than having to click into it first.
+            autofocus: true,
+            backgroundOpacity: 0,
+            theme: _themeFor(palette),
+            // Asked for by the family `google_fonts` registers, not by the human name of the face —
+            // see AppTheme.monoFamily, which is where that distinction and its consequence are
+            // written down. Naming `'Share Tech Mono'` here matched nothing, and the terminal
+            // rendered in the proportional default. xterm's own fallback list is left alone below
+            // it, which costs nothing on web and is what a desktop build would land on.
+            textStyle: TerminalStyle(fontFamily: AppTheme.monoFamily, fontSize: 13),
+          ),
         ),
       ),
     );
