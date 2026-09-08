@@ -124,6 +124,18 @@ class _RemoteControlView extends StatelessWidget {
       );
     }
 
+    // A shell the agent has not answered yet gets no notice at all. It is Pending only in the
+    // window between the request and the agent reporting NotRequired — waiting for the *agent*,
+    // never for a person — and both sentences available below claim somebody is looking at a dialog
+    // that was never raised. The body says it is connecting instead, and the notice above takes over
+    // the moment the answer arrives. Deliberately narrow: an unreachable or unavailable shell still
+    // falls through to the switch, which is where those are said out loud.
+    if (session.kind == RemoteControlSessionKind.shell &&
+        session.consent == RemoteControlConsent.pending &&
+        session.endedAtUtc == null) {
+      return const SizedBox.shrink();
+    }
+
     if (session.isAwaitingConsent) {
       return AlertBox.info(
         'Waiting for the person at ${session.hostname} to allow this. They have been shown a dialog '

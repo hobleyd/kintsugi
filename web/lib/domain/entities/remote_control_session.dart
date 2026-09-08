@@ -47,7 +47,17 @@ class RemoteControlSession extends Equatable {
   /// true for a session that has since finished.
   final bool isActive;
 
-  bool get isAwaitingConsent => consent == RemoteControlConsent.pending && endedAtUtc == null;
+  /// Whether somebody at the host is being asked right now — **a screen session only**.
+  ///
+  /// A shell asks nobody, so a shell sitting on `pending` is waiting for the *agent* to answer, not
+  /// for a person: it is the window between the request and the agent reporting `notRequired`.
+  /// Reading the raw consent value here told the administrator a dialog was on somebody's screen
+  /// when none had been raised, which is the one thing the wording around this feature must never
+  /// get wrong in that direction.
+  bool get isAwaitingConsent =>
+      kind == RemoteControlSessionKind.screen &&
+      consent == RemoteControlConsent.pending &&
+      endedAtUtc == null;
 
   /// Whether the media socket may be opened. A shell session answers `notRequired` rather than
   /// `granted` — nobody was asked — and it opens on that answer exactly as a screen session opens
