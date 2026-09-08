@@ -1982,6 +1982,20 @@ wedged by a release before this one need `Restart-Service KintsugiAgent` by hand
   remote terminal is drawn with, and it is pure Dart precisely so it works on web. Dropping it does
   not degrade the terminal, it removes it — what arrives from the agent is escape sequences, and a
   text widget renders them rather than obeying them.
+- **The remote terminal takes the keyboard from a `Listener`, in a microtask, and both halves of
+  that are load-bearing.** xterm focuses from `onTapDown`, so it needs the press to be recognised as
+  a *tap* — and on web a mouse has one logical pixel of slop, so an ordinary click that drifts two
+  is a drag, focuses nothing, and leaves a selection behind that the *next* tap is spent clearing.
+  That is what made clicking back into a terminal take a random number of attempts. A `Listener`
+  does not compete in the gesture arena, so it sees every press however the press is later
+  interpreted. The microtask is the other half: a focused text field anywhere on the page unfocuses
+  on any pointer down outside itself (`TapRegion`), and that runs *after* an inline handler, so
+  focus lands on the route's modal scope and the keyboard goes nowhere. Deferring puts the request
+  last, which is the only position that survives.
+  `test/presentation/remote_shell_focus_test.dart` pins both, and its gesture must stay
+  `PointerDeviceKind.mouse`: a touch pointer tolerates eighteen pixels before a press stops being a
+  tap, and the whole bug lives inside that difference — the test sails through against the broken
+  code otherwise.
 - **The terminal's font family is `AppTheme.monoFamily`, never the name of the face.** `google_fonts`
   fetches Share Tech Mono at runtime and registers it as `ShareTechMono_regular`, keeping the human
   name only as a fallback for an asset-bundled copy that does not exist here — so a widget naming
