@@ -109,6 +109,7 @@ class RemoteControlTileImage extends Equatable {
 
 final class RemoteControlState extends Equatable {
   const RemoteControlState({
+    this.kind = RemoteControlSessionKind.screen,
     this.session,
     this.geometry,
     this.shell,
@@ -116,6 +117,11 @@ final class RemoteControlState extends Equatable {
     this.connecting = false,
     this.error,
   });
+
+  /// What was asked for, known from the moment the request is made rather than only once the
+  /// session comes back. That matters for exactly one thing: what [status] says while the request
+  /// is in flight, which is the one point at which there is no session to read the kind off.
+  final RemoteControlSessionKind kind;
 
   final RemoteControlSession? session;
   final RemoteDisplayGeometry? geometry;
@@ -154,7 +160,13 @@ final class RemoteControlState extends Equatable {
   /// What the screen says while there is no picture. Null once there is one.
   String? get status {
     if (error != null) return error;
-    if (connecting) return 'Asking…';
+
+    // Nobody is asked for a shell — see RemoteControlSessionKind.shell — so 'Asking…' would
+    // describe a dialog that is never raised, on the one kind of session whose whole justification
+    // is that the administrator knows nobody was consulted.
+    if (connecting) {
+      return kind == RemoteControlSessionKind.shell ? 'Connecting…' : 'Asking…';
+    }
 
     final session = this.session;
     if (session == null) return null;
@@ -169,11 +181,17 @@ final class RemoteControlState extends Equatable {
       RemoteControlConsent.granted => geometry == null ? 'Connecting to ${session.hostname}…' : null,
       RemoteControlConsent.notRequired =>
         shell == null ? 'Opening a terminal on ${session.hostname}…' : null,
+      // A shell row is created Pending and the agent answers NotRequired a moment later, so this is
+      // the wait for the *agent*, not for a person: the consent label's "waiting for the person at
+      // the keyboard" belongs to a screen session alone.
+      RemoteControlConsent.pending when session.kind == RemoteControlSessionKind.shell =>
+        'Connecting to ${session.hostname}…',
       final consent => consent.label,
     };
   }
 
   RemoteControlState copyWith({
+    RemoteControlSessionKind? kind,
     RemoteControlSession? session,
     RemoteDisplayGeometry? geometry,
     RemoteShellInfo? shell,
@@ -183,6 +201,7 @@ final class RemoteControlState extends Equatable {
     bool clearError = false,
   }) =>
       RemoteControlState(
+        kind: kind ?? this.kind,
         session: session ?? this.session,
         geometry: geometry ?? this.geometry,
         shell: shell ?? this.shell,
@@ -192,7 +211,7 @@ final class RemoteControlState extends Equatable {
       );
 
   @override
-  List<Object?> get props => [session, geometry, shell, tiles, connecting, error];
+  List<Object?> get props => [kind, session, geometry, shell, tiles, connecting, error];
 }
 
 /// Drives one remote control session from Connect to hang-up.
@@ -255,7 +274,7 @@ class RemoteControlBloc extends Bloc<RemoteControlEvent, RemoteControlState>
   int _fullFrameSequence = -1;
 
   Future<void> _onRequested(RemoteControlRequested event, Emitter<RemoteControlState> emit) async {
-    emit(state.copyWith(connecting: true, clearError: true));
+    emit(state.copyWith(kind: event.kind, connecting: true, clearError: true));
 
     try {
       final session = await _requestSession(event.hostId, event.kind);

@@ -42,6 +42,27 @@ Future<RemoteControlTileImage> tile({required int x, required int y, required in
 
 int tileKey(int x, int y) => (x << 16) | y;
 
+RemoteControlSession session({
+  required RemoteControlSessionKind kind,
+  required RemoteControlConsent consent,
+  DateTime? endedAtUtc,
+}) =>
+    RemoteControlSession(
+      id: 'session',
+      hostId: 'host',
+      serialNumber: 'C02XYZ',
+      hostname: 'mac-01',
+      requestedBy: 'someone@example.com',
+      kind: kind,
+      consent: consent,
+      requestedAtUtc: DateTime.utc(2026, 1, 1),
+      consentDecidedAtUtc: null,
+      startedAtUtc: null,
+      endedAtUtc: endedAtUtc,
+      endReason: null,
+      isActive: false,
+    );
+
 RemoteControlBloc newBloc() {
   final repository = UnusedRemoteControlRepository();
   return RemoteControlBloc(
@@ -55,6 +76,52 @@ RemoteControlBloc newBloc() {
 Future<void> settle(RemoteControlBloc bloc) => Future<void>.delayed(Duration.zero);
 
 void main() {
+  // A shell asks nobody — see RemoteControlSessionKind.shell — so every waiting message on that
+  // path has to be about the agent answering, never about a person deciding. Both of these said the
+  // opposite, which told an administrator a dialog was on somebody's screen when none was raised.
+  group('a shell session never describes itself as waiting for permission', () {
+    test('the request in flight reads as connecting, not as asking', () {
+      const asking = RemoteControlState(connecting: true);
+      const connecting = RemoteControlState(kind: RemoteControlSessionKind.shell, connecting: true);
+
+      expect(asking.status, 'Asking\u2026');
+      expect(connecting.status, 'Connecting\u2026');
+    });
+
+    test('a pending shell names the host it is connecting to', () {
+      final shell = RemoteControlState(
+        kind: RemoteControlSessionKind.shell,
+        session: session(
+          kind: RemoteControlSessionKind.shell,
+          consent: RemoteControlConsent.pending,
+        ),
+      );
+      final screen = RemoteControlState(
+        session: session(
+          kind: RemoteControlSessionKind.screen,
+          consent: RemoteControlConsent.pending,
+        ),
+      );
+
+      expect(shell.status, 'Connecting to mac-01\u2026');
+      expect(shell.isAwaitingConsent, isFalse);
+      expect(screen.status, RemoteControlConsent.pending.label);
+      expect(screen.isAwaitingConsent, isTrue);
+    });
+
+    test('an unreachable shell still says so', () {
+      final shell = RemoteControlState(
+        kind: RemoteControlSessionKind.shell,
+        session: session(
+          kind: RemoteControlSessionKind.shell,
+          consent: RemoteControlConsent.agentUnreachable,
+        ),
+      );
+
+      expect(shell.status, RemoteControlConsent.agentUnreachable.label);
+    });
+  });
+
   test('a changed top-left tile paints over the full frame instead of replacing it', () async {
     // The agent sends the whole image as one tile at (0, 0), then 256px tiles for whatever changed
     // — the first of which is *also* at (0, 0). Keyed by position alone, the cursor passing through
