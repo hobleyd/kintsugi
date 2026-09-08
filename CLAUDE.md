@@ -1961,3 +1961,20 @@ Comments here explain *why* a decision was made and name the file at the other e
 density and that habit — the cross-references are how this codebase stays navigable. Domain entities
 use private setters with static factory methods and behaviour methods; keep invariants in `Domain`,
 not in handlers.
+
+**Bump `<Version>` in `src/Kintsugi.WebApi/Kintsugi.WebApi.csproj` in every commit that touches
+`src/` or `web/`**, sized to what the commit did: major for a breaking change to a contract an agent
+or the admin UI depends on, minor for a new feature, route or screen, patch for a fix or a
+refinement. It is the only version a human can see without shelling into a container — the admin
+UI's sidebar reads it through `AdminServerController` — so it is what anyone asking "is this
+deployment current?" looks at first.
+
+It used to be bumped "on a release", which meant nothing bumped it: thirteen server commits shipped
+under 1.2.1, two new screens among them, and the sidebar could not tell a current deployment from a
+three-day-old one. That cost real time — a change that was already live on production was hunted
+through Docker images because the number had not moved. Note the two things it still does *not*
+track, deliberately: each agent's own `Cargo.toml` version (released independently by CI, and the
+Clients screen shows those separately), and any change confined to `clients/`, `nginx/` or
+`.github/`. And read the current value immediately before editing it rather than assuming — several
+sessions share this checkout and all of them now touch this one line. If two bumps collide, take the
+higher.

@@ -7,11 +7,24 @@
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <NoWarn>$(NoWarn);CS1591</NoWarn>
     <!-- The server's own version, shown under the Kintsugi name in the admin UI's sidebar via
-         AdminServerController. Bump it here on a release; nothing else declares it. The SDK would
-         otherwise append "+<commit>" to the informational version on any build inside a git
-         checkout, which the Docker build (no .git copied in) never sees - so the suffix is turned
-         off to keep the two builds reporting the same string. -->
-    <Version>1.2.1</Version>
+         AdminServerController. Nothing else declares it. The SDK would otherwise append "+<commit>"
+         to the informational version on any build inside a git checkout, which the Docker build
+         (no .git copied in) never sees - so the suffix is turned off to keep the two builds
+         reporting the same string.
+
+         BUMP THIS IN EVERY COMMIT THAT TOUCHES src/ OR web/, sized to what the commit did:
+         major for a breaking change to a contract an agent or the admin UI depends on, minor for
+         a new feature, route or screen, patch for a fix or a refinement. It used to be bumped
+         "on a release", which in practice meant thirteen server commits went out under 1.2.1 -
+         including two new screens - so the number in the sidebar could not distinguish a current
+         deployment from a stale one. That is not cosmetic: it is the only version a human can see
+         without shelling into a container, and it sent someone hunting through Docker images for a
+         change that was already deployed.
+
+         Read the current value immediately before editing it rather than assuming - several
+         sessions share this checkout, and this is one line that all of them now touch. If two
+         bumps collide, take the higher and keep going. -->
+    <Version>1.3.0</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
