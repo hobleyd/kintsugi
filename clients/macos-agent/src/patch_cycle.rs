@@ -7,7 +7,7 @@ use crate::logging;
 use crate::os_update;
 use crate::policy::PatchingPolicy;
 use crate::queue::{self, RequestKind};
-use crate::schedule::ScheduleState;
+use crate::schedule::{self, ScheduleState};
 use crate::status::{AgentStatus, StatusReporter};
 use crate::upgrade::{self, UpgradeStatus};
 
@@ -90,7 +90,10 @@ pub fn run(
     let show_warning = match confirm_or_delay(policy, state, &work.app_names(), work.os_update_available, report) {
         Ok(Decision::PatchNow) => false,
         Ok(Decision::ProceedAfterWarning) => true,
-        Ok(Decision::Delayed) => return, // nothing more to do until the new due time arrives
+        // Both delaying answers stop here: `confirm_or_delay` has already moved the due time, and
+        // the next tick picks the cycle back up — at once for an unanswered dialog, a delay period
+        // later for an explicit "Delay".
+        Ok(Decision::Delayed) | Ok(Decision::Unanswered) => return,
         Err(err) => {
             logging::warn(&format!("could not show the patching confirmation dialog, will retry at the next check: {err:#}"));
             return;
@@ -170,39 +173,44 @@ fn execute(
     report(AgentStatus::Idle { next_due_epoch: state.next_due_epoch() });
 }
 
-/// What the confirm-or-delay dialog settled on, from `execute`'s point of view.
+/// What the confirm-or-delay dialog settled on.
 ///
-/// The two proceeding variants differ only in whether the five-minute warning comes first, and
-/// that turns on one question: is patching starting because a person just asked for it, or
-/// because this host's schedule came round? The warning is notice before an *automatic* start, so
-/// a click on "Patch Now" — which is that notice, given by the very person the interruption falls
-/// on — starts patching there and then. Kept identical in the other two agents.
+/// Whether the five-minute warning comes first turns on one question: is patching starting because
+/// a person just asked for it, or because this host's schedule ran out of patience? The warning is
+/// notice before an *automatic* start, so a click on "Patch Now" — which is that notice, given by
+/// the very person the interruption falls on — starts patching there and then.
+///
+/// The two delaying variants differ in what the delay costs. An explicit "Delay" buys a fresh
+/// period from now; an unanswered dialog has already spent one waiting for the answer, so it
+/// counts down the budget without postponing anything further. Kept identical in the other two
+/// agents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Decision {
     /// The user clicked "Patch Now": start immediately, with no warning and no further notice.
     PatchNow,
-    /// Patching is starting on the schedule's say-so rather than the user's — the dialog timed
-    /// out, or there were no delays left to offer. Warn first.
+    /// There were no delays left to offer, so the acknowledgement has already been shown and
+    /// patching proceeds — after the warning, this being an automatic start.
     ProceedAfterWarning,
     /// The user asked for more time. Nothing happens until the new due time arrives.
     Delayed,
+    /// Nobody answered before the dialog gave up. Still a delay — the user was asked and said
+    /// nothing — but the cycle is left due at once, so the next poll tick re-asks with the count
+    /// decremented, and the budget running out lands on the branch above. See
+    /// `ScheduleState::register_unanswered_prompt`.
+    Unanswered,
 }
 
 impl Decision {
     /// Reads the dialog's answer as a decision. Split out from `confirm_or_delay` — which cannot
     /// be tested without a display — purely so the polarity of a timeout is pinned by a test
-    /// rather than by a comment: it proceeds, and the only thing it costs is the warning.
+    /// rather than by a comment.
     fn from_choice(choice: ConfirmChoice) -> Self {
         match choice {
             // The click *is* the notice the warning exists to give, and it came from the one
             // person the interruption falls on — so patching starts now, as asked.
             ConfirmChoice::PatchNow => Decision::PatchNow,
-            // Nobody answered for a whole delay period, so the delay this dialog was offering has
-            // already been spent in wall-clock time; deferring for another one would only re-ask a
-            // question nobody is there to answer. No delay is registered, because the cycle is not
-            // being deferred — it proceeds, with the warning any unattended start gets.
-            ConfirmChoice::TimedOut => Decision::ProceedAfterWarning,
             ConfirmChoice::Delay => Decision::Delayed,
+            ConfirmChoice::TimedOut => Decision::Unanswered,
         }
     }
 }
@@ -226,6 +234,9 @@ fn confirm_or_delay(
         return Ok(Decision::ProceedAfterWarning);
     }
 
+    // Stamped before the dialog rather than after, because how long it stood there is what the
+    // delay budget is charged for — including any of it the machine spent asleep.
+    let shown_at = schedule::now_epoch();
     let choice = dialogs::confirm_patch(
         &policy.delay_label(),
         state.delays_remaining(policy),
@@ -235,9 +246,16 @@ fn confirm_or_delay(
     )?;
 
     let decision = Decision::from_choice(choice);
-    if decision == Decision::Delayed {
-        state.register_delay(policy);
-        report(AgentStatus::Idle { next_due_epoch: state.next_due_epoch() });
+    match decision {
+        Decision::Delayed => {
+            state.register_delay(policy);
+            report(AgentStatus::Idle { next_due_epoch: state.next_due_epoch() });
+        }
+        // Nothing is reported here: the cycle is due again immediately, so the next tick either
+        // re-asks or finds the budget gone and proceeds. Telling the menu "next patch due: now"
+        // for the few seconds in between would say less than the line already there.
+        Decision::Unanswered => state.register_unanswered_prompt(policy, shown_at),
+        Decision::PatchNow | Decision::ProceedAfterWarning => {}
     }
 
     Ok(decision)
@@ -352,12 +370,12 @@ mod tests {
         assert_eq!(Decision::from_choice(ConfirmChoice::PatchNow), Decision::PatchNow);
     }
 
-    /// The dialog's own timeout *is* one delay period, so an unanswered dialog has already had
-    /// the time a delay would have bought it. It proceeds — after the warning, which is the only
-    /// notice anybody gets when nobody was there to be asked.
+    /// The dialog's own giveup *is* one delay period, so an unanswered dialog has already spent
+    /// the time a delay buys: it counts down the budget and is re-asked at once, rather than
+    /// postponing by a second period on top — which is what made the count fall once every two.
     #[test]
-    fn an_unanswered_dialog_proceeds_after_the_warning_rather_than_delaying_again() {
-        assert_eq!(Decision::from_choice(ConfirmChoice::TimedOut), Decision::ProceedAfterWarning);
+    fn an_unanswered_dialog_spends_a_delay_without_postponing_the_cycle_again() {
+        assert_eq!(Decision::from_choice(ConfirmChoice::TimedOut), Decision::Unanswered);
     }
 
     #[test]

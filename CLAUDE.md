@@ -1015,14 +1015,29 @@ backoff. Sessions get their own socket so a frame stream can never queue behind 
 and so a session dropping does not cost the host its reachability.
 
 **Consent timeouts have the opposite polarity to patching, and the code keeps them apart.**
-`dialogs::ConfirmChoice::TimedOut` means "nobody was at the desk, so warn them and patch anyway" —
-the user never refused, and the delay period the dialog sat there for has already been spent in
-wall-clock time, so it proceeds after the five-minute warning rather than consuming a delay and
-re-asking a question nobody is there to answer. `RemoteControlChoice::TimedOut` means **nobody
+`dialogs::ConfirmChoice::TimedOut` means "nobody was at the desk, so count it as a delay" — the
+user never refused and patching happens regardless. `RemoteControlChoice::TimedOut` means **nobody
 consented**, and is treated exactly as a refusal. They are separate enums for that reason; reusing
 the first would have put the safe default one careless `match` arm away. The dialog's default button
 is Deny for the same reason, since AppleScript reports the default button as `button returned:` even
 when it dismissed the dialog itself.
+
+**A delay the dialog spent waiting is not a delay to be served again, and getting that wrong made
+the countdown twice as long as the policy says.** The confirmation dialog's giveup *is* one delay
+period (`patch_cycle` passes `policy.delay_seconds()` as the timeout), so by the time it fires, the
+time a delay buys has already been spent. `register_delay` — right for an explicit "Delay" click,
+which asks for a fresh period — then postponed by another one on top, so eight one-hour delays
+counted down over sixteen hours: dialog for an hour, an hour of nothing, dialog again with the
+count decremented. `ScheduleState::register_unanswered_prompt` is the unanswered case instead: it
+charges the budget for however many whole delay periods actually elapsed while the dialog stood
+there, and leaves the cycle due *now*, so the next poll tick re-asks at once and the count falls
+8 → 7 → 6 once per period. Crediting elapsed periods rather than assuming one is what covers sleep
+— a machine that slept with the dialog open wakes to a giveup that fires immediately, and spends
+the delays that passed rather than starting them again. The budget running out needs no special
+case: the next tick finds `can_delay` false and takes the acknowledge-then-warn branch, which is
+where the five-minute notice comes from. Nothing here is a running timer — `is_due` compares wall
+clock against a persisted absolute epoch, which is why sleep, hibernation and a restart all need no
+wake detection.
 
 **The relay is in-memory and single-process.** A session pairs two sockets that must land in the
 same process, so a second API replica behind a load balancer would break remote control specifically

@@ -221,3 +221,20 @@ mod tests {
         assert_eq!(policy_fetched(0).delay_label(), "2 hour(s)");
     }
 }
+
+#[cfg(test)]
+impl PatchingPolicy {
+    /// A policy with whatever intervals a test needs, stamped as freshly fetched. Only the fields
+    /// the scheduling logic actually reads are settable — `fetched_epoch` is private precisely so
+    /// nothing outside this module can forge a staleness answer.
+    pub fn for_test(interval_hours: u32, delay_hours: u32, max_delay_count: u32) -> Self {
+        Self {
+            interval_value: interval_hours,
+            interval_unit: TimeUnit::Hours,
+            delay_value: delay_hours,
+            delay_unit: TimeUnit::Hours,
+            max_delay_count,
+            fetched_epoch: now_epoch(),
+        }
+    }
+}
