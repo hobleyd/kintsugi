@@ -561,7 +561,12 @@ fn run_scheduler(
                     state = Some(ScheduleState::load_or_default(&schedule_state_path, &current_policy));
                 }
             }
-            if let Some(current) = state.as_ref() {
+            // Reported only when the cycle is over *and* nothing is pending. An unanswered
+            // dialog deliberately leaves the state due right now (see
+            // `ScheduleState::register_unanswered_prompt`), so the next tick re-asks within the
+            // minute — and announcing "next patch due: <a moment ago>" with both actions enabled
+            // in between would flicker the menu once per delay period for the whole budget.
+            if let Some(current) = state.as_ref().filter(|current| !current.is_due()) {
                 report(AgentStatus::Idle { next_due_epoch: current.next_due_epoch() });
             }
         }
