@@ -238,6 +238,13 @@ impl WaylandBackend {
             return Err(anyhow!("this session was not granted a display with id {id}"));
         }
 
+        // Already there. Guarded for the same reason the X11 path is: the request would otherwise
+        // renegotiate a PipeWire stream — and drop every held key on the way — to arrive back where
+        // it started. The viewer does not send one, but nothing on the wire stops a future one.
+        if id == self.active_display_id {
+            return Ok(());
+        }
+
         // Everything held goes first: the pointer space is about to change underneath whatever the
         // remote end has down, and the helper positions a release at the last known pointer — which
         // will shortly mean somewhere on a different monitor.

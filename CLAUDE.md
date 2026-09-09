@@ -165,6 +165,29 @@ where `<image>` is `rust:1-slim` plus `gcc-mingw-w64-x86-64` and `wine`, with
 `#[cfg(windows)]` code and the same `windows-sys` bindings. This is worth the setup — it is what
 caught the `winget list` parser silently reporting zero applications.
 
+**On an Apple Silicon Mac, drop the `--platform linux/amd64` and use `--no-run`.** That flag is what
+makes the above unusable there: under qemu, `gcc`'s own `collect2` takes a SIGSEGV part-way through
+`ring`'s C or a build script's link step, and the failure reads as a compiler bug rather than as
+emulation. It is also unnecessary for the half that matters. Debian's `gcc-mingw-w64-x86-64` is
+packaged **for arm64 as well**, so the cross-compiler runs natively and emits x86_64 Windows objects
+— the whole agent compiles and *links* with no emulation at all:
+
+```bash
+docker run --rm --platform linux/arm64 -v "$PWD/clients/windows-agent":/w -w /w \
+    -e CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc \
+    rust:1-slim bash -c 'apt-get update -qq && apt-get install -y -qq gcc-mingw-w64-x86-64 \
+        && rustup target add x86_64-pc-windows-gnu \
+        && cargo test --locked --no-run --target x86_64-pc-windows-gnu'
+```
+
+`--no-run` is the whole difference: it type-checks every module *and* the `#[cfg(test)]` ones, which
+is what catches a signature or an FFI declaration that does not exist, while stopping short of
+executing an x86_64 PE — the one step that genuinely needs Wine and therefore emulation. Running the
+tests still wants an amd64 host (or Rosetta rather than qemu: `colima start --vm-type=vz
+--vz-rosetta`, or Docker Desktop's "Use Rosetta for x86/64 emulation"). Note the Windows agent also
+**cannot be checked on the macOS host at all**, not even partially: `winreg` is an unconditional
+dependency and its `compile_error!` fires before anything else is compiled.
+
 **Working on the Linux agent from a non-Linux machine.** Far easier, because there is no
 cross-compilation involved at all — a Linux container *is* the target:
 
