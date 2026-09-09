@@ -338,6 +338,9 @@ class _RemoteControlView extends StatelessWidget {
     return RemoteScreenView(
       geometry: geometry,
       tiles: state.tiles,
+      // Full screen is the one layout that gives this view a bounded height, and the only one where
+      // the picture has to fit rather than grow.
+      fillsViewport: isFullScreen,
       onInput: (input) => context.read<RemoteControlBloc>().add(RemoteControlInputSent(input)),
     );
   }
@@ -383,10 +386,13 @@ class _FullScreenFrame extends StatelessWidget {
             actions,
             notice,
             const SizedBox(height: 8),
-            // The session takes everything left. `Expanded` rather than letting the column size to
-            // its child: the screen view is an `AspectRatio` inside a `Center`, so unbounded height
-            // would leave it at whatever width it happened to get and the reclaimed space unused.
-            Expanded(child: SingleChildScrollView(child: body)),
+            // The session takes everything left, in a box of known height and **no scroll view**.
+            // A scroll view here would hand the body an unbounded height, which for the screen view
+            // means an `AspectRatio` sized from the width alone: a host screen a different shape
+            // from this window would then be taller than the window, with the bottom of somebody's
+            // desktop reachable only by scrolling — which is the opposite of what full screen is
+            // for. See `RemoteScreenView.fillsViewport`, which is the other half of this.
+            Expanded(child: body),
           ],
         ),
       );

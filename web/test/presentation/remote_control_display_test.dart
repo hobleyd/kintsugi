@@ -10,6 +10,7 @@ import 'package:kintsugi_web/domain/entities/remote_control_session.dart';
 import 'package:kintsugi_web/domain/repositories/repositories.dart';
 import 'package:kintsugi_web/domain/usecases/remote_control_usecases.dart';
 import 'package:kintsugi_web/presentation/remote_control/remote_control_screen.dart';
+import 'package:kintsugi_web/presentation/remote_control/remote_shell_view.dart';
 
 // Aliased rather than shown: `_FakeRepository` has its own `session` method, and an unaliased
 // import would be shadowed by it inside the class.
@@ -102,6 +103,19 @@ const _twoDisplays = RemoteDisplayGeometry(
   ],
 );
 
+/// A host whose screen is a different shape from the browser window — the case that decides whether
+/// the full-screen picture fits or has to be scrolled to.
+const _fourByThreeHost = RemoteDisplayGeometry(
+  pointWidth: 1600,
+  pointHeight: 1200,
+  imageWidth: 1600,
+  imageHeight: 1200,
+  activeDisplayId: 1,
+  displays: [
+    RemoteDisplayOption(id: 1, label: 'Display 1 (1600 x 1200)', width: 1600, height: 1200, isPrimary: true),
+  ],
+);
+
 const _oneDisplay = RemoteDisplayGeometry(
   pointWidth: 1920,
   pointHeight: 1080,
@@ -126,6 +140,7 @@ void main() {
   Future<(_FakeStream, _FakeFullScreen)> pump(
     WidgetTester tester, {
     bool fullScreenAgrees = true,
+    Size window = const Size(1600, 1000),
   }) async {
     final stream = _FakeStream();
     final repository = _FakeRepository(stream);
@@ -137,7 +152,9 @@ void main() {
       ..registerSingleton(EndRemoteControlSession(repository))
       ..registerSingleton(OpenRemoteControlStream(repository));
 
-    tester.view.physicalSize = const Size(1600, 1000);
+    // Set before the first pump, deliberately: resizing the view *after* the tree is built leaves
+    // the screen's subtree unlaid-out for the frame the assertions run in.
+    tester.view.physicalSize = window;
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
     addTearDown(locator.reset);
@@ -167,24 +184,28 @@ void main() {
     String description,
     Future<void> Function(WidgetTester tester, _FakeStream stream, _FakeFullScreen fullScreen) run, {
     bool fullScreenAgrees = true,
+    Size window = const Size(1600, 1000),
   }) {
     testWidgets(description, (tester) async {
-      final (stream, fullScreen) = await pump(tester, fullScreenAgrees: fullScreenAgrees);
+      final (stream, fullScreen) =
+          await pump(tester, fullScreenAgrees: fullScreenAgrees, window: window);
       await run(tester, stream, fullScreen);
       await tester.pumpWidget(const SizedBox());
     });
   }
 
   screenTest('offers no display picker for a host with one display', (tester, stream, _) async {
+    // `pumpAndSettle`, not `pump`: the bloc raises the geometry event from an async stream callback,
+    // so the state it produces lands a microtask after the frame a single pump renders.
     stream.emit(_oneDisplay);
-    await tester.pump();
+    await tester.pumpAndSettle();
 
     expect(find.text('Display'), findsNothing);
   });
 
   screenTest('offers the picker once the host reports two, naming the primary', (tester, stream, _) async {
     stream.emit(_twoDisplays);
-    await tester.pump();
+    await tester.pumpAndSettle();
 
     expect(find.text('Display'), findsOneWidget);
     // The label the agent built, not one composed here — two identical monitors are told apart by
@@ -194,7 +215,7 @@ void main() {
 
   screenTest('sends the display the administrator picked, and nothing before that', (tester, stream, _) async {
     stream.emit(_twoDisplays);
-    await tester.pump();
+    await tester.pumpAndSettle();
     expect(stream.sent, isEmpty);
 
     await tester.tap(find.text('Display 1 (1920 x 1080) — primary').first);
@@ -215,7 +236,7 @@ void main() {
     // can be unplugged between the list being drawn and the choice being made, and the agent then
     // stays where it was.
     stream.emit(_twoDisplays);
-    await tester.pump();
+    await tester.pumpAndSettle();
 
     await tester.tap(find.text('Display 1 (1920 x 1080) — primary').first);
     await tester.pumpAndSettle();
@@ -246,7 +267,7 @@ void main() {
     await tester.pumpAndSettle();
 
     stream.emit(_twoDisplays);
-    await tester.pump();
+    await tester.pumpAndSettle();
 
     // The heading is the width full screen exists to reclaim; Disconnect is the one control a
     // session must never be without.
@@ -255,6 +276,38 @@ void main() {
     // SecondaryButton upper-cases its label, so these are the buttons as painted.
     expect(find.text('DISCONNECT'), findsOneWidget);
     expect(find.text('EXIT FULL SCREEN'), findsOneWidget);
+  });
+
+  screenTest('fits a full-screen picture into the window instead of scrolling it',
+      (tester, stream, _) async {
+    // **The case that would otherwise scroll, and the point of `fillsViewport`.** A `Column` gives
+    // its non-flexible children an unbounded main axis, so the picture's `AspectRatio` sizes itself
+    // from the width alone — and a 4:3 host in a wide window is then far taller than the window,
+    // with the bottom of somebody's desktop reachable only by scrolling. That is the opposite of
+    // what full screen is for, so the picture is `Flexible` here and fits.
+    stream.emit(_fourByThreeHost);
+    await tester.pumpAndSettle();
+
+    final picture = tester.getRect(find.byType(AspectRatio));
+
+    expect(picture.height, lessThanOrEqualTo(700), reason: 'taller than the window: $picture');
+    expect(picture.width, lessThanOrEqualTo(1600));
+    // And it is still a real picture rather than having been squeezed to nothing.
+    expect(picture.height, greaterThan(200), reason: 'collapsed: $picture');
+  }, window: const Size(1600, 700));
+
+  screenTest('lays a full-screen terminal out, which has no aspect ratio to size itself by',
+      (tester, stream, _) async {
+    // The screen view survives an unbounded height because `AspectRatio` derives one from the
+    // width; a terminal has no intrinsic height at all, so a frame that handed it one would throw
+    // rather than render. Both kinds share this screen, so both have to be pumped through it.
+    stream.emit(const RemoteShellInfo(shell: '/bin/zsh', user: 'root'));
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.byType(RemoteShellView), findsOneWidget);
+    expect(tester.getRect(find.byType(RemoteShellView)).height, greaterThan(100));
+    expect(find.text('DISCONNECT'), findsOneWidget);
   });
 
   screenTest('offers the button rather than an error when the browser refuses',

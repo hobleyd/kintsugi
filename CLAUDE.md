@@ -1064,10 +1064,15 @@ Five things about it are load-bearing, and the first is the one that fails on th
   diffs the new display's pixels against the old display's, sending only the tiles that differed and
   leaving fragments of the previous monitor everywhere the two agreed. `force_full_frame` is what
   each agent calls; a test in all three pins it.
-- **The viewer keys the change on `activeDisplayId`, for the same reason.** Every size in a
-  `DisplayInfo` is unchanged across a switch between identical monitors, so without that field in
-  `RemoteDisplayGeometry`'s `props` the state compares equal, the bloc emits nothing, and the stale
-  tiles are never cleared — the switch looks like it did nothing.
+- **The viewer keys the change on `activeDisplayId`, for a narrower reason than it first looks.**
+  Every size in a `DisplayInfo` is unchanged across a switch between identical monitors, so that
+  field is the only one that moves — and `RemoteControlState` is `Equatable` so a poll finding
+  nothing new rebuilds nothing, which means an equal state is never emitted. The *tiles* are safe
+  without it, because the bloc clears them on every geometry message and so emits a differing state
+  whenever there was a picture. What it protects is the **picker**: an announcement arriving with no
+  picture on screen — two in a row, which the Linux backend produces by announcing whenever the
+  geometry differs from what it last sent — would be dropped, leaving the dropdown naming the
+  display the session had just left and the entry for the one it is on inert when clicked.
 - **Everything held is released before the pointer space moves.** A modifier or a mouse button down
   across a switch would otherwise stay down with nothing on either screen to explain it — the same
   invariant `release_all` already keeps at the end of a session, at the one other moment the
@@ -1136,6 +1141,18 @@ deliberate work: `KIND_FORMAT` is re-sent before the first frame of the new disp
 pass has its own writer thread and so its own "have I sent a format yet", and the old stream is fully
 torn down before the new one links. `examples/capture-node.rs` is still how to exercise any of this
 without a compositor — two `pipewiresink` producers and a switch between their node ids.
+
+**The full-screen frame gives the session a bounded height, and the picture has to be told to fit
+it.** `RenderFlex` hands a `Column`'s *non-flexible* children an unbounded main axis, so
+`RemoteScreenView`'s `AspectRatio` derives its height from the width alone — which is right inside
+`PageScaffold`'s own scroll view and wrong in full screen, where a host screen a different shape from
+the window ends up taller than the window with the bottom of somebody's desktop reachable only by
+scrolling. So `_FullScreenFrame` uses a plain `Expanded` with **no scroll view** and passes
+`fillsViewport`, which wraps the picture in `Flexible`. Both halves are needed and neither works
+alone: `Flexible` inside a `Column` of unbounded height throws, and a scroll view would put the
+height back to unbounded. A 4:3 host in a wide window is the case that fails — 689 pixels of overflow
+— and `test/presentation/remote_control_display_test.dart` pins it, along with the terminal, which
+has no intrinsic height at all and so needs the bounded box rather than merely tolerating it.
 
 **The admin UI takes the whole browser window for a session, and the request has to ride the click
 that opened it.** `requestFullscreen` needs *transient user activation* — about five seconds after a

@@ -217,8 +217,12 @@ void main() {
     test('tells two same-sized displays apart, which nothing else in this message does', () {
       // **The case that decides whether a switch is visible at all.** Two identical monitors mean
       // every size in this message is unchanged across a switch, so `activeDisplayId` is the only
-      // field that moved — and it is in `props` for exactly that reason. Without it the state
-      // compares equal, nothing is emitted, and the previous display's tiles are never cleared.
+      // field that moved — and it is in `props` for exactly that reason, since an equal state is not
+      // emitted. What that costs is the picker rather than the picture: the bloc clears the tiles on
+      // every geometry message, so a switch with a picture on screen emits either way, but a second
+      // announcement arriving with none — which the Linux backend produces, comparing the geometry
+      // against what it last sent — would be dropped and leave the dropdown on the display the
+      // session had just left.
       final onFirst = remoteTextUpdateFromJson(
         jsonEncode({...agentDisplayMessage, 'activeDisplayId': 1}),
       )!;

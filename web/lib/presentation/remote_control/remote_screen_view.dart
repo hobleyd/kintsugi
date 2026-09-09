@@ -19,12 +19,24 @@ class RemoteScreenView extends StatefulWidget {
     required this.geometry,
     required this.tiles,
     required this.onInput,
+    this.fillsViewport = false,
     super.key,
   });
 
   final RemoteDisplayGeometry geometry;
   final Map<int, RemoteControlTileImage> tiles;
   final ValueChanged<RemoteInput> onInput;
+
+  /// Whether this view is inside a box of known height, so the picture should fit it.
+  ///
+  /// **Required for full screen and wrong everywhere else, and the reason is one `RenderFlex`
+  /// rule.** A `Column` hands its *non-flexible* children an unbounded main axis, so the
+  /// `AspectRatio` below derives its height from the width alone and cheerfully grows past whatever
+  /// is available — which is right in the page's own scroll view, and in full screen means a host
+  /// screen taller than the window, with the bottom of somebody's desktop reachable only by
+  /// scrolling. Wrapping it in `Flexible` fixes that and can only be done when the height is
+  /// bounded: `Flexible` inside a `Column` with an unbounded height throws.
+  final bool fillsViewport;
 
   @override
   State<RemoteScreenView> createState() => _RemoteScreenViewState();
@@ -64,14 +76,8 @@ class _RemoteScreenViewState extends State<RemoteScreenView> {
             ),
             const SizedBox(height: 12),
           ],
-          Center(
-            child: AspectRatio(
-              aspectRatio: widget.geometry.imageWidth / widget.geometry.imageHeight,
-              child: LayoutBuilder(
-                builder: (context, constraints) => _buildScreen(constraints.biggest),
-              ),
-            ),
-          ),
+          // `Flexible` only where the height is bounded — see [fillsViewport].
+          if (widget.fillsViewport) Flexible(child: _buildPicture()) else _buildPicture(),
           const SizedBox(height: 8),
           Text(
             _canControl
@@ -81,6 +87,15 @@ class _RemoteScreenViewState extends State<RemoteScreenView> {
             style: Theme.of(context).textTheme.bodySmall,
           ),
         ],
+      );
+
+  Widget _buildPicture() => Center(
+        child: AspectRatio(
+          aspectRatio: widget.geometry.imageWidth / widget.geometry.imageHeight,
+          child: LayoutBuilder(
+            builder: (context, constraints) => _buildScreen(constraints.biggest),
+          ),
+        ),
       );
 
   Widget _buildScreen(Size size) {

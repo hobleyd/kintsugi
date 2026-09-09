@@ -127,9 +127,16 @@ class RemoteDisplayGeometry extends RemoteScreenUpdate {
   /// The [RemoteDisplayOption.id] of the display being shown.
   ///
   /// **Part of [props], and that is load-bearing rather than completeness.** Switching between two
-  /// identical monitors changes none of the sizes above, so without this the state would compare
-  /// equal, the bloc would emit nothing, and the stale tiles of the previous display would never be
-  /// cleared — the switch would look like it had done nothing at all.
+  /// identical monitors changes none of the sizes above, so this is the only field that moves — and
+  /// this state is `Equatable` precisely so a poll that finds nothing new rebuilds nothing, which
+  /// means an equal state is *not emitted at all*.
+  ///
+  /// The tiles are safe either way: the bloc clears them on every geometry message, so the state it
+  /// emits differs from the one before it whenever there was a picture. The thing that goes wrong is
+  /// the announcement that arrives when there is **not** one — two in a row, which the Linux backend
+  /// genuinely produces, since it announces by comparing the geometry against what it last sent. That
+  /// second message would compare equal, be dropped, and leave the picker naming the display the
+  /// session has just left, with the entry for the one it is now on doing nothing when clicked.
   final int activeDisplayId;
 
   /// Whether there is a genuine choice to offer. One display is not a choice.
