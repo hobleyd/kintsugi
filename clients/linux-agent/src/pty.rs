@@ -55,6 +55,10 @@ pub const TERM: &str = "xterm-256color";
 /// this is not going quietly.
 const TERMINATE_GRACE: Duration = Duration::from_millis(500);
 
+/// How long a `SIGKILL`ed process is waited for before it is abandoned unreaped. See
+/// [`reap_within`], where the reason there is a deadline here at all is written down.
+const KILL_REAP_GRACE: Duration = Duration::from_secs(2);
+
 pub struct Pty {
     master: OwnedFd,
     child: Child,
@@ -158,8 +162,10 @@ impl Pty {
     }
 
     /// Ends the program: hangup first, so a shell can kill its foreground job and leave the way it
-    /// would if its terminal window closed, then `SIGKILL` for anything that stays. Always reaps, so
-    /// an ended session never leaves a zombie behind in a process that lives for months.
+    /// would if its terminal window closed, then `SIGKILL` for anything that stays. Reaps what it
+    /// killed, so an ended session leaves no zombie behind in a process that lives for months — but
+    /// on a deadline rather than for as long as it takes, because a process the kernel has stopped
+    /// being able to finish killing is never reapable at all. See [`reap_within`].
     pub fn terminate(mut self) -> io::Result<()> {
         if self.child.try_wait()?.is_some() {
             return Ok(());
@@ -179,8 +185,7 @@ impl Pty {
         }
 
         self.child.kill()?;
-        self.child.wait()?;
-        Ok(())
+        reap_within(&mut self.child, KILL_REAP_GRACE)
     }
 }
 
@@ -192,8 +197,10 @@ impl Drop for Pty {
     /// process that lives for months, which is exactly what `terminate`'s own note promises cannot
     /// happen.
     ///
-    /// Deliberately not `terminate`'s full grace period: a drop is not a place to sleep, so this
-    /// hangs up and reaps without waiting to be polite about it.
+    /// Deliberately not `terminate`'s `SIGHUP` grace period: a drop is not a place to sleep waiting
+    /// to be polite. The reap it does is bounded, and that bound is the whole reason the incident in
+    /// [`reap_within`] is written down — an unbounded `wait` on this path is what turned one failed
+    /// session into a Mac that could not be given a terminal again.
     fn drop(&mut self) {
         if self.child.try_wait().is_ok_and(|status| status.is_some()) {
             return;
@@ -205,7 +212,51 @@ impl Drop for Pty {
         }
 
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = reap_within(&mut self.child, KILL_REAP_GRACE);
+    }
+}
+
+/// Waits for a `SIGKILL`ed child to be reaped, and gives up rather than waiting forever.
+///
+/// `Child::wait` is the obvious call here, and it is the one that cost a Mac its terminal for a
+/// morning. A process wedged in the kernel's own exit path — `ps` reports it `E`, and no further
+/// signal moves it — never becomes reapable, so `waitpid` sits in `__wait4` for as long as the
+/// machine is up. Both callers run on the way *out* of a session, which is what makes an unbounded
+/// wait there so much worse than it looks:
+///
+/// * On macOS this teardown is inside one `kintsugi-agent --remote-shell` invocation, and launchd
+///   will not start a second instance of a label already running (see `remote_shell`). So a single
+///   hung teardown does not cost one session, it costs the host the whole feature: every later
+///   request lands in a queue nothing drains and is reported to the administrator as "the other end
+///   never connected", until somebody kills the process by hand or reboots.
+/// * `Drop` runs while a `?` is unwinding, *before* the caller logs why the session failed — so the
+///   host goes silent with not one line naming the session, the failure, or this.
+///
+/// An abandoned child is the lesser evil in both callers. The macOS process is about to exit and
+/// launchd inherits whatever it leaves; the Linux resident unit's next session is not owed a wait
+/// for a process the kernel itself cannot finish. The Windows `Pty` has always bounded this —
+/// `WaitForSingleObject(self.process, 1_000)` — and this is that shape, arrived at the hard way.
+fn reap_within(child: &mut Child, grace: Duration) -> io::Result<()> {
+    let deadline = std::time::Instant::now() + grace;
+
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+
+        if std::time::Instant::now() >= deadline {
+            return Err(io::Error::new(
+                ErrorKind::TimedOut,
+                format!(
+                    "the terminal's process ({}) had not exited {:?} after being killed; abandoning it \
+                     unreaped rather than waiting on a process the kernel cannot finish killing",
+                    child.id(),
+                    grace
+                ),
+            ));
+        }
+
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -351,6 +402,20 @@ mod tests {
         // SAFETY: signal 0 checks for existence without sending anything. ESRCH means reaped.
         let alive = unsafe { libc::kill(pid, 0) } == 0;
         assert!(!alive, "shell {pid} was not reaped");
+    }
+
+    #[test]
+    fn reaping_a_kill_gives_up_rather_than_waiting_for_a_process_that_never_exits() {
+        // The real case cannot be constructed here: what wedges is a process the kernel has stopped
+        // being able to finish killing, and nothing in a test can put one in that state. A live
+        // child and no grace at all exercise the property whose absence did the damage, which is
+        // simply that this wait ends.
+        let mut pty = Pty::spawn(&sh(), INITIAL_COLS, INITIAL_ROWS).expect("spawn");
+
+        let error = reap_within(&mut pty.child, Duration::ZERO).expect_err("a live child cannot be reaped");
+        assert_eq!(error.kind(), ErrorKind::TimedOut, "{error}");
+
+        pty.terminate().expect("terminate");
     }
 
     #[test]

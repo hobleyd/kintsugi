@@ -70,6 +70,17 @@ const CONTROL_SILENCE_TIMEOUT: Duration = Duration::from_secs(90);
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// How long the TLS and WebSocket handshake may take once the TCP connection is up.
+///
+/// [`CONNECT_TIMEOUT`] bounds the connect and, until this existed, nothing bounded what came after
+/// it: the stream is still in blocking mode through `client_tls_with_config`, so a server that
+/// accepts the connection and then answers nothing parks this thread in `read` with no deadline of
+/// any kind. Nothing upstream rescues it either — nginx gives `location = /api/remote-control` a
+/// `proxy_read_timeout` of an hour, deliberately, because a live session is legitimately silent for
+/// minutes at a time, and that timeout applies just as happily to a handshake that never finishes.
+/// Cleared the moment the handshake is done, since `set_nonblocking` governs every read after it.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Reconnect backoff for the control socket. As the macOS agent: a host that cannot reach the server
 /// is a host nobody can connect to anyway, so there is nothing to gain from hammering it.
 const INITIAL_RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
@@ -989,11 +1000,37 @@ fn connect(url: &str, identity: &AgentIdentity) -> Result<Socket> {
     // into fuller packets trades exactly the latency a remote session is judged on.
     let _ = stream.set_nodelay(true);
 
+    // The handshake is the only blocking read this socket ever does — see `HANDSHAKE_TIMEOUT`,
+    // which is what keeps a server that answers nothing from owning this thread for good.
+    let _ = stream.set_read_timeout(Some(HANDSHAKE_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(HANDSHAKE_TIMEOUT));
+
     let (socket, _response) = tungstenite::client_tls_with_config(request, stream, None, Some(Connector::Rustls(tls)))
         .map_err(|err| anyhow!("{err}"))
         .with_context(|| format!("the WebSocket handshake with {url} failed"))?;
 
+    clear_handshake_timeouts(&socket);
+
     Ok(socket)
+}
+
+/// Lifts the handshake deadline now that the socket is up.
+///
+/// `set_nonblocking` is what governs reads from here, and on every platform here it takes precedence
+/// over `SO_RCVTIMEO` anyway — but a timeout left set is a second, invisible deadline on a socket
+/// that is meant to be idle for hours, and the next reader of this file should not have to work out
+/// which of the two wins.
+fn clear_handshake_timeouts(socket: &Socket) {
+    let stream = match socket.get_ref() {
+        MaybeTlsStream::Plain(stream) => Some(stream),
+        MaybeTlsStream::Rustls(stream) => Some(&stream.sock),
+        _ => None,
+    };
+
+    if let Some(stream) = stream {
+        let _ = stream.set_read_timeout(None);
+        let _ = stream.set_write_timeout(None);
+    }
 }
 
 /// Connects to the first address of `host` that answers, trying each one the resolver returns.

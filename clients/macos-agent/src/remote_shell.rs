@@ -44,6 +44,15 @@
 //! means either a resident job (which is the Linux shape, and a much larger change) or a longer
 //! timeout traded against how long an abandoned request may sit here waiting to open a root shell.
 //!
+//! All of which assumed a run *ends*. One that does not costs the host the feature outright rather
+//! than one session: launchd holds the label, `WatchPaths` has nowhere to deliver the next trigger,
+//! and every later request ages out unread while the administrator is told "the other end never
+//! connected" — with nothing in any log, because a run wedged on the way out never reaches the line
+//! that would say so. That is not hypothetical either; it is `pty::reap_within`, which is where the
+//! morning it cost is written down. So every wait inside one invocation is bounded: the connect and
+//! the handshake by `remote_control::CONNECT_TIMEOUT` and `HANDSHAKE_TIMEOUT`, the teardown by
+//! `pty::KILL_REAP_GRACE`. Anything added here that can block needs the same treatment.
+//!
 //! # What a forged request can do
 //!
 //! The queue directory is `root:admin 0770`, like the main one, so a local administrator can write
@@ -342,6 +351,12 @@ pub fn run(config: &Config, serial_number: &str) -> Result<()> {
             logging::warn(&format!("discarding a remote shell request for session {session_id}: it is too old to run"));
             continue;
         }
+
+        // Logged before the attempt as well as after it. Everything below this line used to be
+        // able to hang forever (see `pty::reap_within`), and a run that never returns never reaches
+        // the warn either — so a morning of dead terminals left not one line in any log naming a
+        // session, a failure, or the queue this was claimed from.
+        logging::info(&format!("opening a root shell for session {session_id}"));
 
         if let Err(err) = run_session(config, serial_number, &identity, &session_id) {
             logging::warn(&format!("remote shell session {session_id} failed: {err:#}"));
