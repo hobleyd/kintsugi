@@ -38,8 +38,8 @@ fn plan() -> anyhow::Result<Plan> {
 }
 
 /// Runs one full due patch cycle: check what's actually pending, confirm (or delay) only if there's
-/// real work, a 5-minute warning, applications, then the OS if an update is available — in that
-/// order, per the policy. `report` is how the notification-area menu (which this module knows
+/// real work, a 5-minute warning unless the user asked for patching to start now, applications, then
+/// the OS if an update is available — in that order, per the policy. `report` is how the notification-area menu (which this module knows
 /// nothing about) is kept in sync with what's happening.
 ///
 /// Returns without doing anything destructive if the service can't be reached, if there's nothing
@@ -64,16 +64,17 @@ pub fn run(policy: &PatchingPolicy, state: &mut ScheduleState, report: &StatusRe
         return;
     }
 
-    match confirm_or_delay(policy, state, &work.app_names(), work.os_update_available, report) {
-        Ok(false) => return, // delayed — nothing more to do until the new due time arrives
-        Ok(true) => {}
+    let show_warning = match confirm_or_delay(policy, state, &work.app_names(), work.os_update_available, report) {
+        Ok(Decision::PatchNow) => false,
+        Ok(Decision::ProceedAfterWarning) => true,
+        Ok(Decision::Delayed) => return, // nothing more to do until the new due time arrives
         Err(err) => {
             logging::warn(&format!("could not show the patching confirmation dialog, will retry at the next check: {err:#}"));
             return;
         }
-    }
+    };
 
-    execute(policy, state, work, report, true);
+    execute(policy, state, work, report, show_warning);
 }
 
 /// The menu's "Patch Now" item: skips both the confirm/delay decision (asking whether to delay makes
@@ -127,21 +128,60 @@ fn execute(policy: &PatchingPolicy, state: &mut ScheduleState, work: Plan, repor
     report(AgentStatus::Idle { next_due_epoch: state.next_due_epoch() });
 }
 
-/// Returns `Ok(true)` to proceed with patching now, `Ok(false)` if the user chose to delay (or the
-/// dialog just sat there unanswered — see `dialogs::confirm_patch`'s `TimedOut`).
+/// What the confirm-or-delay dialog settled on, from `execute`'s point of view.
+///
+/// The two proceeding variants differ only in whether the five-minute warning comes first, and
+/// that turns on one question: is patching starting because a person just asked for it, or
+/// because this host's schedule came round? The warning is notice before an *automatic* start, so
+/// a click on "Patch Now" — which is that notice, given by the very person the interruption falls
+/// on — starts patching there and then. Kept identical in the other two agents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Decision {
+    /// The user clicked "Patch Now": start immediately, with no warning and no further notice.
+    PatchNow,
+    /// Patching is starting on the schedule's say-so rather than the user's — the dialog timed
+    /// out, or there were no delays left to offer. Warn first.
+    ProceedAfterWarning,
+    /// The user asked for more time. Nothing happens until the new due time arrives.
+    Delayed,
+}
+
+impl Decision {
+    /// Reads the dialog's answer as a decision. Split out from `confirm_or_delay` — which cannot
+    /// be tested without a display — purely so the polarity of a timeout is pinned by a test
+    /// rather than by a comment: it proceeds, and the only thing it costs is the warning.
+    fn from_choice(choice: ConfirmChoice) -> Self {
+        match choice {
+            // The click *is* the notice the warning exists to give, and it came from the one
+            // person the interruption falls on — so patching starts now, as asked.
+            ConfirmChoice::PatchNow => Decision::PatchNow,
+            // Nobody answered for a whole delay period, so the delay this dialog was offering has
+            // already been spent in wall-clock time; deferring for another one would only re-ask a
+            // question nobody is there to answer. No delay is registered, because the cycle is not
+            // being deferred — it proceeds, with the warning any unattended start gets.
+            ConfirmChoice::TimedOut => Decision::ProceedAfterWarning,
+            ConfirmChoice::Delay => Decision::Delayed,
+        }
+    }
+}
+
+/// Asks whether this cycle proceeds, and on whose say-so — see [`Decision`] for what each answer
+/// means and why an unanswered dialog is not a delay.
 fn confirm_or_delay(
     policy: &PatchingPolicy,
     state: &mut ScheduleState,
     app_names: &[String],
     os_update_available: bool,
     report: &StatusReporter,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<Decision> {
     if !state.can_delay(policy) {
         dialogs::acknowledge(
             "The maximum number of delays has been used — patching will now proceed.",
             WARNING_PERIOD.as_secs(),
         )?;
-        return Ok(true);
+        // An acknowledgement is not a request to start now — it is notice that the budget is
+        // gone, with nothing left to choose — so the five-minute warning still applies.
+        return Ok(Decision::ProceedAfterWarning);
     }
 
     let choice = dialogs::confirm_patch(
@@ -152,18 +192,13 @@ fn confirm_or_delay(
         policy.delay_seconds(),
     )?;
 
-    match choice {
-        ConfirmChoice::PatchNow => Ok(true),
-        // An ignored dialog counts down the delay budget exactly like an explicit delay would: it
-        // consumed one delay period's worth of time, so it consumes one delay. The next poll tick
-        // re-shows the dialog (via `run`) with the count decremented, until either the user
-        // responds or the budget hits zero and the unconditional-proceed branch above takes over.
-        ConfirmChoice::Delay | ConfirmChoice::TimedOut => {
-            state.register_delay(policy);
-            report(AgentStatus::Idle { next_due_epoch: state.next_due_epoch() });
-            Ok(false)
-        }
+    let decision = Decision::from_choice(choice);
+    if decision == Decision::Delayed {
+        state.register_delay(policy);
+        report(AgentStatus::Idle { next_due_epoch: state.next_due_epoch() });
     }
+
+    Ok(decision)
 }
 
 /// Applications first, then the OS — per the policy's intent, application updates are the frequent,
@@ -230,4 +265,27 @@ fn run_patches(work: Plan, report: &StatusReporter) -> (usize, usize) {
     }
 
     (succeeded, failed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clicking_patch_now_starts_immediately_rather_than_after_the_warning() {
+        assert_eq!(Decision::from_choice(ConfirmChoice::PatchNow), Decision::PatchNow);
+    }
+
+    /// The dialog's own timeout *is* one delay period, so an unanswered dialog has already had
+    /// the time a delay would have bought it. It proceeds — after the warning, which is the only
+    /// notice anybody gets when nobody was there to be asked.
+    #[test]
+    fn an_unanswered_dialog_proceeds_after_the_warning_rather_than_delaying_again() {
+        assert_eq!(Decision::from_choice(ConfirmChoice::TimedOut), Decision::ProceedAfterWarning);
+    }
+
+    #[test]
+    fn clicking_delay_defers_the_cycle() {
+        assert_eq!(Decision::from_choice(ConfirmChoice::Delay), Decision::Delayed);
+    }
 }

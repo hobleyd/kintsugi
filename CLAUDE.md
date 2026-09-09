@@ -1015,8 +1015,10 @@ backoff. Sessions get their own socket so a frame stream can never queue behind 
 and so a session dropping does not cost the host its reachability.
 
 **Consent timeouts have the opposite polarity to patching, and the code keeps them apart.**
-`dialogs::ConfirmChoice::TimedOut` means "nobody was at the desk, so count it as a delay" — the user
-never refused and patching happens regardless. `RemoteControlChoice::TimedOut` means **nobody
+`dialogs::ConfirmChoice::TimedOut` means "nobody was at the desk, so warn them and patch anyway" —
+the user never refused, and the delay period the dialog sat there for has already been spent in
+wall-clock time, so it proceeds after the five-minute warning rather than consuming a delay and
+re-asking a question nobody is there to answer. `RemoteControlChoice::TimedOut` means **nobody
 consented**, and is treated exactly as a refusal. They are separate enums for that reason; reusing
 the first would have put the safe default one careless `match` arm away. The dialog's default button
 is Deny for the same reason, since AppleScript reports the default button as `button returned:` even

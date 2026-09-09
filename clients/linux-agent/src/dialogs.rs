@@ -11,10 +11,13 @@ const TITLE: &str = "Kintsugi Patching";
 pub enum ConfirmChoice {
     PatchNow,
     Delay,
-    /// The dialog was left up long enough that it dismissed itself. Callers should treat this the
-    /// same as an explicit `Delay` — the user never said no to patching, they just weren't there —
-    /// so ignoring the dialog still counts down the delay budget rather than leaving it open
-    /// forever.
+    /// The dialog was left up long enough that it dismissed itself.
+    ///
+    /// **Not** the same as an explicit `Delay`: the dialog stays up for a whole delay period, so
+    /// by the time it gives up that delay has already been spent in wall-clock time, and
+    /// deferring for another one would only re-ask a question nobody is there to answer. Callers
+    /// proceed instead, after the same five-minute warning any unattended start gets — see
+    /// `patch_cycle::confirm_or_delay`.
     TimedOut,
 }
 
@@ -100,8 +103,8 @@ fn confirmation_message(delay_label: &str, delays_remaining: u32, app_names: &[S
 ///
 /// `timeout_seconds` bounds how long the dialog stays up before it dismisses itself
 /// (`ConfirmChoice::TimedOut`) — otherwise an ignored dialog would sit on screen forever. Callers
-/// pass the delay period itself, so leaving it untouched for one delay period behaves exactly
-/// like clicking "Delay" once.
+/// pass the delay period itself, so an ignored dialog spends a whole delay period before giving
+/// up, which is why that outcome proceeds to patch rather than delaying again.
 pub fn confirm_patch(
     delay_label: &str,
     delays_remaining: u32,
@@ -165,7 +168,7 @@ pub fn confirm_patch(
         match choice {
             ConfirmChoice::Delay => "delay",
             ConfirmChoice::PatchNow => "patch now",
-            ConfirmChoice::TimedOut => "timed out (treated as delay)",
+            ConfirmChoice::TimedOut => "timed out (patching proceeds, after the warning)",
         }
     ));
 
@@ -175,8 +178,8 @@ pub fn confirm_patch(
 /// What the person at the keyboard said when asked to hand over control of this host.
 ///
 /// **A separate type from [`ConfirmChoice`] on purpose, because a timeout means the opposite
-/// thing.** There, nobody answering means "they were not at the desk, so count it as a delay and
-/// patch later" — the user never refused, and patching happens regardless. Here, nobody answering
+/// thing.** There, nobody answering means "they were not at the desk, so warn them and patch
+/// anyway" — the user never refused, and patching happens regardless. Here, nobody answering
 /// means **nobody consented**, and the only safe reading of silence is refusal. Reusing that enum
 /// would have left the safe default one careless `match` arm away from handing an unattended desktop
 /// to whoever asked. Kept identical to the other two agents' `RemoteControlChoice`.
