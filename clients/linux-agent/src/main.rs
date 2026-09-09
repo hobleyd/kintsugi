@@ -37,7 +37,7 @@ use config::Config;
 use identity::AgentIdentity;
 use queue::{Plan, PlannedApp, RequestHandler, RequestKind};
 use schedule::ScheduleState;
-use status::{AgentStatus, CheckInStatus, MenuAction, StatusReporter};
+use status::{AgentStatus, CheckInStatus, MenuAction, StatusReporter, StatusReporterFn};
 use system_info::InstalledApp;
 
 /// How often the `--agent` loop wakes to check whether a patch cycle is due. Deliberately not
@@ -620,7 +620,7 @@ fn run_ui_agent() -> Result<()> {
     let state = ScheduleState::load_or_default(&schedule_state_path, &current_policy);
 
     let (menu_tx, menu_rx) = mpsc::channel();
-    let report: Box<StatusReporter> = Box::new(tray_menu::report_status);
+    let report: StatusReporterFn = tray_menu::report_status;
 
     // A third thread, for the display half of remote control: the consent dialog, the screen capture
     // and the input injection, all of which need this session's display and none of which the root
@@ -632,10 +632,51 @@ fn run_ui_agent() -> Result<()> {
     // black screen.
     std::thread::spawn(remote_session::run);
 
-    std::thread::spawn(move || run_scheduler(current_policy, state, queue_dir, policy_cache_path, menu_rx, report));
+    std::thread::spawn(move || run_scheduler(current_policy, state, schedule_state_path, queue_dir, policy_cache_path, menu_rx, report));
 
     // Blocks for the rest of the process's life — this call never returns normally.
     tray_menu::run(menu_tx)
+}
+
+
+/// How a patch cycle is started — `patch_cycle::run` for a naturally due one, `run_now` for a
+/// "Patch Now" click. Their signatures are identical, so `spawn_cycle` is handed whichever one is
+/// meant rather than a flag to branch on.
+type CycleFn = fn(&mut QueueClient, &policy::PatchingPolicy, &mut ScheduleState, &StatusReporter);
+
+/// Runs one patch cycle on its own thread, handing it the schedule state for the duration and
+/// getting it back when it finishes.
+///
+/// A thread rather than a plain call, because the confirmation dialog stands there for a whole
+/// delay period and the scheduler used to be parked inside it for all of it. Three things went
+/// wrong while it was: the "Next check-in" line stopped updating, a menu click sat in the channel
+/// until the dialog came down (which from the menu looks like the item did nothing — the reason
+/// this changed), and — Linux's own, and the worst of them — the heartbeat above lapsed after
+/// `queue::HEARTBEAT_MAX_AGE`, so the root service concluded nobody was logged in and patched
+/// *unattended* under a user who had the prompt open.
+///
+/// The state goes *with* the cycle rather than being shared behind a lock: a mutex held for the
+/// hours a dialog can stand there would have moved the block rather than removed it, since
+/// `is_due` would then be the thing waiting. So `state` being `None` in `run_scheduler`'s loop is
+/// exactly "a cycle is in flight", and it is what stops a second one starting.
+///
+/// Everything else is cheap to hand over: the policy is a small struct, `report` is a function
+/// pointer, and the queue client is a directory path. A cycle therefore works from the policy as
+/// it was when it started, which is the same thing the previous arrangement did — the loop's
+/// re-read only ever affected the *next* cycle.
+fn spawn_cycle(
+    cycle: CycleFn,
+    queue_dir: &std::path::Path,
+    policy: &policy::PatchingPolicy,
+    mut state: ScheduleState,
+    report: StatusReporterFn,
+) -> std::thread::JoinHandle<ScheduleState> {
+    let mut handler = QueueClient { queue_dir: queue_dir.to_path_buf() };
+    let policy = policy.clone();
+    std::thread::spawn(move || {
+        cycle(&mut handler, &policy, &mut state, &report);
+        state
+    })
 }
 
 /// The background half of `run_ui_agent` — see its doc comment for why this is a separate
@@ -645,15 +686,19 @@ fn run_ui_agent() -> Result<()> {
 /// the root service through the queue (see `checkin_schedule::request_now`).
 fn run_scheduler(
     mut current_policy: policy::PatchingPolicy,
-    mut state: ScheduleState,
+    state: ScheduleState,
+    schedule_state_path: std::path::PathBuf,
     queue_dir: std::path::PathBuf,
     policy_cache_path: std::path::PathBuf,
     menu_rx: mpsc::Receiver<MenuAction>,
-    report: Box<StatusReporter>,
+    report: StatusReporterFn,
 ) {
     report(AgentStatus::Idle { next_due_epoch: state.next_due_epoch() });
 
-    let mut handler = QueueClient { queue_dir: queue_dir.clone() };
+    // `None` for exactly as long as a cycle owns the schedule state — see `spawn_cycle`, which is
+    // also why this loop can be sure it is never running two.
+    let mut state = Some(state);
+    let mut in_flight: Option<std::thread::JoinHandle<ScheduleState>> = None;
 
     // The root service's schedule, as last shown in the menu. Re-read every tick — the service
     // persists a minute on its first run and the server may move it on any check-in — but only
@@ -666,9 +711,33 @@ fn run_scheduler(
     loop {
         // Tells the root service this host has somebody driving it, so it doesn't start patching
         // unattended underneath a user who is sitting right there — see
-        // `patch_unattended_if_nobody_is_logged_in`. First thing each tick, so a slow cycle below
-        // can't let it lapse.
+        // `patch_unattended_if_nobody_is_logged_in`. First thing each tick, and the cycle below
+        // runs on its own thread, so neither an hour-long confirmation dialog nor a long patch
+        // run can let it lapse.
         queue::record_heartbeat(&queue_dir);
+
+        // Takes the schedule state back from a cycle that has finished, and says so. Reporting
+        // here rather than trusting the cycle to is what covers its early returns — an
+        // unreachable service, nothing to patch, a dialog that would not launch — since those
+        // report nothing and would otherwise leave the menu greyed on "waiting for your answer"
+        // for a prompt that is no longer there.
+        if in_flight.as_ref().is_some_and(|handle| handle.is_finished()) {
+            match in_flight.take().expect("just checked that a handle is there").join() {
+                Ok(finished) => state = Some(finished),
+                Err(_) => {
+                    // Nothing in a cycle is expected to panic, but a scheduler that quietly
+                    // stopped scheduling would be the worst possible way to find out: reload from
+                    // disk (the state is saved on every change, so disk is the freshest copy) and
+                    // carry on, so a repeating panic shows up as a repeating log line rather than
+                    // as a host that silently never patches again.
+                    logging::error("the patch cycle thread panicked; reloading the schedule from disk and carrying on");
+                    state = Some(ScheduleState::load_or_default(&schedule_state_path, &current_policy));
+                }
+            }
+            if let Some(current) = state.as_ref() {
+                report(AgentStatus::Idle { next_due_epoch: current.next_due_epoch() });
+            }
+        }
 
         // Re-read rather than re-fetch: the root service refreshes this file on its own schedule
         // (see `run_daemon`), so picking up a policy change here is a local file read, not a
@@ -689,7 +758,16 @@ fn run_scheduler(
         match menu_rx.recv_timeout(AGENT_POLL_INTERVAL) {
             Ok(MenuAction::PatchNow) => {
                 logging::info("scheduler received the Patch Now signal");
-                patch_cycle::run_now(&mut handler, &current_policy, &mut state, report.as_ref());
+                match state.take() {
+                    Some(owned) => in_flight = Some(spawn_cycle(patch_cycle::run_now, &queue_dir, &current_policy, owned, report)),
+                    // The menu greys both actions whenever this can happen, so getting here means
+                    // a click was already on its way — which is worth saying, since this is an
+                    // explicit action the user just took and silence would read as it being lost.
+                    None => {
+                        logging::info("Patch Now ignored: a patch cycle is already running");
+                        dialogs::notify("Kintsugi Patching", "A patch cycle is already running.");
+                    }
+                }
             }
             Ok(MenuAction::CheckInNow) => {
                 logging::info("scheduler received the Check In Now signal");
@@ -700,8 +778,9 @@ fn run_scheduler(
                 shown_check_in = None;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if state.is_due() {
-                    patch_cycle::run(&mut handler, &current_policy, &mut state, report.as_ref());
+                if state.as_ref().is_some_and(|current| current.is_due()) {
+                    let owned = state.take().expect("just checked that the state is here");
+                    in_flight = Some(spawn_cycle(patch_cycle::run, &queue_dir, &current_policy, owned, report));
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {

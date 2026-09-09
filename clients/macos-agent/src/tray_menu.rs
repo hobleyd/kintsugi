@@ -128,6 +128,14 @@ pub fn report_status(status: AgentStatus) {
                     state.progress_item.set_text("Status: idle");
                     state.patching = false;
                 }
+                // Greyed like `Patching` via the same flag, but with the progress window left
+                // closed below: a prompt awaiting an answer is not progress, and a window claiming
+                // otherwise would be sitting on top of the dialog it is describing.
+                AgentStatus::AwaitingAnswer => {
+                    state.status_item.set_text("Waiting for your answer");
+                    state.progress_item.set_text("Status: a prompt is on screen");
+                    state.patching = true;
+                }
                 AgentStatus::Patching { current, completed, total } => {
                     state.status_item.set_text(format!("Patching: {current}"));
                     state.progress_item.set_text(if *total > 0 {
@@ -145,7 +153,7 @@ pub fn report_status(status: AgentStatus) {
         // for it — opened the moment there's something to show, closed again once idle.
         let Some(mtm) = MainThreadMarker::new() else { return };
         match &status {
-            AgentStatus::Idle { .. } => crate::progress_window::hide(),
+            AgentStatus::Idle { .. } | AgentStatus::AwaitingAnswer => crate::progress_window::hide(),
             AgentStatus::Patching { current, completed, total } => {
                 crate::progress_window::show_and_update(mtm, current, *completed, *total)
             }

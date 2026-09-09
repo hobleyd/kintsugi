@@ -212,6 +212,12 @@ fn confirm_or_delay(
     os_update_available: bool,
     report: &StatusReporter,
 ) -> anyhow::Result<Decision> {
+    // Either dialog below stands there until it is answered, and the confirm one for a whole
+    // delay period — so the menu is told a prompt is up, which greys its "Patch Now" item rather
+    // than leaving it offering to ask a question that is on screen being asked. The cycle runs on
+    // its own thread (`main::spawn_cycle`), so the scheduler is free to serve the menu meanwhile.
+    report(AgentStatus::AwaitingAnswer);
+
     if !state.can_delay(policy) {
         // This dialog *is* the warning, not a preamble to it: it states the period and stands for
         // as much of it as the user leaves it up, and `execute` waits out whatever `remaining_warning`

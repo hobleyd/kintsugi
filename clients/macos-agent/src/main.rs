@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 
 use config::Config;
 use schedule::ScheduleState;
-use status::{AgentStatus, CheckInStatus, MenuAction, StatusReporter};
+use status::{AgentStatus, CheckInStatus, MenuAction, StatusReporter, StatusReporterFn};
 use system_info::InstalledApp;
 
 /// How often the `--agent` loop wakes to check whether a patch cycle is due. Deliberately not
@@ -423,7 +423,7 @@ fn run_ui_agent() -> Result<()> {
     let state = ScheduleState::load_or_default(&schedule_state_path, &current_policy);
 
     let (menu_tx, menu_rx) = mpsc::channel();
-    let report: Box<StatusReporter> = Box::new(tray_menu::report_status);
+    let report: StatusReporterFn = tray_menu::report_status;
 
     // Set by the menu bar's "End Remote Session" and cleared by whoever acts on it. Shared rather
     // than a channel because the click has to be meaningful whether or not a session is running at
@@ -444,10 +444,63 @@ fn run_ui_agent() -> Result<()> {
     let remote_control_flag = end_remote_session.clone();
     std::thread::spawn(move || remote_control::run(remote_control_config, remote_control_serial, remote_control_flag));
 
-    std::thread::spawn(move || run_scheduler(client, config, current_policy, state, serial_number, agent_identity, policy_cache_path, menu_rx, report));
+    std::thread::spawn(move || {
+        run_scheduler(client, config, current_policy, state, schedule_state_path, serial_number, agent_identity, policy_cache_path, menu_rx, report)
+    });
 
     // Blocks for the rest of the process's life — this call never returns normally.
     tray_menu::run(menu_tx, end_remote_session)
+}
+
+
+/// How a patch cycle is started — `patch_cycle::run` for a naturally due one, `run_now` for a
+/// "Patch Now" click. Their signatures are identical, so `spawn_cycle` is handed whichever one is
+/// meant rather than a flag to branch on.
+type CycleFn = fn(
+    &reqwest::blocking::Client,
+    &Config,
+    &policy::PatchingPolicy,
+    &mut ScheduleState,
+    &str,
+    &identity::AgentIdentity,
+    &StatusReporter,
+);
+
+/// Runs one patch cycle on its own thread, handing it the schedule state for the duration and
+/// getting it back when it finishes.
+///
+/// A thread rather than a plain call, because the confirmation dialog stands there for a whole
+/// delay period and the scheduler used to be parked inside it for all of it: the "Next check-in"
+/// line stopped updating, and a menu click sat in the channel until the dialog came down, which
+/// from the menu bar looks like the item did nothing. (The Linux agent had a third and worse
+/// symptom — see its own copy of this comment.)
+///
+/// The state goes *with* the cycle rather than being shared behind a lock: a mutex held for the
+/// hours a dialog can stand there would have moved the block rather than removed it, since
+/// `is_due` would then be the thing waiting. So `state` being `None` in `run_scheduler`'s loop is
+/// exactly "a cycle is in flight", and it is what stops a second one starting.
+///
+/// Everything else is cheap to hand over — the `Client` shares its connection pool with the
+/// clone, `report` is a function pointer — and each cycle works from the policy and identity as
+/// they were when it started. That is no different from before: the loop's re-reads only ever
+/// affected the *next* cycle, and neither a policy nor a certificate changes mid-cycle in a way
+/// this one would want to act on.
+fn spawn_cycle(
+    cycle: CycleFn,
+    client: &reqwest::blocking::Client,
+    config: &Config,
+    policy: &policy::PatchingPolicy,
+    mut state: ScheduleState,
+    serial_number: &str,
+    identity: &identity::AgentIdentity,
+    report: StatusReporterFn,
+) -> std::thread::JoinHandle<ScheduleState> {
+    let (client, config, policy) = (client.clone(), config.clone(), policy.clone());
+    let (serial_number, identity) = (serial_number.to_string(), identity.clone());
+    std::thread::spawn(move || {
+        cycle(&client, &config, &policy, &mut state, &serial_number, &identity, &report);
+        state
+    })
 }
 
 /// The background half of `run_ui_agent` — see its doc comment for why this is a separate
@@ -459,7 +512,8 @@ fn run_scheduler(
     client: reqwest::blocking::Client,
     config: Config,
     mut current_policy: policy::PatchingPolicy,
-    mut state: ScheduleState,
+    state: ScheduleState,
+    schedule_state_path: std::path::PathBuf,
     serial_number: String,
     // Whatever `identity::load` found (or didn't) at process startup — this process never enrolls
     // one itself (see run_ui_agent's own comment on that), but it's not necessarily *permanently*
@@ -472,9 +526,14 @@ fn run_scheduler(
     mut agent_identity: Option<identity::AgentIdentity>,
     policy_cache_path: std::path::PathBuf,
     menu_rx: mpsc::Receiver<MenuAction>,
-    report: Box<StatusReporter>,
+    report: StatusReporterFn,
 ) {
     report(AgentStatus::Idle { next_due_epoch: state.next_due_epoch() });
+
+    // `None` for exactly as long as a cycle owns the schedule state — see `spawn_cycle`, which is
+    // also why this loop can be sure it is never running two.
+    let mut state = Some(state);
+    let mut in_flight: Option<std::thread::JoinHandle<ScheduleState>> = None;
 
     // The daemon's schedule, as last shown in the menu. Re-read every tick — the daemon persists a
     // minute on its first run and the server may move it on any check-in — but only pushed to the
@@ -484,6 +543,29 @@ fn run_scheduler(
     let mut shown_check_in: Option<CheckInStatus> = None;
 
     loop {
+        // Takes the schedule state back from a cycle that has finished, and says so. Reporting
+        // here rather than trusting the cycle to is what covers its early returns — an
+        // unreachable server, nothing to patch, a dialog that would not launch — since those
+        // report nothing and would otherwise leave the menu greyed on "waiting for your answer"
+        // for a prompt that is no longer there.
+        if in_flight.as_ref().is_some_and(|handle| handle.is_finished()) {
+            match in_flight.take().expect("just checked that a handle is there").join() {
+                Ok(finished) => state = Some(finished),
+                Err(_) => {
+                    // Nothing in a cycle is expected to panic, but a scheduler that quietly
+                    // stopped scheduling would be the worst possible way to find out: reload from
+                    // disk (the state is saved on every change, so disk is the freshest copy) and
+                    // carry on, so a repeating panic shows up as a repeating log line rather than
+                    // as a host that silently never patches again.
+                    logging::error("the patch cycle thread panicked; reloading the schedule from disk and carrying on");
+                    state = Some(ScheduleState::load_or_default(&schedule_state_path, &current_policy));
+                }
+            }
+            if let Some(current) = state.as_ref() {
+                report(AgentStatus::Idle { next_due_epoch: current.next_due_epoch() });
+            }
+        }
+
         if agent_identity.is_none() {
             agent_identity = identity::load(&config::identity_dir());
             if agent_identity.is_some() {
@@ -509,15 +591,33 @@ fn run_scheduler(
         match menu_rx.recv_timeout(AGENT_POLL_INTERVAL) {
             Ok(MenuAction::PatchNow) => {
                 logging::info("scheduler received the Patch Now signal");
-                match &agent_identity {
-                    Some(identity) => patch_cycle::run_now(&client, &config, &current_policy, &mut state, &serial_number, identity, report.as_ref()),
-                    None => {
-                        // Unlike a naturally-due cycle finding nothing to do (silent by design —
-                        // see patch_cycle::run), this is an explicit action the user just took, so
-                        // it must never look like nothing happened even when there's a real reason
-                        // it can't proceed.
+                // Every branch that declines has to say so out loud: unlike a naturally-due cycle
+                // finding nothing to do (silent by design — see patch_cycle::run), this is an
+                // explicit action the user just took, so it must never look like nothing happened
+                // even when there's a real reason it can't proceed.
+                match (state.take(), &agent_identity) {
+                    (Some(owned), Some(identity)) => {
+                        in_flight = Some(spawn_cycle(
+                            patch_cycle::run_now,
+                            &client,
+                            &config,
+                            &current_policy,
+                            owned,
+                            &serial_number,
+                            identity,
+                            report,
+                        ));
+                    }
+                    (Some(owned), None) => {
+                        state = Some(owned);
                         logging::warn("Patch Now ignored: no enrolled agent identity yet");
                         dialogs::notify("Kintsugi Patching", "Not yet enrolled with the server — try again shortly.");
+                    }
+                    // The menu greys both actions whenever this can happen, so getting here means
+                    // a click was already on its way.
+                    (None, _) => {
+                        logging::info("Patch Now ignored: a patch cycle is already running");
+                        dialogs::notify("Kintsugi Patching", "A patch cycle is already running.");
                     }
                 }
             }
@@ -530,9 +630,21 @@ fn run_scheduler(
                 shown_check_in = None;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if state.is_due() {
+                if state.as_ref().is_some_and(|current| current.is_due()) {
                     match &agent_identity {
-                        Some(identity) => patch_cycle::run(&client, &config, &current_policy, &mut state, &serial_number, identity, report.as_ref()),
+                        Some(identity) => {
+                            let owned = state.take().expect("just checked that the state is here");
+                            in_flight = Some(spawn_cycle(
+                                patch_cycle::run,
+                                &client,
+                                &config,
+                                &current_policy,
+                                owned,
+                                &serial_number,
+                                identity,
+                                report,
+                            ));
+                        }
                         None => logging::warn("patch cycle due, but skipped: no enrolled agent identity yet"),
                     }
                 }

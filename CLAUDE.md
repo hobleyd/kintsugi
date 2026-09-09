@@ -1587,8 +1587,23 @@ before the queue was reached — whereas the Windows service (`Agent::check_in`)
 service (`main::check_in`, under the lock it already holds) run the check-in *inside* the request.
 If that check-in installs a newer agent, the per-user process asking is restarted before it can
 read the answer; the new version in the menu is the confirmation. Both action items are greyed out
-while either a patch cycle or a check-in is running, because one scheduler thread serves both and a
-queued click would otherwise run minutes later, unasked.
+while either a patch cycle or a check-in is running, because a cycle owns the schedule state for its
+whole length (see below) and the scheduler cannot start a second one while it does.
+
+**A patch cycle runs on its own thread, and the confirmation dialog is why.** All three schedulers
+used to call `patch_cycle::run` inline, so the loop was parked inside a dialog that stands there for
+a whole delay period — hours. Three things went wrong while it was, and only the first is obvious:
+the menu's "Next check-in" line stopped updating; a menu click sat in the channel until the dialog
+came down and then ran unasked, which is exactly what the greying above exists to prevent; and on
+Linux the per-user heartbeat lapsed after `queue::HEARTBEAT_MAX_AGE` (ten minutes), so the root
+service concluded nobody was logged in and **patched unattended under a user who had the prompt
+open**. `main::spawn_cycle` hands the cycle its own thread, and hands it the `ScheduleState` by
+*ownership* rather than behind a lock — a mutex held for the length of a dialog would have moved the
+block rather than removed it, since `is_due` would then be the thing waiting. So `state` being `None`
+in the scheduler loop *is* "a cycle is in flight", the join site is where the state comes back, and
+`AgentStatus::AwaitingAnswer` is what greys "Patch Now" while a prompt is on screen without opening
+the progress window over it. Keep the three copies in step; the shape is identical and only the
+arguments a cycle needs differ.
 
 **Only the Linux agent patches with nobody logged in, and it has to.** Both other agents put the
 patching schedule in the per-user process, which costs nothing when every managed host is somebody's

@@ -416,6 +416,10 @@ fn apply_status(status: AgentStatus) {
             "Status: idle".to_string(),
             false,
         ),
+        // Greyed like `Patching` (the third element), but with the progress window left closed
+        // below: a prompt awaiting an answer is not progress, and a window claiming otherwise
+        // would be sitting on top of the dialog it is describing.
+        AgentStatus::AwaitingAnswer => ("Waiting for your answer".to_string(), "Status: a prompt is on screen".to_string(), true),
         AgentStatus::Patching { current, completed, total } => (
             format!("Patching: {current}"),
             if *total > 0 {
@@ -436,7 +440,7 @@ fn apply_status(status: AgentStatus) {
     // A window, unlike the menu, is visible without the user having to think to go looking for it —
     // opened the moment there's something to show, closed again once idle.
     match &status {
-        AgentStatus::Idle { .. } => crate::progress_window::hide(),
+        AgentStatus::Idle { .. } | AgentStatus::AwaitingAnswer => crate::progress_window::hide(),
         AgentStatus::Patching { current, completed, total } => crate::progress_window::show_and_update(current, *completed, *total),
     }
 }

@@ -8,6 +8,12 @@ pub enum AgentStatus {
     Idle {
         next_due_epoch: u64,
     },
+    /// A dialog is on screen and the cycle is waiting for the person at the keyboard to answer it
+    /// — the confirm-or-delay prompt, or the "no delays left" notice. Its own state rather than a
+    /// flavour of `Patching`, because nothing is being patched yet and the progress window would
+    /// be asserting otherwise; what it shares with `Patching` is that the menu's actions are
+    /// greyed, since the question the "Patch Now" item asks is already on screen being asked.
+    AwaitingAnswer,
     Patching {
         /// What's being worked on right now — an application name (optionally "-> version"), or
         /// "Installing macOS updates", or the 5-minute warning message before anything starts.
@@ -18,6 +24,12 @@ pub enum AgentStatus {
 }
 
 pub type StatusReporter<'a> = dyn Fn(AgentStatus) + Send + Sync + 'a;
+
+/// The reporter as the scheduler actually holds it: a plain function pointer, because a patch
+/// cycle runs on its own thread (see `main::spawn_cycle`) and the reporter has to be something
+/// that can be copied into it — `tray_menu::report_status` is a `fn`, not a closure. Nothing below
+/// the scheduler notices: `patch_cycle` still takes `&StatusReporter`, which a `fn` coerces to.
+pub type StatusReporterFn = fn(AgentStatus);
 
 /// The menu bar's "Next check-in" line — the root daemon's hourly schedule, which is a separate
 /// concern from the patch cycle above: a check-in (registration, inventory, the agent's own update)
