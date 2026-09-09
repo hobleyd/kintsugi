@@ -108,12 +108,32 @@ class RemoteDisplayGeometry extends RemoteScreenUpdate {
     required this.imageWidth,
     required this.imageHeight,
     this.canControlInput = true,
+    this.displays = const [],
+    this.activeDisplayId = 0,
   });
 
   final double pointWidth;
   final double pointHeight;
   final int imageWidth;
   final int imageHeight;
+
+  /// Every display this host could show, and which one these tiles are of.
+  ///
+  /// **Empty means "offer no picker", not "this host has no screen".** An agent from before display
+  /// switching sends neither field, and a host with one display sends a single entry — so the
+  /// choice appears only where there is one, and a laptop gets no control it cannot use.
+  final List<RemoteDisplayOption> displays;
+
+  /// The [RemoteDisplayOption.id] of the display being shown.
+  ///
+  /// **Part of [props], and that is load-bearing rather than completeness.** Switching between two
+  /// identical monitors changes none of the sizes above, so without this the state would compare
+  /// equal, the bloc would emit nothing, and the stale tiles of the previous display would never be
+  /// cleared — the switch would look like it had done nothing at all.
+  final int activeDisplayId;
+
+  /// Whether there is a genuine choice to offer. One display is not a choice.
+  bool get hasDisplayChoice => displays.length > 1;
 
   /// Whether this host will accept keyboard and mouse, or can only be watched.
   ///
@@ -127,7 +147,40 @@ class RemoteDisplayGeometry extends RemoteScreenUpdate {
   final bool canControlInput;
 
   @override
-  List<Object?> get props => [pointWidth, pointHeight, imageWidth, imageHeight, canControlInput];
+  List<Object?> get props =>
+      [pointWidth, pointHeight, imageWidth, imageHeight, canControlInput, displays, activeDisplayId];
+}
+
+/// One display the host offered, as the picker shows it.
+///
+/// [id] is **opaque and defined by the agent** — a `CGDirectDisplayID` on macOS, an index into
+/// Windows' monitor enumeration, a RandR monitor or a PipeWire node on Linux. Nothing here
+/// interprets one; it is echoed back in [RemoteDisplaySelection], which is the whole of the
+/// contract. See `DisplayOption` in `clients/macos-agent/src/remote_protocol.rs`.
+class RemoteDisplayOption extends Equatable {
+  const RemoteDisplayOption({
+    required this.id,
+    required this.label,
+    required this.width,
+    required this.height,
+    required this.isPrimary,
+  });
+
+  final int id;
+
+  /// What to show in the picker. Built by the agent, because only the host knows what its displays
+  /// are called — a label composed here from a resolution would say nothing about the two identical
+  /// monitors that are the common office desk.
+  final String label;
+
+  final int width;
+  final int height;
+
+  /// Whether this is the host's primary display: the one a session starts on.
+  final bool isPrimary;
+
+  @override
+  List<Object?> get props => [id, label, width, height, isPrimary];
 }
 
 /// One JPEG-encoded rectangle of the host's screen, in image pixel coordinates.
@@ -237,6 +290,17 @@ class RemoteKeyInput extends RemoteInput {
 
   final int usbHidUsage;
   final bool isDown;
+}
+
+/// Asks the agent to show a different one of the displays it offered.
+///
+/// The agent restarts its capture there and sends a fresh [RemoteDisplayGeometry] before the first
+/// tile of the new display, so nothing here has to predict what the new geometry will be — which
+/// matters because on Wayland the agent does not know either until its portal has renegotiated.
+class RemoteDisplaySelection extends RemoteInput {
+  const RemoteDisplaySelection(this.displayId);
+
+  final int displayId;
 }
 
 /// Asks the agent for a different trade between picture quality and bandwidth.

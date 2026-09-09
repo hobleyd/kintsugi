@@ -21,7 +21,9 @@ import '../../domain/usecases/upgrade_path_usecases.dart';
 import '../../domain/usecases/upgrade_script_usecases.dart';
 import '../network/api_client.dart';
 import '../network/unauthorized_notifier.dart';
+import '../platform/browser_full_screen.dart';
 import '../platform/browser_page_navigator.dart';
+import '../platform/full_screen.dart';
 import '../platform/page_navigator.dart';
 import 'locator.dart';
 
@@ -44,6 +46,9 @@ Future<void> configureDependencies() async {
     ApiClient(unauthorizedNotifier: locator<UnauthorizedNotifier>()),
   );
   locator.registerSingleton<PageNavigator>(const BrowserPageNavigator());
+  // A singleton because it holds one broadcast stream over one document-level listener: a
+  // per-screen instance would add a listener per remote-control session and never remove it.
+  locator.registerSingleton<FullScreenController>(BrowserFullScreenController());
 
   final api = locator<ApiClient>();
 

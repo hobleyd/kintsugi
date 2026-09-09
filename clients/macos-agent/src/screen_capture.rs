@@ -36,7 +36,7 @@ use objc2_screen_capture_kit::{
 };
 
 use crate::logging;
-use crate::remote_protocol::{encode_tile, DisplayInfo};
+use crate::remote_protocol::{encode_tile, DisplayInfo, DisplayOption};
 
 /// `kCVPixelFormatType_32BGRA`, as a FourCC. BGRA rather than one of the YUV formats because the
 /// only consumer is a JPEG encoder that wants interleaved 8-bit colour, and converting from
@@ -70,6 +70,11 @@ const FULL_FRAME_TILE_FRACTION: f64 = 0.6;
 extern "C" {
     fn CGPreflightScreenCaptureAccess() -> bool;
     fn CGRequestScreenCaptureAccess() -> bool;
+    /// Non-zero for the display physically built into this Mac. Worth one FFI declaration purely
+    /// for the label: "Built-in Display" beside "Display 2" is what somebody looking at a picker
+    /// actually recognises, where two entries both reading "Display" and differing only in a
+    /// resolution are not distinguishable at all on a laptop plugged into a same-sized monitor.
+    fn CGDisplayIsBuiltin(display: u32) -> u32;
 }
 
 /// Whether this process may capture the screen.
@@ -281,15 +286,29 @@ pub struct ScreenCapture {
     _output: Retained<StreamOutput>,
     slot: Arc<FrameSlot>,
     pub geometry: DisplayGeometry,
+    /// Every display this Mac had when this capture started, for the viewer's picker.
+    ///
+    /// Re-enumerated on every [`Self::start`] rather than cached for the session, so a monitor
+    /// plugged in or unplugged mid-call is reflected the next time the viewer switches — which is
+    /// the only moment the list is read again anyway.
+    displays: Vec<DisplayOption>,
+    active_display_id: u32,
 }
 
 impl ScreenCapture {
-    /// Starts capturing the main display.
+    /// Starts capturing one display, and reports what the others are.
     ///
-    /// One display, not all of them: a viewer that can only draw one picture would have to be told
-    /// which, and every host this is aimed at is somebody's laptop. Extending this means sending a
-    /// display list to the viewer and letting it choose, which the protocol has room for.
-    pub fn start(max_image_width: u32) -> Result<Self> {
+    /// One display at a time, not all of them composited: a Mac with two monitors has a global
+    /// coordinate space with a hole in it as often as not (they are rarely the same height and are
+    /// almost never aligned), so a single picture of the union would be mostly dead space and every
+    /// pointer conversion would have to reason about which monitor a click landed on. The viewer
+    /// gets the list instead and asks for one — see [`DisplayOption`].
+    ///
+    /// `requested_display_id` is a [`DisplayOption::id`] the viewer echoed back, or `None` for
+    /// "whichever this Mac considers main". A display that has since been unplugged falls back to
+    /// main rather than failing: the alternative is a session that ends because somebody pulled a
+    /// cable while the request was in flight.
+    pub fn start(max_image_width: u32, requested_display_id: Option<u32>) -> Result<Self> {
         if !has_screen_recording_permission() {
             return Err(anyhow!(
                 "this agent does not have the Screen Recording permission, so it cannot capture the screen \
@@ -297,7 +316,25 @@ impl ScreenCapture {
             ));
         }
 
-        let display = main_display().context("could not find a display to capture")?;
+        let available = shareable_displays().context("could not find a display to capture")?;
+        let displays = describe_displays(&available);
+
+        // `position()`, not a lookup that can miss: an id naming a display that has gone falls back
+        // to the first, which ScreenCaptureKit lists as the main one.
+        let chosen = requested_display_id
+            .and_then(|id| displays.iter().position(|display| display.id == id))
+            .unwrap_or(0);
+
+        if let Some(requested) = requested_display_id {
+            if displays.get(chosen).is_none_or(|display| display.id != requested) {
+                logging::warn(&format!(
+                    "display {requested} is no longer attached; capturing this Mac's main display instead"
+                ));
+            }
+        }
+
+        let display = available[chosen].clone();
+        let active_display_id = displays[chosen].id;
 
         // SCDisplay reports its frame in points, in the global coordinate space — which is exactly
         // the space CGEventPost wants, so this is the one conversion input needs.
@@ -390,7 +427,16 @@ impl ScreenCapture {
             point_width, point_height, image_width, image_height
         ));
 
-        Ok(Self { stream, _output: output, slot, geometry })
+        Ok(Self { stream, _output: output, slot, geometry, displays, active_display_id })
+    }
+
+    /// Every display this Mac had when this capture started, and which one it is showing.
+    pub fn displays(&self) -> Vec<DisplayOption> {
+        self.displays.clone()
+    }
+
+    pub fn active_display_id(&self) -> u32 {
+        self.active_display_id
     }
 
     /// The most recent frame, or `None` if none arrived within `timeout`.
@@ -449,13 +495,13 @@ fn start_capture(stream: &SCStream) -> Result<()> {
     }
 }
 
-/// The display to capture.
+/// Every display this Mac can capture, main first.
 ///
 /// `SCShareableContent` is asynchronous and there is no synchronous form of it, so this bridges to
 /// a channel — the session is being set up on its own thread and has nothing else to do until it
 /// knows what it is capturing.
-fn main_display() -> Result<Retained<SCDisplay>> {
-    let (sender, receiver) = std::sync::mpsc::channel::<Result<Retained<SCDisplay>, String>>();
+fn shareable_displays() -> Result<Vec<Retained<SCDisplay>>> {
+    let (sender, receiver) = std::sync::mpsc::channel::<Result<Vec<Retained<SCDisplay>>, String>>();
 
     let handler = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
         let result = if !error.is_null() {
@@ -469,12 +515,16 @@ fn main_display() -> Result<Retained<SCDisplay>> {
             // SAFETY: a documented accessor.
             let displays = unsafe { content.displays() };
 
-            // firstObject, not "the one whose id matches CGMainDisplayID": ScreenCaptureKit lists
-            // the main display first, and a Mac with the lid shut and no external monitor has no
-            // display in this list at all — which is a clearer error than a lookup that misses.
-            match displays.firstObject() {
-                Some(display) => Ok(display),
-                None => Err("this Mac reported no capturable displays".to_string()),
+            // Kept in ScreenCaptureKit's own order, which puts the main display first — so index 0
+            // is what a session captures when the viewer has asked for nothing, and no lookup
+            // against `CGMainDisplayID` is needed. A Mac with the lid shut and no external monitor
+            // has no display in this list at all, which is a clearer error than an empty picker.
+            let displays: Vec<_> = displays.iter().collect();
+
+            if displays.is_empty() {
+                Err("this Mac reported no capturable displays".to_string())
+            } else {
+                Ok(displays)
             }
         };
 
@@ -485,10 +535,48 @@ fn main_display() -> Result<Retained<SCDisplay>> {
     unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&handler) };
 
     match receiver.recv_timeout(Duration::from_secs(10)) {
-        Ok(Ok(display)) => Ok(display),
+        Ok(Ok(displays)) => Ok(displays),
         Ok(Err(message)) => Err(anyhow!("{message}")),
         Err(_) => Err(anyhow!("ScreenCaptureKit did not answer the request for shareable content")),
     }
+}
+
+/// Turns ScreenCaptureKit's displays into what the viewer's picker shows.
+///
+/// The label is built here rather than in the viewer because only this side knows anything about
+/// the hardware: "Built-in Display" beside "Display 2" is recognisable, where two entries composed
+/// from a resolution are indistinguishable on the very common desk of a laptop beside an external
+/// monitor of the same size.
+fn describe_displays(displays: &[Retained<SCDisplay>]) -> Vec<DisplayOption> {
+    displays
+        .iter()
+        .enumerate()
+        .map(|(index, display)| {
+            // SAFETY: documented accessors on a live SCDisplay.
+            let (id, frame) = unsafe { (display.displayID(), display.frame()) };
+            let width = frame.size.width.max(0.0).round() as u32;
+            let height = frame.size.height.max(0.0).round() as u32;
+
+            // SAFETY: takes a CGDirectDisplayID and has no preconditions.
+            let built_in = unsafe { CGDisplayIsBuiltin(id) } != 0;
+            let name = if built_in {
+                "Built-in Display".to_string()
+            } else {
+                format!("Display {}", index + 1)
+            };
+
+            DisplayOption {
+                id,
+                label: format!("{name} ({width} x {height})"),
+                width,
+                height,
+                // Index rather than the origin: macOS puts the main display's origin at (0, 0), but
+                // so does a display arrangement being rebuilt after a hotplug, and ScreenCaptureKit
+                // ordering is the fact this module already relies on.
+                is_primary: index == 0,
+            }
+        })
+        .collect()
 }
 
 /// Silences an unused-import warning on a module that only touches the main thread indirectly.
@@ -526,6 +614,19 @@ impl FrameEncoder {
             // next to old tiles at the previous one looks like a rendering fault.
             self.force_full = true;
         }
+    }
+
+    /// Makes the next frame a whole one, whatever changed.
+    ///
+    /// **Required on a display switch, and the reason it is required is not obvious.** This encoder
+    /// finds changes by diffing against the previous frame, and two identical monitors — the common
+    /// office desk — give the *same* dimensions on both sides of a switch. So `encode_changes` would
+    /// diff the new display's pixels against the old display's and send only the tiles that happened
+    /// to differ, leaving fragments of the previous monitor on screen everywhere the two agreed. The
+    /// geometry check inside `encode_changes` cannot catch it, because nothing about the geometry
+    /// changed.
+    pub fn force_full_frame(&mut self) {
+        self.force_full = true;
     }
 
     /// The wire messages for everything that changed since the last call. Empty when nothing did.
@@ -767,6 +868,24 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(tile_rect(&messages[0]), (0, 0, 800, 600));
+    }
+
+    #[test]
+    fn a_forced_full_frame_resends_a_screen_whose_pixels_are_identical() {
+        // The display-switch case, and the reason `force_full_frame` exists rather than being left
+        // to the geometry check. Two same-sized monitors showing the same thing produce a frame this
+        // encoder cannot tell from the previous one, so without the flag a switch between them sends
+        // nothing at all and the viewer goes on showing the display it was already on.
+        let mut encoder = FrameEncoder::new(60);
+        let frame = flat_frame(600, 400, [10, 20, 30, 255]);
+        encoder.encode_changes(&frame);
+        assert!(encoder.encode_changes(&frame).is_empty());
+
+        encoder.force_full_frame();
+
+        let messages = encoder.encode_changes(&frame);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(tile_rect(&messages[0]), (0, 0, 600, 400));
     }
 
     #[test]

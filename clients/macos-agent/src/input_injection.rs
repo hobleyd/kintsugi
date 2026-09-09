@@ -388,9 +388,24 @@ impl InputInjector {
             ViewerInput::Key { hid, down } => self.key(*hid, *down),
             // Handled by the capture side, not here.
             ViewerInput::Quality { .. } => {}
+            // Both handled by the capture side, not here. A switch does reach this object, but as a
+            // `set_origin` call from the session loop once the new capture has started — the point
+            // space every coordinate below is in changes with the display, and this object cannot
+            // learn the new origin from the message alone.
+            ViewerInput::SelectDisplay { .. } => {}
             // A shell session's business, and a shell session has no injector at all.
             ViewerInput::Resize { .. } => {}
         }
+    }
+
+    /// Moves this injector onto a different display.
+    ///
+    /// Called when the viewer switches displays, because every coordinate it sends is relative to
+    /// whichever display is being captured while `CGEventPost` wants the global space — so the
+    /// origin is the whole of the conversion between them, and a switch that left it alone would
+    /// put every click on the previous monitor.
+    pub fn set_origin(&mut self, origin: CGPoint) {
+        self.origin = origin;
     }
 
     /// Lets go of everything the remote end was holding.

@@ -1,6 +1,6 @@
 [package]
 name = "kintsugi-agent"
-version = "0.8.1"
+version = "0.9.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Background agent that registers this Linux host with the patching system's host inventory."
@@ -66,7 +66,11 @@ rustls-native-certs = "0.8"
 # break the statically linked musl release CI ships — see the note on that in this file and the
 # module comment in screen_capture.rs. There is no Wayland path for the same reason: the portal route
 # needs PipeWire, which is C.
-x11rb = { version = "0.14", default-features = false, features = ["xtest", "xfixes"] }
+# "randr" for `GetMonitors`, which is how the display picker learns this host has more than one
+# monitor and where each one sits inside the root window. Pure Rust like the rest of x11rb — it is
+# request encoding and reply parsing, not a binding — so it costs the no-C-library invariant above
+# nothing, which is the only reason it is affordable here.
+x11rb = { version = "0.14", default-features = false, features = ["xtest", "xfixes", "randr"] }
 
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
 # "jpeg" alongside "png": png is the tray icon, jpeg is every remote control frame. Also brings

@@ -28,8 +28,10 @@
 //! importing the dmabuf, or capture stops working on exactly the GPU-accelerated compositors that
 //! most hosts run.
 
+use std::cell::Cell;
 use std::io::Write;
 use std::os::fd::OwnedFd;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -126,11 +128,27 @@ impl FrameSlot {
     }
 }
 
-/// Runs the capture until the stream ends or stdout closes.
+/// Runs the capture until the stream ends or stdout closes, re-linking whenever the administrator
+/// picks a different display.
 ///
 /// Blocks for the whole session: PipeWire's main loop must run on the thread that owns it, and this
 /// is the only thing this process does once the portal has been negotiated.
-pub fn run(fd: OwnedFd, node_id: u32, can_control_input: bool) -> Result<()> {
+///
+/// **A display switch is a fresh stream, not a re-target of the running one.** A PipeWire stream may
+/// only be touched from the thread driving its loop, and that thread is inside `mainloop.run()` for
+/// the whole session — so the switch arrives over PipeWire's own channel (whose callback runs *on*
+/// that thread), records the wanted node and quits the loop, and this function connects a new
+/// stream and runs it again. Two things fall out of that shape for free, and both would have needed
+/// deliberate work otherwise: the format is re-announced before the first frame of the new display,
+/// because each pass has its own writer thread and so its own "have I sent a format yet"; and the
+/// old stream is fully torn down before the new one links, so the compositor is never compositing
+/// two captures at once.
+pub fn run(
+    fd: OwnedFd,
+    initial_node_id: u32,
+    can_control_input: bool,
+    switch_requests: pw::channel::Receiver<u32>,
+) -> Result<()> {
     pw::init();
 
     let mainloop = pw::main_loop::MainLoopRc::new(None).context("creating the PipeWire main loop")?;
@@ -143,7 +161,30 @@ pub fn run(fd: OwnedFd, node_id: u32, can_control_input: bool) -> Result<()> {
         .connect_fd_rc(fd, None)
         .context("connecting to the PipeWire remote the portal opened")?;
 
-    stream_node(&mainloop, core, node_id, can_control_input)
+    // Set by the channel callback below and read after each pass. `Rc<Cell<_>>` rather than an
+    // atomic because both ends are on this one thread — the callback is attached to this loop, which
+    // is the whole reason it is allowed to call `quit`.
+    let requested: Rc<Cell<Option<u32>>> = Rc::new(Cell::new(None));
+
+    let switch_target = Rc::clone(&requested);
+    let switch_loop = mainloop.clone();
+    let _switch_receiver = switch_requests.attach(mainloop.loop_(), move |node_id| {
+        switch_target.set(Some(node_id));
+        switch_loop.quit();
+    });
+
+    let mut node_id = initial_node_id;
+
+    loop {
+        stream_node(&mainloop, core.clone(), node_id, can_control_input)?;
+
+        // `None` means the loop quit for the other reason — stdout closed, or the stream failed —
+        // which is the end of the session rather than a switch.
+        let Some(next) = requested.take() else { return Ok(()) };
+
+        eprintln!("remote control: switching capture from PipeWire node {node_id} to {next}");
+        node_id = next;
+    }
 }
 
 /// Streams one PipeWire node to stdout until it ends.
@@ -312,6 +353,10 @@ pub fn stream_node(
                     height: format.height,
                     stride,
                     can_control_input,
+                    // Carried on every frame's format so the agent can tell a switch that has taken
+                    // effect from one still in flight — see `FormatMessage::node_id`. Two displays
+                    // of the same size would otherwise be indistinguishable on the wire.
+                    node_id,
                 },
             });
         })
@@ -527,7 +572,7 @@ mod tests {
         // The whole point of a slot over a queue: an agent that falls behind must see the current
         // screen when it catches up, not work through a backlog of stale ones.
         let slot = FrameSlot::new();
-        let format = FormatMessage { width: 2, height: 1, stride: 8, can_control_input: true };
+        let format = FormatMessage { width: 2, height: 1, stride: 8, can_control_input: true, node_id: 7 };
 
         slot.put(Frame { bytes: vec![1], format: format.clone() });
         slot.put(Frame { bytes: vec![2], format: format.clone() });
@@ -553,7 +598,7 @@ mod tests {
         let slot = FrameSlot::new();
         slot.put(Frame {
             bytes: vec![9],
-            format: FormatMessage { width: 1, height: 1, stride: 4, can_control_input: false },
+            format: FormatMessage { width: 1, height: 1, stride: 4, can_control_input: false, node_id: 7 },
         });
         slot.finish();
 
@@ -585,8 +630,12 @@ mod tests {
         // A resolution change mid-session renegotiates the stream, and a frame the agent lays out
         // with the previous stride is a diagonally sheared picture — so the repeat is load-bearing,
         // while repeating it per frame would just be noise.
-        let first = FormatMessage { width: 2, height: 1, stride: 8, can_control_input: true };
-        let resized = FormatMessage { width: 4, height: 1, stride: 16, can_control_input: true };
+        let first = FormatMessage { width: 2, height: 1, stride: 8, can_control_input: true, node_id: 7 };
+        let resized = FormatMessage { width: 4, height: 1, stride: 16, can_control_input: true, node_id: 7 };
+        // The same pixels from a different node, which is what a display switch between two
+        // identical monitors produces: the format has to be re-sent or the agent would never learn
+        // the picture is now of somewhere else.
+        let switched = FormatMessage { width: 4, height: 1, stride: 16, can_control_input: true, node_id: 9 };
 
         // Driven from a fixed list rather than through the slot, which is newest-wins and would
         // collapse these three into one.
@@ -596,6 +645,7 @@ mod tests {
                 Frame { bytes: vec![1], format: first.clone() },
                 Frame { bytes: vec![2], format: first },
                 Frame { bytes: vec![3], format: resized },
+                Frame { bytes: vec![4], format: switched },
             ]
             .into_iter(),
             &mut written,
@@ -611,6 +661,10 @@ mod tests {
                 // No second format: nothing about the layout changed.
                 wire::KIND_FRAME,
                 // The resize does re-announce it.
+                wire::KIND_FORMAT,
+                wire::KIND_FRAME,
+                // And so does a switch to a same-sized display, which is the whole reason the node
+                // id is part of this message.
                 wire::KIND_FORMAT,
                 wire::KIND_FRAME,
             ]

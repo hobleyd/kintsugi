@@ -16,7 +16,7 @@
 use anyhow::Result;
 
 use crate::input_injection::InputInjector;
-use crate::remote_protocol::ViewerInput;
+use crate::remote_protocol::{DisplayOption, ViewerInput};
 use crate::screen_capture::{self, DisplayGeometry, Frame, ScreenCapture};
 use crate::wayland_backend::WaylandBackend;
 
@@ -56,7 +56,14 @@ pub fn unavailable_reason() -> Option<String> {
 
 /// The capture and input pair for whichever session this host is running.
 pub enum Backend {
-    X11 { capture: ScreenCapture, injector: InputInjector },
+    X11 {
+        capture: ScreenCapture,
+        injector: InputInjector,
+        /// Kept so a display switch can restart the capture with the same pixel budget. The X11
+        /// path has to rebuild it — a different monitor is a different region of the root window
+        /// and a different scale — where the Wayland one only asks the helper to re-target.
+        max_image_width: u32,
+    },
     Wayland(WaylandBackend),
 }
 
@@ -69,16 +76,75 @@ impl Backend {
         // Capture first: it is the half that fails on a host with no display, and failing there
         // gives the better message. An injector that cannot open a connection on a host whose
         // capture just succeeded is a genuinely odd state and says so.
-        let capture = ScreenCapture::start(max_image_width)?;
-        let injector = InputInjector::new()?;
+        //
+        // `None`: whichever display this host considers primary. The viewer asks for a different
+        // one later through `select_display`.
+        let capture = ScreenCapture::start(max_image_width, None)?;
+        let mut injector = InputInjector::new()?;
+        // XTEST positions in root coordinates and the capture may be a crop of the root window, so
+        // the injector has to be told where that crop starts before the first click arrives.
+        injector.set_origin(capture.geometry.origin_x, capture.geometry.origin_y);
 
-        Ok(Self::X11 { capture, injector })
+        Ok(Self::X11 { capture, injector, max_image_width })
     }
 
     pub fn geometry(&self) -> DisplayGeometry {
         match self {
             Self::X11 { capture, .. } => capture.geometry,
             Self::Wayland(wayland) => wayland.geometry(),
+        }
+    }
+
+    /// Every display this session could show, for the viewer's picker.
+    ///
+    /// The two backends mean subtly different things by this and the difference is worth knowing.
+    /// On X11 it is the monitors RandR reports, plus the whole virtual screen, because the root
+    /// window genuinely spans every output. On Wayland it is **the outputs the host's user agreed to
+    /// share** through the portal's own picker — so a Wayland host may honestly offer one entry on a
+    /// two-monitor desk, and no amount of asking will change that from here.
+    pub fn displays(&self) -> Vec<DisplayOption> {
+        match self {
+            Self::X11 { capture, .. } => capture.displays(),
+            Self::Wayland(wayland) => wayland.displays(),
+        }
+    }
+
+    pub fn active_display_id(&self) -> u32 {
+        match self {
+            Self::X11 { capture, .. } => capture.active_display_id(),
+            Self::Wayland(wayland) => wayland.active_display_id(),
+        }
+    }
+
+    /// Points this session at another display.
+    ///
+    /// **The two backends differ in when the change takes effect, and the caller must not assume
+    /// either.** X11 rebuilds the capture here, so [`Self::geometry`] and
+    /// [`Self::active_display_id`] have already moved by the time this returns. Wayland only *asks*
+    /// — the helper renegotiates a PipeWire stream and reports the new format when it has one — so
+    /// both stay where they were for a few frames. That is why the session loop announces the
+    /// geometry by comparing it against what it last sent rather than immediately after this call.
+    pub fn select_display(&mut self, id: u32) -> Result<()> {
+        match self {
+            Self::X11 { capture, injector, max_image_width } => {
+                if id == capture.active_display_id() {
+                    return Ok(());
+                }
+
+                // Started before the old one is dropped, so a monitor unplugged since the picker was
+                // drawn leaves the session watching where it was rather than watching nothing.
+                let next = ScreenCapture::start(*max_image_width, Some(id))?;
+
+                // Before the origin moves, not after: a modifier or a button still held when the
+                // pointer space changes underneath it would stay held with nothing on either screen
+                // to explain it.
+                injector.release_all();
+                injector.set_origin(next.geometry.origin_x, next.geometry.origin_y);
+
+                *capture = next;
+                Ok(())
+            }
+            Self::Wayland(wayland) => wayland.select_display(id),
         }
     }
 

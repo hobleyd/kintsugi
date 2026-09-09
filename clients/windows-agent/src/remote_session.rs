@@ -238,14 +238,19 @@ fn serve(
     session_id: &str,
     requested_by: &str,
 ) -> Result<()> {
-    let mut capture = ScreenCapture::start(DEFAULT_MAX_IMAGE_WIDTH)?;
-    let mut encoder = FrameEncoder::new(DEFAULT_JPEG_QUALITY);
-    let mut injector = InputInjector::new(capture.geometry.point_width, capture.geometry.point_height);
+    // `None`: the primary display, which is what a session captured before the viewer could choose.
+    // The viewer asks for a different one by echoing back a `DisplayOption::id`.
+    let mut requested_display: Option<u32> = None;
 
-    write(ipc, &IpcMessage::DisplayInfo {
-        json: serde_json::to_string(&capture.geometry.to_display_info())
-            .context("could not describe the display")?,
-    })?;
+    let mut capture = ScreenCapture::start(DEFAULT_MAX_IMAGE_WIDTH, requested_display)?;
+    let mut encoder = FrameEncoder::new(DEFAULT_JPEG_QUALITY);
+    let mut injector = InputInjector::new(
+        (capture.geometry.origin_x, capture.geometry.origin_y),
+        capture.geometry.point_width,
+        capture.geometry.point_height,
+    );
+
+    announce_display(ipc, &capture)?;
 
     // The visible indicator, on its own thread with its own window — see the module note on why it
     // cannot be this thread and why it stays on the startup desktop.
@@ -279,6 +284,28 @@ fn serve(
                                     encoder.set_quality(quality);
                                 }
                             }
+                            ViewerInput::SelectDisplay { id } if id != capture.active_display_id() => {
+                                // Remembered as well as acted on, because the desktop-switch
+                                // rebuild below starts a *fresh* capture: without this, answering a
+                                // UAC prompt would quietly put the session back on the primary
+                                // display, which reads as the switch having been undone by nothing.
+                                requested_display = Some(id);
+
+                                // A failed switch is reported and the session carries on watching
+                                // where it was. Ending it instead would cost a granted session — and
+                                // the host's user another dialog — over a monitor unplugged a
+                                // second ago.
+                                if let Err(err) = rebuild_capture(
+                                    ipc,
+                                    &mut capture,
+                                    &mut injector,
+                                    &mut encoder,
+                                    requested_display,
+                                ) {
+                                    logging::warn(&format!("could not switch to display {id}: {err:#}"));
+                                }
+                            }
+                            ViewerInput::SelectDisplay { .. } => {}
                             other => injector.apply(&other),
                         }
                     }
@@ -301,20 +328,11 @@ fn serve(
             // `FrameEncoder` sends one by construction — the alternative would be diffing the
             // secure desktop against the last frame of the user's.
             if desktop.follow().unwrap_or(false) {
-                match ScreenCapture::start(DEFAULT_MAX_IMAGE_WIDTH) {
-                    Ok(rebuilt) => {
-                        capture = rebuilt;
-                        encoder = FrameEncoder::new(DEFAULT_JPEG_QUALITY);
-                        injector = InputInjector::new(
-                            capture.geometry.point_width,
-                            capture.geometry.point_height,
-                        );
-
-                        write(ipc, &IpcMessage::DisplayInfo {
-                            json: serde_json::to_string(&capture.geometry.to_display_info())
-                                .context("could not describe the display")?,
-                        })?;
-
+                // `requested_display`, not `None`: the display the administrator picked has to
+                // survive a desktop switch, or answering a UAC prompt would drop the session back
+                // onto the primary monitor for no reason a reader could see.
+                match rebuild_capture(ipc, &mut capture, &mut injector, &mut encoder, requested_display) {
+                    Ok(()) => {
                         if remote_desktop::is_secure_desktop(desktop.name()) {
                             logging::info(remote_desktop::secure_desktop_notice());
                         }
@@ -322,8 +340,12 @@ fn serve(
                     Err(err) => {
                         // The secure desktop occasionally refuses a capture while it is coming up.
                         // Skipping this frame and trying again is right; ending the session because
-                        // a UAC prompt appeared would be the worst possible response.
-                        logging::warn(&format!("could not capture the new desktop yet: {err:#}"));
+                        // a UAC prompt appeared would be the worst possible response. The wording is
+                        // deliberately neutral about which half failed: `rebuild_capture` also
+                        // announces the new geometry, so a broken pipe reaches here too — and that
+                        // one ends the session a moment later at the read at the top of the loop
+                        // rather than needing to be propagated from here.
+                        logging::warn(&format!("could not move onto the new desktop yet: {err:#}"));
                         continue;
                     }
                 }
@@ -353,6 +375,61 @@ fn serve(
     write(ipc, &IpcMessage::EndedByHost { session_id: session_id.to_string(), reason })?;
 
     Ok(())
+}
+
+/// Starts a capture and puts the session onto it, replacing whatever was running.
+///
+/// **Used for both of the reasons a capture is replaced mid-session, which is why it is one
+/// function.** Windows switching desktops invalidates the device contexts the old capture was built
+/// from, and the administrator picking a different display needs a differently-sized DIB; both end
+/// up here, and both need the same four things afterwards in the same order.
+///
+/// The new capture starts *before* the old one is dropped, so a display unplugged since the picker
+/// was drawn leaves the session watching where it was rather than watching nothing. Everything the
+/// remote end is holding is released, because the pointer space is about to change underneath it.
+/// The injector moves onto the new display's origin, since every coordinate the viewer sends is
+/// relative to whichever display it is looking at. And the encoder is told to send a whole frame —
+/// see `FrameEncoder::force_full_frame` for why its own geometry check is not enough.
+fn rebuild_capture(
+    ipc: &mut PipeConnection,
+    capture: &mut ScreenCapture,
+    injector: &mut InputInjector,
+    encoder: &mut FrameEncoder,
+    display_id: Option<u32>,
+) -> Result<()> {
+    let next = ScreenCapture::start(DEFAULT_MAX_IMAGE_WIDTH, display_id)?;
+
+    injector.release_all();
+    injector.set_origin(
+        (next.geometry.origin_x, next.geometry.origin_y),
+        next.geometry.point_width,
+        next.geometry.point_height,
+    );
+
+    *capture = next;
+    encoder.force_full_frame();
+
+    announce_display(ipc, capture)
+}
+
+/// Tells the viewer what it is looking at: the geometry, and every display it could ask for instead.
+///
+/// Sent before the first tile and again after every rebuild. **Resending the whole message is what
+/// makes a switch visible to the viewer**, and it has to be, because the size is frequently
+/// unchanged across one — two identical monitors is the ordinary office desk — so the active
+/// display's id is the only field that moved.
+fn announce_display(ipc: &mut PipeConnection, capture: &ScreenCapture) -> Result<()> {
+    let info = capture
+        .geometry
+        .to_display_info()
+        .showing(capture.displays(), capture.active_display_id());
+
+    write(
+        ipc,
+        &IpcMessage::DisplayInfo {
+            json: serde_json::to_string(&info).context("could not describe the display")?,
+        },
+    )
 }
 
 fn write(ipc: &mut PipeConnection, message: &IpcMessage) -> Result<()> {

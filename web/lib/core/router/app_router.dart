@@ -16,6 +16,8 @@ import '../../presentation/settings/patching_policy_screen.dart';
 import '../../presentation/settings/vanta_screen.dart';
 import '../../presentation/shell/app_shell.dart';
 import '../../presentation/upgrade_scripts/upgrade_scripts_screen.dart';
+import '../di/locator.dart';
+import '../platform/full_screen.dart';
 import 'bloc_listenable.dart';
 
 /// Every path the UI has. Named constants because the sidebar, the redirects and the deep links
@@ -98,7 +100,13 @@ GoRouter createRouter(SessionBloc sessionBloc) {
       GoRoute(path: Routes.unavailable, builder: (_, _) => const ServerUnavailableScreen()),
       GoRoute(path: Routes.signIn, builder: (_, _) => const SignInScreen()),
       ShellRoute(
-        builder: (context, state, child) => AppShell(location: state.uri.path, child: child),
+        builder: (context, state, child) => AppShell(
+          location: state.uri.path,
+          // So the sidebar steps aside for the remote-control viewer's full-screen mode. Passed
+          // here rather than looked up inside the shell so a widget test can pump it without one.
+          fullScreen: locator<FullScreenController>(),
+          child: child,
+        ),
         routes: [
           GoRoute(path: Routes.hosts, builder: (_, _) => const HostsScreen()),
           GoRoute(
@@ -109,6 +117,9 @@ GoRouter createRouter(SessionBloc sessionBloc) {
             builder: (context, state) => RemoteControlScreen(
               hostId: state.pathParameters['hostId']!,
               hostname: state.uri.queryParameters['hostname'],
+              // The viewer asks for full screen as it opens: a remote desktop inside a 240px-inset
+              // panel is the host's screen at half the size it could be.
+              fullScreen: locator<FullScreenController>(),
             ),
           ),
           GoRoute(
@@ -119,6 +130,9 @@ GoRouter createRouter(SessionBloc sessionBloc) {
               hostId: state.pathParameters['hostId']!,
               kind: RemoteControlSessionKind.shell,
               hostname: state.uri.queryParameters['hostname'],
+              // A terminal wants the height as much as a desktop wants the width, and both are the
+              // same screen — so the toggle is offered on this route too.
+              fullScreen: locator<FullScreenController>(),
             ),
           ),
           GoRoute(

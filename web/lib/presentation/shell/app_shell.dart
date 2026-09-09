@@ -6,6 +6,7 @@ import '../../core/di/locator.dart';
 import '../../core/router/app_router.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/theme/kintsugi_palette.dart';
+import '../../core/platform/full_screen.dart';
 import '../../core/theme/theme_cubit.dart';
 import '../../domain/usecases/server_info_usecases.dart';
 import '../session/session_bloc.dart';
@@ -17,13 +18,36 @@ import 'server_version_cubit.dart';
 /// rebuilds only the page: the sidebar keeps its scroll position and does not flicker, which is
 /// most of what "no full page refresh" means in practice.
 class AppShell extends StatelessWidget {
-  const AppShell({super.key, required this.location, required this.child});
+  const AppShell({super.key, required this.location, required this.child, this.fullScreen});
 
   final String location;
   final Widget child;
 
+  /// Watched so the sidebar gets out of the way in full screen — which one screen asks for, the
+  /// remote-control viewer, where the host's desktop is the whole point of the page and 240px of
+  /// navigation beside it is width taken from it.
+  ///
+  /// Nullable, and passed in rather than looked up: a null controller is "never full screen", which
+  /// is what a widget test pumping this shell wants without having to register anything. The real
+  /// one comes from the router — see `app_router.dart`.
+  final FullScreenController? fullScreen;
+
   @override
-  Widget build(BuildContext context) => BlocProvider(
+  Widget build(BuildContext context) {
+    final fullScreen = this.fullScreen;
+    if (fullScreen == null) return _build(context, withSidebar: true);
+
+    // A stream rather than the screen telling this shell, because full screen can be *left* without
+    // anything in this app being asked: Escape and F11 both do it, and a shell that trusted its own
+    // last request would keep the sidebar hidden on a page that was no longer full-screen.
+    return StreamBuilder<bool>(
+      initialData: fullScreen.isFullScreen,
+      stream: fullScreen.onChanged,
+      builder: (context, snapshot) => _build(context, withSidebar: snapshot.data != true),
+    );
+  }
+
+  Widget _build(BuildContext context, {required bool withSidebar}) => BlocProvider(
         // Provided here rather than in main.dart beside SessionBloc: the route it reads is gated,
         // so it must not be asked for until the router has decided this browser may use the app —
         // which is exactly when this shell is first built. The ShellRoute keeps this element
@@ -35,7 +59,7 @@ class AppShell extends StatelessWidget {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                _Sidebar(location: location),
+                if (withSidebar) _Sidebar(location: location),
                 Expanded(child: child),
               ],
             ),

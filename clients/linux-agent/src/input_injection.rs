@@ -253,6 +253,16 @@ pub struct InputInjector {
     connection: RustConnection,
     root: Window,
 
+    /// The top-left of the display being captured, inside the root window.
+    ///
+    /// XTEST positions a pointer in **root** coordinates, which on a multi-monitor X11 session span
+    /// every output at once, while the viewer sends coordinates relative to whichever display it is
+    /// looking at. This is the whole of the conversion between the two — zero while the session is
+    /// showing the entire virtual screen, and the monitor's own origin otherwise. See
+    /// [`Self::set_origin`].
+    origin_x: f64,
+    origin_y: f64,
+
     /// Every key currently down, as a HID usage, and every button.
     ///
     /// Tracked only so they can be released when the session ends. X11 needs no modifier state on
@@ -283,7 +293,16 @@ impl InputInjector {
 
         let root = connection.setup().roots[screen_index].root;
 
-        Ok(Self { connection, root, keys_down: Vec::new(), buttons_down: [false; 3] })
+        Ok(Self {
+            connection,
+            root,
+            // The whole virtual screen until a session says otherwise, which is what `Backend::start`
+            // then does with the region its capture actually chose.
+            origin_x: 0.0,
+            origin_y: 0.0,
+            keys_down: Vec::new(),
+            buttons_down: [false; 3],
+        })
     }
 
     pub fn apply(&mut self, input: &ViewerInput) {
@@ -293,6 +312,9 @@ impl InputInjector {
             ViewerInput::Key { hid, down } => self.key(*hid, *down),
             // The capture side's business, not this one's.
             ViewerInput::Quality { .. } => Ok(()),
+            // Also the capture side's. A switch does reach this object, but as a `set_origin` call
+            // once the new region is known — the message alone does not say where that region is.
+            ViewerInput::SelectDisplay { .. } => Ok(()),
             // A shell session's business, and a shell session has no injector at all.
             ViewerInput::Resize { .. } => Ok(()),
         };
@@ -330,11 +352,22 @@ impl InputInjector {
         let _ = self.connection.flush();
     }
 
+    /// Moves this injector onto the display the session is now capturing.
+    ///
+    /// Called when the viewer switches displays. Every coordinate it sends is relative to the
+    /// display it is watching, so a switch that left this alone would put every click on the
+    /// monitor the administrator just navigated away from.
+    pub fn set_origin(&mut self, origin_x: f64, origin_y: f64) {
+        self.origin_x = origin_x;
+        self.origin_y = origin_y;
+    }
+
     fn pointer(&mut self, action: PointerAction, x: f64, y: f64, button: MouseButton) -> Result<()> {
-        // Clamped to the screen, and rounded rather than truncated: X11 takes integer pixels and
-        // truncation would bias every movement up and to the left by up to a pixel.
-        let x = x.round().clamp(0.0, f64::from(i16::MAX)) as i16;
-        let y = y.round().clamp(0.0, f64::from(i16::MAX)) as i16;
+        // Into root coordinates first — see the origin fields — then clamped and rounded rather than
+        // truncated: X11 takes integer pixels and truncation would bias every movement up and to the
+        // left by up to a pixel.
+        let x = (self.origin_x + x).round().clamp(0.0, f64::from(i16::MAX)) as i16;
+        let y = (self.origin_y + y).round().clamp(0.0, f64::from(i16::MAX)) as i16;
 
         match action {
             PointerAction::Move => self.fake_input(MOTION_NOTIFY, 0, x, y),

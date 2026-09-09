@@ -143,6 +143,110 @@ void main() {
       );
     });
 
+    /// The exact JSON the agents' own `display_info_names_the_displays_under_the_names_the_viewer_reads`
+    /// test asserts they emit. Same field names, same shape — the other half of the pair, and the
+    /// only check that exists, since the server relays this message without parsing it.
+    const agentDisplayMessage = {
+      'type': 'display',
+      'pointWidth': 2560.0,
+      'pointHeight': 1440.0,
+      'imageWidth': 1280,
+      'imageHeight': 720,
+      'canControlInput': true,
+      'displays': [
+        {
+          'id': 1,
+          'label': 'Built-in Retina Display (2560 x 1440)',
+          'width': 2560,
+          'height': 1440,
+          'isPrimary': true,
+        },
+        {
+          'id': 7,
+          'label': 'Display 2 (1920 x 1080)',
+          'width': 1920,
+          'height': 1080,
+          'isPrimary': false,
+        },
+      ],
+      'activeDisplayId': 7,
+    };
+
+    test('reads the display list and which one is being shown', () {
+      final geometry =
+          remoteTextUpdateFromJson(jsonEncode(agentDisplayMessage))! as RemoteDisplayGeometry;
+
+      expect(geometry.activeDisplayId, 7);
+      expect(geometry.hasDisplayChoice, isTrue);
+      expect(geometry.displays.map((display) => display.id), [1, 7]);
+      expect(geometry.displays.first.label, 'Built-in Retina Display (2560 x 1440)');
+      expect(geometry.displays.first.isPrimary, isTrue);
+      expect(geometry.displays.last.isPrimary, isFalse);
+      expect(geometry.displays.last.width, 1920);
+    });
+
+    test('offers no picker for an agent that sent no display list', () {
+      // Every agent from before display switching. Absent has to read as "offer nothing" rather
+      // than as one invented entry, or the picker would appear on hosts that cannot switch.
+      final geometry = remoteTextUpdateFromJson(jsonEncode({
+            'type': 'display',
+            'pointWidth': 1512.0,
+            'pointHeight': 982.0,
+            'imageWidth': 1512,
+            'imageHeight': 982,
+          }))! as RemoteDisplayGeometry;
+
+      expect(geometry.displays, isEmpty);
+      expect(geometry.activeDisplayId, 0);
+      expect(geometry.hasDisplayChoice, isFalse);
+    });
+
+    test('offers no picker for a host with one display', () {
+      // One display is not a choice, and a dropdown that can only be set to where it already is is
+      // a control that does nothing.
+      final geometry = remoteTextUpdateFromJson(jsonEncode({
+            ...agentDisplayMessage,
+            'displays': [agentDisplayMessage['displays']! as List<Object?>].first.take(1).toList(),
+            'activeDisplayId': 1,
+          }))! as RemoteDisplayGeometry;
+
+      expect(geometry.displays, hasLength(1));
+      expect(geometry.hasDisplayChoice, isFalse);
+    });
+
+    test('tells two same-sized displays apart, which nothing else in this message does', () {
+      // **The case that decides whether a switch is visible at all.** Two identical monitors mean
+      // every size in this message is unchanged across a switch, so `activeDisplayId` is the only
+      // field that moved — and it is in `props` for exactly that reason. Without it the state
+      // compares equal, nothing is emitted, and the previous display's tiles are never cleared.
+      final onFirst = remoteTextUpdateFromJson(
+        jsonEncode({...agentDisplayMessage, 'activeDisplayId': 1}),
+      )!;
+      final onSecond = remoteTextUpdateFromJson(
+        jsonEncode({...agentDisplayMessage, 'activeDisplayId': 7}),
+      )!;
+
+      expect(onFirst, isNot(equals(onSecond)));
+    });
+
+    test('keeps the readable entries of a display list with a broken one in it', () {
+      // A malformed geometry drops the whole message, because there would be nothing to draw into.
+      // A malformed *entry* only costs one row of a picker, so the rest are kept — the same "one odd
+      // message must not end a session" rule the rest of this mapper follows.
+      final geometry = remoteTextUpdateFromJson(jsonEncode({
+            ...agentDisplayMessage,
+            'displays': [
+              {'label': 'no id at all', 'width': 1, 'height': 1},
+              {'id': 7, 'width': 1920, 'height': 1080, 'isPrimary': false},
+            ],
+          }))! as RemoteDisplayGeometry;
+
+      expect(geometry.displays, hasLength(1));
+      expect(geometry.displays.single.id, 7);
+      // A blank label is unclickable in the sense that matters — nobody can tell what it is.
+      expect(geometry.displays.single.label, 'Display 7');
+    });
+
     test('ignores a message type it has never heard of', () {
       // A newer agent must not be able to break a session by mentioning something new.
       expect(remoteTextUpdateFromJson(jsonEncode({'type': 'clipboard', 'text': 'x'})), isNull);
@@ -179,6 +283,18 @@ void main() {
       expect(
         remoteInputToJson(const RemoteKeyInput(usbHidUsage: 0x00070004, isDown: true)),
         {'type': 'key', 'hid': 0x00070004, 'down': true},
+      );
+    });
+
+    test('a display selection is spelled the way the agent parses it', () {
+      // The agents' own `parses_a_display_selection` reads exactly this, and their
+      // `a_display_selection_is_not_spelled_the_same_as_the_geometry_message` asserts that
+      // "display" — the geometry message's own type, travelling the other way — is *not* accepted
+      // as one. Both directions have to keep those two strings apart, and this is the only check on
+      // this side.
+      expect(
+        remoteInputToJson(const RemoteDisplaySelection(7)),
+        {'type': 'select-display', 'id': 7},
       );
     });
 

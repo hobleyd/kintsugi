@@ -34,7 +34,7 @@ use crate::logging;
 use crate::remote_ipc::{self, FrameReader, IpcConnection, IpcFrame, IpcMessage};
 use crate::remote_protocol::{parse_viewer_input, ConsentOutcome, ViewerInput};
 use crate::screen_capture::{
-    FrameEncoder, DEFAULT_JPEG_QUALITY, DEFAULT_MAX_FPS, DEFAULT_MAX_IMAGE_WIDTH,
+    DisplayGeometry, FrameEncoder, DEFAULT_JPEG_QUALITY, DEFAULT_MAX_FPS, DEFAULT_MAX_IMAGE_WIDTH,
 };
 use crate::tray_menu;
 
@@ -103,6 +103,16 @@ struct ActiveSession {
     /// a bigger share of the interval than either of theirs.
     next_frame_at: Instant,
     started: Instant,
+
+    /// The geometry and display last sent to the viewer.
+    ///
+    /// **Compared against the backend every tick rather than announced when something asks for a
+    /// change, and that is forced by Wayland.** A switch there is asynchronous — the helper
+    /// renegotiates a PipeWire stream and the frames keep coming from the old display until it has
+    /// — so there is no moment after `select_display` at which the new geometry is known. The same
+    /// comparison also catches a monitor mode change or a hotplug mid-session, which nothing
+    /// announced before.
+    announced: (DisplayGeometry, u32),
 }
 
 fn serve(mut ipc: IpcConnection) -> Result<()> {
@@ -138,6 +148,13 @@ fn serve(mut ipc: IpcConnection) -> Result<()> {
         }
 
         if let Some(session) = active.as_mut() {
+            // Before capturing, so a geometry the viewer has not been told about is never the
+            // geometry a tile is laid out against. See `ActiveSession::announced`.
+            if (session.backend.geometry(), session.backend.active_display_id()) != session.announced {
+                session.encoder.force_full_frame();
+                announce_display(&mut ipc, session)?;
+            }
+
             if Instant::now() >= session.next_frame_at {
                 session.next_frame_at = Instant::now() + frame_interval;
 
@@ -181,16 +198,12 @@ fn handle(
             }
 
             match start(&session_id, &requested_by) {
-                Ok(session) => {
+                Ok(mut session) => {
                     // Sent only now, and only from a started session, because `can_control_input`
                     // is not knowable until the portal has answered. Announcing the geometry any
                     // earlier would mean claiming a Wayland host was drivable and then finding out
                     // it was not, with nothing on the wire able to correct it.
-                    let geometry = session.backend.geometry();
-                    let display = geometry.to_display_info(session.backend.can_control_input());
-                    write(ipc, &IpcMessage::DisplayInfo {
-                        json: serde_json::to_string(&display).context("could not describe the display")?,
-                    })?;
+                    announce_display(ipc, &mut session)?;
                     *active = Some(session);
                 }
                 Err(err) => {
@@ -218,6 +231,19 @@ fn handle(
                         session.encoder.set_quality(quality);
                     }
                 }
+                ViewerInput::SelectDisplay { id } => {
+                    // A failed switch is reported and the session carries on watching where it was.
+                    // Ending it instead would cost the administrator a granted session — and the
+                    // host's user another dialog — over a monitor unplugged a second ago.
+                    if let Err(err) = session.backend.select_display(id) {
+                        logging::warn(&format!("could not switch to display {id}: {err:#}"));
+                    } else {
+                        // Whatever arrives next is a different screen, and on two identical
+                        // monitors it is the same size — so nothing but this makes the encoder send
+                        // it. See `FrameEncoder::force_full_frame`.
+                        session.encoder.force_full_frame();
+                    }
+                }
                 other => session.backend.apply(&other),
             }
 
@@ -240,6 +266,31 @@ fn handle(
             Ok(())
         }
     }
+}
+
+/// Tells the viewer what it is looking at: the geometry, and every display it could ask for instead.
+///
+/// Sent before the first tile and again whenever either changes. **Resending the whole message is
+/// what makes a switch visible to the viewer**, and it has to be, because the size is frequently
+/// unchanged across one — two identical monitors is the ordinary desk — so the active display's id
+/// is the only field that moved.
+fn announce_display(ipc: &mut IpcConnection, session: &mut ActiveSession) -> Result<()> {
+    let geometry = session.backend.geometry();
+    let active_display_id = session.backend.active_display_id();
+
+    let display = geometry
+        .to_display_info(session.backend.can_control_input())
+        .showing(session.backend.displays(), active_display_id);
+
+    write(
+        ipc,
+        &IpcMessage::DisplayInfo {
+            json: serde_json::to_string(&display).context("could not describe the display")?,
+        },
+    )?;
+
+    session.announced = (geometry, active_display_id);
+    Ok(())
 }
 
 /// Asks the person at the keyboard, and turns their answer into the protocol's own vocabulary.
@@ -293,6 +344,21 @@ fn start(session_id: &str, requested_by: &str) -> Result<ActiveSession> {
 
     Ok(ActiveSession {
         session_id: session_id.to_string(),
+        // Deliberately a geometry no backend can report — a zero-sized display with an id of
+        // `u32::MAX` — so the first comparison in the loop always announces. `announce_display` is
+        // called explicitly before the session goes live anyway; this is what keeps the two from
+        // disagreeing if that call ever moves.
+        announced: (
+            DisplayGeometry {
+                origin_x: 0.0,
+                origin_y: 0.0,
+                point_width: 0.0,
+                point_height: 0.0,
+                image_width: 0,
+                image_height: 0,
+            },
+            u32::MAX,
+        ),
         backend,
         encoder: FrameEncoder::new(DEFAULT_JPEG_QUALITY),
         next_frame_at: Instant::now(),

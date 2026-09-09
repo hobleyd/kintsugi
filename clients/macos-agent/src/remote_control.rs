@@ -589,8 +589,10 @@ fn run_session(
     stop: &Arc<AtomicBool>,
     outbound: &Sender<Outbound>,
 ) -> Result<()> {
-    let capture = ScreenCapture::start(DEFAULT_MAX_IMAGE_WIDTH).context("could not start capturing this Mac's screen")?;
-    let geometry = capture.geometry;
+    // `None`: whichever display this Mac considers main. The viewer picks a different one later by
+    // echoing back a `DisplayOption::id`, which is what `switch_display` below acts on.
+    let mut capture = ScreenCapture::start(DEFAULT_MAX_IMAGE_WIDTH, None)
+        .context("could not start capturing this Mac's screen")?;
 
     let mut socket = connect_session_socket(config, serial_number, identity, session_id)?;
     set_nonblocking(&socket)?;
@@ -602,15 +604,18 @@ fn run_session(
     logging::info(&format!("remote control session {session_id} started for {requested_by}"));
 
     // The viewer needs the geometry before the first tile, or it has nothing to draw into and no
-    // way to convert a click back into a screen position.
-    let display_info = serde_json::to_string(&geometry.to_display_info()).context("could not describe the display")?;
+    // way to convert a click back into a screen position. It carries the display list too, which is
+    // what puts the picker in front of the administrator.
     // Queued rather than `send`, for the same reason as the control socket: this one is non-blocking
     // too, and a WouldBlock here would abandon a session before its first frame.
-    write_queued(&mut socket, Message::text(display_info)).context("could not send the display geometry to the viewer")?;
+    announce_display(&mut socket, &capture).context("could not send the display geometry to the viewer")?;
 
     // None when Accessibility is missing. The session still runs — the administrator can see the
     // screen, which is most of what a support call needs — and the dialog already said so.
-    let mut injector = InputInjector::new(CGPoint { x: geometry.origin_x, y: geometry.origin_y });
+    let mut injector = InputInjector::new(CGPoint {
+        x: capture.geometry.origin_x,
+        y: capture.geometry.origin_y,
+    });
     if injector.is_none() {
         logging::warn("remote input is unavailable: could not create a CoreGraphics event source");
     }
@@ -632,10 +637,26 @@ fn run_session(
             break "the session was ended on the host".to_string();
         }
 
-        match pump_input(&mut socket, injector.as_mut(), &mut encoder) {
+        let mut requested_display = None;
+
+        match pump_input(&mut socket, injector.as_mut(), &mut encoder, &mut requested_display) {
             Ok(true) => {}
             Ok(false) => break "the viewer disconnected".to_string(),
             Err(err) => break format!("{err:#}"),
+        }
+
+        if let Some(id) = requested_display {
+            // A failed switch is reported and the session carries on watching where it was. Ending
+            // it instead would cost the administrator a granted session — and another dialog in
+            // front of the host's user — over a monitor that was unplugged a second ago.
+            match switch_display(&mut socket, &mut capture, injector.as_mut(), &mut encoder, id) {
+                Ok(()) => {}
+                Err(err) => {
+                    logging::warn(&format!(
+                        "remote control session {session_id}: could not switch to display {id}: {err:#}"
+                    ));
+                }
+            }
         }
 
         if pending_flush {
@@ -704,8 +725,73 @@ fn run_session(
     Ok(())
 }
 
+/// Tells the viewer what it is looking at: the geometry, and every display it could ask for instead.
+///
+/// Sent before the first tile and again after every switch. **Resending the whole message is what
+/// makes a switch visible to the viewer**, and it has to be, because the *size* is frequently
+/// unchanged across one — two identical monitors is the ordinary office desk — so the active
+/// display's id is the only field that moved.
+fn announce_display(socket: &mut Socket, capture: &ScreenCapture) -> Result<()> {
+    let info = capture
+        .geometry
+        .to_display_info()
+        .showing(capture.displays(), capture.active_display_id());
+
+    let json = serde_json::to_string(&info).context("could not describe the display")?;
+    write_queued(socket, Message::text(json))
+}
+
+/// Moves a running session onto another of this Mac's displays.
+///
+/// Four things happen in an order that matters. The new capture starts **before** the old one is
+/// dropped, so a display that has been unplugged since the picker was drawn leaves the session
+/// watching where it was rather than watching nothing. Everything the remote end is holding is
+/// released, because a modifier held down across a switch would otherwise stay down with nothing
+/// on either screen to explain it. The injector is moved onto the new display's origin, since every
+/// coordinate the viewer sends is relative to whichever display it is looking at. And the encoder is
+/// told to send a whole frame — see [`FrameEncoder::force_full_frame`] for why the geometry check
+/// inside it is not enough.
+fn switch_display(
+    socket: &mut Socket,
+    capture: &mut ScreenCapture,
+    injector: Option<&mut InputInjector>,
+    encoder: &mut FrameEncoder,
+    display_id: u32,
+) -> Result<()> {
+    if display_id == capture.active_display_id() {
+        return Ok(());
+    }
+
+    let next = ScreenCapture::start(DEFAULT_MAX_IMAGE_WIDTH, Some(display_id))
+        .with_context(|| format!("could not start capturing display {display_id}"))?;
+
+    if let Some(injector) = injector {
+        injector.release_all();
+        injector.set_origin(CGPoint { x: next.geometry.origin_x, y: next.geometry.origin_y });
+    }
+
+    // Dropped rather than stopped by hand: `ScreenCapture::drop` stops the stream, and doing both
+    // would ask ScreenCaptureKit to stop one it has already been told to stop.
+    drop(std::mem::replace(capture, next));
+
+    encoder.force_full_frame();
+    announce_display(socket, capture)?;
+
+    logging::info(&format!("remote control switched to display {display_id}"));
+    Ok(())
+}
+
 /// Reads and applies everything the viewer has sent. `Ok(false)` means it hung up.
-fn pump_input(socket: &mut Socket, mut injector: Option<&mut InputInjector>, encoder: &mut FrameEncoder) -> Result<bool> {
+///
+/// `requested_display` collects a display switch for the caller instead of acting on it here,
+/// because switching means replacing the capture — which this function does not own. Last one wins
+/// if several arrive in one drain, which is what somebody clicking twice through a picker means.
+fn pump_input(
+    socket: &mut Socket,
+    mut injector: Option<&mut InputInjector>,
+    encoder: &mut FrameEncoder,
+    requested_display: &mut Option<u32>,
+) -> Result<bool> {
     loop {
         match socket.read() {
             Ok(Message::Text(text)) => {
@@ -719,6 +805,7 @@ fn pump_input(socket: &mut Socket, mut injector: Option<&mut InputInjector>, enc
                                 encoder.set_quality(quality);
                             }
                         }
+                        ViewerInput::SelectDisplay { id } => *requested_display = Some(id),
                         other => {
                             if let Some(injector) = injector.as_mut() {
                                 injector.apply(&other);

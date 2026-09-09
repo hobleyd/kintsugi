@@ -95,6 +95,16 @@ impl Frame {
 /// a sharper remote screen. Not worth it; see the decision log.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DisplayGeometry {
+    /// The top-left of the display being captured, in **virtual-desktop** coordinates — which is
+    /// where a secondary monitor's own origin is, and is negative for one placed to the left of or
+    /// above the primary.
+    ///
+    /// Zero while the session is showing the primary display, which is why nothing needed it before
+    /// the picker existed. It is what `input_injection::InputInjector::set_origin` converts a
+    /// viewer's coordinates *out* of: the viewer sends them relative to the display it is watching,
+    /// and `SendInput` normalises over the whole virtual desktop.
+    pub origin_x: f64,
+    pub origin_y: f64,
     pub point_width: f64,
     pub point_height: f64,
     pub image_width: u32,
@@ -107,6 +117,20 @@ impl DisplayGeometry {
     }
 }
 
+/// A rectangle of the virtual desktop, in virtual-desktop coordinates.
+///
+/// The device context `GetDC(NULL)` hands back covers the *whole* virtual desktop with its origin at
+/// the primary display's top-left, so a monitor to the left of the primary has a negative `x` and a
+/// blit from it is perfectly legal — which is what makes switching displays on Windows a source
+/// rectangle rather than a different capture API.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureRegion {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
 #[cfg(windows)]
 pub use platform::ScreenCapture;
 
@@ -115,25 +139,41 @@ mod platform {
     use std::ptr;
 
     use anyhow::{anyhow, Result};
-    use windows_sys::Win32::Foundation::{GetLastError, HWND};
+    use windows_sys::Win32::Foundation::{GetLastError, BOOL, HWND, LPARAM, RECT};
     use windows_sys::Win32::Graphics::Gdi::{
-        BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
-        SelectObject, SetBrushOrgEx, SetStretchBltMode, StretchBlt, BITMAPINFO, BITMAPINFOHEADER,
-        BI_RGB, DIB_RGB_COLORS, HALFTONE, HBITMAP, HDC, HGDIOBJ, SRCCOPY,
+        BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, EnumDisplayMonitors,
+        GetDC, GetMonitorInfoW, ReleaseDC, SelectObject, SetBrushOrgEx, SetStretchBltMode,
+        StretchBlt, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HALFTONE, HBITMAP, HDC,
+        HGDIOBJ, HMONITOR, MONITORINFO, SRCCOPY,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         DrawIconEx, GetCursorInfo, GetIconInfo, GetSystemMetrics, CURSORINFO, CURSOR_SHOWING,
-        DI_NORMAL, ICONINFO, SM_CXSCREEN, SM_CYSCREEN,
+        DI_NORMAL, ICONINFO, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN, SM_CYVIRTUALSCREEN,
+        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
     };
 
     use crate::logging;
+    use crate::remote_protocol::DisplayOption;
 
-    use super::{DisplayGeometry, Frame};
+    use super::{CaptureRegion, DisplayGeometry, Frame};
 
-    /// The primary display, captured and scaled into a DIB this struct owns for the whole session.
+    /// `MONITORINFOF_PRIMARY`, which windows-sys does not declare — it is a plain constant in
+    /// `winuser.h` rather than a generated type, so it is spelled out here rather than reached for
+    /// through a second crate.
+    const MONITOR_IS_PRIMARY: u32 = 1;
+
+    /// The whole virtual desktop, offered as its own entry beside the individual monitors.
+    ///
+    /// Reserved rather than derived: monitor ids below are one-based indices into Windows'
+    /// enumeration order, so zero is free and means "all of them".
+    const WHOLE_DESKTOP_DISPLAY_ID: u32 = 0;
+
+    /// One display, captured and scaled into a DIB this struct owns for the whole session.
     ///
     /// Everything is allocated once. A `StretchBlt` into a bitmap that already exists is the whole
-    /// per-frame cost; recreating the DC and the DIB each time would dominate it.
+    /// per-frame cost; recreating the DC and the DIB each time would dominate it. That is also why a
+    /// display switch replaces the whole object rather than resizing this one — the DIB's size is
+    /// fixed at creation, and a monitor of a different resolution needs a different one.
     pub struct ScreenCapture {
         screen_dc: HDC,
         memory_dc: HDC,
@@ -142,20 +182,47 @@ mod platform {
         /// Points into the DIB section. Valid for as long as `bitmap` is, which is this struct's
         /// lifetime — `Drop` deletes the bitmap last.
         bits: *mut u8,
-        screen_width: i32,
-        screen_height: i32,
+        /// The rectangle of the virtual desktop being blitted from.
+        region: CaptureRegion,
         pub geometry: DisplayGeometry,
+        displays: Vec<DisplayOption>,
+        active_display_id: u32,
     }
 
     impl ScreenCapture {
-        pub fn start(max_image_width: u32) -> Result<Self> {
-            // SAFETY: documented, no arguments beyond a constant.
-            let (screen_width, screen_height) =
-                unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+        /// Starts capturing one of this host's displays, and reports what the others are.
+        ///
+        /// `requested_display_id` is a [`DisplayOption::id`] the viewer echoed back, or `None` for
+        /// the primary display — which is what a session captured before the picker existed, so
+        /// nothing about the default behaviour changes here. Ids are this agent's own: zero is the
+        /// whole virtual desktop and one-based indices name monitors in Windows' enumeration order.
+        pub fn start(max_image_width: u32, requested_display_id: Option<u32>) -> Result<Self> {
+            let displays = describe_displays();
+
+            // `position()` rather than a lookup that can fail: a monitor unplugged since the picker
+            // was drawn falls back to the primary, because ending a granted session over a pulled
+            // cable is the worse answer.
+            let chosen = requested_display_id
+                .and_then(|id| displays.iter().position(|display| display.id == id))
+                .or_else(|| displays.iter().position(|display| display.is_primary))
+                .unwrap_or(0);
+
+            if let Some(requested) = requested_display_id {
+                if displays[chosen].id != requested {
+                    logging::warn(&format!(
+                        "display {requested} is no longer attached; capturing the primary display instead"
+                    ));
+                }
+            }
+
+            let region = region_for(displays[chosen].id);
+            let active_display_id = displays[chosen].id;
+
+            let (screen_width, screen_height) = (region.width, region.height);
 
             if screen_width <= 0 || screen_height <= 0 {
                 return Err(anyhow!(
-                    "Windows reports a {screen_width}x{screen_height} primary display, which cannot be captured"
+                    "Windows reports a {screen_width}x{screen_height} display, which cannot be captured"
                 ));
             }
 
@@ -240,6 +307,8 @@ mod platform {
             }
 
             let geometry = DisplayGeometry {
+                origin_x: f64::from(region.x),
+                origin_y: f64::from(region.y),
                 point_width: f64::from(screen_width),
                 point_height: f64::from(screen_height),
                 image_width,
@@ -247,7 +316,9 @@ mod platform {
             };
 
             logging::info(&format!(
-                "remote control capture started: {screen_width}x{screen_height} screen, sending {image_width}x{image_height}"
+                "remote control capture started: {screen_width}x{screen_height} at {},{} of the virtual \
+                 desktop, sending {image_width}x{image_height}",
+                region.x, region.y
             ));
 
             Ok(Self {
@@ -256,10 +327,20 @@ mod platform {
                 bitmap,
                 previous_bitmap,
                 bits: bits as *mut u8,
-                screen_width,
-                screen_height,
+                region,
                 geometry,
+                displays,
+                active_display_id,
             })
+        }
+
+        /// Every display this host had when this capture started, and which one it is showing.
+        pub fn displays(&self) -> Vec<DisplayOption> {
+            self.displays.clone()
+        }
+
+        pub fn active_display_id(&self) -> u32 {
+            self.active_display_id
         }
 
         /// Grabs one frame. `None` means the blit failed, which the caller treats as a frame to skip
@@ -269,14 +350,14 @@ mod platform {
             let width = self.geometry.image_width;
             let height = self.geometry.image_height;
 
-            let blitted = if width as i32 == self.screen_width && height as i32 == self.screen_height {
+            let blitted = if width as i32 == self.region.width && height as i32 == self.region.height {
                 // SAFETY: both DCs are valid and the bitmap selected into `memory_dc` is exactly
                 // this size. BitBlt rather than StretchBlt when no scaling is needed — it is the
                 // cheaper path and avoids HALFTONE resampling a 1:1 copy.
                 unsafe {
                     BitBlt(
                         self.memory_dc, 0, 0, width as i32, height as i32,
-                        self.screen_dc, 0, 0, SRCCOPY,
+                        self.screen_dc, self.region.x, self.region.y, SRCCOPY,
                     )
                 }
             } else {
@@ -291,7 +372,8 @@ mod platform {
                 unsafe {
                     StretchBlt(
                         self.memory_dc, 0, 0, width as i32, height as i32,
-                        self.screen_dc, 0, 0, self.screen_width, self.screen_height, SRCCOPY,
+                        self.screen_dc, self.region.x, self.region.y, self.region.width,
+                        self.region.height, SRCCOPY,
                     )
                 }
             };
@@ -352,11 +434,18 @@ mod platform {
             // GetIconInfo hands back two bitmaps the caller owns, deleted below.
             let has_icon_info = unsafe { GetIconInfo(cursor.hCursor, &mut icon) } != 0;
 
-            let scale_x = f64::from(self.geometry.image_width) / f64::from(self.screen_width);
-            let scale_y = f64::from(self.geometry.image_height) / f64::from(self.screen_height);
+            let scale_x = f64::from(self.geometry.image_width) / f64::from(self.region.width);
+            let scale_y = f64::from(self.geometry.image_height) / f64::from(self.region.height);
 
-            let x = ((f64::from(cursor.ptScreenPos.x) - f64::from(icon.xHotspot)) * scale_x).round() as i32;
-            let y = ((f64::from(cursor.ptScreenPos.y) - f64::from(icon.yHotspot)) * scale_y).round() as i32;
+            // `ptScreenPos` is in virtual-desktop coordinates and this bitmap covers one region of
+            // it, so the region's own origin comes off first. Without that subtraction the pointer
+            // is drawn at its desktop position inside a frame that starts somewhere else — on a
+            // second monitor it lands wherever the arithmetic happens to put it, or is clipped away
+            // entirely, and `DrawIconEx` reports nothing either way.
+            let x = ((f64::from(cursor.ptScreenPos.x - self.region.x) - f64::from(icon.xHotspot)) * scale_x)
+                .round() as i32;
+            let y = ((f64::from(cursor.ptScreenPos.y - self.region.y) - f64::from(icon.yHotspot)) * scale_y)
+                .round() as i32;
 
             // SAFETY: a valid DC and a valid cursor handle. Zero width/height asks for the
             // cursor's own size, which is what is wanted — scaling the cursor itself would make it
@@ -377,6 +466,176 @@ mod platform {
                 }
             }
         }
+    }
+
+    /// One monitor, as Windows reports it.
+    struct MonitorRect {
+        region: CaptureRegion,
+        is_primary: bool,
+    }
+
+    /// What the viewer's picker shows for this host.
+    ///
+    /// The whole virtual desktop is offered as its own entry whenever there is more than one
+    /// monitor, because the device context this module already blits from covers it — see
+    /// [`CaptureRegion`]. It is deliberately *not* the default: two monitors sent as one picture are
+    /// twice as wide for the same pixel budget, so both arrive at half the resolution of the one
+    /// somebody is looking at, and the primary display is what a session captured before the picker
+    /// existed.
+    fn describe_displays() -> Vec<DisplayOption> {
+        let monitors = enumerate_monitors();
+
+        // Nothing enumerated is not a host with no screen — `EnumDisplayMonitors` can answer
+        // nothing on a session with no attached desktop — so the primary metrics stand in rather
+        // than the picker being empty and `start` having nothing to fall back to.
+        if monitors.is_empty() {
+            let region = primary_region();
+            return vec![DisplayOption {
+                id: 1,
+                label: format!("Display 1 ({} x {})", region.width, region.height),
+                width: region.width.max(0) as u32,
+                height: region.height.max(0) as u32,
+                is_primary: true,
+            }];
+        }
+
+        let describe = |index: usize, monitor: &MonitorRect| DisplayOption {
+            // One-based indices into Windows' own enumeration order, which is also roughly the
+            // numbering its Display settings page shows — so "Display 2" here is what the person at
+            // the host would call the same monitor. Zero is reserved for the whole desktop.
+            id: index as u32 + 1,
+            label: format!("Display {} ({} x {})", index + 1, monitor.region.width, monitor.region.height),
+            width: monitor.region.width.max(0) as u32,
+            height: monitor.region.height.max(0) as u32,
+            is_primary: monitor.is_primary,
+        };
+
+        // One monitor and the whole desktop are the same pixels, and offering both would be two
+        // entries the reader has to work out are identical — worse than no picker at all.
+        if monitors.len() < 2 {
+            return vec![describe(0, &monitors[0])];
+        }
+
+        let desktop = region_for(WHOLE_DESKTOP_DISPLAY_ID);
+        // Windows is entitled to report no primary flag at all on an unusual configuration, and
+        // then nothing would be the default. The first monitor stands in.
+        let any_primary = monitors.iter().any(|monitor| monitor.is_primary);
+
+        let mut displays = vec![DisplayOption {
+            id: WHOLE_DESKTOP_DISPLAY_ID,
+            label: format!("All displays ({} x {})", desktop.width, desktop.height),
+            width: desktop.width.max(0) as u32,
+            height: desktop.height.max(0) as u32,
+            is_primary: false,
+        }];
+
+        displays.extend(monitors.iter().enumerate().map(|(index, monitor)| DisplayOption {
+            is_primary: if any_primary { monitor.is_primary } else { index == 0 },
+            ..describe(index, monitor)
+        }));
+
+        displays
+    }
+
+    /// The rectangle of the virtual desktop an offered display corresponds to.
+    ///
+    /// Re-asks Windows rather than remembering a rectangle alongside the [`DisplayOption`], because
+    /// the option travels to the browser and back — a rectangle riding along with it would be
+    /// geometry the viewer could influence. A monitor that has vanished between the two calls falls
+    /// back to the primary display, which is always blittable.
+    fn region_for(display_id: u32) -> CaptureRegion {
+        if display_id == WHOLE_DESKTOP_DISPLAY_ID {
+            // SAFETY: documented; each takes one constant index.
+            let (x, y, width, height) = unsafe {
+                (
+                    GetSystemMetrics(SM_XVIRTUALSCREEN),
+                    GetSystemMetrics(SM_YVIRTUALSCREEN),
+                    GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                    GetSystemMetrics(SM_CYVIRTUALSCREEN),
+                )
+            };
+
+            if width > 0 && height > 0 {
+                return CaptureRegion { x, y, width, height };
+            }
+
+            return primary_region();
+        }
+
+        let monitors = enumerate_monitors();
+        match display_id
+            .checked_sub(1)
+            .and_then(|index| monitors.get(index as usize))
+        {
+            Some(monitor) if monitor.region.width > 0 && monitor.region.height > 0 => monitor.region,
+            _ => primary_region(),
+        }
+    }
+
+    /// The primary display, at the origin of the virtual desktop by definition.
+    fn primary_region() -> CaptureRegion {
+        // SAFETY: documented, no arguments beyond a constant.
+        let (width, height) = unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+        CaptureRegion { x: 0, y: 0, width, height }
+    }
+
+    fn enumerate_monitors() -> Vec<MonitorRect> {
+        let mut monitors: Vec<MonitorRect> = Vec::new();
+
+        // SAFETY: a NULL device context and a NULL clip rectangle ask for every display monitor,
+        // which is documented. The callback is called synchronously for each, on this thread, with
+        // `dwdata` handed back unchanged — so the pointer to `monitors` is valid for every call and
+        // there is no aliasing, since nothing else touches it until this returns.
+        unsafe {
+            EnumDisplayMonitors(
+                ptr::null_mut(),
+                ptr::null(),
+                Some(collect_monitor),
+                &mut monitors as *mut Vec<MonitorRect> as LPARAM,
+            );
+        }
+
+        monitors
+    }
+
+    /// `EnumDisplayMonitors`' callback. Returns non-zero throughout, which is what asks it to keep
+    /// going — returning zero on a monitor whose info could not be read would silently truncate the
+    /// list at that point.
+    unsafe extern "system" fn collect_monitor(
+        monitor: HMONITOR,
+        _dc: HDC,
+        _clip: *mut RECT,
+        data: LPARAM,
+    ) -> BOOL {
+        // SAFETY: `data` is the pointer `enumerate_monitors` passed, and this callback runs
+        // synchronously on that function's own thread before it returns. No inner `unsafe` block,
+        // matching the window procedures in `dialogs` and `tray_menu`: an `unsafe fn` body is
+        // already an unsafe context in this edition, and one here is a warning.
+        let monitors = &mut *(data as *mut Vec<MonitorRect>);
+
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            rcMonitor: RECT { left: 0, top: 0, right: 0, bottom: 0 },
+            rcWork: RECT { left: 0, top: 0, right: 0, bottom: 0 },
+            dwFlags: 0,
+        };
+
+        // SAFETY: `monitor` is the handle Windows just passed and `cbSize` is set as required.
+        // `rcMonitor`, not `rcWork`: the working area excludes the taskbar, and a remote session
+        // that could not see the taskbar would be missing the Start button.
+        if GetMonitorInfoW(monitor, &mut info) != 0 {
+            monitors.push(MonitorRect {
+                region: CaptureRegion {
+                    x: info.rcMonitor.left,
+                    y: info.rcMonitor.top,
+                    width: info.rcMonitor.right - info.rcMonitor.left,
+                    height: info.rcMonitor.bottom - info.rcMonitor.top,
+                },
+                is_primary: info.dwFlags & MONITOR_IS_PRIMARY != 0,
+            });
+        }
+
+        1
     }
 
     impl Drop for ScreenCapture {
@@ -430,6 +689,19 @@ impl FrameEncoder {
             // next to old tiles at the previous one looks like a rendering fault.
             self.force_full = true;
         }
+    }
+
+    /// Makes the next frame a whole one, whatever changed.
+    ///
+    /// **Required on a display switch, and the reason it is required is not obvious.** This encoder
+    /// finds changes by diffing against the previous frame, and two identical monitors — the common
+    /// office desk — give the *same* dimensions on both sides of a switch. So `encode_changes` would
+    /// diff the new display's pixels against the old display's and send only the tiles that happened
+    /// to differ, leaving fragments of the previous monitor on screen everywhere the two agreed. The
+    /// geometry check inside `encode_changes` cannot catch it, because nothing about the geometry
+    /// changed.
+    pub fn force_full_frame(&mut self) {
+        self.force_full = true;
     }
 
     /// The wire messages for everything that changed since the last call. Empty when nothing did.
@@ -671,6 +943,24 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(tile_rect(&messages[0]), (0, 0, 800, 600));
+    }
+
+    #[test]
+    fn a_forced_full_frame_resends_a_screen_whose_pixels_are_identical() {
+        // The display-switch case, and the reason `force_full_frame` exists rather than being left
+        // to the geometry check. Two same-sized monitors showing the same thing produce a frame this
+        // encoder cannot tell from the previous one, so without the flag a switch between them sends
+        // nothing at all and the viewer goes on showing the display it was already on.
+        let mut encoder = FrameEncoder::new(60);
+        let frame = flat_frame(600, 400, [10, 20, 30, 255]);
+        encoder.encode_changes(&frame);
+        assert!(encoder.encode_changes(&frame).is_empty());
+
+        encoder.force_full_frame();
+
+        let messages = encoder.encode_changes(&frame);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(tile_rect(&messages[0]), (0, 0, 600, 400));
     }
 
     #[test]

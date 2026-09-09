@@ -39,6 +39,10 @@ pub const KIND_FRAME: u8 = 2;
 /// A JSON `{"message": …}` the agent logs and reports as the reason a session could not start.
 pub const KIND_ERROR: u8 = 3;
 
+/// A JSON [`DisplaysMessage`]: every output the portal granted, so the agent can offer the
+/// administrator a choice between them. Sent once, before the first format.
+pub const KIND_DISPLAYS: u8 = 4;
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct FormatMessage {
     pub width: u32,
@@ -55,6 +59,43 @@ pub struct FormatMessage {
     /// Hyprland host can be watched and not driven. See `DisplayInfo::with_input` in
     /// `remote_protocol.rs`.
     pub can_control_input: bool,
+
+    /// The PipeWire node these frames came from, which is also the display's id everywhere above
+    /// here — see [`DisplayEntry::node_id`].
+    ///
+    /// **This is what tells the agent a display switch has actually taken effect.** A switch is
+    /// asynchronous: the helper renegotiates a stream and the frames keep coming from the old node
+    /// until it has. Without the node on the format, the agent would have to announce the new
+    /// display optimistically and would announce it again when the size changed, so the viewer
+    /// would clear its tiles twice and show the *previous* monitor in between.
+    pub node_id: u32,
+}
+
+/// Every output the portal granted, in the order it granted them.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DisplaysMessage {
+    pub displays: Vec<DisplayEntry>,
+}
+
+/// One output the administrator may ask to watch.
+///
+/// **The list is what the host's user agreed to share, not what is plugged in.** The portal's own
+/// picker is what chooses; this helper asks for multiple outputs and reports whatever came back, so
+/// a two-monitor Wayland desk legitimately offers one entry when only one was shared — and nothing
+/// on this side can widen that. See the note in the agent's `backend::Backend::displays`.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DisplayEntry {
+    /// The PipeWire node id, used as the display's id all the way up to the browser.
+    ///
+    /// The agent's own `DisplayOption::id` is documented as opaque and platform-defined, so reusing
+    /// the node id here means there is no second numbering to map back — which is one fewer table
+    /// that could drift between two processes shipped in one archive.
+    pub node_id: u32,
+
+    pub label: String,
+    pub width: u32,
+    pub height: u32,
+    pub is_primary: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -90,6 +131,15 @@ pub enum InputMessage {
         steps_x: i32,
         #[serde(default)]
         steps_y: i32,
+    },
+    /// Watch a different one of the granted outputs, naming it by [`DisplayEntry::node_id`].
+    ///
+    /// Not an input event at all, and it travels on the input channel anyway: it arrives from the
+    /// same place, in the same order relative to the pointer events around it, and the portal's
+    /// injection target has to move with the capture. A separate channel would let a click for the
+    /// old display overtake the switch.
+    SelectDisplay {
+        node_id: u32,
     },
 }
 
@@ -146,6 +196,12 @@ pub fn write_format(out: &mut impl Write, format: &FormatMessage) -> io::Result<
     write_message(out, KIND_FORMAT, &json)
 }
 
+pub fn write_displays(out: &mut impl Write, displays: &DisplaysMessage) -> io::Result<()> {
+    let json = serde_json::to_vec(displays)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    write_message(out, KIND_DISPLAYS, &json)
+}
+
 pub fn write_error(out: &mut impl Write, message: &str) -> io::Result<()> {
     let json = serde_json::to_vec(&ErrorMessage { message: message.to_string() })
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
@@ -184,12 +240,46 @@ mod tests {
             height: 1080,
             stride: 7680,
             can_control_input: false,
+            node_id: 42,
         })
         .unwrap();
 
         assert!(json.contains("\"width\":1920"), "{json}");
         assert!(json.contains("\"stride\":7680"), "{json}");
         assert!(json.contains("\"can_control_input\":false"), "{json}");
+        assert!(json.contains("\"node_id\":42"), "{json}");
+    }
+
+    #[test]
+    fn the_display_list_names_its_fields_the_way_the_agent_reads_them() {
+        // The agent turns each of these into a `DisplayOption` the browser renders, and a rename on
+        // one side alone is a picker that offers nothing — with nothing anywhere reporting it.
+        let json = serde_json::to_string(&DisplaysMessage {
+            displays: vec![DisplayEntry {
+                node_id: 51,
+                label: "HDMI-1 (1920 x 1080)".to_string(),
+                width: 1920,
+                height: 1080,
+                is_primary: true,
+            }],
+        })
+        .unwrap();
+
+        assert!(json.contains("\"node_id\":51"), "{json}");
+        assert!(json.contains("\"label\":\"HDMI-1 (1920 x 1080)\""), "{json}");
+        assert!(json.contains("\"is_primary\":true"), "{json}");
+    }
+
+    #[test]
+    fn a_display_selection_parses_as_an_input_message() {
+        // It travels on the input channel deliberately — see the variant's own note.
+        let parsed: InputMessage =
+            serde_json::from_str(r#"{"type":"selectdisplay","node_id":51}"#).unwrap();
+
+        match parsed {
+            InputMessage::SelectDisplay { node_id } => assert_eq!(node_id, 51),
+            other => panic!("parsed as {other:?}"),
+        }
     }
 
     #[test]

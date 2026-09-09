@@ -64,7 +64,7 @@ use ashpd::desktop::screencast::{
 use ashpd::desktop::{PersistMode, Session, SessionPortal};
 use ashpd::enumflags2::BitFlags;
 
-use crate::wire::{InputMessage, PointerAction};
+use crate::wire::{DisplayEntry, DisplaysMessage, InputMessage, PointerAction};
 
 /// A live portal session: the compositor's grant, held open.
 ///
@@ -89,8 +89,15 @@ enum Grant {
 pub struct PortalSession {
     grant: Grant,
 
-    /// The PipeWire node the compositor is publishing frames on.
+    /// The PipeWire node the compositor is publishing frames on, and the one input is positioned
+    /// within. Moves when the administrator picks a different display — see [`Self::select_node`].
     pub node_id: u32,
+
+    /// Every output the compositor published for this session, in the order it did.
+    ///
+    /// **This is the outputs the host's user agreed to share, not the monitors attached.** The
+    /// portal's own picker decides; this asks for more than one and reports whatever came back.
+    displays: Vec<DisplayEntry>,
 
     /// The file descriptor for the PipeWire remote, taken by the capture side.
     ///
@@ -125,6 +132,28 @@ impl PortalSession {
     /// Whether the portal granted keyboard and pointer as well as capture.
     pub fn can_control_input(&self) -> bool {
         matches!(self.grant, Grant::Controllable { .. })
+    }
+
+    /// The outputs this session may show, for the agent to offer as a picker.
+    pub fn displays(&self) -> DisplaysMessage {
+        DisplaysMessage { displays: self.displays.clone() }
+    }
+
+    /// Moves input onto a different granted output. `false` for a node this session was not granted.
+    ///
+    /// **Checked against the granted list rather than accepted, and that is a security property
+    /// rather than tidiness.** The node id arrives from the agent, which got it from a browser; a
+    /// node this session was never granted is either a stale id or an attempt to position a pointer
+    /// inside somebody else's stream, and the portal would refuse it anyway — refusing here means
+    /// the refusal is stated in this process's own log instead of appearing as input that silently
+    /// stopped working.
+    pub fn select_node(&mut self, node_id: u32) -> bool {
+        if !self.displays.iter().any(|display| display.node_id == node_id) {
+            return false;
+        }
+
+        self.node_id = node_id;
+        true
     }
 
     /// Hands the PipeWire remote's file descriptor to the capture side. Only available once.
@@ -168,11 +197,11 @@ impl PortalSession {
         // An empty stream list means capture was not granted even though the call succeeded, which
         // a backend granting input alone would produce. There is nothing to show, so it is an error
         // rather than a view-only session.
-        let node_id = started
-            .streams()
+        let displays = describe_streams(started.streams());
+        let node_id = displays
             .first()
             .ok_or_else(|| anyhow!("the portal granted input but published no screen to capture"))?
-            .pipe_wire_node_id();
+            .node_id;
 
         // Only claim input if the portal actually granted *both* devices. A backend handing back
         // pointer alone would otherwise present a keyboard that silently does nothing — better to
@@ -196,6 +225,7 @@ impl PortalSession {
         Ok(Self {
             grant: Grant::Controllable { remote_desktop, session },
             node_id,
+            displays,
             pipewire_fd: Some(pipewire_fd),
         })
     }
@@ -217,11 +247,11 @@ impl PortalSession {
             .response()
             .context("the user or the compositor refused the portal's own permission request")?;
 
-        let node_id = started
-            .streams()
+        let displays = describe_streams(started.streams());
+        let node_id = displays
             .first()
             .ok_or_else(|| anyhow!("the portal published no screen to capture"))?
-            .pipe_wire_node_id();
+            .node_id;
 
         if let Some(token) = started.restore_token() {
             store_restore_token(RestoreTokenFor::ScreenCast, token);
@@ -232,7 +262,7 @@ impl PortalSession {
             .await
             .context("opening the PipeWire remote")?;
 
-        Ok(Self { grant: Grant::ViewOnly { session }, node_id, pipewire_fd: Some(pipewire_fd) })
+        Ok(Self { grant: Grant::ViewOnly { session }, node_id, displays, pipewire_fd: Some(pipewire_fd) })
     }
 
     /// Injects one input event. A no-op on a view-only session.
@@ -245,6 +275,11 @@ impl PortalSession {
         };
 
         match input {
+            // Not an input event: it is handled in `main`'s portal loop, which calls `select_node`
+            // before this is ever reached. Matched explicitly rather than with a wildcard so that a
+            // *new* message added to the wire cannot be silently swallowed here — the compiler is
+            // the only thing that would notice, and this is the arm that would hide it.
+            InputMessage::SelectDisplay { .. } => {}
             InputMessage::Pointer { x, y, action, button } => match action {
                 // Absolute rather than relative, because the viewer knows where the pointer should
                 // be and the agent has no way to read where it currently is — a relative stream
@@ -327,6 +362,55 @@ impl PortalSession {
     }
 }
 
+/// Turns the portal's granted streams into the picker the administrator sees.
+///
+/// Labels come from the portal where it offers one. `Stream::id()` is the output's own identifier
+/// — "HDMI-1", "eDP-1" on a portal that publishes it — which is what a person sitting at the host
+/// would call their monitors; the fallback numbers them, because two entries that both read
+/// "Display" and differ only in a resolution are indistinguishable on the very ordinary desk of a
+/// laptop beside an external monitor of the same size.
+fn describe_streams(streams: &[ashpd::desktop::screencast::Stream]) -> Vec<DisplayEntry> {
+    // Nothing in the ScreenCast interface says which output is the primary one, so position stands
+    // in: a compositor puts the output containing the origin first in its own layout. Falling back
+    // to the first stream matters — with no primary at all the agent's picker would have no default
+    // and `select_display` would have nothing to fall back to.
+    let at_origin = streams
+        .iter()
+        .position(|stream| stream.position() == Some((0, 0)))
+        .unwrap_or(0);
+
+    streams
+        .iter()
+        .enumerate()
+        .map(|(index, stream)| {
+            let (width, height) = stream.size().unwrap_or((0, 0));
+            let width = width.max(0) as u32;
+            let height = height.max(0) as u32;
+
+            let name = stream
+                .id()
+                .map(str::to_string)
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| format!("Display {}", index + 1));
+
+            DisplayEntry {
+                // The node id, not the index: it is what `NotifyPointerMotionAbsolute` takes and
+                // what the stream is linked by, so using anything else here would mean a mapping
+                // table between this list and the two places that consume it.
+                node_id: stream.pipe_wire_node_id(),
+                label: if width > 0 && height > 0 {
+                    format!("{name} ({width} x {height})")
+                } else {
+                    name
+                },
+                width,
+                height,
+                is_primary: index == at_origin,
+            }
+        })
+        .collect()
+}
+
 /// `persistence` is `Some` only when `ScreenCast` itself owns the session. On a `RemoteDesktop`
 /// session the persist mode and restore token have already gone on `SelectDevices`, and repeating
 /// them here is the call the portal rejects outright — see the module note.
@@ -347,9 +431,18 @@ where
         // it by hand from XFIXES because X11 has no equivalent; here the compositor does it,
         // which is both cheaper and correct for scaled outputs.
         .set_cursor_mode(CursorMode::Embedded)
-        // One monitor. Multiple would mean several PipeWire streams and a coordinate space
-        // spanning them, which the media protocol has no way to describe.
-        .set_multiple(false);
+        // More than one monitor is asked for, and only one is ever *streamed* at a time — the
+        // helper links to whichever node the administrator picked and re-links on a switch, so
+        // there is never a coordinate space spanning two outputs. Asking is what puts the choice
+        // in front of the host's user, who is the only one entitled to make it.
+        //
+        // Two things follow and neither is a bug to be fixed here. The portal's picker decides what
+        // comes back, so a two-monitor host that shared one output offers one entry — see
+        // `DisplayEntry`. And a host that already granted a session before this asked for multiple
+        // has a *stored restore token* for that single-output grant, so it keeps returning one
+        // output until somebody revokes the permission in their desktop's settings; that is the
+        // portal remembering an answer, not this call being ignored.
+        .set_multiple(true);
 
     let stored = persistence.and_then(stored_restore_token);
     let options = match persistence {

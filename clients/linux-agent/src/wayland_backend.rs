@@ -45,7 +45,7 @@ use serde::Deserialize;
 use crate::config::WAYLAND_BACKEND_BINARY as HELPER_BINARY;
 use crate::input_injection::{evdev_keycode_for_hid, MAX_WHEEL_CLICKS, PIXELS_PER_CLICK};
 use crate::logging;
-use crate::remote_protocol::{MouseButton, PointerAction, ViewerInput};
+use crate::remote_protocol::{DisplayOption, MouseButton, PointerAction, ViewerInput};
 use crate::screen_capture::{downscale, DisplayGeometry, Frame};
 
 /// The helper's message kinds. Mirrored by hand from `wire.rs` in `clients/linux-agent-wayland`,
@@ -54,6 +54,7 @@ use crate::screen_capture::{downscale, DisplayGeometry, Frame};
 const KIND_FORMAT: u8 = 1;
 const KIND_FRAME: u8 = 2;
 const KIND_ERROR: u8 = 3;
+const KIND_DISPLAYS: u8 = 4;
 
 /// How long to wait for the helper to report a working stream before giving up.
 ///
@@ -75,6 +76,17 @@ pub struct WaylandBackend {
     stream: Arc<StreamSlot>,
     geometry: DisplayGeometry,
     can_control_input: bool,
+
+    /// The pixel budget frames are scaled into, kept because the geometry is recomputed whenever
+    /// the helper renegotiates — a different display is a different size, and so is a mode change
+    /// on the same one.
+    max_image_width: u32,
+
+    /// Every output the portal granted, and which one the frames currently arriving are of.
+    ///
+    /// The active id follows the *format*, never the request — see [`StreamFormat::node_id`].
+    displays: Vec<DisplayOption>,
+    active_display_id: u32,
 
     /// Every key currently held down, so they can be released if the session ends mid-chord.
     held_keys: Vec<u8>,
@@ -160,13 +172,7 @@ impl WaylandBackend {
         // error grows linearly towards the bottom-right by exactly the scale factor. It would look
         // like a viewer geometry fault, and it is not one — it would be this line. Unscaled outputs
         // are unaffected either way, which is why it could sit unnoticed.
-        let scale = (f64::from(max_image_width) / f64::from(format.width)).min(1.0);
-        let geometry = DisplayGeometry {
-            point_width: f64::from(format.width),
-            point_height: f64::from(format.height),
-            image_width: ((f64::from(format.width) * scale).round() as u32).max(1),
-            image_height: ((f64::from(format.height) * scale).round() as u32).max(1),
-        };
+        let geometry = geometry_for(&format, max_image_width);
 
         logging::info(&format!(
             "remote control capture started on Wayland: {}x{} stream, sending {}x{}{}",
@@ -177,12 +183,22 @@ impl WaylandBackend {
             if format.can_control_input { "" } else { ", view-only (the portal granted no input)" }
         ));
 
+        // Read before the slot moves into the struct. Safe to read now rather than later: the helper
+        // writes its display list before its first format, so `wait_for_format` having returned
+        // above means it has already arrived.
+        let displays = describe_displays(&stream.granted_displays());
+
         Ok(Self {
             child,
             stdin,
             stream,
             geometry,
             can_control_input: format.can_control_input,
+            max_image_width,
+            // Empty on a helper that reported nothing, which the viewer reads as "offer no picker"
+            // — see `DisplayInfo::displays`.
+            displays,
+            active_display_id: format.node_id,
             held_keys: Vec::new(),
             held_buttons: Vec::new(),
             reported_end: false,
@@ -196,6 +212,40 @@ impl WaylandBackend {
 
     pub fn can_control_input(&self) -> bool {
         self.can_control_input
+    }
+
+    /// The outputs the portal granted, for the viewer's picker.
+    ///
+    /// **These are the outputs the host's user agreed to share, not the monitors attached** — the
+    /// portal's own picker is what chose, and nothing on this side can widen it. A host that shared
+    /// one output offers one entry, which the viewer renders as no picker at all.
+    pub fn displays(&self) -> Vec<DisplayOption> {
+        self.displays.clone()
+    }
+
+    pub fn active_display_id(&self) -> u32 {
+        self.active_display_id
+    }
+
+    /// Asks the helper to capture a different granted output.
+    ///
+    /// **Only asks.** The helper tears down its PipeWire stream and negotiates another, so frames
+    /// keep arriving from the previous display for a moment and [`Self::active_display_id`] does not
+    /// move until one arrives carrying the new node — which is why the session loop announces the
+    /// geometry by comparing it against what it last sent rather than straight after this call.
+    pub fn select_display(&mut self, id: u32) -> Result<()> {
+        if !self.displays.iter().any(|display| display.id == id) {
+            return Err(anyhow!("this session was not granted a display with id {id}"));
+        }
+
+        // Everything held goes first: the pointer space is about to change underneath whatever the
+        // remote end has down, and the helper positions a release at the last known pointer — which
+        // will shortly mean somewhere on a different monitor.
+        self.release_all();
+
+        writeln!(self.stdin, r#"{{"type":"selectdisplay","node_id":{id}}}"#)
+            .and_then(|()| self.stdin.flush())
+            .with_context(|| format!("could not ask the Wayland helper to capture node {id}"))
     }
 
     /// The newest frame, or `None` if none has arrived since the last call.
@@ -218,6 +268,23 @@ impl WaylandBackend {
         }
 
         let (pixels, format) = self.stream.take()?;
+
+        // The stream renegotiates for two reasons and both land here: the administrator switched
+        // display, and the host changed a monitor's mode or unplugged one. Either way the geometry
+        // has to follow the frames rather than the other way round — laying the new stream out at
+        // the previous size is a picture rescaled to the wrong aspect, which reads as a broken
+        // viewer.
+        if format.node_id != self.active_display_id
+            || format.width as f64 != self.geometry.point_width
+            || format.height as f64 != self.geometry.point_height
+        {
+            self.geometry = geometry_for(&format, self.max_image_width);
+            self.active_display_id = format.node_id;
+            logging::info(&format!(
+                "the Wayland helper is now streaming node {} at {}x{}",
+                format.node_id, format.width, format.height
+            ));
+        }
 
         // De-strided here rather than in the helper. The stride is a property of each PipeWire
         // buffer, and passing it through means the helper never has to copy a frame twice — it hands
@@ -330,6 +397,36 @@ struct StreamFormat {
     height: u32,
     stride: u32,
     can_control_input: bool,
+
+    /// The PipeWire node these frames came from, which is this backend's display id.
+    ///
+    /// **Read rather than assumed, and that is what makes a switch honest.** Asking the helper to
+    /// switch is asynchronous — it tears down one PipeWire stream and negotiates another — and
+    /// frames keep arriving from the old display until it has. Announcing the new display when the
+    /// *request* was made would show the previous monitor under the new display's name for as long
+    /// as that took, which on two identical monitors is indistinguishable from a switch that did
+    /// nothing.
+    ///
+    /// `serde(default)` so a helper from before display switching — which cannot happen, since the
+    /// two ship in one archive, but costs nothing to tolerate — is read as node zero rather than
+    /// failing the whole format and ending the session.
+    #[serde(default)]
+    node_id: u32,
+}
+
+/// One output the portal granted, as the helper reported it.
+#[derive(Debug, Clone, Deserialize)]
+struct HelperDisplay {
+    node_id: u32,
+    label: String,
+    width: u32,
+    height: u32,
+    is_primary: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HelperDisplays {
+    displays: Vec<HelperDisplay>,
 }
 
 /// The newest frame the helper has sent, and the format to read it with.
@@ -347,6 +444,9 @@ struct StreamSlot {
 struct SlotState {
     format: Option<StreamFormat>,
     frame: Option<Vec<u8>>,
+
+    /// The outputs the portal granted, reported once before the first format.
+    displays: Vec<HelperDisplay>,
 
     /// What the helper said went wrong, if it said anything. Reported instead of a timeout, because
     /// "the portal refused the screen" is actionable and "the helper produced no frame" is not.
@@ -391,6 +491,22 @@ impl StreamSlot {
                 .wait_timeout(state, remaining)
                 .map_err(|_| anyhow!("the helper reader thread panicked"))?;
             state = next;
+        }
+    }
+
+    /// The outputs the helper reported, or empty if it reported none.
+    ///
+    /// Read after [`Self::wait_for_format`] has returned, which is what makes the ordering safe
+    /// without a second wait: the helper writes its display list before its first format, the
+    /// reader thread applies messages in order, and both go under this lock.
+    fn granted_displays(&self) -> Vec<HelperDisplay> {
+        self.state.lock().map(|state| state.displays.clone()).unwrap_or_default()
+    }
+
+    fn put_displays(&self, displays: Vec<HelperDisplay>) {
+        if let Ok(mut state) = self.state.lock() {
+            state.displays = displays;
+            self.changed.notify_all();
         }
     }
 
@@ -471,6 +587,14 @@ fn read_helper(mut stdout: impl Read, stream: &StreamSlot) {
                 }
             },
             KIND_FRAME => stream.put_frame(payload),
+            KIND_DISPLAYS => match serde_json::from_slice::<HelperDisplays>(&payload) {
+                Ok(message) => stream.put_displays(message.displays),
+                // Not fatal, unlike a malformed format: the display list only drives the viewer's
+                // picker, so losing it costs the choice of monitor and not the session.
+                Err(error) => {
+                    logging::warn(&format!("could not read the Wayland helper's display list: {error}"))
+                }
+            },
             KIND_ERROR => {
                 let message = serde_json::from_slice::<HelperError>(&payload)
                     .map(|error| error.message)
@@ -492,6 +616,58 @@ const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Deserialize)]
 struct HelperError {
     message: String,
+}
+
+/// The geometry to report for a stream in whatever layout the helper just negotiated.
+///
+/// The point size *is* the stream size, and that is a decision worth being explicit about because
+/// the portal's own wording leaves room for another reading. `NotifyPointerMotionAbsolute` takes the
+/// PipeWire node id and, per the spec, coordinates "in the stream's logical coordinate space" —
+/// which is taken here to mean the frames that stream actually produces, i.e. `format.width` by
+/// `format.height`. Reporting those same numbers as the point size makes the viewer's conversion the
+/// identity, so nothing can drift between the two.
+///
+/// The other reading is the compositor's logical points, which differ from the stream's pixels on a
+/// fractionally-scaled output — a 2560x1440 monitor at 150% is 1706x960 logical. If that reading
+/// turns out to be the right one, the symptom is specific and worth recognising: the picture is
+/// perfect, the pointer tracks correctly at the top-left, and the error grows linearly towards the
+/// bottom-right by exactly the scale factor. It would look like a viewer geometry fault, and it is
+/// not one — it would be this function. Unscaled outputs are unaffected either way, which is why it
+/// could sit unnoticed.
+///
+/// The origin is always zero: a portal stream is its own coordinate space and the portal positions a
+/// pointer within it, unlike X11 where a monitor is a rectangle of one desktop-wide root window.
+fn geometry_for(format: &StreamFormat, max_image_width: u32) -> DisplayGeometry {
+    let width = format.width.max(1);
+    let height = format.height.max(1);
+    let scale = (f64::from(max_image_width) / f64::from(width)).min(1.0);
+
+    DisplayGeometry {
+        origin_x: 0.0,
+        origin_y: 0.0,
+        point_width: f64::from(width),
+        point_height: f64::from(height),
+        image_width: ((f64::from(width) * scale).round() as u32).max(1),
+        image_height: ((f64::from(height) * scale).round() as u32).max(1),
+    }
+}
+
+/// Turns the helper's report into what the viewer's picker shows.
+///
+/// A straight mapping, and it stays one deliberately: the label and the primary flag are the
+/// portal's answers, not this agent's, and second-guessing them here would mean inventing a name for
+/// an output only the compositor can identify.
+fn describe_displays(displays: &[HelperDisplay]) -> Vec<DisplayOption> {
+    displays
+        .iter()
+        .map(|display| DisplayOption {
+            id: display.node_id,
+            label: display.label.clone(),
+            width: display.width,
+            height: display.height,
+            is_primary: display.is_primary,
+        })
+        .collect()
 }
 
 /// Copies a strided buffer into the tight rows [`Frame`] means by BGRA.
@@ -658,7 +834,7 @@ mod tests {
     use super::*;
 
     fn format(width: u32, height: u32, stride: u32) -> StreamFormat {
-        StreamFormat { width, height, stride, can_control_input: true }
+        StreamFormat { width, height, stride, can_control_input: true, node_id: 7 }
     }
 
     #[test]
@@ -848,7 +1024,7 @@ mod tests {
         // Byte for byte what `wire::write_message` produces on the other side. The server relays
         // none of this, and nothing else checks the two ends against each other.
         let mut wire = Vec::new();
-        let format_json = br#"{"width":4,"height":2,"stride":16,"can_control_input":false}"#;
+        let format_json = br#"{"width":4,"height":2,"stride":16,"can_control_input":false,"node_id":51}"#;
         wire.push(KIND_FORMAT);
         wire.extend_from_slice(&(format_json.len() as u32).to_be_bytes());
         wire.extend_from_slice(format_json);
@@ -860,8 +1036,57 @@ mod tests {
         read_helper(&wire[..], &slot);
 
         let (frame, format) = slot.take().expect("a frame");
-        assert_eq!(format, StreamFormat { width: 4, height: 2, stride: 16, can_control_input: false });
+        assert_eq!(
+            format,
+            StreamFormat { width: 4, height: 2, stride: 16, can_control_input: false, node_id: 51 }
+        );
         assert_eq!(frame.len(), 32);
+    }
+
+    #[test]
+    fn the_reader_takes_the_display_list_the_helper_sent() {
+        // The other half of the hand-mirrored pair above. A rename on either side is a picker that
+        // silently offers nothing, since an unreadable list is deliberately not fatal.
+        let displays_json =
+            br#"{"displays":[{"node_id":51,"label":"eDP-1 (2256 x 1504)","width":2256,"height":1504,"is_primary":true},{"node_id":52,"label":"HDMI-1 (1920 x 1080)","width":1920,"height":1080,"is_primary":false}]}"#;
+
+        let mut wire = vec![KIND_DISPLAYS];
+        wire.extend_from_slice(&(displays_json.len() as u32).to_be_bytes());
+        wire.extend_from_slice(displays_json);
+
+        let slot = StreamSlot::default();
+        read_helper(&wire[..], &slot);
+
+        let displays = describe_displays(&slot.granted_displays());
+
+        assert_eq!(displays.len(), 2);
+        assert_eq!(displays[0].id, 51);
+        assert_eq!(displays[0].label, "eDP-1 (2256 x 1504)");
+        assert!(displays[0].is_primary);
+        assert_eq!(displays[1].id, 52);
+        assert!(!displays[1].is_primary);
+    }
+
+    #[test]
+    fn an_unreadable_display_list_costs_the_picker_and_not_the_session() {
+        // Deliberately unlike a malformed *format*, which ends the read: the list only drives the
+        // viewer's picker, so losing it must leave the frames behind it flowing.
+        let mut wire = vec![KIND_DISPLAYS];
+        wire.extend_from_slice(&5u32.to_be_bytes());
+        wire.extend_from_slice(b"}{ x ");
+        let format_json = br#"{"width":1,"height":1,"stride":4,"can_control_input":true,"node_id":9}"#;
+        wire.push(KIND_FORMAT);
+        wire.extend_from_slice(&(format_json.len() as u32).to_be_bytes());
+        wire.extend_from_slice(format_json);
+        wire.push(KIND_FRAME);
+        wire.extend_from_slice(&4u32.to_be_bytes());
+        wire.extend_from_slice(&[1u8; 4]);
+
+        let slot = StreamSlot::default();
+        read_helper(&wire[..], &slot);
+
+        assert!(slot.granted_displays().is_empty());
+        assert!(slot.take().is_some(), "the frame after the bad list should still arrive");
     }
 
     #[test]

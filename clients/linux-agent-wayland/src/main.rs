@@ -35,7 +35,7 @@ use std::sync::mpsc;
 use anyhow::{Context, Result};
 
 use kintsugi_agent_wayland::portal::PortalSession;
-use kintsugi_agent_wayland::wire::{self, InputMessage};
+use kintsugi_agent_wayland::wire::{self, DisplaysMessage, InputMessage};
 use kintsugi_agent_wayland::capture;
 
 fn main() {
@@ -54,6 +54,11 @@ fn run() -> Result<()> {
     let (ready_tx, ready_rx) = mpsc::channel::<Result<Ready>>();
     let (input_tx, input_rx) = mpsc::channel::<InputMessage>();
 
+    // PipeWire's own channel rather than an `mpsc`, because the receiving end has to be a callback
+    // attached to the capture loop: a stream may only be replaced from the thread driving it, and
+    // that is the only way to reach that thread from this one. See `capture::run`.
+    let (switch_tx, switch_rx) = pipewire::channel::channel::<u32>();
+
     // The portal thread. It owns the session for the whole run: returning from this closure would
     // drop it and revoke the compositor's grant mid-session.
     std::thread::Builder::new()
@@ -65,14 +70,19 @@ fn run() -> Result<()> {
         .recv()
         .context("the portal thread stopped before reporting whether it had a session")??;
 
+    // Before the first frame, so the agent can offer the picker from the moment the session opens
+    // rather than after something has been captured.
+    wire::write_displays(&mut std::io::stdout(), &ready.displays)
+        .context("reporting the displays the portal granted")?;
+
     // Started only once there is a session, so nothing is read from stdin that could not yet be
     // acted on — and so a failed negotiation leaves no thread behind.
     std::thread::Builder::new()
         .name("stdin".to_string())
-        .spawn(move || read_input(&input_tx))
+        .spawn(move || read_input(&input_tx, &switch_tx))
         .context("starting the stdin thread")?;
 
-    capture::run(ready.pipewire_fd, ready.node_id, ready.can_control_input)
+    capture::run(ready.pipewire_fd, ready.node_id, ready.can_control_input, switch_rx)
 }
 
 /// What the portal thread reports back once the session is up.
@@ -80,6 +90,7 @@ struct Ready {
     pipewire_fd: std::os::fd::OwnedFd,
     node_id: u32,
     can_control_input: bool,
+    displays: DisplaysMessage,
 }
 
 async fn serve_portal(ready: mpsc::Sender<Result<Ready>>, input: mpsc::Receiver<InputMessage>) {
@@ -103,6 +114,7 @@ async fn serve_portal(ready: mpsc::Sender<Result<Ready>>, input: mpsc::Receiver<
         pipewire_fd: fd,
         node_id: session.node_id,
         can_control_input: session.can_control_input(),
+        displays: session.displays(),
     };
 
     if ready.send(Ok(announcement)).is_err() {
@@ -113,6 +125,19 @@ async fn serve_portal(ready: mpsc::Sender<Result<Ready>>, input: mpsc::Receiver<
     // A blocking receive on an async thread, which is fine and deliberate: this thread does nothing
     // else, and the alternative — an async channel — would pull in a runtime for one queue.
     while let Ok(message) = input.recv() {
+        // Not an input event, and handled before `inject` sees it: it moves the node every
+        // subsequent pointer position is expressed within, which is the portal's own rule — it will
+        // only position a pointer inside a stream belonging to this session.
+        if let InputMessage::SelectDisplay { node_id } = message {
+            if !session.select_node(node_id) {
+                eprintln!(
+                    "remote control: ignoring a request to watch PipeWire node {node_id}, which this \
+                     portal session was not granted"
+                );
+            }
+            continue;
+        }
+
         if let Err(error) = session.inject(&message).await {
             // Logged and continued. One rejected event is not a reason to end a session: the portal
             // rejects an occasional call during a compositor's own transitions (a workspace switch,
@@ -123,7 +148,12 @@ async fn serve_portal(ready: mpsc::Sender<Result<Ready>>, input: mpsc::Receiver<
 }
 
 /// Reads newline-delimited input events until the agent closes stdin.
-fn read_input(input: &mpsc::Sender<InputMessage>) {
+///
+/// A display switch goes to **both** ends, and both are needed: the portal thread has to move the
+/// stream every pointer position is expressed within, and the capture loop has to link to the new
+/// node. Sent on the portal channel first, so an event that arrives immediately after the switch is
+/// positioned inside the display it was meant for.
+fn read_input(input: &mpsc::Sender<InputMessage>, switch: &pipewire::channel::Sender<u32>) {
     let stdin = std::io::stdin();
 
     for line in stdin.lock().lines() {
@@ -140,8 +170,19 @@ fn read_input(input: &mpsc::Sender<InputMessage>) {
             // unrecognised key a disconnection.
             Err(error) => eprintln!("remote control: could not read an input event ({error})"),
             Ok(message) => {
+                let switch_to = match message {
+                    InputMessage::SelectDisplay { node_id } => Some(node_id),
+                    _ => None,
+                };
+
                 if input.send(message).is_err() {
                     return;
+                }
+
+                if let Some(node_id) = switch_to {
+                    // A failed send means the capture loop has already finished, which ends the
+                    // session anyway — there is nothing useful to do about it here.
+                    let _ = switch.send(node_id);
                 }
             }
         }

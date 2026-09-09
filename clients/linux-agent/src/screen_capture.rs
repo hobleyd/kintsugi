@@ -40,12 +40,13 @@
 
 use anyhow::{anyhow, Context, Result};
 use x11rb::connection::Connection;
+use x11rb::protocol::randr::{self, ConnectionExt as RandrConnectionExt};
 use x11rb::protocol::xfixes;
 use x11rb::protocol::xproto::{ConnectionExt as XprotoConnectionExt, ImageFormat, Screen};
 use x11rb::rust_connection::RustConnection;
 
 use crate::logging;
-use crate::remote_protocol::{encode_tile, DisplayInfo};
+use crate::remote_protocol::{encode_tile, DisplayInfo, DisplayOption};
 
 /// How wide a captured image may be, in pixels, before it is scaled down. Same as the other two
 /// agents.
@@ -90,6 +91,15 @@ impl Frame {
 /// macOS genuinely differs, and one protocol serves all three.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DisplayGeometry {
+    /// The top-left of the region being captured, inside the root window. Zero when the session is
+    /// showing the whole virtual screen, and the monitor's own position otherwise — which is what
+    /// `input_injection::InputInjector::set_origin` needs, since XTEST positions a pointer in root
+    /// coordinates while the viewer sends coordinates relative to the display it is watching.
+    ///
+    /// Always zero on the Wayland backend: a portal stream is its own coordinate space, and the
+    /// portal positions a pointer within it rather than within any desktop-wide one.
+    pub origin_x: f64,
+    pub origin_y: f64,
     pub point_width: f64,
     pub point_height: f64,
     pub image_width: u32,
@@ -129,18 +139,45 @@ pub fn unavailable_reason() -> Option<String> {
     None
 }
 
-/// A connection to the X server, and the geometry of the screen being watched.
+/// A connection to the X server, and the region of the root window being watched.
 pub struct ScreenCapture {
     connection: RustConnection,
     root: u32,
-    /// The full screen size, which is what `GetImage` is asked for.
-    screen_width: u16,
-    screen_height: u16,
+    /// The rectangle of the root window `GetImage` is asked for: the whole virtual screen, or one
+    /// RandR monitor inside it.
+    region: CaptureRegion,
     pub geometry: DisplayGeometry,
+    displays: Vec<DisplayOption>,
+    active_display_id: u32,
+}
+
+/// A rectangle of the root window, in root coordinates.
+///
+/// **X11 is the one platform where switching displays is a crop rather than a different source.** A
+/// multi-monitor X11 session has a single root window spanning every output, so the whole desktop is
+/// already what `GetImage` returns — which is why "All displays" stays on offer here and has no
+/// counterpart on macOS or Windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CaptureRegion {
+    x: i16,
+    y: i16,
+    width: u16,
+    height: u16,
 }
 
 impl ScreenCapture {
-    pub fn start(max_image_width: u32) -> Result<Self> {
+    /// Starts capturing one of this session's displays, and reports what the others are.
+    ///
+    /// `requested_display_id` is a [`DisplayOption::id`] the viewer echoed back, or `None` for the
+    /// default. Ids here are this agent's own: zero means the whole virtual screen and one-based
+    /// indices name RandR monitors — see [`describe_displays`].
+    ///
+    /// **The default on a multi-monitor host is the primary monitor, not the whole screen**, which
+    /// is a deliberate change from the behaviour that predates the picker. The whole virtual screen
+    /// of a two-monitor desk is twice as wide as one and is scaled into the same 1600-pixel budget,
+    /// so it arrived at half the useful resolution with most of the picture being a display nobody
+    /// was looking at. It is still one click away as "All displays", which is why nothing is lost.
+    pub fn start(max_image_width: u32, requested_display_id: Option<u32>) -> Result<Self> {
         if let Some(reason) = unavailable_reason() {
             return Err(anyhow!("{reason}"));
         }
@@ -173,23 +210,57 @@ impl ScreenCapture {
             logging::warn("this X server has no XFIXES extension, so the remote pointer will not be visible");
         }
 
+        let displays = describe_displays(&connection, root, screen_width, screen_height);
+
+        // `position()` rather than a lookup that can fail: an id naming a monitor that has been
+        // unplugged since the picker was drawn falls back to the default, because ending a granted
+        // session over a pulled cable is the worse answer.
+        let chosen = requested_display_id
+            .and_then(|id| displays.iter().position(|display| display.id == id))
+            .or_else(|| displays.iter().position(|display| display.is_primary))
+            .unwrap_or(0);
+
+        if let Some(requested) = requested_display_id {
+            if displays[chosen].id != requested {
+                logging::warn(&format!(
+                    "display {requested} is no longer attached; capturing this host's primary display instead"
+                ));
+            }
+        }
+
+        let region = region_for(&displays[chosen], &connection, root, screen_width, screen_height);
+        let active_display_id = displays[chosen].id;
+
         // Scaled down only if it would otherwise be wider than the cap, and never scaled up.
-        let scale = (f64::from(max_image_width) / f64::from(screen_width)).min(1.0);
-        let image_width = ((f64::from(screen_width) * scale).round() as u32).max(1);
-        let image_height = ((f64::from(screen_height) * scale).round() as u32).max(1);
+        let scale = (f64::from(max_image_width) / f64::from(region.width)).min(1.0);
+        let image_width = ((f64::from(region.width) * scale).round() as u32).max(1);
+        let image_height = ((f64::from(region.height) * scale).round() as u32).max(1);
 
         let geometry = DisplayGeometry {
-            point_width: f64::from(screen_width),
-            point_height: f64::from(screen_height),
+            origin_x: f64::from(region.x),
+            origin_y: f64::from(region.y),
+            point_width: f64::from(region.width),
+            point_height: f64::from(region.height),
             image_width,
             image_height,
         };
 
         logging::info(&format!(
-            "remote control capture started: {screen_width}x{screen_height} screen, sending {image_width}x{image_height}"
+            "remote control capture started: {}x{} at {},{} of a {screen_width}x{screen_height} root window, \
+             sending {image_width}x{image_height}",
+            region.width, region.height, region.x, region.y
         ));
 
-        Ok(Self { connection, root, screen_width, screen_height, geometry })
+        Ok(Self { connection, root, region, geometry, displays, active_display_id })
+    }
+
+    /// Every display this session could show, and which one it is showing.
+    pub fn displays(&self) -> Vec<DisplayOption> {
+        self.displays.clone()
+    }
+
+    pub fn active_display_id(&self) -> u32 {
+        self.active_display_id
     }
 
     /// Grabs one frame. `None` means the X server refused this one, which the caller treats as a
@@ -200,10 +271,10 @@ impl ScreenCapture {
             .get_image(
                 ImageFormat::Z_PIXMAP,
                 self.root,
-                0,
-                0,
-                self.screen_width,
-                self.screen_height,
+                self.region.x,
+                self.region.y,
+                self.region.width,
+                self.region.height,
                 // Every plane. A mask of !0 rather than the visual's own depth mask, which is what
                 // every X11 screenshot tool uses and what a 24-in-32 TrueColor visual needs.
                 !0,
@@ -220,7 +291,7 @@ impl ScreenCapture {
         // reverse; rather than carry an untestable byte-swapping path, that is checked and refused
         // by `start`'s caller having a working little-endian assumption. The length check below is
         // what actually protects the slicing.
-        let expected = self.screen_width as usize * self.screen_height as usize * 4;
+        let expected = self.region.width as usize * self.region.height as usize * 4;
         if bgra.len() < expected {
             return None;
         }
@@ -228,7 +299,7 @@ impl ScreenCapture {
 
         self.draw_cursor(&mut bgra);
 
-        let full = Frame::new(bgra, u32::from(self.screen_width), u32::from(self.screen_height));
+        let full = Frame::new(bgra, u32::from(self.region.width), u32::from(self.region.height));
 
         if full.width == self.geometry.image_width && full.height == self.geometry.image_height {
             return Some(full);
@@ -250,20 +321,24 @@ impl ScreenCapture {
             return;
         };
 
-        let stride = self.screen_width as usize * 4;
+        let stride = self.region.width as usize * 4;
 
         // XFIXES reports where the cursor is drawn and where its hotspot sits inside its own image;
         // the top-left of the sprite is the difference. Ignore the hotspot and the pointer lands a
         // dozen pixels from where it looks like it is, which is exactly enough to make clicking feel
         // wrong.
-        let origin_x = i32::from(cursor.x) - i32::from(cursor.xhot);
-        let origin_y = i32::from(cursor.y) - i32::from(cursor.yhot);
+        // Less the captured region's own origin, because XFIXES answers in root coordinates and
+        // this buffer only covers one monitor of it. Without that subtraction the pointer is drawn
+        // at its root position inside a frame that starts somewhere else — so on a second monitor
+        // it lands wherever the arithmetic happens to put it, or is clipped away entirely.
+        let origin_x = i32::from(cursor.x) - i32::from(cursor.xhot) - i32::from(self.region.x);
+        let origin_y = i32::from(cursor.y) - i32::from(cursor.yhot) - i32::from(self.region.y);
 
         for (index, pixel) in cursor.cursor_image.iter().enumerate() {
             let x = origin_x + (index % cursor.width as usize) as i32;
             let y = origin_y + (index / cursor.width as usize) as i32;
 
-            if x < 0 || y < 0 || x >= i32::from(self.screen_width) || y >= i32::from(self.screen_height) {
+            if x < 0 || y < 0 || x >= i32::from(self.region.width) || y >= i32::from(self.region.height) {
                 continue;
             }
 
@@ -286,6 +361,147 @@ impl ScreenCapture {
             bgra[offset + 2] = blend(source_red, bgra[offset + 2], inverse);
         }
     }
+}
+
+/// The whole virtual screen, which is what an X11 session with one monitor — or a server too old to
+/// answer `GetMonitors` — has to offer.
+const WHOLE_SCREEN_DISPLAY_ID: u32 = 0;
+
+/// What the viewer's picker shows for this session.
+///
+/// **The list is RandR's, and a server that cannot answer gets one entry rather than an error.**
+/// `GetMonitors` arrived in RandR 1.5 (2015); a host without it, or a remote X server that answers
+/// nothing useful, still has a perfectly capturable root window, and refusing a session over a
+/// missing picker would trade a working feature for a new one.
+///
+/// The whole virtual screen is offered as its own entry whenever there is more than one monitor,
+/// because on X11 it genuinely is a thing that can be captured — see [`CaptureRegion`] — and it is
+/// what a session did before the picker existed. It is deliberately *not* the primary entry: see
+/// [`ScreenCapture::start`].
+fn describe_displays(
+    connection: &RustConnection,
+    root: u32,
+    screen_width: u16,
+    screen_height: u16,
+) -> Vec<DisplayOption> {
+    let whole_screen = |label: String, is_primary: bool| DisplayOption {
+        id: WHOLE_SCREEN_DISPLAY_ID,
+        label,
+        width: u32::from(screen_width),
+        height: u32::from(screen_height),
+        is_primary,
+    };
+
+    let monitors = match monitors(connection, root) {
+        Ok(monitors) => monitors,
+        Err(err) => {
+            logging::warn(&format!(
+                "could not ask this X server which monitors it has, so the whole screen is the only \
+                 thing on offer: {err:#}"
+            ));
+            return vec![whole_screen(format!("Screen ({screen_width} x {screen_height})"), true)];
+        }
+    };
+
+    // One monitor and one screen are the same picture, and offering both would be two entries
+    // naming the same pixels — worse than no picker at all, since the reader has to work out that
+    // they are identical.
+    if monitors.len() < 2 {
+        let label = monitors
+            .first()
+            .map(|monitor| format!("{} ({screen_width} x {screen_height})", monitor.1))
+            .unwrap_or_else(|| format!("Screen ({screen_width} x {screen_height})"));
+        return vec![whole_screen(label, true)];
+    }
+
+    let mut displays = vec![whole_screen(
+        format!("All displays ({screen_width} x {screen_height})"),
+        // Never the default. A two-monitor desk sent whole is twice as wide for the same pixel
+        // budget, so it arrives at half the resolution of the one display anybody is looking at.
+        false,
+    )];
+
+    // Ids are one-based indices into RandR's own ordering rather than the monitor's name atom: an
+    // atom is only meaningful to the X server that minted it, and the viewer echoes this value back
+    // through a JSON `u32`. Index zero is taken by the whole screen above.
+    let any_primary = monitors.iter().any(|(monitor, _)| monitor.primary);
+
+    displays.extend(monitors.iter().enumerate().map(|(index, (monitor, name))| DisplayOption {
+        id: index as u32 + 1,
+        label: format!("{name} ({} x {})", monitor.width, monitor.height),
+        width: u32::from(monitor.width),
+        height: u32::from(monitor.height),
+        // RandR is entitled to report no primary at all — it is a per-screen property an
+        // administrator can leave unset — so the first monitor stands in, or nothing would be the
+        // default and `start` would fall back to "All displays" on exactly the hosts the change
+        // above is for.
+        is_primary: if any_primary { monitor.primary } else { index == 0 },
+    }));
+
+    displays
+}
+
+/// RandR's monitors and their names, in RandR's own order.
+///
+/// The name is an atom, so each one costs a round trip to turn into a string. Worth it: "eDP-1" and
+/// "HDMI-1" are what a person at the host would call their displays, where "Display 1" and
+/// "Display 2" say nothing about which is which.
+fn monitors(connection: &RustConnection, root: u32) -> Result<Vec<(randr::MonitorInfo, String)>> {
+    let reply = connection
+        .randr_get_monitors(root, true)
+        .context("could not ask this X server for its monitor list")?
+        .reply()
+        .context("this X server has no RandR 1.5 monitor list")?;
+
+    Ok(reply
+        .monitors
+        .into_iter()
+        .map(|monitor| {
+            let name = connection
+                .get_atom_name(monitor.name)
+                .ok()
+                .and_then(|pending| pending.reply().ok())
+                .map(|reply| String::from_utf8_lossy(&reply.name).into_owned())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "Display".to_string());
+
+            (monitor, name)
+        })
+        .collect())
+}
+
+/// The rectangle of the root window an offered display corresponds to.
+///
+/// Re-asks RandR rather than remembering a rectangle alongside the [`DisplayOption`], because the
+/// option travels to the browser and back and a rectangle riding along with it would be geometry
+/// the viewer could influence. A monitor that has vanished between the two calls falls back to the
+/// whole screen, which is always capturable.
+fn region_for(
+    display: &DisplayOption,
+    connection: &RustConnection,
+    root: u32,
+    screen_width: u16,
+    screen_height: u16,
+) -> CaptureRegion {
+    let whole_screen = CaptureRegion { x: 0, y: 0, width: screen_width, height: screen_height };
+
+    if display.id == WHOLE_SCREEN_DISPLAY_ID {
+        return whole_screen;
+    }
+
+    let Ok(monitors) = monitors(connection, root) else { return whole_screen };
+    let Some((monitor, _)) = monitors.get(display.id as usize - 1) else { return whole_screen };
+
+    // Clamped into the root window, because `GetImage` answers BadMatch for a rectangle that leaves
+    // it — and a display being reconfigured really can report one for a moment.
+    let width = monitor.width.min(screen_width.saturating_sub(monitor.x.max(0) as u16));
+    let height = monitor.height.min(screen_height.saturating_sub(monitor.y.max(0) as u16));
+
+    if width == 0 || height == 0 {
+        return whole_screen;
+    }
+
+    CaptureRegion { x: monitor.x.max(0), y: monitor.y.max(0), width, height }
 }
 
 fn blend(source: u32, destination: u8, inverse_alpha: u32) -> u8 {
@@ -350,6 +566,19 @@ impl FrameEncoder {
             // next to old tiles at the previous one looks like a rendering fault.
             self.force_full = true;
         }
+    }
+
+    /// Makes the next frame a whole one, whatever changed.
+    ///
+    /// **Required on a display switch, and the reason it is required is not obvious.** This encoder
+    /// finds changes by diffing against the previous frame, and two identical monitors — the common
+    /// office desk — give the *same* dimensions on both sides of a switch. So `encode_changes` would
+    /// diff the new display's pixels against the old display's and send only the tiles that happened
+    /// to differ, leaving fragments of the previous monitor on screen everywhere the two agreed. The
+    /// geometry check inside `encode_changes` cannot catch it, because nothing about the geometry
+    /// changed.
+    pub fn force_full_frame(&mut self) {
+        self.force_full = true;
     }
 
     /// The wire messages for everything that changed since the last call. Empty when nothing did.
@@ -591,6 +820,24 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(tile_rect(&messages[0]), (0, 0, 800, 600));
+    }
+
+    #[test]
+    fn a_forced_full_frame_resends_a_screen_whose_pixels_are_identical() {
+        // The display-switch case, and the reason `force_full_frame` exists rather than being left
+        // to the geometry check. Two same-sized monitors showing the same thing produce a frame this
+        // encoder cannot tell from the previous one, so without the flag a switch between them sends
+        // nothing at all and the viewer goes on showing the display it was already on.
+        let mut encoder = FrameEncoder::new(60);
+        let frame = flat_frame(600, 400, [10, 20, 30, 255]);
+        encoder.encode_changes(&frame);
+        assert!(encoder.encode_changes(&frame).is_empty());
+
+        encoder.force_full_frame();
+
+        let messages = encoder.encode_changes(&frame);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(tile_rect(&messages[0]), (0, 0, 600, 400));
     }
 
     #[test]

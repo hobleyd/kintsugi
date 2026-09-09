@@ -94,6 +94,11 @@ RemoteScreenUpdate? remoteTextUpdateFromJson(String text) {
         // Absent means true: an agent from before this field existed could always be driven, and
         // defaulting the other way would make every older host look view-only.
         canControlInput: decoded['canControlInput'] != false,
+        // Absent means an empty list, which the viewer reads as "offer no picker" — see
+        // `RemoteDisplayGeometry.displays`. An agent from before display switching sends neither
+        // field, and it is right that such a host shows no choice rather than one entry it invented.
+        displays: _displaysFrom(decoded['displays']),
+        activeDisplayId: _asInt(decoded['activeDisplayId']),
       );
 
     case 'shell':
@@ -190,6 +195,13 @@ Map<String, Object?>? remoteInputToJson(RemoteInput input) => switch (input) {
           'hid': usbHidUsage,
           'down': isDown,
         },
+      RemoteDisplaySelection(:final displayId) => {
+          // "select-display", not "display": the agent's own geometry message is typed "display",
+          // and one string meaning two unrelated messages in two different parsers is the sort of
+          // coincidence that survives review and then wastes an afternoon reading a session log.
+          'type': 'select-display',
+          'id': displayId,
+        },
       RemoteQualityInput(:final jpegQuality) => {
           'type': 'quality',
           // A null-aware element: omitted entirely when unset, which is what the agent's
@@ -206,6 +218,32 @@ Map<String, Object?>? remoteInputToJson(RemoteInput input) => switch (input) {
       // put a keystroke on the wire in a shape no agent reads.
       RemoteShellInput() => null,
     };
+
+/// Reads the display list, dropping anything malformed rather than failing the whole message.
+///
+/// A geometry message that would not parse is a session with nothing to draw into; a display list
+/// that would not parse only costs the picker. So an entry missing an id is skipped and the rest
+/// are kept, which is the same "one odd message must not end a session" rule the rest of this file
+/// follows.
+List<RemoteDisplayOption> _displaysFrom(Object? raw) {
+  if (raw is! List) return const [];
+
+  return [
+    for (final entry in raw)
+      if (entry is Map<String, dynamic> && entry['id'] is num)
+        RemoteDisplayOption(
+          id: _asInt(entry['id']),
+          // Falls back to something nameable rather than an empty row: a picker entry with a blank
+          // label is unclickable in the sense that matters — nobody can tell what it is.
+          label: entry['label']?.toString().isNotEmpty == true
+              ? entry['label'].toString()
+              : 'Display ${_asInt(entry['id'])}',
+          width: _asInt(entry['width']),
+          height: _asInt(entry['height']),
+          isPrimary: entry['isPrimary'] == true,
+        ),
+  ];
+}
 
 double _asDouble(Object? raw) => raw is num ? raw.toDouble() : 0;
 

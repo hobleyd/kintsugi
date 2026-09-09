@@ -198,6 +198,77 @@ pub fn scan_code_for_hid(hid: u32) -> Option<(u16, bool)> {
     }
 }
 
+/// Turns a viewer's coordinates into what `SendInput` wants.
+///
+/// **Two things had to change together here and either alone puts the pointer somewhere else.**
+/// `MOUSEEVENTF_ABSOLUTE` normalises over the *primary* monitor unless `MOUSEEVENTF_VIRTUALDESK` is
+/// also set, in which case it normalises over the whole virtual desktop — so reaching a second
+/// monitor needs the flag *and* the divisor to be the virtual desktop's. Neither is visible on a
+/// single-monitor host, where the two rectangles are the same numbers and the whole conversion is
+/// the identity, which is why this is a separate testable type rather than four lines inside
+/// `pointer`: the case that goes wrong is a monitor placed to the left of or above the primary,
+/// where `SM_XVIRTUALSCREEN` is **negative**.
+///
+/// Lives outside the `#[cfg(windows)]` module so its arithmetic is tested on every platform. Only
+/// [`Self::current`], which reads the system metrics, is Windows-only.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PointerSpace {
+    /// The captured display's top-left, in virtual-desktop coordinates.
+    origin_x: f64,
+    origin_y: f64,
+
+    /// The virtual desktop itself. `left` and `top` are negative whenever a monitor sits above or
+    /// to the left of the primary one.
+    virtual_left: f64,
+    virtual_top: f64,
+    virtual_width: f64,
+    virtual_height: f64,
+}
+
+impl PointerSpace {
+    pub fn new(
+        origin: (f64, f64),
+        virtual_origin: (f64, f64),
+        virtual_width: f64,
+        virtual_height: f64,
+    ) -> Self {
+        Self {
+            origin_x: origin.0,
+            origin_y: origin.1,
+            virtual_left: virtual_origin.0,
+            virtual_top: virtual_origin.1,
+            // Guarded rather than trusted: a zero would be a division by zero, and Windows really
+            // does report nothing useful here on a session with no attached desktop.
+            virtual_width: virtual_width.max(1.0),
+            virtual_height: virtual_height.max(1.0),
+        }
+    }
+
+    /// A viewer coordinate, relative to the captured display, as an absolute virtual-desktop
+    /// coordinate in 0..=65535.
+    ///
+    /// The divisor is `width - 1`, not `width`: the range is inclusive at both ends, so a click on
+    /// the rightmost pixel has to reach 65535 exactly or the far edge of the desktop is unreachable.
+    pub fn normalise(self, x: f64, y: f64) -> (i32, i32) {
+        let desktop_x = self.origin_x + x - self.virtual_left;
+        let desktop_y = self.origin_y + y - self.virtual_top;
+
+        let normalised_x = ((desktop_x / (self.virtual_width - 1.0).max(1.0)) * ABSOLUTE_RANGE)
+            .round()
+            .clamp(0.0, ABSOLUTE_RANGE) as i32;
+        let normalised_y = ((desktop_y / (self.virtual_height - 1.0).max(1.0)) * ABSOLUTE_RANGE)
+            .round()
+            .clamp(0.0, ABSOLUTE_RANGE) as i32;
+
+        (normalised_x, normalised_y)
+    }
+}
+
+/// `MOUSEEVENTF_ABSOLUTE` coordinates are normalised into this range, inclusive, rather than being
+/// pixels — over the primary monitor by default, and over the whole virtual desktop with
+/// `MOUSEEVENTF_VIRTUALDESK`. See [`PointerSpace`].
+const ABSOLUTE_RANGE: f64 = 65535.0;
+
 #[cfg(windows)]
 pub use platform::InputInjector;
 
@@ -207,13 +278,51 @@ mod platform {
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
         KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
         MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-        MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT,
+        MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
+        MOUSEEVENTF_WHEEL, MOUSEINPUT,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN,
     };
 
     use crate::logging;
     use crate::remote_protocol::{MouseButton, PointerAction, ViewerInput};
 
-    use super::scan_code_for_hid;
+    use super::{scan_code_for_hid, PointerSpace};
+
+    impl PointerSpace {
+        /// The pointer space for a display at `origin` on this host's current virtual desktop.
+        ///
+        /// The virtual desktop is read here rather than passed in because it is not the caller's
+        /// business and it changes underneath a session — a monitor plugged in or unplugged moves
+        /// it, and every switch re-reads it for that reason.
+        pub fn current(origin: (f64, f64), width: f64, height: f64) -> Self {
+            // SAFETY: documented; each takes one constant index.
+            let (left, top, virtual_width, virtual_height) = unsafe {
+                (
+                    GetSystemMetrics(SM_XVIRTUALSCREEN),
+                    GetSystemMetrics(SM_YVIRTUALSCREEN),
+                    GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                    GetSystemMetrics(SM_CYVIRTUALSCREEN),
+                )
+            };
+
+            // A desktop Windows reports as empty falls back to the captured display itself, which
+            // makes the conversion the identity — the behaviour this agent had before it could
+            // reach a second monitor at all, and the right degenerate answer.
+            if virtual_width <= 0 || virtual_height <= 0 {
+                return Self::new(origin, origin, width, height);
+            }
+
+            Self::new(
+                origin,
+                (f64::from(left), f64::from(top)),
+                f64::from(virtual_width),
+                f64::from(virtual_height),
+            )
+        }
+    }
 
     /// One notch of a mouse wheel, as Windows defines it.
     const WHEEL_DELTA: f64 = 120.0;
@@ -223,9 +332,6 @@ mod platform {
     /// gentle two-finger scroll fly down a page.
     const PIXELS_PER_NOTCH: f64 = 100.0;
 
-    /// `MOUSEEVENTF_ABSOLUTE` coordinates are normalised over the primary monitor into this range,
-    /// inclusive, rather than being pixels.
-    const ABSOLUTE_RANGE: f64 = 65535.0;
 
     /// Posts the remote pointer and keyboard into this host.
     ///
@@ -233,8 +339,7 @@ mod platform {
     /// reason. There is no handle to keep here; `SendInput` is stateless. What must not be shared is
     /// the record of what is currently held down, because that is what lets go at the end.
     pub struct InputInjector {
-        screen_width: f64,
-        screen_height: f64,
+        space: PointerSpace,
 
         /// Every key currently down, as a HID usage.
         ///
@@ -247,13 +352,24 @@ mod platform {
     }
 
     impl InputInjector {
-        pub fn new(screen_width: f64, screen_height: f64) -> Self {
+        /// `origin` and the size are the display being captured, in virtual-desktop coordinates —
+        /// which for anything but the primary display means a non-zero, possibly negative, origin.
+        pub fn new(origin: (f64, f64), width: f64, height: f64) -> Self {
             Self {
-                screen_width: screen_width.max(1.0),
-                screen_height: screen_height.max(1.0),
+                space: PointerSpace::current(origin, width, height),
                 keys_down: Vec::new(),
                 buttons_down: [false; 3],
             }
+        }
+
+        /// Moves this injector onto the display the session is now capturing.
+        ///
+        /// Called when the viewer switches displays. Every coordinate it sends is relative to the
+        /// display it is watching, so a switch that left this alone would put every click on the
+        /// monitor the administrator just navigated away from. The virtual desktop is re-read at the
+        /// same time, since a monitor plugged in or unplugged changes it.
+        pub fn set_origin(&mut self, origin: (f64, f64), width: f64, height: f64) {
+            self.space = PointerSpace::current(origin, width, height);
         }
 
         pub fn apply(&mut self, input: &ViewerInput) {
@@ -263,6 +379,10 @@ mod platform {
                 ViewerInput::Key { hid, down } => self.key(*hid, *down),
                 // The capture side's business, not this one's.
                 ViewerInput::Quality { .. } => {}
+                // Also the capture side's. A switch does reach this object, but as a `set_origin`
+                // call once the new capture has started — the message alone does not say where the
+                // new display sits on the virtual desktop.
+                ViewerInput::SelectDisplay { .. } => {}
                 // A shell session's business, and a shell session has no injector at all.
                 ViewerInput::Resize { .. } => {}
             }
@@ -289,19 +409,7 @@ mod platform {
         }
 
         fn pointer(&mut self, action: PointerAction, x: f64, y: f64, button: MouseButton) {
-            // Normalised over the primary monitor, which is also what was captured — see
-            // DisplayGeometry on why the two coordinate spaces are the same number on Windows.
-            //
-            // The divisor is width - 1, not width: the range is inclusive at both ends, so a click
-            // on the rightmost pixel has to reach 65535 exactly or the far edge of the screen is
-            // unreachable.
-            let normalised_x = ((x / (self.screen_width - 1.0).max(1.0)) * ABSOLUTE_RANGE)
-                .round()
-                .clamp(0.0, ABSOLUTE_RANGE) as i32;
-            let normalised_y = ((y / (self.screen_height - 1.0).max(1.0)) * ABSOLUTE_RANGE)
-                .round()
-                .clamp(0.0, ABSOLUTE_RANGE) as i32;
-            let position = Some((normalised_x, normalised_y));
+            let position = Some(self.space.normalise(x, y));
 
             match action {
                 PointerAction::Move => self.send_mouse(MOUSEEVENTF_MOVE, 0, position),
@@ -385,7 +493,12 @@ mod platform {
 
         fn send_mouse(&self, flags: u32, wheel_delta: i32, position: Option<(i32, i32)>) {
             let (dx, dy, flags) = match position {
-                Some((x, y)) => (x, y, flags | MOUSEEVENTF_ABSOLUTE),
+                // VIRTUALDESK alongside ABSOLUTE, and the two are one decision: without it the
+                // 0..65535 range is normalised over the *primary* monitor alone, and every
+                // coordinate `PointerSpace` produced — which spans the whole virtual desktop —
+                // would be squeezed onto that one screen. On a single-monitor host the two are
+                // identical, which is exactly why this must not be "simplified" back.
+                Some((x, y)) => (x, y, flags | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK),
                 None => (0, 0, flags),
             };
 
@@ -457,6 +570,76 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `PointerSpace` is where the multi-monitor arithmetic lives, and none of it is exercised by a
+    /// single-monitor host — the primary display and the virtual desktop are the same rectangle
+    /// there, so every conversion is the identity and a wrong one tests clean. These use a desktop
+    /// with a **negative** origin, which is what a monitor placed to the left of the primary gives.
+    const RANGE: i32 = 65535;
+
+    #[test]
+    fn a_single_monitor_host_normalises_over_its_own_screen() {
+        // The pre-existing behaviour, and it has to stay exactly this: origin and desktop are the
+        // same rectangle, so the corners are the corners.
+        let space = PointerSpace::new((0.0, 0.0), (0.0, 0.0), 1920.0, 1080.0);
+
+        assert_eq!(space.normalise(0.0, 0.0), (0, 0));
+        assert_eq!(space.normalise(1919.0, 1079.0), (RANGE, RANGE));
+    }
+
+    #[test]
+    fn a_secondary_monitor_to_the_right_maps_onto_the_far_half_of_the_desktop() {
+        // Two 1920-wide monitors side by side: the desktop is 3840 wide, and the second display's
+        // own (0, 0) is halfway across it. Without the origin this would land on the primary.
+        let space = PointerSpace::new((1920.0, 0.0), (0.0, 0.0), 3840.0, 1080.0);
+
+        let (x, _) = space.normalise(0.0, 0.0);
+        assert!((x - RANGE / 2).abs() <= 16, "the left edge of display 2 should be mid-desktop, got {x}");
+
+        assert_eq!(space.normalise(3839.0 - 1920.0, 1079.0), (RANGE, RANGE));
+    }
+
+    #[test]
+    fn a_secondary_monitor_to_the_left_of_the_primary_has_a_negative_desktop_origin() {
+        // **The case that goes wrong.** Windows reports SM_XVIRTUALSCREEN as -1920 here, so the
+        // desktop's left edge is negative and every coordinate has to be shifted by it. Skip that
+        // and display 2's own top-left normalises to a negative number, which clamps to zero — so
+        // the whole of the left monitor collapses onto the primary's left edge.
+        let space = PointerSpace::new((-1920.0, 0.0), (-1920.0, 0.0), 3840.0, 1080.0);
+
+        assert_eq!(space.normalise(0.0, 0.0), (0, 0));
+
+        let (right_edge, _) = space.normalise(1919.0, 0.0);
+        assert!(
+            (right_edge - RANGE / 2).abs() <= 16,
+            "the right edge of the left-hand monitor should be mid-desktop, got {right_edge}"
+        );
+
+        // And the primary, which starts at the desktop's midpoint.
+        let primary = PointerSpace::new((0.0, 0.0), (-1920.0, 0.0), 3840.0, 1080.0);
+        assert_eq!(primary.normalise(1919.0, 1079.0), (RANGE, RANGE));
+    }
+
+    #[test]
+    fn a_position_outside_the_desktop_clamps_rather_than_wrapping() {
+        // A drag that leaves the picture holds at the edge, matching what the viewer's own clamp
+        // does — and, more importantly, a negative value cast to i32 would be an absurd coordinate
+        // rather than a clamped one.
+        let space = PointerSpace::new((0.0, 0.0), (0.0, 0.0), 1920.0, 1080.0);
+
+        assert_eq!(space.normalise(-500.0, -500.0), (0, 0));
+        assert_eq!(space.normalise(99_999.0, 99_999.0), (RANGE, RANGE));
+    }
+
+    #[test]
+    fn a_desktop_windows_reports_as_empty_does_not_divide_by_zero() {
+        // Guarded in `new`, because Windows genuinely answers nothing useful for the virtual desktop
+        // on a session with no attached desktop — and a division by zero here is a panic inside the
+        // session helper rather than a session that fails politely.
+        let space = PointerSpace::new((0.0, 0.0), (0.0, 0.0), 0.0, 0.0);
+
+        assert_eq!(space.normalise(0.0, 0.0), (0, 0));
+    }
 
     // The mapping only. Posting an event is not testable without a desktop, and asserting that a
     // real keystroke arrived would mean typing into whatever had focus on the machine running the

@@ -468,6 +468,12 @@ class RemoteControlBloc extends Bloc<RemoteControlEvent, RemoteControlState>
 
   @override
   Future<void> close() async {
+    // Before anything that awaits, and that ordering is the point. `Polling.close` cancels the
+    // timer, but it only runs once `super.close()` is reached at the bottom of this method — so
+    // every await above it is a window in which the two-second poll keeps firing at a bloc that is
+    // being torn down, issuing requests for a session nobody is watching any more.
+    stopPolling();
+
     await _detachStream();
     await _shellOutput.close();
 

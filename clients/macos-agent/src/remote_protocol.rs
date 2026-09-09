@@ -178,6 +178,31 @@ pub const TILE_HEADER_BYTES: usize = 14;
 /// message in this protocol has, so a frame of the wrong kind is refused rather than drawn or typed.
 pub const SHELL_FRAME_HEADER_BYTES: usize = 2;
 
+/// One display the host could show, as offered to the viewer's picker.
+///
+/// [`id`](Self::id) is **opaque to the viewer** and means whatever the agent that produced it says:
+/// a `CGDirectDisplayID` on macOS, an index into Windows' monitor enumeration, a RandR monitor (or
+/// zero for the whole virtual screen) on Linux. The viewer never interprets one — it echoes it back
+/// in [`ViewerInput::SelectDisplay`] — so making the three agree would be one more thing to keep in
+/// step for no reader's benefit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DisplayOption {
+    pub id: u32,
+
+    /// What the picker shows. Built by the agent rather than composed by the viewer from the size,
+    /// because only the host knows what its displays are called — and a label built from a size has
+    /// nothing to say about the two identical monitors that are the common office desk.
+    pub label: String,
+
+    pub width: u32,
+    pub height: u32,
+
+    /// Whether this is the host's primary display: the one a session captures when the viewer has
+    /// asked for nothing in particular.
+    #[serde(rename = "isPrimary")]
+    pub is_primary: bool,
+}
+
 /// Sent as a text message whenever the geometry changes, and always once before the first tile.
 ///
 /// Two sizes, because they are genuinely different and conflating them is what puts the remote
@@ -212,6 +237,24 @@ pub struct DisplayInfo {
     /// to know until the portal session is negotiated.
     #[serde(rename = "canControlInput")]
     pub can_control_input: bool,
+
+    /// Every display this session could show, and which of them it is showing.
+    ///
+    /// **An empty list means "offer no picker", not "this host has no screen".** An agent from
+    /// before display switching existed sends neither field, and a host with one display sends one
+    /// entry — so the viewer offers the choice only where there is one, and a laptop gets no control
+    /// it cannot use.
+    ///
+    /// A switch is announced by resending this whole message. The *size* may be unchanged when it
+    /// happens — two identical monitors is the common case — so
+    /// [`active_display_id`](Self::active_display_id) is what says the picture is now of somewhere
+    /// else.
+    pub displays: Vec<DisplayOption>,
+
+    /// The [`DisplayOption::id`] these tiles are of. Zero when [`displays`](Self::displays) is
+    /// empty, which is what an agent that cannot switch reports.
+    #[serde(rename = "activeDisplayId")]
+    pub active_display_id: u32,
 }
 
 impl DisplayInfo {
@@ -241,7 +284,22 @@ impl DisplayInfo {
             image_width,
             image_height,
             can_control_input,
+            displays: Vec::new(),
+            active_display_id: 0,
         }
+    }
+
+    /// Names the displays this session could show and which one it is showing.
+    ///
+    /// Chained onto one of the constructors above rather than folded into them, because the two
+    /// facts are discovered in different places: the geometry comes off the capture that is running,
+    /// the list off the platform's display enumeration. It is also what keeps
+    /// `screen_capture::DisplayGeometry` `Copy` on all three agents — a `Vec` on that struct would
+    /// not be, and the session loops hold it by value.
+    pub fn showing(mut self, displays: Vec<DisplayOption>, active_display_id: u32) -> Self {
+        self.displays = displays;
+        self.active_display_id = active_display_id;
+        self
     }
 }
 
@@ -350,6 +408,11 @@ pub enum ViewerInput {
         jpeg_quality: Option<u8>,
         max_fps: Option<u8>,
     },
+    /// The viewer asking to watch a different display, naming one of the [`DisplayOption::id`]s the
+    /// agent offered. The agent restarts capture there and resends [`DisplayInfo`] before the first
+    /// tile of the new display.
+    SelectDisplay { id: u32 },
+
     /// The terminal in the browser changed size; the PTY's window size follows so the shell
     /// re-wraps. Shell sessions only.
     Resize { cols: u16, rows: u16 },
@@ -384,6 +447,7 @@ pub fn parse_viewer_input(json: &str) -> Option<ViewerInput> {
         max_fps: Option<u8>,
         cols: Option<u16>,
         rows: Option<u16>,
+        id: Option<u32>,
     }
 
     let envelope: Envelope = serde_json::from_str(json).ok()?;
@@ -428,6 +492,11 @@ pub fn parse_viewer_input(json: &str) -> Option<ViewerInput> {
             jpeg_quality: envelope.jpeg_quality,
             max_fps: envelope.max_fps,
         }),
+
+        // "select-display", not "display": `DisplayInfo`'s own `type` is already "display", and one
+        // string meaning two unrelated messages in two different parsers is exactly the coincidence
+        // that survives a review and then wastes an afternoon of somebody reading a session log.
+        "select-display" => Some(ViewerInput::SelectDisplay { id: envelope.id? }),
 
         "resize" => {
             let (cols, rows) = (envelope.cols?, envelope.rows?);
@@ -583,6 +652,69 @@ mod tests {
         let json = serde_json::to_string(&DisplayInfo::with_input(1.0, 2.0, 1, 2, false)).unwrap();
 
         assert!(json.contains(r#""canControlInput":false"#), "{json}");
+    }
+
+    #[test]
+    fn display_info_offers_no_picker_until_it_is_told_about_the_displays() {
+        // An empty list is what an agent that cannot switch reports, and the viewer reads it as
+        // "offer nothing" rather than as "this host has no screen". Both constructors must start
+        // there, or a backend that forgets to call `showing` would offer a picker naming nothing.
+        assert!(DisplayInfo::new(1.0, 2.0, 1, 2).displays.is_empty());
+        assert_eq!(DisplayInfo::new(1.0, 2.0, 1, 2).active_display_id, 0);
+        assert!(DisplayInfo::with_input(1.0, 2.0, 1, 2, false).displays.is_empty());
+    }
+
+    #[test]
+    fn display_info_names_the_displays_under_the_names_the_viewer_reads() {
+        // The viewer keys on these exact names and the server relays the message without parsing it,
+        // so a rename here is a picker that never appears — with nothing anywhere reporting it.
+        let json = serde_json::to_string(
+            &DisplayInfo::new(2560.0, 1440.0, 1280, 720).showing(
+                vec![
+                    DisplayOption {
+                        id: 1,
+                        label: "Built-in Retina Display (2560 x 1440)".to_string(),
+                        width: 2560,
+                        height: 1440,
+                        is_primary: true,
+                    },
+                    DisplayOption {
+                        id: 7,
+                        label: "Display 2 (1920 x 1080)".to_string(),
+                        width: 1920,
+                        height: 1080,
+                        is_primary: false,
+                    },
+                ],
+                7,
+            ),
+        )
+        .unwrap();
+
+        assert!(json.contains(r#""activeDisplayId":7"#), "{json}");
+        assert!(json.contains(r#""isPrimary":true"#), "{json}");
+        assert!(json.contains(r#""label":"Display 2 (1920 x 1080)""#), "{json}");
+        assert!(json.contains(r#""displays":[{"id":1"#), "{json}");
+    }
+
+    #[test]
+    fn parses_a_display_selection() {
+        assert_eq!(
+            parse_viewer_input(r#"{"type":"select-display","id":7}"#),
+            Some(ViewerInput::SelectDisplay { id: 7 })
+        );
+        // Nothing to switch to. Ignored rather than guessed at: the alternative is a session that
+        // silently changes to the primary display because one message arrived malformed.
+        assert_eq!(parse_viewer_input(r#"{"type":"select-display"}"#), None);
+    }
+
+    #[test]
+    fn a_display_selection_is_not_spelled_the_same_as_the_geometry_message() {
+        // The two travel in opposite directions through two different parsers, and sharing "display"
+        // between them would make a session log ambiguous about which end sent what. This asserts
+        // the viewer's own `type` is not accepted as a selection.
+        assert_eq!(parse_viewer_input(r#"{"type":"display","id":7}"#), None);
+        assert_eq!(DisplayInfo::new(1.0, 1.0, 1, 1).message_type, "display");
     }
 
     #[test]

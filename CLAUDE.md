@@ -1048,6 +1048,111 @@ same process, so a second API replica behind a load balancer would break remote 
 unless both were routed to the same instance. Nothing does that today — compose runs one `api` — but
 it is the assumption to check first if that changes.
 
+**A host with several monitors is watched one at a time, and the picker is a media-protocol
+addition alone.** `DisplayInfo` carries a `displays` list and an `activeDisplayId`; the viewer sends
+`{"type":"select-display","id":…}` back; the agent restarts its capture there and resends
+`DisplayInfo`. **Nothing in the server changed for any of it**, which is the property "the server
+relays the media protocol without parsing it" exists to buy — and equally means nothing server-side
+would catch the two ends drifting, so `web/test/data/remote_control_mapper_test.dart` and the three
+agents' `remote_protocol.rs` tests assert the same JSON from both sides.
+
+Five things about it are load-bearing, and the first is the one that fails on the commonest desk.
+
+- **The encoder must be told to send a whole frame on every switch, explicitly.** `FrameEncoder`
+  finds changes by diffing against the previous frame, and two identical monitors — an ordinary
+  office setup — are the *same size*, so its own geometry check sees nothing changed and it happily
+  diffs the new display's pixels against the old display's, sending only the tiles that differed and
+  leaving fragments of the previous monitor everywhere the two agreed. `force_full_frame` is what
+  each agent calls; a test in all three pins it.
+- **The viewer keys the change on `activeDisplayId`, for the same reason.** Every size in a
+  `DisplayInfo` is unchanged across a switch between identical monitors, so without that field in
+  `RemoteDisplayGeometry`'s `props` the state compares equal, the bloc emits nothing, and the stale
+  tiles are never cleared — the switch looks like it did nothing.
+- **Everything held is released before the pointer space moves.** A modifier or a mouse button down
+  across a switch would otherwise stay down with nothing on either screen to explain it — the same
+  invariant `release_all` already keeps at the end of a session, at the one other moment the
+  coordinate space changes underneath somebody's hand.
+- **Ids are opaque and agent-defined, deliberately.** A `CGDirectDisplayID` on macOS, a one-based
+  index into Windows' monitor enumeration, a RandR monitor (or zero for the whole root window) on
+  X11, a PipeWire node id on Wayland. The viewer echoes one back and interprets nothing, so there is
+  no shared numbering to keep in step; the *label* is built by the agent too, because only the host
+  knows that one of its screens is "Built-in Display" or "HDMI-1" — a label composed in the browser
+  from a resolution says nothing about two identical monitors. An empty list means "offer no
+  picker", which is what an agent from before this sends and what a one-display host sends, and the
+  viewer shows the control only where there is a genuine choice.
+- **A failed switch never ends the session.** A monitor can be unplugged between the list being
+  drawn and the choice being made; the agent logs it, stays on the display it was on, and says so in
+  the next `DisplayInfo`. Ending the session instead would cost the administrator a granted session
+  and the host's user another consent dialog over a pulled cable. For the same reason the viewer's
+  picker is stateless — it shows what the agent last *reported*, never what was clicked.
+
+**How the four backends reach a second display differs completely, and two of them are a crop rather
+than a different source.** macOS restarts the ScreenCaptureKit stream against another `SCDisplay`
+and moves `InputInjector`'s origin, which the injector already had because `CGEventPost` works in
+global points. Windows and X11 both already had a device context or a root window spanning the
+*whole* virtual desktop, so a switch is a source rectangle inside it — which is why both offer "All
+displays" as an entry of its own and macOS does not. Wayland is the one that has to ask somebody
+else; see below.
+
+Two platform consequences worth knowing before debugging one. **Windows needed
+`MOUSEEVENTF_VIRTUALDESK` and a virtual-desktop divisor together, and either alone puts the pointer
+somewhere else** — `MOUSEEVENTF_ABSOLUTE` normalises over the *primary* monitor without the flag, so
+coordinates spanning the desktop get squeezed onto one screen. On a single-monitor host the two
+rectangles are the same numbers and the whole conversion is the identity, so a wrong one tests
+perfectly clean; `input_injection::PointerSpace` is a separate testable type outside the
+`#[cfg(windows)]` module for exactly that reason, and its tests use a desktop with a **negative**
+origin, which is what a monitor placed left of or above the primary gives. And **the Windows session
+helper has to remember which display was picked**, because Windows switching desktops (a UAC prompt,
+the lock screen) rebuilds the capture from scratch — a rebuild that passed `None` would quietly drop
+the session back onto the primary monitor with nothing to explain it.
+
+**The default display changed on Linux and Windows multi-monitor hosts, and that is deliberate.**
+Both now start on the primary monitor rather than the whole desktop: two monitors sent as one
+picture are twice as wide for the same 1600-pixel budget, so both arrived at half the resolution of
+the one anybody was looking at. "All displays" is one click away, so nothing is lost. macOS never
+had the whole-desktop form to lose.
+
+**Wayland's display list is the outputs the host's user agreed to share, not the monitors
+attached** — a different thing from the other three, and it cannot be widened from this side. The
+helper asks `SelectSources` for `multiple(true)`, the portal's own picker decides what comes back,
+and `describe_streams` reports whatever it granted. Three consequences. A two-monitor Wayland host
+that shared one output honestly offers one entry, and the viewer shows no picker. **A host that
+granted a session before this change keeps returning one output**, because the stored restore token
+remembers that single-output grant until somebody revokes the permission in their desktop settings —
+that is the portal remembering an answer, not the call being ignored, and it will read exactly like
+the compositor limitation the persist-mode bug above produced. And the switch is **asynchronous**:
+the helper tears down its PipeWire stream and negotiates another, so frames keep arriving from the
+previous display for a moment. `FormatMessage` therefore carries the `node_id`, the agent's
+`active_display_id` follows the *frames* rather than the request, and `remote_session` announces the
+geometry by comparing it against what it last sent — which is also, incidentally, the first thing
+that handles a monitor mode change or a hotplug mid-session on that backend.
+
+**The switch in the Wayland helper is a fresh stream, and the shape it takes is forced.** A PipeWire
+stream may only be touched from the thread driving its loop, and that thread is inside
+`mainloop.run()` for the whole session — so the request arrives over PipeWire's own channel (whose
+callback runs *on* that thread), records the wanted node and quits the loop, and `capture::run` loops
+round to connect a new stream. Two things then fall out for free that would otherwise have needed
+deliberate work: `KIND_FORMAT` is re-sent before the first frame of the new display, because each
+pass has its own writer thread and so its own "have I sent a format yet", and the old stream is fully
+torn down before the new one links. `examples/capture-node.rs` is still how to exercise any of this
+without a compositor — two `pipewiresink` producers and a switch between their node ids.
+
+**The admin UI takes the whole browser window for a session, and the request has to ride the click
+that opened it.** `requestFullscreen` needs *transient user activation* — about five seconds after a
+gesture in Chrome — so `RemoteControlScreen` asks in `initState`, which runs on the same turn as the
+Connect press. Asking after consent arrives would be asking up to sixty seconds after any gesture
+and would be refused every single time. A refusal is ordinary rather than exceptional (a bookmarked
+URL opened by pressing Enter has no gesture behind it), so it is answered with a "Full Screen" button
+rather than an error — pressing it *is* the gesture the browser was waiting for. Three further
+things. `FullScreenController` is an interface in `core/platform/` for the same reason
+`PageNavigator` is: `package:web` is unavailable under `flutter test`, where `kIsWeb` is false, so a
+screen that reached for the DOM could not be pumped at all. `AppShell` drops its 240px sidebar while
+full screen and the screen drops `PageScaffold`'s heading and the panel inset, because that width and
+height *is* what full screen is for — but the action row stays, since Disconnect is the one control
+a session must never be without. And the shell watches a **stream** rather than trusting the
+screen's last request, because Escape and F11 leave full screen without anything in this app being
+asked.
+
 **`ui.Image` and `CGEventSource` both need releasing by hand.** The viewer keeps decoded tiles as
 live `ui.Image`s keyed by position rather than compositing to an offscreen surface, so a repaint is a
 few `drawImageRect` calls — but each holds a native texture the garbage collector does not account
@@ -1517,6 +1622,7 @@ original — then the others for what each platform forced to differ. The differ
 | Host identity | hardware serial, always present | SMBIOS serial, **often a placeholder** | DMI serial, **often a placeholder** |
 | Nobody logged in | nothing patches | nothing patches | root service patches unattended — see below |
 | Remote control | per-user process, consent + capture + input | service holds the socket, a **SYSTEM session helper** does the rest, named pipe between | resident root unit holds the socket, per-user process does the rest, unix socket between; X11 via XTEST, Wayland via a separate portal/PipeWire binary |
+| Choosing a display | restarts the ScreenCaptureKit stream on another `SCDisplay` | a source rectangle of the whole virtual desktop, plus "All displays" | X11: a crop of the root window, plus "All displays". Wayland: whichever outputs the portal's picker granted, re-linked to a different PipeWire node |
 | Remote shell | a third root LaunchDaemon, as **root**, asked by the per-user process through its own queue | the service itself, as **SYSTEM**, over ConPTY — no helper | the resident root unit, as **root** — nothing crosses `remote_ipc` |
 | Reachable with nobody logged in | no — the per-user process holds the identity | yes, for a shell; a screen request answers `Unavailable` | yes, for a shell; a screen request answers `Unavailable` |
 
@@ -1954,6 +2060,21 @@ wedged by a release before this one need `Restart-Service KintsugiAgent` by hand
   first installed from an X11-only package gains Wayland support on its next update without a
   reinstall. The name lives in `config::WAYLAND_BACKEND_BINARY` because three places have to agree on
   it.
+- **The display picker is a third hand-mirrored pair with nothing between its two ends**, alongside
+  the tile half and the shell half above. `DisplayOption`/`DisplayInfo.displays` and
+  `ViewerInput::SelectDisplay` in each agent's `remote_protocol.rs`, and `RemoteDisplayOption` /
+  `RemoteDisplaySelection` in `web/lib/data/models/remote_control_mapper.dart`. Two strings are
+  deliberately *not* the same and must stay apart: the geometry message's own `type` is `display`,
+  travelling agent-to-browser, while the selection is `select-display`, travelling the other way
+  through a different parser. Both sides' tests assert that the wrong one is refused.
+- The Wayland helper's own `FormatMessage.node_id` and `DisplayEntry` (`wire.rs`) are mirrored by
+  `StreamFormat` and `HelperDisplay` in the agent's `wayland_backend.rs`, the same way the rest of
+  that protocol is. A rename on one side alone means a picker that offers nothing — read deliberately
+  as non-fatal, so nothing anywhere reports it.
+- `x11rb`'s `randr` feature is what `describe_displays` needs for `GetMonitors`. It is pure Rust like
+  the rest of x11rb, so it costs the Linux agent's no-C-library invariant nothing — but any *other*
+  crate added for display enumeration would break the statically linked musl release for the whole
+  fleet, not just remote control.
 - `input_injection::evdev_keycode_for_hid` is the base table and `xtest_keycode_for_hid` is that plus
   `EVDEV_KEYCODE_OFFSET`. XTEST wants the offset form; the portal's `NotifyKeyboardKeycode` wants the
   raw kernel code. Getting it backwards types a key eight positions along the physical keyboard —
