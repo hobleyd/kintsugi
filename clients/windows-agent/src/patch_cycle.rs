@@ -77,10 +77,11 @@ pub fn run(policy: &PatchingPolicy, state: &mut ScheduleState, report: &StatusRe
     execute(policy, state, work, report, show_warning);
 }
 
-/// The menu's "Patch Now" item: skips both the confirm/delay decision (asking whether to delay makes
-/// no sense when the user just explicitly asked to patch right now) and the 5-minute warning (that
-/// warning exists to give notice before an *automatic* start; clicking this item already is that
-/// notice) — goes straight into patching, once it's confirmed there's actually something to do.
+/// The menu's "Patch Now" item: skips the confirm/delay decision altogether, since asking whether to
+/// delay makes no sense when the user just explicitly asked to patch right now, and goes straight
+/// into patching once it's confirmed there's actually something to do. It also skips the 5-minute
+/// warning, for the reason [`Decision`] gives — the same reason the dialog's own "Patch Now" button
+/// does.
 pub fn run_now(policy: &PatchingPolicy, state: &mut ScheduleState, report: &StatusReporter) {
     logging::info("Patch Now triggered manually from the notification area");
 

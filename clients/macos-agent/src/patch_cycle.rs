@@ -100,11 +100,11 @@ pub fn run(
     execute(client, config, serial_number, policy, state, work, identity, report, show_warning);
 }
 
-/// The menu bar's "Patch Now" button: skips both the confirm/delay decision (asking whether to
-/// delay makes no sense when the user just explicitly asked to patch right now) and the 5-minute
-/// warning (that warning exists to give notice before an *automatic* start; clicking this button
-/// already is that notice) — goes straight into patching, once it's confirmed there's actually
-/// something to do.
+/// The menu bar's "Patch Now" button: skips the confirm/delay decision altogether, since asking
+/// whether to delay makes no sense when the user just explicitly asked to patch right now, and
+/// goes straight into patching once it's confirmed there's actually something to do. It also
+/// skips the 5-minute warning, for the reason [`Decision`] gives — the same reason the dialog's
+/// own "Patch Now" button does.
 pub fn run_now(
     client: &reqwest::blocking::Client,
     config: &Config,
