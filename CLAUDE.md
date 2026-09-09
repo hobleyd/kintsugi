@@ -1034,8 +1034,12 @@ there, and leaves the cycle due *now*, so the next poll tick re-asks at once and
 8 → 7 → 6 once per period. Crediting elapsed periods rather than assuming one is what covers sleep
 — a machine that slept with the dialog open wakes to a giveup that fires immediately, and spends
 the delays that passed rather than starting them again. The budget running out needs no special
-case: the next tick finds `can_delay` false and takes the acknowledge-then-warn branch, which is
-where the five-minute notice comes from. Nothing here is a running timer — `is_due` compares wall
+case: the next tick finds `can_delay` false and shows the "no delays left" dialog, which is where
+the five-minute notice comes from. **That dialog is the warning rather than a preamble to it**: it
+states the period, stands there for as much of it as the user leaves it up, and `remaining_warning`
+hands `execute` whatever is left, so the notice is five minutes in total — somebody who reads it and
+clicks OK still gets the rest of the period, and a host with nobody at it waits five minutes instead
+of the ten that showing both in series cost. Nothing here is a running timer — `is_due` compares wall
 clock against a persisted absolute epoch, which is why sleep, hibernation and a restart all need no
 wake detection.
 

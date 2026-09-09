@@ -8,7 +8,33 @@ use crate::queue::{self, Plan, RequestKind};
 use crate::schedule::{self, ScheduleState};
 use crate::status::{AgentStatus, StatusReporter};
 
+/// How much notice an automatic start gives, *in total* — the "no delays left" dialog is part of
+/// it rather than something served before it, so a host nobody is sitting at waits five minutes
+/// from that dialog appearing to patching starting, not five plus however long the dialog stood
+/// there. `confirm_or_delay` measures what the dialog used and hands `execute` the remainder.
 const WARNING_PERIOD: Duration = Duration::from_secs(5 * 60);
+
+/// The shortest remainder still worth waiting out — see `remaining_warning`.
+const MINIMUM_WARNING: Duration = Duration::from_secs(30);
+
+/// What is left of the notice after the "no delays left" dialog has stood there for `stood_for`.
+/// This is the rule that keeps an automatic start's warning five minutes *in total* rather than
+/// five on top of however long that dialog was up, so somebody who reads it and clicks OK still
+/// gets the rest of the period to save their work and a host with nobody at it waits five minutes
+/// rather than ten.
+///
+/// A remainder under `MINIMUM_WARNING` comes back as none at all: when the dialog runs the period
+/// out on its own the leftover is a second or two of rounding, and a notification promising "1
+/// minute" that is really four seconds says less than saying nothing. Kept identical in the other
+/// two agents.
+fn remaining_warning(stood_for: Duration) -> Duration {
+    let remaining = WARNING_PERIOD.saturating_sub(stood_for);
+    if remaining < MINIMUM_WARNING {
+        Duration::ZERO
+    } else {
+        remaining
+    }
+}
 
 /// How long to wait for the service to answer a `Plan` request. Short — it's one HTTP call plus a
 /// Windows Update search — but not so short that a slow link makes a due cycle silently vanish.
@@ -64,9 +90,9 @@ pub fn run(policy: &PatchingPolicy, state: &mut ScheduleState, report: &StatusRe
         return;
     }
 
-    let show_warning = match confirm_or_delay(policy, state, &work.app_names(), work.os_update_available, report) {
-        Ok(Decision::PatchNow) => false,
-        Ok(Decision::ProceedAfterWarning) => true,
+    let warning = match confirm_or_delay(policy, state, &work.app_names(), work.os_update_available, report) {
+        Ok(Decision::PatchNow) => Duration::ZERO,
+        Ok(Decision::ProceedAfterWarning { remaining }) => remaining,
         // Both delaying answers stop here: `confirm_or_delay` has already moved the due time, and
         // the next tick picks the cycle back up — at once for an unanswered dialog, a delay period
         // later for an explicit "Delay".
@@ -77,7 +103,7 @@ pub fn run(policy: &PatchingPolicy, state: &mut ScheduleState, report: &StatusRe
         }
     };
 
-    execute(policy, state, work, report, show_warning);
+    execute(policy, state, work, report, warning);
 }
 
 /// The menu's "Patch Now" item: skips the confirm/delay decision altogether, since asking whether to
@@ -104,15 +130,17 @@ pub fn run_now(policy: &PatchingPolicy, state: &mut ScheduleState, report: &Stat
         return;
     }
 
-    execute(policy, state, work, report, false);
+    execute(policy, state, work, report, Duration::ZERO);
 }
 
-fn execute(policy: &PatchingPolicy, state: &mut ScheduleState, work: Plan, report: &StatusReporter, show_warning: bool) {
-    if show_warning {
-        let warning_message = format!("Patching will begin in {} minutes. Please save your work.", WARNING_PERIOD.as_secs() / 60);
+fn execute(policy: &PatchingPolicy, state: &mut ScheduleState, work: Plan, report: &StatusReporter, warning: Duration) {
+    if !warning.is_zero() {
+        let minutes = (warning.as_secs() + 59) / 60;
+        let warning_message =
+            format!("Patching will begin in {minutes} minute{}. Please save your work.", if minutes == 1 { "" } else { "s" });
         dialogs::notify("Kintsugi Patching", &warning_message);
         report(AgentStatus::Patching { current: warning_message, completed: 0, total: 0 });
-        std::thread::sleep(WARNING_PERIOD);
+        std::thread::sleep(warning);
     }
 
     dialogs::notify("Kintsugi Patching", "Patching has started — do not turn off your computer.");
@@ -148,8 +176,9 @@ enum Decision {
     /// The user clicked "Patch Now": start immediately, with no warning and no further notice.
     PatchNow,
     /// There were no delays left to offer, so the acknowledgement has already been shown and
-    /// patching proceeds — after the warning, this being an automatic start.
-    ProceedAfterWarning,
+    /// patching proceeds. `remaining` is what is left of `WARNING_PERIOD` after however long that
+    /// dialog stood there, which is what keeps the notice five minutes in total.
+    ProceedAfterWarning { remaining: Duration },
     /// The user asked for more time. Nothing happens until the new due time arrives.
     Delayed,
     /// Nobody answered before the dialog gave up. Still a delay — the user was asked and said
@@ -184,13 +213,19 @@ fn confirm_or_delay(
     report: &StatusReporter,
 ) -> anyhow::Result<Decision> {
     if !state.can_delay(policy) {
+        // This dialog *is* the warning, not a preamble to it: it states the period and stands for
+        // as much of it as the user leaves it up, and `execute` waits out whatever `remaining_warning`
+        // says is left.
+        let shown_at = schedule::now_epoch();
         dialogs::acknowledge(
-            "The maximum number of delays has been used — patching will now proceed.",
+            &format!(
+                "The maximum number of delays has been used. Patching will begin in {} minutes — please save your work.",
+                WARNING_PERIOD.as_secs() / 60
+            ),
             WARNING_PERIOD.as_secs(),
         )?;
-        // An acknowledgement is not a request to start now — it is notice that the budget is
-        // gone, with nothing left to choose — so the five-minute warning still applies.
-        return Ok(Decision::ProceedAfterWarning);
+        let stood_for = Duration::from_secs(schedule::now_epoch().saturating_sub(shown_at));
+        return Ok(Decision::ProceedAfterWarning { remaining: remaining_warning(stood_for) });
     }
 
     // Stamped before the dialog rather than after, because how long it stood there is what the
@@ -214,7 +249,7 @@ fn confirm_or_delay(
         // re-asks or finds the budget gone and proceeds. Telling the menu "next patch due: now"
         // for the few seconds in between would say less than the line already there.
         Decision::Unanswered => state.register_unanswered_prompt(policy, shown_at),
-        Decision::PatchNow | Decision::ProceedAfterWarning => {}
+        Decision::PatchNow | Decision::ProceedAfterWarning { .. } => {}
     }
 
     Ok(decision)
@@ -289,6 +324,24 @@ fn run_patches(work: Plan, report: &StatusReporter) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_notice_left_up_for_the_whole_period_leaves_nothing_to_wait_out() {
+        assert_eq!(remaining_warning(WARNING_PERIOD), Duration::ZERO);
+        assert_eq!(remaining_warning(WARNING_PERIOD * 2), Duration::ZERO, "and an overrun is not negative time");
+    }
+
+    #[test]
+    fn a_notice_read_and_dismissed_leaves_the_rest_of_the_period_to_run() {
+        assert_eq!(remaining_warning(Duration::from_secs(60)), WARNING_PERIOD - Duration::from_secs(60));
+    }
+
+    /// The common unattended case, where the dialog gives up a moment either side of the period:
+    /// what is left is rounding, not notice.
+    #[test]
+    fn a_remainder_of_a_few_seconds_is_no_remainder_at_all() {
+        assert_eq!(remaining_warning(WARNING_PERIOD - Duration::from_secs(5)), Duration::ZERO);
+    }
 
     #[test]
     fn clicking_patch_now_starts_immediately_rather_than_after_the_warning() {
