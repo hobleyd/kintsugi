@@ -9,7 +9,8 @@ paths:
 
 This is the one hand-mirrored pair with **nothing between its two ends** — the server relays these
 bytes without parsing them, so no C# definition sits in the middle and nothing server-side can ever
-notice a mismatch. Both ends are listed above deliberately: change one and you must change the other.
+notice a mismatch. This rule loads at either end — each agent's remote_protocol.rs and the viewer's
+remote_control_mapper.dart — deliberately: change one and you must change the other.
 
 - **The remote-control media protocol is the one hand-mirrored pair with nothing between the two
   ends.** Every other mirrored shape in this repo (the Rust request structs, `web/lib/data/models/`)

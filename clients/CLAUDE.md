@@ -223,8 +223,6 @@ The server's half is in `src/CLAUDE.md`, the viewer's in `web/CLAUDE.md`. The ti
 between agent and server, and the media protocol's hand-mirrored wire format, are path-scoped rules
 under `.claude/rules/` that load when you open the file at either end.
 
-## Remote control
-
 An administrator can take control of a host's screen, keyboard and mouse from the Hosts screen's
 Connect action, or open a **terminal** on it from the Terminal action beside it. Both are the same
 session underneath — one request, one relay, one audit row — and `RemoteControlSessionKind` on the

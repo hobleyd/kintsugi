@@ -4,8 +4,6 @@ Loaded when Claude reads files under `web/`. The root `CLAUDE.md` carries the ru
 before you get here — the `/api/admin/` prefix, `[RequireAdminSession]`, and the nginx location
 precedence a new route depends on.
 
-## The admin UI
-
 `web/` is a Flutter web application. `nginx/Dockerfile` compiles it and bakes the bundle into the
 nginx image, which is why that image is built rather than pulled: `docker compose up -d --build`
 has to stay the one documented way to run the system, and a bundle built on somebody's laptop and

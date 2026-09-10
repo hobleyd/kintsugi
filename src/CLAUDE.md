@@ -155,8 +155,8 @@ number in the query string. The browser's arrives on `/api/admin/remote-control/
 regex and carrying `[RequireAdminSession]`. Neither end could be authenticated by the other's
 mechanism, and mutual TLS can only be verified by whatever terminates it — which is nginx. A
 peer-to-peer or TURN-relayed design re-terminates somewhere holding no fleet CA, so it would need a
-second, parallel auth mechanism *and* an inbound port on every managed Mac. Same constraint as "the
-fallback is a guess" above.
+second, parallel auth mechanism *and* an inbound port on every managed Mac. Same constraint as
+"The fallback is a guess" in web/CLAUDE.md.
 
 
 **The server relays the media protocol without parsing it, and that is load-bearing.** Once the two
@@ -251,9 +251,9 @@ reason: a typed client outlives one call.
 
 **`VantaSettings.ConsoleBaseUrl` is its own setting and is not `AGENT_API_BASE_URL`.** It is the
 address every synced record links back to, so it must be the *browser's* door, not nginx's agent one
-— see "The fallback is a guess" in web/CLAUDE.md. It cannot be derived from the request either, because the
-sync normally runs on a timer with nothing in flight. HTTPS is enforced at save time in the domain
-entity, because Vanta requires it and the alternative is an opaque rejection a day later.
+— see "The fallback is a guess" in web/CLAUDE.md. It cannot be derived from the request either,
+because the sync normally runs on a timer with nothing in flight. HTTPS is enforced at save time in
+the domain entity, because Vanta requires it and the alternative is an opaque rejection a day later.
 
 
 ## Audit event shipping: the Auditing settings
@@ -452,7 +452,7 @@ replaced it.
 
 ## Verifying a server-written upgrade script
 
-**Verifying a server-written upgrade script actually works.** `dotnet test` only asserts the shape
+**Verifying it actually works.** `dotnet test` only asserts the shape
 of the text; it never runs it. The scripts' `--update-version` mode is a few lines of `curl` against
 a public catalog, so running it the way `CheckScriptVersionAsync` does costs seconds and is the only
 thing that catches a script that is syntactically perfect and answers nothing:
@@ -468,6 +468,8 @@ one had shipped in the branch of the Homebrew script that answers for Homebrew i
 prompt text recommending the pattern to the AI; nothing surfaced it, because the failure is a null
 `LatestVersion`, which is indistinguishable from "no update available".
 
+
+## One script per package manager
 
 **Every package manager has one script, and the manager's own row is told apart at runtime.** Each
 manager used to get two texts from `BuildScript(isSelfUpdate)` — `homebrew-self-update.sh` beside
