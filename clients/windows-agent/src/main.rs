@@ -48,6 +48,16 @@ const AGENT_POLL_INTERVAL: Duration = Duration::from_secs(60);
 pub const MAX_ATTEMPTS: u32 = 5;
 pub const INITIAL_BACKOFF: Duration = Duration::from_secs(5);
 
+/// A GET's own retry budget, which is deliberately not the POST one above.
+///
+/// A POST reports something that has already happened and can afford minutes of backoff; a GET is
+/// holding up a patch cycle somebody may be watching. So this takes a per-attempt timeout well
+/// under the client's own 15s and a short delay between attempts — a blackholed SYN is not answered
+/// by waiting longer, it is answered by a fresh connection. See `get_with_retry`.
+pub const GET_ATTEMPTS: u32 = 3;
+pub const GET_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
+pub const GET_RETRY_DELAY: Duration = Duration::from_millis(500);
+
 fn main() -> Result<()> {
     // reqwest's rustls backend needs a process-wide default crypto provider installed before any
     // TLS connection is made; with exactly one provider feature compiled in (ring — see Cargo.toml)

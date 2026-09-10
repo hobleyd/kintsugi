@@ -142,6 +142,7 @@ const SESSION_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(300);
 /// before its socket arrives inside it. An agent still retrying when the server gives up reports
 /// nothing at all, and the administrator is told "the other end never connected", which names
 /// neither the host nor the reason.
+#[cfg(test)]
 const SERVER_PAIRING_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) type Socket = WebSocket<MaybeTlsStream<TcpStream>>;

@@ -16,7 +16,7 @@ use crate::self_removal;
 use crate::self_update;
 use crate::system_info::{self, InstalledApp};
 use crate::upgrade;
-use crate::{checkin_schedule, MAX_ATTEMPTS, INITIAL_BACKOFF};
+use crate::{checkin_schedule, GET_ATTEMPTS, GET_ATTEMPT_TIMEOUT, GET_RETRY_DELAY, MAX_ATTEMPTS, INITIAL_BACKOFF};
 
 /// How often the service wakes to look at the queue when no check-in is due.
 ///
@@ -348,6 +348,46 @@ pub fn collect_installed_applications() -> Vec<InstalledApp> {
         .chain(managers.apps)
         .filter(|app| seen.insert(app.clone()))
         .collect()
+}
+
+/// A GET that survives the moment of packet loss a POST already survives.
+///
+/// `post_with_retry` has retried since this agent was written, so an intermittently lossy path to
+/// the server is invisible on every POST — enrollment, inventory, patch results — and was fatal on
+/// every GET, each of which had exactly one attempt. On one host that cost a whole patch cycle to a
+/// bad minute: `upgrade::fetch_upgrade_statuses` is called once per application, deliberately, so
+/// five applications in a row each spent the client's full timeout and reported "operation timed
+/// out". The same link on the same evening is what `remote_control`'s session-socket retry exists
+/// for; this is the third place the asymmetry showed up, and the two halves now sit together so a
+/// fourth is harder to write.
+///
+/// The response is returned whatever its status. Every caller already tells a rejection apart from
+/// a failure to reach the server, and a 4xx is not going to fix itself on retry.
+pub fn get_with_retry(
+    description: &str,
+    build: impl Fn() -> reqwest::blocking::RequestBuilder,
+) -> Result<reqwest::blocking::Response> {
+    let mut last_error = None;
+
+    for attempt in 1..=GET_ATTEMPTS {
+        match build().timeout(GET_ATTEMPT_TIMEOUT).send() {
+            Ok(response) => return Ok(response),
+            Err(err) => {
+                // {err:#} for the cause chain, the same reason post_with_retry does it.
+                logging::warn(&format!("attempt {attempt}/{GET_ATTEMPTS} to fetch {description} failed: {err:#}"));
+                last_error = Some(err);
+            }
+        }
+
+        if attempt < GET_ATTEMPTS {
+            std::thread::sleep(GET_RETRY_DELAY);
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "could not fetch {description} after {GET_ATTEMPTS} attempts: {}",
+        last_error.map(|err| err.to_string()).unwrap_or_default()
+    ))
 }
 
 pub fn post_with_retry<T: Serialize, R: serde::de::DeserializeOwned>(client: &reqwest::blocking::Client, url: &str, body: &T) -> Result<R> {

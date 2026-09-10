@@ -88,10 +88,7 @@ fn now_epoch() -> u64 {
 /// policy rather than having none at all, and because that cache file is how the policy reaches the
 /// tray process at all. See `refresh` and `load_cached`.
 fn fetch(client: &reqwest::blocking::Client, config: &Config, cache_path: &Path) -> Result<PatchingPolicy> {
-    let response = client
-        .get(config.patching_policy_url())
-        .send()
-        .context("request failed")?;
+    let response = crate::service::get_with_retry("the patching policy", || client.get(config.patching_policy_url()))?;
 
     if !response.status().is_success() {
         anyhow::bail!("request rejected (HTTP {})", response.status());

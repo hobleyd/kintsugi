@@ -110,10 +110,9 @@ fn needs_update(current_version: &str, latest_version: &str) -> bool {
 }
 
 fn fetch_latest(client: &reqwest::blocking::Client, config: &Config) -> Result<AgentPackageInfo> {
-    let response = client
-        .get(config.agent_package_latest_url(PLATFORM))
-        .send()
-        .context("request failed")?;
+    let response = crate::get_with_retry("the latest agent package", || {
+        client.get(config.agent_package_latest_url(PLATFORM))
+    })?;
 
     if response.status() == reqwest::StatusCode::NOT_FOUND {
         anyhow::bail!("no {PLATFORM} package has been published yet");
@@ -138,6 +137,10 @@ fn staging_dir() -> Result<PathBuf> {
 }
 
 fn download_to_temp_file(client: &reqwest::blocking::Client, url: &str) -> Result<PathBuf> {
+    // One attempt, unlike the metadata fetch above: this is a multi-megabyte transfer on a
+    // client whose timeout is sized for one, so the short per-attempt budget `get_with_retry`
+    // applies would cut a healthy download short. A failure costs an hour — the next check-in
+    // tries again — where a failed upgrade-path fetch costs a patch cycle.
     let mut response = client.get(url).send().context("download request failed")?;
     if !response.status().is_success() {
         anyhow::bail!("download rejected (HTTP {})", response.status());

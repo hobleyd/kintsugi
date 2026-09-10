@@ -1850,6 +1850,20 @@ refused. The remedy is to delete the identity directory **outright** rather than
 `create_dir_all` then recreates it inheriting from the parent, which is what clears stale per-file
 permissions.
 
+**Every request an agent makes is retried, and for a long time only the POSTs were.**
+`post_with_retry` has been there since the beginning, so an intermittently lossy path between a host
+and the server is invisible on enrollment, inventory and patch results — and every GET beside it had
+exactly one attempt. On one host that cost a whole patch cycle to a bad minute:
+`upgrade::fetch_upgrade_statuses` is called once per application, deliberately, so five applications
+in a row each spent the client's full 15s timeout and reported "operation timed out". `get_with_retry`
+now sits next to `post_with_retry` in the same file, and its budget is deliberately different — a
+POST reports something that has already happened and can afford minutes of backoff, a GET is holding
+up a patch cycle somebody is watching, so it takes a short per-attempt timeout and a short delay. The
+one GET left un-retried is the self-update *download*, because its client's timeout is sized for a
+multi-megabyte transfer and a short per-attempt budget would cut a healthy one short; it says so.
+This is the same asymmetry `remote_control`'s session socket had, in a third place — if you are
+adding a request to an agent, the question to ask is what happens to it when one SYN is dropped.
+
 **Replacing a running binary differs.** macOS and Linux stage next to the target and rename over it
 (atomic, and Unix will unlink an open file). Windows locks a running image, so `self_update` renames
 the *old* binary aside — which Windows does allow — copies the new one into the freed path, and

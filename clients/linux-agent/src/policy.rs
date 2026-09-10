@@ -94,10 +94,7 @@ fn now_epoch() -> u64 {
 /// client-certificate regex (see nginx/default.conf), so this needs the mutual-TLS identity, and
 /// on this platform only root holds one.
 fn fetch(client: &reqwest::blocking::Client, config: &Config, cache_path: &Path) -> Result<PatchingPolicy> {
-    let response = client
-        .get(config.patching_policy_url())
-        .send()
-        .context("request failed")?;
+    let response = crate::get_with_retry("the patching policy", || client.get(config.patching_policy_url()))?;
 
     if !response.status().is_success() {
         anyhow::bail!("request rejected (HTTP {})", response.status());

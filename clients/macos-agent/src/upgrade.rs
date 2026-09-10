@@ -114,11 +114,11 @@ pub fn fetch_upgrade_statuses(
     config: &Config,
     serial_number: &str,
 ) -> Result<Vec<UpgradeStatus>> {
-    let response = client
-        .get(config.upgrade_paths_url())
-        .query(&[("serialNumber", serial_number)])
-        .send()
-        .context("request failed")?;
+    let response = crate::get_with_retry("this host's upgrade paths", || {
+        client
+            .get(config.upgrade_paths_url())
+            .query(&[("serialNumber", serial_number)])
+    })?;
 
     if !response.status().is_success() {
         anyhow::bail!("request rejected (HTTP {})", response.status());

@@ -87,10 +87,7 @@ fn now_epoch() -> u64 {
 /// later run that can't reach the server (network blip, VPN down) can fall back to the last
 /// known policy rather than having none at all — see `load_or_fetch`.
 pub fn fetch(client: &reqwest::blocking::Client, config: &Config, cache_path: &Path) -> Result<PatchingPolicy> {
-    let response = client
-        .get(config.patching_policy_url())
-        .send()
-        .context("request failed")?;
+    let response = crate::get_with_retry("the patching policy", || client.get(config.patching_policy_url()))?;
 
     if !response.status().is_success() {
         anyhow::bail!("request rejected (HTTP {})", response.status());

@@ -50,6 +50,16 @@ const POLICY_REFRESH_INTERVAL: u64 = 60 * 60;
 const MAX_ATTEMPTS: u32 = 5;
 const INITIAL_BACKOFF: Duration = Duration::from_secs(5);
 
+/// A GET's own retry budget, which is deliberately not the POST one above.
+///
+/// A POST reports something that has already happened and can afford minutes of backoff; a GET is
+/// holding up a patch cycle somebody may be watching. So this takes a per-attempt timeout well
+/// under the client's own 15s and a short delay between attempts — a blackholed SYN is not answered
+/// by waiting longer, it is answered by a fresh connection. See `get_with_retry`.
+const GET_ATTEMPTS: u32 = 3;
+const GET_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
+const GET_RETRY_DELAY: Duration = Duration::from_millis(500);
+
 #[derive(Debug, Serialize)]
 struct RegisterHostRequest {
     hostname: String,
@@ -684,6 +694,46 @@ fn collect_installed_applications() -> Vec<InstalledApp> {
         .chain(homebrew.apps)
         .filter(|app| seen.insert(app.clone()))
         .collect()
+}
+
+/// A GET that survives the moment of packet loss a POST already survives.
+///
+/// `post_with_retry` has retried since this agent was written, so an intermittently lossy path to
+/// the server is invisible on every POST — enrollment, inventory, patch results — and was fatal on
+/// every GET, each of which had exactly one attempt. On one host that cost a whole patch cycle to a
+/// bad minute: `upgrade::fetch_upgrade_statuses` is called once per application, deliberately, so
+/// five applications in a row each spent the client's full timeout and reported "operation timed
+/// out". The same link on the same evening is what `remote_control`'s session-socket retry exists
+/// for; this is the third place the asymmetry showed up, and the two halves now sit together so a
+/// fourth is harder to write.
+///
+/// The response is returned whatever its status. Every caller already tells a rejection apart from
+/// a failure to reach the server, and a 4xx is not going to fix itself on retry.
+pub(crate) fn get_with_retry(
+    description: &str,
+    build: impl Fn() -> reqwest::blocking::RequestBuilder,
+) -> Result<reqwest::blocking::Response> {
+    let mut last_error = None;
+
+    for attempt in 1..=GET_ATTEMPTS {
+        match build().timeout(GET_ATTEMPT_TIMEOUT).send() {
+            Ok(response) => return Ok(response),
+            Err(err) => {
+                // {err:#} for the cause chain, the same reason post_with_retry does it.
+                logging::warn(&format!("attempt {attempt}/{GET_ATTEMPTS} to fetch {description} failed: {err:#}"));
+                last_error = Some(err);
+            }
+        }
+
+        if attempt < GET_ATTEMPTS {
+            std::thread::sleep(GET_RETRY_DELAY);
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "could not fetch {description} after {GET_ATTEMPTS} attempts: {}",
+        last_error.map(|err| err.to_string()).unwrap_or_default()
+    ))
 }
 
 fn post_with_retry<T: Serialize, R: serde::de::DeserializeOwned>(client: &reqwest::blocking::Client, url: &str, body: &T) -> Result<R> {
