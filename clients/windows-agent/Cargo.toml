@@ -1,6 +1,6 @@
 [package]
 name = "kintsugi-agent"
-version = "0.9.3"
+version = "0.9.4"
 edition = "2021"
 description = "Background agent that registers this PC with the patching system's host inventory."
 

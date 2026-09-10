@@ -492,9 +492,9 @@ pub fn scan_installed_programs(managed_keys: &ManagedKeys) -> Vec<InstalledApp> 
 /// `com.apple.` bundle-identifier check is on macOS — without it this reports several hundred
 /// entries per host, most of them noise.
 fn read_uninstall_entry(subkey: &RegKey, subkey_name: &str, managed_keys: &ManagedKeys) -> Option<InstalledApp> {
-    let name: String = subkey.get_value("DisplayName").ok()?;
-    let name = name.trim().to_string();
-    if name.is_empty() {
+    let reported_name: String = subkey.get_value("DisplayName").ok()?;
+    let reported_name = reported_name.trim().to_string();
+    if reported_name.is_empty() {
         return None;
     }
 
@@ -525,16 +525,31 @@ fn read_uninstall_entry(subkey: &RegKey, subkey_name: &str, managed_keys: &Manag
     // as --appId and look the application's registry entry back up by, so it is load-bearing: a
     // Script row with no identifier is never patchable at all (see `upgrade::is_patchable`).
     let application_identifier = subkey_name.trim().to_string();
-    if application_identifier.is_empty() || managed_keys.claims(&application_identifier, &name) {
+    if application_identifier.is_empty() {
         return None;
     }
 
-    let version: String = subkey
+    // Read before the name is settled, because the name is normalized *against* it — and read as
+    // an `Option` rather than straight into the "unknown" fallback below, or a nameless version
+    // would have that literal stripped out of the display name.
+    let display_version: Option<String> = subkey
         .get_value("DisplayVersion")
         .ok()
         .map(|v: String| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "unknown".to_string());
+        .filter(|v| !v.is_empty());
+
+    let name = display_name_without_version(&reported_name, display_version.as_deref());
+
+    // Asked under both spellings. A package manager's key set holds whatever *it* calls the
+    // application: winget correlating this same entry reports the registry's own unstripped
+    // `DisplayName`, while a catalog name ("LibreOffice") only ever matches the stripped one.
+    // Missing the join either way round is silent — it reports one install twice, which is two
+    // competing upgrade paths for it.
+    if managed_keys.claims(&application_identifier, &reported_name) || managed_keys.claims(&application_identifier, &name) {
+        return None;
+    }
+
+    let version = display_version.unwrap_or_else(|| "unknown".to_string());
 
     Some(InstalledApp {
         name,
@@ -544,6 +559,112 @@ fn read_uninstall_entry(subkey: &RegKey, subkey_name: &str, managed_keys: &Manag
         available_version: None,
         update_available: None,
     })
+}
+
+/// Strips the version an installer baked into its own `DisplayName`, so one application keeps one
+/// name across its releases.
+///
+/// A row in `upgrade_paths` is keyed by (`ApplicationName`, platform) and a human's "Sign Script"
+/// review is recorded on that row, so a name that moves with the version is a fresh, unsigned row
+/// every release: the reviewed script quietly stops applying, the host stops patching, and the
+/// Upgrade Scripts screen shows the old name beside the new one with nothing to say they are the
+/// same application. LibreOffice registers its `DisplayName` as `LibreOffice 26.8.0.3`, and it is
+/// far from alone. Nothing else about the entry has to hold still for this to work — `UpgradePath`
+/// only drops a `ScriptSignature` when the *script text* changes, so the MSI product code and the
+/// version moving underneath a stable name cost nothing.
+///
+/// The strip is anchored on this entry's own `DisplayVersion` rather than on anything that merely
+/// looks like a version, and that is what keeps it from doing harm:
+/// - `Microsoft Visual C++ 2015-2022 Redistributable (x64) - 14.38.33130` loses the last token and
+///   its dangling separator; the `2015-2022` naming a product line matches no version and stays.
+/// - `Java 8 Update 411` (`DisplayVersion` `8.0.4110.9`) is left alone — a bare number is a word in
+///   a product name far more often than it is a version, so a two-component floor keeps it.
+/// - `Python 3.12.4 (64-bit)` (`DisplayVersion` `3.12.4150.0`) is left alone, and deliberately:
+///   3.11 and 3.12 install side by side and are genuinely different applications, so collapsing
+///   them onto one row carrying one researched script would be a worse failure than this one.
+///
+/// A *truncated* version in the name (`Foo 1.2` against a `DisplayVersion` of `1.2.3.4`) is the
+/// other common shape and is matched too — but only on whole components, which is exactly what
+/// holds the Python case above apart.
+fn display_name_without_version(display_name: &str, display_version: Option<&str>) -> String {
+    let name = display_name.trim();
+    let Some(version) = display_version.map(str::trim).filter(|version| is_version_anchor(version)) else {
+        return name.to_string();
+    };
+
+    let components: Vec<&str> = version.split('.').collect();
+    let tokens: Vec<&str> = name.split_whitespace().collect();
+    let Some(index) = tokens.iter().position(|token| token_names_version(token, &components)) else {
+        return name.to_string();
+    };
+
+    let mut kept = tokens;
+    kept.remove(index);
+    // Whatever the version was glued on with goes with it: `... (x64) - 14.38.33130` would
+    // otherwise keep a trailing separator, and a mid-name hit (`7-Zip 24.09 (x64)`) a double space.
+    let stripped = kept.join(" ");
+    let stripped = stripped.trim_matches(|c: char| c.is_whitespace() || matches!(c, '-' | '\u{2013}' | ',' | ':' | ';'));
+
+    // A name that was nothing but its version is left as it was found: an entry has to be called
+    // something, and reporting an empty name would drop the application from the inventory.
+    if stripped.is_empty() {
+        name.to_string()
+    } else {
+        stripped.to_string()
+    }
+}
+
+/// Whether a `DisplayVersion` is specific enough to strip a name by. A vendor may write anything at
+/// all in that value, and a single-component or non-numeric one ("1", "Free Edition") would match
+/// tokens that are not versions at all.
+fn is_version_anchor(version: &str) -> bool {
+    let mut components = version.split('.');
+    matches!(
+        (components.next(), components.next()),
+        (Some(first), Some(second)) if is_numeric_component(first) && is_numeric_component(second)
+    )
+}
+
+/// Whether one whitespace-separated token of a display name is the version in `version_components`,
+/// in full or truncated to its leading components.
+fn token_names_version(token: &str, version_components: &[&str]) -> bool {
+    let candidate = token.trim_matches(|c: char| matches!(c, '(' | ')' | '[' | ']' | ',' | ';' | '-' | '_'));
+    // "v1.2.3" makes the same claim as "1.2.3".
+    let candidate = match candidate.strip_prefix('v').or_else(|| candidate.strip_prefix('V')) {
+        Some(rest) if rest.starts_with(|c: char| c.is_ascii_digit()) => rest,
+        _ => candidate,
+    };
+
+    let components: Vec<&str> = candidate.split('.').collect();
+    // Two components minimum, and never more than the version has: a token matching only the first
+    // component of a `DisplayVersion` is how `Java 8 Update 411` would lose the `8` it needs.
+    if components.len() < 2 || components.len() > version_components.len() {
+        return false;
+    }
+
+    components
+        .iter()
+        .zip(version_components)
+        .all(|(component, version_component)| components_match(component, version_component))
+}
+
+/// Compares one dotted component numerically, so a zero-padded name (`7-Zip 24.09`) still matches
+/// the `DisplayVersion` it was taken from (`24.9`).
+fn components_match(component: &str, version_component: &str) -> bool {
+    if !is_numeric_component(component) || !is_numeric_component(version_component) {
+        return false;
+    }
+
+    match (component.parse::<u64>(), version_component.parse::<u64>()) {
+        (Ok(left), Ok(right)) => left == right,
+        // Longer than a u64 holds, which is not a version anybody ships; compared as written
+        // rather than treated as equal.
+        _ => component == version_component,
+    }
+}
+
+fn is_numeric_component(component: &str) -> bool {
+    !component.is_empty() && component.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Name reported for winget's own entry, and the `packageManager` value every package it manages
@@ -1253,6 +1374,66 @@ mod tests {
         let parsed = parse_choco_outdated("firefox|153.0|154.0.1|false\n");
 
         assert_eq!(parsed.get("firefox"), Some(&"154.0.1".to_string()));
+    }
+
+    #[test]
+    fn display_name_without_version_strips_the_version_an_installer_baked_into_its_name() {
+        // The case this exists for: LibreOffice's own DisplayName carries its version, so every
+        // release used to arrive as a new application with an unsigned upgrade path.
+        assert_eq!(display_name_without_version("LibreOffice 26.8.0.3", Some("26.8.0.3")), "LibreOffice");
+        assert_eq!(display_name_without_version("Foo v1.2.3", Some("1.2.3")), "Foo");
+    }
+
+    #[test]
+    fn display_name_without_version_takes_the_separator_the_version_was_glued_on_with() {
+        assert_eq!(
+            display_name_without_version("Microsoft Visual C++ 2015-2022 Redistributable (x64) - 14.38.33130", Some("14.38.33130")),
+            "Microsoft Visual C++ 2015-2022 Redistributable (x64)"
+        );
+        // A hit in the middle of the name must not leave the double space behind either.
+        assert_eq!(display_name_without_version("7-Zip 24.09 (x64)", Some("24.9")), "7-Zip (x64)");
+    }
+
+    #[test]
+    fn display_name_without_version_matches_a_version_truncated_to_whole_components() {
+        // Plenty of installers name themselves after the release and record a build number.
+        assert_eq!(display_name_without_version("Foo 1.2", Some("1.2.3.4")), "Foo");
+    }
+
+    #[test]
+    fn display_name_without_version_keeps_a_number_that_is_part_of_the_product_name() {
+        // `8` is a component of the DisplayVersion but not the version, and dropping it would
+        // report a different application. The two-component floor is what keeps it.
+        assert_eq!(display_name_without_version("Java 8 Update 411", Some("8.0.4110.9")), "Java 8 Update 411");
+        assert_eq!(display_name_without_version("Microsoft Office 365", Some("16.0.17328.20550")), "Microsoft Office 365");
+        // 2015-2022 names a product line, not a version.
+        assert_eq!(
+            display_name_without_version("Microsoft Visual C++ 2015-2022 Redistributable (x64)", Some("14.38.33130")),
+            "Microsoft Visual C++ 2015-2022 Redistributable (x64)"
+        );
+    }
+
+    #[test]
+    fn display_name_without_version_keeps_a_version_that_is_not_this_entrys_own() {
+        // Python 3.11 and 3.12 install side by side and are genuinely different applications, so
+        // the name is only stripped by a version the entry itself declares — and `3.12.4` is not
+        // a component-wise prefix of `3.12.4150.0`.
+        assert_eq!(display_name_without_version("Python 3.12.4 (64-bit)", Some("3.12.4150.0")), "Python 3.12.4 (64-bit)");
+    }
+
+    #[test]
+    fn display_name_without_version_leaves_a_name_alone_without_a_usable_anchor() {
+        // No DisplayVersion at all, and the ones a vendor writes prose into: nothing here is
+        // specific enough to remove a word by.
+        assert_eq!(display_name_without_version("LibreOffice 26.8.0.3", None), "LibreOffice 26.8.0.3");
+        assert_eq!(display_name_without_version("LibreOffice 26.8.0.3", Some("unknown")), "LibreOffice 26.8.0.3");
+        assert_eq!(display_name_without_version("Some Tool 1", Some("1")), "Some Tool 1");
+    }
+
+    #[test]
+    fn display_name_without_version_never_reports_an_empty_name() {
+        // An entry whose whole DisplayName is its version still has to be called something.
+        assert_eq!(display_name_without_version("1.2.3", Some("1.2.3")), "1.2.3");
     }
 
     #[test]
