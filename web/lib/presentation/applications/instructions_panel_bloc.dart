@@ -10,6 +10,32 @@ import '../../domain/entities/enums.dart';
 import '../../domain/entities/upgrade_path.dart';
 import '../../domain/usecases/upgrade_path_usecases.dart';
 
+/// What a successful signature produced, for a screen that is about to close the panel that made it.
+///
+/// The Failed Updates screen takes the row — and so this panel — off the table the moment a repair
+/// is signed, which destroys the panel's own "Signed. Opened a pull request" line and its link in
+/// the same frame they appear. The pull request is the durable record of the review (see
+/// `IScriptApprovalPublisher`), so it has to survive the widget that announced it: the screen
+/// re-states it at page level instead.
+class SignedScriptOutcome extends Equatable {
+  const SignedScriptOutcome({
+    required this.clearedPatchFailures,
+    required this.approvalDescription,
+    required this.approvalPullRequestUrl,
+  });
+
+  /// How many outstanding failures the server cleared — see [UpgradePathResult.clearedPatchFailures].
+  final int clearedPatchFailures;
+
+  /// The same sentence the panel would have shown about publishing the approval.
+  final String approvalDescription;
+
+  final String? approvalPullRequestUrl;
+
+  @override
+  List<Object?> get props => [clearedPatchFailures, approvalDescription, approvalPullRequestUrl];
+}
+
 sealed class InstructionsPanelEvent extends Equatable {
   const InstructionsPanelEvent();
 
@@ -71,7 +97,7 @@ final class InstructionsPanelState extends Equatable {
     this.loadError,
     this.reloadTable = false,
     this.justSigned = false,
-    this.clearedPatchFailures = 0,
+    this.signedOutcome,
   });
 
   final bool loading;
@@ -113,9 +139,8 @@ final class InstructionsPanelState extends Equatable {
   /// failing, and only then does the Failed Updates screen take its row off the queue.
   final bool justSigned;
 
-  /// How many outstanding failures that signature cleared, from the server — see
-  /// [UpgradePathResult.clearedPatchFailures].
-  final int clearedPatchFailures;
+  /// Everything that signature produced which outlives this panel — set exactly when [justSigned] is.
+  final SignedScriptOutcome? signedOutcome;
 
   bool get canSign => inSyncWithServer && (result?.isSignable ?? false) && !signing && !saving;
 
@@ -135,7 +160,7 @@ final class InstructionsPanelState extends Equatable {
     String? loadError,
     bool reloadTable = false,
     bool justSigned = false,
-    int clearedPatchFailures = 0,
+    SignedScriptOutcome? signedOutcome,
     bool clearResult = false,
     bool clearMessages = false,
   }) =>
@@ -159,7 +184,7 @@ final class InstructionsPanelState extends Equatable {
         loadError: loadError ?? this.loadError,
         reloadTable: reloadTable,
         justSigned: justSigned,
-        clearedPatchFailures: clearedPatchFailures,
+        signedOutcome: signedOutcome,
       );
 
   @override
@@ -179,7 +204,7 @@ final class InstructionsPanelState extends Equatable {
         loadError,
         reloadTable,
         justSigned,
-        clearedPatchFailures,
+        signedOutcome,
       ];
 }
 
@@ -399,7 +424,11 @@ class InstructionsPanelBloc extends Bloc<InstructionsPanelEvent, InstructionsPan
         signApprovalUrl: signed.approvalPullRequestUrl,
         reloadTable: true,
         justSigned: true,
-        clearedPatchFailures: signed.clearedPatchFailures,
+        signedOutcome: SignedScriptOutcome(
+          clearedPatchFailures: signed.clearedPatchFailures,
+          approvalDescription: _describeApproval(signed),
+          approvalPullRequestUrl: signed.approvalPullRequestUrl,
+        ),
       ));
     } on ApiException catch (error) {
       emit(state.copyWith(signing: false, signMessage: 'Failed: ${error.message}'));

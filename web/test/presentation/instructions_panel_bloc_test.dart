@@ -68,6 +68,10 @@ class FakeUpgradePathRepository implements UpgradePathRepository {
       // The server clears the failures a repair addresses and reports how many; an ordinary
       // review clears nothing.
       clearedPatchFailures: patchFailureId == null ? 0 : 3,
+      // Signing publishes the approval as a pull request, which is the durable record of the
+      // review — and the thing the Failed Updates screen has to re-state, since signing closes
+      // the panel that would otherwise show it.
+      approvalOutcome: ScriptApprovalPublishOutcome.pullRequestOpened,
     );
   }
 
@@ -117,6 +121,7 @@ UpgradePathResult result({
   String? script = '#!/bin/bash',
   bool scriptSigned = false,
   int clearedPatchFailures = 0,
+  ScriptApprovalPublishOutcome? approvalOutcome,
   Map<String, dynamic>? raw,
 }) =>
     UpgradePathResult(
@@ -133,8 +138,9 @@ UpgradePathResult result({
       checkedUtc: DateTime.utc(2026, 9, 1),
       script: script,
       scriptSigned: scriptSigned,
-      approvalOutcome: null,
-      approvalPullRequestUrl: null,
+      approvalOutcome: approvalOutcome,
+      approvalPullRequestUrl:
+          approvalOutcome == null ? null : 'https://example.invalid/pull/1',
       approvalMessage: null,
       clearedPatchFailures: clearedPatchFailures,
       raw: raw ??
@@ -402,7 +408,10 @@ void main() {
       wait: const Duration(milliseconds: 20),
       verify: (bloc) {
         expect(bloc.state.justSigned, isTrue);
-        expect(bloc.state.clearedPatchFailures, 3);
+        expect(bloc.state.signedOutcome?.clearedPatchFailures, 3);
+        // Handed out because signing closes this panel on the Failed Updates screen, taking its own
+        // "Signed. Opened a pull request" line and link with it.
+        expect(bloc.state.signedOutcome?.approvalDescription, isNotEmpty);
       },
     );
 
@@ -431,7 +440,7 @@ void main() {
       wait: const Duration(milliseconds: 20),
       verify: (bloc) {
         expect(repository.signedPatchFailureId, isNull);
-        expect(bloc.state.clearedPatchFailures, 0);
+        expect(bloc.state.signedOutcome?.clearedPatchFailures, 0);
       },
     );
   });

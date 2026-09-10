@@ -36,12 +36,13 @@ class InstructionsPanel extends StatelessWidget {
   /// prompt. Composed server-side; see [InstructionsPanelBloc.patchFailureId].
   final String? patchFailureId;
 
-  /// Called after a *successful sign*, with how many outstanding failures the server cleared.
+  /// Called after a *successful sign*, with everything that signature produced.
   ///
   /// Separate from [onServerStateChanged], which fires for a save too: only the signature replaces
   /// the script that was failing, so only the signature takes a row off the Failed Updates queue.
-  /// Null on the Applications screen, which has no queue to take anything off.
-  final void Function(int clearedFailures)? onScriptSigned;
+  /// Null on the Applications screen, which has no queue to take anything off — and which needs no
+  /// hand-off either, since nothing there closes the panel out from under its own messages.
+  final void Function(SignedScriptOutcome outcome)? onScriptSigned;
 
   /// Called after a save or a sign, so the table above re-reads and the status column stops
   /// saying "review and sign".
@@ -70,7 +71,7 @@ class _PanelBody extends StatefulWidget {
   const _PanelBody({required this.onServerStateChanged, this.onScriptSigned});
 
   final VoidCallback onServerStateChanged;
-  final void Function(int clearedFailures)? onScriptSigned;
+  final void Function(SignedScriptOutcome outcome)? onScriptSigned;
 
   @override
   State<_PanelBody> createState() => _PanelBodyState();
@@ -105,7 +106,9 @@ class _PanelBodyState extends State<_PanelBody> {
 
           if (state.reloadTable) widget.onServerStateChanged();
           // After the reload, so the screen acts on a table it has already asked to refresh.
-          if (state.justSigned) widget.onScriptSigned?.call(state.clearedPatchFailures);
+          if (state.signedOutcome case final outcome? when state.justSigned) {
+            widget.onScriptSigned?.call(outcome);
+          }
         },
         builder: (context, state) {
           if (state.loading) {

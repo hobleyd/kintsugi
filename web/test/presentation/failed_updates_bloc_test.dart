@@ -5,6 +5,7 @@ import 'package:kintsugi_web/domain/entities/patch_failure.dart';
 import 'package:kintsugi_web/domain/repositories/repositories.dart';
 import 'package:kintsugi_web/domain/usecases/patch_failure_usecases.dart';
 import 'package:kintsugi_web/presentation/applications/failed_updates_bloc.dart';
+import 'package:kintsugi_web/presentation/applications/instructions_panel_bloc.dart';
 
 class FakePatchFailureRepository implements PatchFailureRepository {
   FakePatchFailureRepository(this.failures);
@@ -61,6 +62,20 @@ PatchFailure failure_({
       scriptSigned: true,
       method: UpgradeMethod.script,
       canFix: platform != null && hasScript,
+    );
+
+/// What the fix panel hands back after a signature. `approvalDescription` is the sentence the panel
+/// would have shown about the pull request, which the screen re-states because signing closes that
+/// panel in the same frame.
+SignedScriptOutcome signed_({
+  int clearedPatchFailures = 1,
+  String approvalDescription = 'Opened a pull request for review.',
+  String? approvalPullRequestUrl = 'https://example.invalid/pull/1',
+}) =>
+    SignedScriptOutcome(
+      clearedPatchFailures: clearedPatchFailures,
+      approvalDescription: approvalDescription,
+      approvalPullRequestUrl: approvalPullRequestUrl,
     );
 
 FailedUpdatesBloc blocFor(FakePatchFailureRepository repository) => FailedUpdatesBloc(
@@ -201,7 +216,7 @@ void main() {
       act: (bloc) => bloc
         ..add(const FailedUpdatesRequested())
         ..add(const FailedUpdateRowExpansionToggled('1'))
-        ..add(const FailedUpdateScriptSigned('1', 1)),
+        ..add(FailedUpdateScriptSigned('1', signed_())),
       wait: const Duration(milliseconds: 20),
       verify: (bloc) {
         expect(bloc.state.visibleRows.map((f) => f.id), ['2']);
@@ -217,7 +232,7 @@ void main() {
       build: () => blocFor(FakePatchFailureRepository([failure_(id: '1')])),
       act: (bloc) => bloc
         ..add(const FailedUpdatesRequested())
-        ..add(const FailedUpdateScriptSigned('1', 4)),
+        ..add(FailedUpdateScriptSigned('1', signed_(clearedPatchFailures: 4))),
       wait: const Duration(milliseconds: 20),
       verify: (bloc) {
         expect(bloc.state.notice, contains('4 failures'));
@@ -232,12 +247,69 @@ void main() {
       build: () => blocFor(FakePatchFailureRepository([failure_(id: '1')])),
       act: (bloc) => bloc
         ..add(const FailedUpdatesRequested())
-        ..add(const FailedUpdateScriptSigned('1', 1)),
+        ..add(FailedUpdateScriptSigned('1', signed_())),
       wait: const Duration(milliseconds: 20),
       verify: (bloc) {
         expect(bloc.state.notice, contains('Cleared its failure'));
         expect(bloc.state.notice, isNot(contains('across the hosts')));
       },
+    );
+
+    /// Signing closes the panel that was showing "Signed. Opened a pull request" and its link, in
+    /// the same frame they appeared. The pull request is the durable record of the review, so the
+    /// screen re-states it at page level — otherwise the one artifact of the approval is destroyed
+    /// by the row leaving the table.
+    blocTest<FailedUpdatesBloc, FailedUpdatesState>(
+      'keeps the approval pull request reachable after the panel closes',
+      build: () => blocFor(FakePatchFailureRepository([failure_(id: '1')])),
+      act: (bloc) => bloc
+        ..add(const FailedUpdatesRequested())
+        ..add(FailedUpdateScriptSigned('1', signed_())),
+      wait: const Duration(milliseconds: 20),
+      verify: (bloc) {
+        expect(bloc.state.notice, contains('Opened a pull request'));
+        expect(bloc.state.noticeLinkUrl, 'https://example.invalid/pull/1');
+      },
+    );
+
+    /// A banner describes one action. Left up, "Signed the repaired script for Ollama" stayed on
+    /// screen through every later filter change and background reload, announcing something several
+    /// interactions old as though it had just happened.
+    /// Awaited between events on purpose. Bloc runs handlers for *different* event types
+    /// concurrently, so firing these back to back lets the synchronous filter change finish before
+    /// the asynchronous sign handler has emitted anything — which passes for the wrong reason and
+    /// tests nothing. What is being pinned is the ordinary sequence: banner appears, then the
+    /// operator does something else.
+    blocTest<FailedUpdatesBloc, FailedUpdatesState>(
+      'clears the banner, and its link, when the table is narrowed afterwards',
+      build: () => blocFor(FakePatchFailureRepository([failure_(id: '1')])),
+      act: (bloc) async {
+        bloc.add(const FailedUpdatesRequested());
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        bloc.add(FailedUpdateScriptSigned('1', signed_()));
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        expect(bloc.state.notice, isNotNull, reason: 'the banner has to exist before it can clear');
+        bloc.add(const FailedUpdatesFiltersChanged(FailedUpdateFilters(search: 'ollama')));
+      },
+      wait: const Duration(milliseconds: 20),
+      verify: (bloc) {
+        expect(bloc.state.notice, isNull);
+        expect(bloc.state.noticeLinkUrl, isNull);
+      },
+    );
+
+    blocTest<FailedUpdatesBloc, FailedUpdatesState>(
+      'clears the banner on the next reload rather than carrying it forward',
+      build: () => blocFor(FakePatchFailureRepository([failure_(id: '1')])),
+      act: (bloc) async {
+        bloc.add(const FailedUpdatesRequested());
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        bloc.add(FailedUpdateScriptSigned('1', signed_()));
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        bloc.add(const FailedUpdatesRequested(showSpinner: false));
+      },
+      wait: const Duration(milliseconds: 20),
+      verify: (bloc) => expect(bloc.state.notice, isNull),
     );
   });
 

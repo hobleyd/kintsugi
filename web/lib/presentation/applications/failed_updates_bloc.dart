@@ -5,6 +5,7 @@ import '../../core/network/api_exception.dart';
 import '../../domain/entities/enums.dart';
 import '../../domain/entities/patch_failure.dart';
 import '../../domain/usecases/patch_failure_usecases.dart';
+import 'instructions_panel_bloc.dart';
 
 sealed class FailedUpdatesEvent extends Equatable {
   const FailedUpdatesEvent();
@@ -50,13 +51,13 @@ final class FailedUpdateRowExpansionToggled extends FailedUpdatesEvent {
 /// this re-reads the list, closes the panel, and says what happened — including when the clearing
 /// reached other hosts failing on the same script, which the operator did not ask for by name.
 final class FailedUpdateScriptSigned extends FailedUpdatesEvent {
-  const FailedUpdateScriptSigned(this.id, this.clearedFailures);
+  const FailedUpdateScriptSigned(this.id, this.outcome);
 
   final String id;
-  final int clearedFailures;
+  final SignedScriptOutcome outcome;
 
   @override
-  List<Object?> get props => [id, clearedFailures];
+  List<Object?> get props => [id, outcome];
 }
 
 final class FailedUpdateDismissed extends FailedUpdatesEvent {
@@ -125,6 +126,7 @@ class FailedUpdatesState extends Equatable {
     this.dismissingIds = const {},
     this.error,
     this.notice,
+    this.noticeLinkUrl,
   });
 
   final bool loading;
@@ -137,6 +139,11 @@ class FailedUpdatesState extends Equatable {
 
   final String? error;
   final String? notice;
+
+  /// A link rendered beside [notice] — the approval pull request a signature opened. It lives here
+  /// rather than in the fix panel because signing closes that panel in the same frame, and the pull
+  /// request is the durable record of the review.
+  final String? noticeLinkUrl;
 
   List<PatchFailure> get visibleRows =>
       failures.where(filters.matches).toList(growable: false);
@@ -159,6 +166,7 @@ class FailedUpdatesState extends Equatable {
     Set<String>? dismissingIds,
     String? error,
     String? notice,
+    String? noticeLinkUrl,
     bool clearExpanded = false,
     bool clearMessages = false,
   }) =>
@@ -170,10 +178,14 @@ class FailedUpdatesState extends Equatable {
         dismissingIds: dismissingIds ?? this.dismissingIds,
         error: clearMessages ? null : (error ?? this.error),
         notice: clearMessages ? null : (notice ?? this.notice),
+        // Tied to the notice it belongs to rather than carried forward on its own: a link left
+        // behind by a cleared notice would point at the pull request for something else.
+        noticeLinkUrl: clearMessages ? null : (noticeLinkUrl ?? this.noticeLinkUrl),
       );
 
   @override
-  List<Object?> get props => [loading, failures, filters, expandedId, dismissingIds, error, notice];
+  List<Object?> get props =>
+      [loading, failures, filters, expandedId, dismissingIds, error, notice, noticeLinkUrl];
 }
 
 /// The Failed Updates screen.
@@ -190,7 +202,11 @@ class FailedUpdatesBloc extends Bloc<FailedUpdatesEvent, FailedUpdatesState> {
         _dismissFailure = dismissFailure,
         super(const FailedUpdatesState()) {
     on<FailedUpdatesRequested>(_onRequested);
-    on<FailedUpdatesFiltersChanged>((event, emit) => emit(state.copyWith(filters: event.filters)));
+    on<FailedUpdatesFiltersChanged>(
+      // clearMessages for the same reason a reload does it: the banner describes an action, and
+      // narrowing the table is a different one.
+      (event, emit) => emit(state.copyWith(filters: event.filters, clearMessages: true)),
+    );
     on<FailedUpdateRowExpansionToggled>(
       (event, emit) => emit(
         state.expandedId == event.id
@@ -206,20 +222,27 @@ class FailedUpdatesBloc extends Bloc<FailedUpdatesEvent, FailedUpdatesState> {
   final DismissPatchFailure _dismissFailure;
 
   Future<void> _onRequested(FailedUpdatesRequested event, Emitter<FailedUpdatesState> emit) async {
-    if (event.showSpinner) emit(state.copyWith(loading: true, clearMessages: true));
+    // Cleared whether or not this reload shows a spinner. The banner describes one action, and the
+    // reload that follows a save is a *different* action — leaving it up meant "Signed the repaired
+    // script for Ollama" stayed on screen through every later filter change and background reload,
+    // announcing something three interactions old as though it had just happened. The events that
+    // set a banner (`_onScriptSigned`, `_onDismissed`) read the list themselves rather than going
+    // through this one, so they are not clearing their own message.
+    emit(state.copyWith(loading: event.showSpinner ? true : null, clearMessages: true));
 
     try {
-      emit(state.copyWith(loading: false, failures: await _getFailures(), error: ''));
+      emit(state.copyWith(loading: false, failures: await _getFailures()));
     } on ApiException catch (error) {
       emit(state.copyWith(loading: false, error: error.message));
     }
   }
 
   Future<void> _onScriptSigned(FailedUpdateScriptSigned event, Emitter<FailedUpdatesState> emit) async {
-    final application = state.failures
-        .where((failure) => failure.id == event.id)
-        .map((failure) => failure.applicationName)
-        .firstOrNull;
+    // Read before the reload, since the row is about to leave the list — and without
+    // `firstOrNull`, which is `package:collection`'s and reaches this file only through a
+    // transitive export that nothing here depends on directly.
+    final matching = state.failures.where((failure) => failure.id == event.id);
+    final application = matching.isEmpty ? null : matching.first.applicationName;
 
     try {
       emit(state.copyWith(
@@ -227,7 +250,8 @@ class FailedUpdatesBloc extends Bloc<FailedUpdatesEvent, FailedUpdatesState> {
         // The row this panel belonged to has just left the default view, and a panel expanded
         // against a row nobody can see is a background refresh polling for nothing.
         clearExpanded: true,
-        notice: _describeSigning(application, event.clearedFailures),
+        notice: _describeSigning(application, event.outcome),
+        noticeLinkUrl: event.outcome.approvalPullRequestUrl,
       ));
     } on ApiException catch (error) {
       // The signature landed regardless — this is only the re-read. Say so rather than implying
@@ -241,19 +265,25 @@ class FailedUpdatesBloc extends Bloc<FailedUpdatesEvent, FailedUpdatesState> {
 
   /// What the screen says after a repair is signed.
   ///
-  /// Names the count whenever it is more than one, because clearing the row the operator had open
-  /// also clears every other host failing on that same script — a wider action than they asked for
-  /// by name, and one that should be visible rather than silent.
-  static String _describeSigning(String? application, int clearedFailures) {
+  /// Three things, and each is here because the panel that would otherwise have said it is closing
+  /// in the same frame. The count, because clearing the row the operator had open also clears every
+  /// other host failing on that same script — a wider action than they asked for by name, and one
+  /// that should be visible rather than silent. That the fix is unproven, because nothing here
+  /// claims it worked. And what became of the approval, since the pull request is the durable
+  /// record of the review and its link went down with the panel.
+  static String _describeSigning(String? application, SignedScriptOutcome outcome) {
     final subject = application ?? 'this application';
-    final cleared = switch (clearedFailures) {
+    final cleared = switch (outcome.clearedPatchFailures) {
       0 => 'Nothing was outstanding to clear',
       1 => 'Cleared its failure',
-      _ => 'Cleared $clearedFailures failures across the hosts running it',
+      final count => 'Cleared $count failures across the hosts running it',
     };
 
+    final approval =
+        outcome.approvalDescription.isEmpty ? '' : ' ${outcome.approvalDescription}';
+
     return 'Signed the repaired script for $subject. $cleared — it comes back if the next patch '
-        'cycle still fails.';
+        'cycle still fails.$approval';
   }
 
   Future<void> _onDismissed(FailedUpdateDismissed event, Emitter<FailedUpdatesState> emit) async {

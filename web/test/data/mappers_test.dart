@@ -275,6 +275,38 @@ void main() {
     });
   });
 
+  group('upgradePathResultFromJson', () {
+    /// Hand-mirrored from `UpgradePathResultDto` with nothing in CI cross-checking the two, and a
+    /// misspelling here reads as 0 rather than failing — which would silently make a repair look
+    /// like it cleared nothing. See `.claude/rules/hand-mirrored-dtos.md`.
+    test('reads how many patch failures a repair signature cleared', () {
+      final result = upgradePathResultFromJson(const {
+        'applicationName': 'Ollama',
+        'platform': 'macOS',
+        'status': 'Found',
+        'method': 'Script',
+        'script': '#!/bin/bash',
+        'scriptSigned': true,
+        'clearedPatchFailures': 4,
+      });
+
+      expect(result.clearedPatchFailures, 4);
+    });
+
+    test('reads an ordinary signature, which clears nothing, as zero', () {
+      final result = upgradePathResultFromJson(const {
+        'applicationName': 'Ollama',
+        'platform': 'macOS',
+        'status': 'Found',
+        'method': 'Script',
+        'script': '#!/bin/bash',
+        'scriptSigned': true,
+      });
+
+      expect(result.clearedPatchFailures, 0);
+    });
+  });
+
   group('patchFailureFromJson', () {
     Map<String, dynamic> body([Map<String, dynamic> overrides = const {}]) => {
           'id': 'f1',

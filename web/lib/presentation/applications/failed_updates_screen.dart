@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../core/di/locator.dart';
+import '../../core/platform/page_navigator.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/theme/kintsugi_palette.dart';
 import '../../core/widgets/alert_box.dart';
@@ -86,7 +87,18 @@ class _FailedUpdatesView extends StatelessWidget {
         ),
         const SizedBox(height: 20),
         if (state.error case final error? when error.isNotEmpty) AlertBox.error(error),
-        if (state.notice case final notice? when notice.isNotEmpty) AlertBox.success(notice),
+        if (state.notice case final notice? when notice.isNotEmpty)
+          AlertBox.success(
+            notice,
+            // The approval pull request, re-stated here because signing closed the panel that would
+            // have shown it — see `SignedScriptOutcome`.
+            child: state.noticeLinkUrl == null
+                ? null
+                : LinkText(
+                    label: 'View pull request',
+                    onTap: () => locator<PageNavigator>().go(state.noticeLinkUrl!),
+                  ),
+          ),
         if (state.loading && state.failures.isEmpty)
           const EmptyPanel('Loading failed updates...')
         else if (state.failures.isEmpty)
@@ -340,9 +352,9 @@ class _FixPanel extends StatelessWidget {
               // Signing is what takes the row off the queue — not saving. An unsigned script is one
               // no agent will run, so a fix that was saved and not signed leaves the failure live,
               // and the row should keep saying so.
-              onScriptSigned: (clearedFailures) => context
+              onScriptSigned: (outcome) => context
                   .read<FailedUpdatesBloc>()
-                  .add(FailedUpdateScriptSigned(failure.id, clearedFailures)),
+                  .add(FailedUpdateScriptSigned(failure.id, outcome)),
             )
           else
             const AlertBox.info(
