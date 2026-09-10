@@ -31,6 +31,19 @@ enum UpgradePathStatus { found, notFound, failed }
 /// Mirrors `UpgradeMethod`. Sent as its name.
 enum UpgradeMethod { unknown, directDownload, packageManagerCommand, manualSteps, script }
 
+/// Mirrors `PatchFailureResolution`. Sent as an ordinal, so declaration order is load-bearing.
+enum PatchFailureResolution {
+  outstanding,
+  patchSucceeded,
+  dismissed;
+
+  String get label => switch (this) {
+        PatchFailureResolution.outstanding => 'Outstanding',
+        PatchFailureResolution.patchSucceeded => 'Patched Since',
+        PatchFailureResolution.dismissed => 'Dismissed',
+      };
+}
+
 /// Mirrors `AiProvider`. Sent as an ordinal.
 enum AiProvider {
   anthropic,

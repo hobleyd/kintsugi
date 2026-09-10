@@ -2,6 +2,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../domain/entities/enums.dart';
 import '../../presentation/applications/applications_screen.dart';
+import '../../presentation/applications/failed_updates_screen.dart';
 import '../../presentation/clients/clients_screen.dart';
 import '../../presentation/hosts/hosts_screen.dart';
 import '../../presentation/remote_control/remote_control_screen.dart';
@@ -34,7 +35,12 @@ abstract final class Routes {
   /// a support call is pointed at a link, and "open a shell on this machine" and "watch this
   /// machine's screen" are different things to be sent to.
   static String remoteShell(String hostId) => '/hosts/${Uri.encodeComponent(hostId)}/shell';
+  /// The Applications menu's two screens. `/applications` stays the installed-applications view
+  /// rather than moving under a new prefix, because the Hosts screen's "N app updates" badge and
+  /// every Vanta record's `externalUrl` deep-link into it with `?status=&host=` — see
+  /// `VantaResourceBuilder`.
   static const applications = '/applications';
+  static const applicationsFailed = '/applications/failed';
   static const clients = '/clients';
   static const upgradeScripts = '/upgrade-scripts';
   static const settingsAiAgent = '/settings/ai-agent';
@@ -143,6 +149,10 @@ GoRouter createRouter(SessionBloc sessionBloc) {
               initialStatusKey: state.uri.queryParameters['status'],
               initialHostName: state.uri.queryParameters['host'],
             ),
+          ),
+          GoRoute(
+            path: Routes.applicationsFailed,
+            builder: (_, _) => const FailedUpdatesScreen(),
           ),
           GoRoute(path: Routes.clients, builder: (_, _) => const ClientsScreen()),
           GoRoute(path: Routes.upgradeScripts, builder: (_, _) => const UpgradeScriptsScreen()),

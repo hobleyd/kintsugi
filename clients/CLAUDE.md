@@ -217,6 +217,42 @@ side: it is a oneshot that is about to exit, and the next timer firing execs wha
 by then — only the long-running per-user units get restarted.
 
 
+## Reporting a failed upgrade
+
+A patch that *works* is reported by `upgrade::report_patch_result`; one that runs and **fails** is
+reported by `upgrade::report_patch_failure`, to `POST /api/patch-failures`, and turns up on the admin
+UI's Failed Updates screen with the date, the count and the command's captured output. The server's
+half is in `src/CLAUDE.md`. Three things about the agents' half.
+
+**Whichever process ran the script reports it, and only that one.** The Linux service
+(`main::ServiceHandler::patch_application`) and the Windows service
+(`service::AgentService::patch_application`) are each the single place `patch_one` ever runs, so both
+report from there and their per-user halves — which reach patching only through `queue` — report
+nothing. macOS is the one that has to choose, because it genuinely has two runners: the root daemon
+runs AI-researched and App Store rows, the per-user process runs Homebrew ones (see `runs_as_root`).
+So `main::DaemonRequestHandler::patch_application` reports its own, and `patch_cycle::run_patches`
+reports only when `ran_by_the_daemon` is false. Reporting in both places would record every root-run
+failure twice.
+
+**Only a real execution failure is reported.** Everything reachable *before* `patch_one` — no
+enrolled identity, no signed patchable path, the daemon's `runs_as_root` refusal, an unreachable
+server — is a configuration problem rather than a bug in a script, and a screen full of those hides
+the ones a human or the AI can actually fix. OS updates are out for the same reason: there is no
+script to repair. Each call site says so in a comment; keep them saying it.
+
+**`MAX_REPORTED_FAILURE_BYTES` has to stay below the server's own ceiling.** A failing script's
+stderr is unbounded and `run_script` bails with all of it. 4000 bytes here against
+`ReportPatchFailureCommandValidator.MaxDetailsLength`'s 16000 there — a report longer than the
+validator accepts is answered with a 400 and the failure is lost silently, for exactly the noisiest
+failures. `truncate_for_report` keeps the **tail** rather than the head (a script's last words are
+where its failure is; its first are the preamble every run prints) and walks to a char boundary, the
+same as `truncate_for_log`. Identical in all three agents, tests included.
+
+**`failedUtc` is the host's own clock.** A machine that patched overnight and could not reach the
+server until morning would otherwise report the failure as having happened when the network came
+back. Formatted RFC 3339 via `time`, which all three agents already carry for logging.
+
+
 ## Remote control: what the three agents share
 
 The server's half is in `src/CLAUDE.md`, the viewer's in `web/CLAUDE.md`. The timeout orderings

@@ -290,7 +290,19 @@ impl RequestHandler for Agent {
             .with_context(|| format!("'{application_name}' has no signed, patchable upgrade path"))?;
 
         logging::info(&format!("attempting to patch {} (method {:?})", status.application_name, status.method));
-        upgrade::patch_one(&status, identity)?;
+        if let Err(err) = upgrade::patch_one(&status, identity) {
+            // Reported from here rather than by the tray process, for the same reason the success
+            // below is: this is the one place a script actually runs, and the only side holding the
+            // identity every agent-only route requires. The tray merely relays the verdict through
+            // `queue`, so a failure is recorded exactly once.
+            //
+            // Note what sits *above* this line and so is never reported: no enrolled identity, and
+            // an application with no signed, patchable upgrade path. Those are configuration
+            // problems rather than bugs in a script, and the Failed Updates screen exists for the
+            // ones a human or the AI can fix.
+            upgrade::report_patch_failure(&self.client, &self.config, &self.serial_number, &status, &err);
+            return Err(err);
+        }
         logging::info(&format!("patched {} successfully", status.application_name));
 
         match &status.latest_version {

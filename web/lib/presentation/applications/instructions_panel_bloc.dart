@@ -174,6 +174,7 @@ class InstructionsPanelBloc extends Bloc<InstructionsPanelEvent, InstructionsPan
   InstructionsPanelBloc({
     required this.applicationName,
     required this.platform,
+    this.patchFailureId,
     required GetUpgradePathPrompt getPrompt,
     required StartUpgradePathRefresh startRefresh,
     required GetUpgradePathRefreshStatus refreshStatus,
@@ -198,6 +199,17 @@ class InstructionsPanelBloc extends Bloc<InstructionsPanelEvent, InstructionsPan
 
   final String applicationName;
 
+  /// A reported patch failure to repair, when this panel was opened from the Failed Updates screen
+  /// rather than from Applications.
+  ///
+  /// It only ever reaches the prompt route, which composes the repair brief — the failure's output
+  /// and the current script — server-side and returns it appended to the ordinary research prompt.
+  /// Everything after that is the panel's existing flow unchanged: the operator reads or edits the
+  /// text, "Send to AI" is the same refresh with the same prompt override, and the result still
+  /// arrives unsigned. Composing that text here instead would put a second author of an AI prompt
+  /// in the client, free to drift from `AiUpgradePathResearchClient`.
+  final String? patchFailureId;
+
   /// The row's platform, which may be empty for an application nothing has been researched for.
   /// The prompt response then reports the platform research would use, and that becomes the one
   /// every later call sends.
@@ -221,6 +233,7 @@ class InstructionsPanelBloc extends Bloc<InstructionsPanelEvent, InstructionsPan
       final prompt = await _getPrompt(
         applicationName: applicationName,
         platform: platform.isEmpty ? null : platform,
+        patchFailureId: patchFailureId,
       );
       _resolvedPlatform = prompt.platform ?? (platform.isEmpty ? null : platform);
 

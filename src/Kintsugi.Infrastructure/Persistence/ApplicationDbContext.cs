@@ -13,6 +13,7 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
     public DbSet<Host> Hosts => Set<Host>();
     public DbSet<Patch> Patches => Set<Patch>();
     public DbSet<PatchDeployment> PatchDeployments => Set<PatchDeployment>();
+    public DbSet<PatchFailure> PatchFailures => Set<PatchFailure>();
     public DbSet<InstalledApplication> InstalledApplications => Set<InstalledApplication>();
     public DbSet<AiAgentSettings> AiAgentSettings => Set<AiAgentSettings>();
     public DbSet<UpgradePath> UpgradePaths => Set<UpgradePath>();

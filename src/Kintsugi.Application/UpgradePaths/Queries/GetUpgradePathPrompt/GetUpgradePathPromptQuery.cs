@@ -7,7 +7,12 @@ namespace Kintsugi.Application.UpgradePaths.Queries.GetUpgradePathPrompt;
 /// the Applications page's per-row instructions panel so a user can review or hand-edit it before
 /// it's actually sent, via <c>RefreshUpgradePathCommand</c>'s prompt override.
 /// </summary>
-public record GetUpgradePathPromptQuery(string ApplicationName, string? Platform) : IRequest<UpgradePathPromptDto>;
+/// <param name="PatchFailureId">A reported patch failure to build a *repair* prompt for, rather
+/// than the plain research prompt — the Failed Updates screen passes the row's own id, and the
+/// answer carries the default prompt with a brief describing the failure and the current script
+/// appended to it (see <c>PatchFailureRepairPrompt</c>). Ignored when the id matches nothing, which
+/// simply yields the ordinary prompt.</param>
+public record GetUpgradePathPromptQuery(string ApplicationName, string? Platform, Guid? PatchFailureId = null) : IRequest<UpgradePathPromptDto>;
 
 /// <param name="Platform">The platform the prompt was (or would be) built for — resolved
 /// server-side (the first match, ordered by platform name) when the request didn't specify one.

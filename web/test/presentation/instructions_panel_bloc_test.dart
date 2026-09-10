@@ -21,9 +21,21 @@ class FakeUpgradePathRepository implements UpgradePathRepository {
   String? signedApplication;
   String? signedPlatform;
 
+  /// What the prompt route was asked for. The Failed Updates screen's whole repair flow is this one
+  /// argument reaching the server — everything after it is the panel's ordinary behaviour.
+  String? promptedPatchFailureId;
+  int promptCalls = 0;
+
   @override
-  Future<UpgradePathPrompt> prompt({required String applicationName, String? platform}) async =>
-      promptResult;
+  Future<UpgradePathPrompt> prompt({
+    required String applicationName,
+    String? platform,
+    String? patchFailureId,
+  }) async {
+    promptCalls++;
+    promptedPatchFailureId = patchFailureId;
+    return promptResult;
+  }
 
   @override
   Future<UpgradePathResult> save(Map<String, dynamic> body) async {
@@ -127,10 +139,15 @@ UpgradePathResult result({
           },
     );
 
-InstructionsPanelBloc blocFor(FakeUpgradePathRepository repository, {String platform = 'macOS'}) =>
+InstructionsPanelBloc blocFor(
+  FakeUpgradePathRepository repository, {
+  String platform = 'macOS',
+  String? patchFailureId,
+}) =>
     InstructionsPanelBloc(
       applicationName: 'Nextcloud',
       platform: platform,
+      patchFailureId: patchFailureId,
       getPrompt: GetUpgradePathPrompt(repository),
       startRefresh: StartUpgradePathRefresh(repository),
       refreshStatus: GetUpgradePathRefreshStatus(repository),
@@ -150,6 +167,32 @@ void main() {
         reason: null,
         existingResult: result(),
       ),
+    );
+  });
+
+  group('opening the panel from the Failed Updates screen', () {
+    /// The whole repair flow is this one argument reaching the prompt route: the server composes the
+    /// brief — the failure's output and the current script — and appends it to the ordinary research
+    /// prompt. Everything the panel does afterwards is unchanged, which is the point.
+    blocTest<InstructionsPanelBloc, InstructionsPanelState>(
+      'asks the prompt route to build a repair brief for that failure',
+      build: () => blocFor(repository, patchFailureId: 'failure-1'),
+      act: (bloc) => bloc.add(const PanelOpened()),
+      wait: const Duration(milliseconds: 10),
+      verify: (_) {
+        expect(repository.promptCalls, 1);
+        expect(repository.promptedPatchFailureId, 'failure-1');
+      },
+    );
+
+    /// The Applications screen opens the same panel and must keep asking for plain research — a
+    /// failure id leaking in there would put another host's error into a prompt about nothing.
+    blocTest<InstructionsPanelBloc, InstructionsPanelState>(
+      'sends no failure id when opened from the Applications screen',
+      build: () => blocFor(repository),
+      act: (bloc) => bloc.add(const PanelOpened()),
+      wait: const Duration(milliseconds: 10),
+      verify: (_) => expect(repository.promptedPatchFailureId, isNull),
     );
   });
 

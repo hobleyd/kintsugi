@@ -536,6 +536,71 @@ namespace Kintsugi.Infrastructure.Persistence.Migrations
                     b.ToTable("patch_deployments", "patching");
                 });
 
+            modelBuilder.Entity("Kintsugi.Domain.Entities.PatchFailure", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ApplicationName")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("AttemptedVersion")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Details")
+                        .IsRequired()
+                        .HasMaxLength(16000)
+                        .HasColumnType("character varying(16000)");
+
+                    b.Property<int>("FailureCount")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset>("FirstFailedUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("HostId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("InstalledVersion")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<DateTimeOffset>("LastFailedUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Platform")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<int>("Resolution")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0);
+
+                    b.Property<DateTimeOffset?>("ResolvedUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTimeOffset?>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("HostId");
+
+                    b.HasIndex("HostId", "ApplicationName");
+
+                    b.HasIndex("Resolution", "LastFailedUtc");
+
+                    b.ToTable("patch_failures", "patching");
+                });
+
             modelBuilder.Entity("Kintsugi.Domain.Entities.PatchingPolicySettings", b =>
                 {
                     b.Property<Guid>("Id")
@@ -782,6 +847,15 @@ namespace Kintsugi.Infrastructure.Persistence.Migrations
                         .WithMany()
                         .HasForeignKey("ParentApplicationId")
                         .OnDelete(DeleteBehavior.Cascade);
+                });
+
+            modelBuilder.Entity("Kintsugi.Domain.Entities.PatchFailure", b =>
+                {
+                    b.HasOne("Kintsugi.Domain.Entities.Host", null)
+                        .WithMany()
+                        .HasForeignKey("HostId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 #pragma warning restore 612, 618
         }

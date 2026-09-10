@@ -13,6 +13,7 @@ import '../entities/agent_package.dart';
 import '../entities/application.dart';
 import '../entities/enums.dart';
 import '../entities/host.dart';
+import '../entities/patch_failure.dart';
 import '../entities/remote_control_session.dart';
 import '../entities/session.dart';
 import '../entities/settings.dart';
@@ -89,7 +90,14 @@ abstract interface class UpgradePathRepository {
 
   Future<UpgradePathRefreshStatus> refreshStatus(String applicationName);
 
-  Future<UpgradePathPrompt> prompt({required String applicationName, String? platform});
+  /// [patchFailureId] asks for a *repair* prompt instead: the same research prompt with a brief
+  /// describing that failure and the current script appended, composed server-side. The Failed
+  /// Updates screen passes it; the Applications screen does not.
+  Future<UpgradePathPrompt> prompt({
+    required String applicationName,
+    String? platform,
+    String? patchFailureId,
+  });
 
   /// Saves an upgrade path directly, without going through the AI.
   ///
@@ -104,6 +112,15 @@ abstract interface class UpgradePathRepository {
   /// on, and a signature that covered text the client just supplied would not be a review of
   /// anything the fleet is going to execute.
   Future<UpgradePathResult> signScript({required String applicationName, required String platform});
+}
+
+/// The Failed Updates screen's data — reads `/api/admin/patch-failures`.
+abstract interface class PatchFailureRepository {
+  Future<List<PatchFailure>> list();
+
+  /// Clears one failure by hand. Everything else closes itself when the host next reports that
+  /// application patched successfully.
+  Future<void> dismiss(String id);
 }
 
 abstract interface class AgentPackageRepository {

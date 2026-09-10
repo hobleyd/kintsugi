@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../data/repositories/agent_package_repository_impl.dart';
 import '../../data/repositories/application_repository_impl.dart';
 import '../../data/repositories/host_repository_impl.dart';
+import '../../data/repositories/patch_failure_repository_impl.dart';
 import '../../data/repositories/remote_control_repository_impl.dart';
 import '../../data/repositories/server_info_repository_impl.dart';
 import '../../data/repositories/session_repository_impl.dart';
@@ -13,6 +14,7 @@ import '../../domain/repositories/repositories.dart';
 import '../../domain/usecases/application_usecases.dart';
 import '../../domain/usecases/client_usecases.dart';
 import '../../domain/usecases/host_usecases.dart';
+import '../../domain/usecases/patch_failure_usecases.dart';
 import '../../domain/usecases/remote_control_usecases.dart';
 import '../../domain/usecases/server_info_usecases.dart';
 import '../../domain/usecases/session_usecases.dart';
@@ -58,6 +60,7 @@ Future<void> configureDependencies() async {
     ..registerSingleton<HostRepository>(HostRepositoryImpl(api))
     ..registerSingleton<RemoteControlRepository>(RemoteControlRepositoryImpl(api))
     ..registerSingleton<ApplicationRepository>(ApplicationRepositoryImpl(api))
+    ..registerSingleton<PatchFailureRepository>(PatchFailureRepositoryImpl(api))
     ..registerSingleton<UpgradePathRepository>(UpgradePathRepositoryImpl(api))
     ..registerSingleton<AgentPackageRepository>(AgentPackageRepositoryImpl(api))
     ..registerSingleton<UpgradeScriptRepository>(UpgradeScriptRepositoryImpl(api))
@@ -77,6 +80,7 @@ void _registerUseCases() {
   final hosts = locator<HostRepository>();
   final applications = locator<ApplicationRepository>();
   final upgradePaths = locator<UpgradePathRepository>();
+  final patchFailures = locator<PatchFailureRepository>();
   final packages = locator<AgentPackageRepository>();
   final scripts = locator<UpgradeScriptRepository>();
   final ai = locator<AiAgentSettingsRepository>();
@@ -99,6 +103,8 @@ void _registerUseCases() {
     ..registerSingleton(EndRemoteControlSession(remoteControl))
     ..registerSingleton(OpenRemoteControlStream(remoteControl))
     ..registerSingleton(GetApplicationOverview(applications))
+    ..registerSingleton(GetPatchFailures(patchFailures))
+    ..registerSingleton(DismissPatchFailure(patchFailures))
     ..registerSingleton(StartUpgradePathScan(upgradePaths))
     ..registerSingleton(GetUpgradePathScanStatus(upgradePaths))
     ..registerSingleton(StartUpdateCheck(upgradePaths))

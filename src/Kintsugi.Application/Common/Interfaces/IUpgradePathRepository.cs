@@ -57,6 +57,18 @@ public interface IUpgradePathRepository
     /// not for an unscoped, fleet-wide listing, which <see cref="GetSummariesAsync"/> covers instead.</summary>
     Task<IReadOnlyList<UpgradeStatusDto>> GetStatusesAsync(string serialNumber, CancellationToken cancellationToken);
 
+    /// <summary>The single upgrade path one host's named application resolves to — the same
+    /// resolution <see cref="GetStatusesAsync"/> performs per row, for one application rather than
+    /// all of them.</summary>
+    /// <remarks>
+    /// Exists because the platform an application resolves to is a *bucket* ("Homebrew", "winget",
+    /// "macOS", ...) that depends on which package manager owns that particular installation, not
+    /// on the host's operating system — so it cannot be derived from anything an agent sends. See
+    /// <c>ReportPatchFailureCommandHandler</c>, the only caller, and the remarks on
+    /// <c>Kintsugi.Domain.Entities.PatchFailure</c>.
+    /// </remarks>
+    Task<UpgradePath?> ResolveForHostAsync(string serialNumber, string applicationName, CancellationToken cancellationToken);
+
     /// <summary>One row per (application, platform) upgrade path, with host counts aggregated at
     /// the database level — safe to call across a large fleet, unlike expanding to one row per host.</summary>
     Task<IReadOnlyList<UpgradePathSummaryDto>> GetSummariesAsync(CancellationToken cancellationToken);

@@ -480,7 +480,19 @@ impl RequestHandler for ServiceHandler<'_> {
         let status = upgrade::find_patchable(&statuses, application_name, self.identity)
             .with_context(|| format!("the server has no signed, patchable upgrade path for {application_name}"))?;
 
-        upgrade::patch_one(status, self.identity)?;
+        if let Err(err) = upgrade::patch_one(status, self.identity) {
+            // Reported from here rather than by the per-user process, for the same reason the
+            // success below is: this is the one place a script actually runs, and the only side
+            // holding the identity every agent-only route requires. `QueueClient` merely relays
+            // the verdict, so a failure is recorded exactly once.
+            //
+            // Note what sits *above* this line and so is never reported: an unreachable server, and
+            // an application with no signed, patchable upgrade path. Those are configuration
+            // problems rather than bugs in a script, and the Failed Updates screen exists for the
+            // ones a human or the AI can fix.
+            upgrade::report_patch_failure(self.client, self.config, self.serial_number, status, &err);
+            return Err(err);
+        }
 
         match &status.latest_version {
             Some(new_version) => upgrade::report_patch_result(self.client, self.config, self.serial_number, &status.application_name, new_version),

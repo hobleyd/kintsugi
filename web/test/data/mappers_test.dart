@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:kintsugi_web/data/models/agent_package_mapper.dart';
 import 'package:kintsugi_web/data/models/host_mapper.dart';
+import 'package:kintsugi_web/data/models/patch_failure_mapper.dart';
 import 'package:kintsugi_web/data/models/settings_mapper.dart';
 import 'package:kintsugi_web/data/models/upgrade_path_mapper.dart';
 import 'package:kintsugi_web/domain/entities/enums.dart';
@@ -273,4 +274,71 @@ void main() {
       expect(row.newerReleases, isEmpty);
     });
   });
+
+  group('patchFailureFromJson', () {
+    Map<String, dynamic> body([Map<String, dynamic> overrides = const {}]) => {
+          'id': 'f1',
+          'hostId': 'h1',
+          'hostname': 'mac-1',
+          'serialNumber': 'C02',
+          'applicationName': 'Ollama',
+          'platform': 'macOS',
+          'installedVersion': '0.32.14',
+          'attemptedVersion': '0.33.3',
+          'details': 'exited with 1: Permission denied',
+          'firstFailedUtc': '2026-09-07T02:00:00+00:00',
+          'lastFailedUtc': '2026-09-09T02:00:00+00:00',
+          'failureCount': 4,
+          'resolution': 0,
+          'resolvedUtc': null,
+          'hasScript': true,
+          'scriptSigned': true,
+          'method': 'Script',
+          'canFix': true,
+          ...overrides,
+        };
+
+    test('reads PatchFailureResolution from the ordinal the server sends', () {
+      // PatchFailureResolution carries no JSON converter, so System.Text.Json writes its ordinal —
+      // which is what makes declaration order in enums.dart load-bearing.
+      expect(patchFailureFromJson(body()).resolution, PatchFailureResolution.outstanding);
+      expect(
+        patchFailureFromJson(body({'resolution': 1})).resolution,
+        PatchFailureResolution.patchSucceeded,
+      );
+      expect(
+        patchFailureFromJson(body({'resolution': 2})).resolution,
+        PatchFailureResolution.dismissed,
+      );
+    });
+
+    test('keeps the counts and both dates, which are what tell a blip from a broken script', () {
+      final failure = patchFailureFromJson(body());
+
+      expect(failure.failureCount, 4);
+      expect(failure.isRepeating, isTrue);
+      expect(failure.firstFailedUtc.toUtc(), DateTime.utc(2026, 9, 7, 2));
+      expect(failure.lastFailedUtc.toUtc(), DateTime.utc(2026, 9, 9, 2));
+    });
+
+    /// A failure whose upgrade path has since been deleted still has to arrive — losing it would
+    /// hide a real failure. The screen shows it as one it cannot offer a fix for.
+    test('reads a failure with no resolved platform', () {
+      final failure = patchFailureFromJson(body({'platform': null, 'canFix': false}));
+
+      expect(failure.platform, isNull);
+      expect(failure.canFix, isFalse);
+    });
+
+    /// canFix is computed server-side from a join the client cannot see. The fallback exists only
+    /// for a response predating the field, and must agree with the server's own rule.
+    test('falls back to platform-and-script when the server sent no canFix', () {
+      final withScript = body()..remove('canFix');
+      expect(patchFailureFromJson(withScript).canFix, isTrue);
+
+      final withoutScript = body({'hasScript': false})..remove('canFix');
+      expect(patchFailureFromJson(withoutScript).canFix, isFalse);
+    });
+  });
+
 }

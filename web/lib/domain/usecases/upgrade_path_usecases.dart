@@ -52,8 +52,16 @@ class GetUpgradePathPrompt {
 
   final UpgradePathRepository _repository;
 
-  Future<UpgradePathPrompt> call({required String applicationName, String? platform}) =>
-      _repository.prompt(applicationName: applicationName, platform: platform);
+  Future<UpgradePathPrompt> call({
+    required String applicationName,
+    String? platform,
+    String? patchFailureId,
+  }) =>
+      _repository.prompt(
+        applicationName: applicationName,
+        platform: platform,
+        patchFailureId: patchFailureId,
+      );
 }
 
 /// Sends one application's instructions to the AI agent.

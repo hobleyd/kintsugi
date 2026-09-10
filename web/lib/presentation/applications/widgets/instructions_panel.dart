@@ -24,10 +24,16 @@ class InstructionsPanel extends StatelessWidget {
     required this.applicationName,
     required this.platform,
     required this.onServerStateChanged,
+    this.patchFailureId,
   });
 
   final String applicationName;
   final String platform;
+
+  /// Set by the Failed Updates screen, so the instructions box opens already carrying the repair
+  /// brief — the failure's own output and the current script — instead of the plain research
+  /// prompt. Composed server-side; see [InstructionsPanelBloc.patchFailureId].
+  final String? patchFailureId;
 
   /// Called after a save or a sign, so the table above re-reads and the status column stops
   /// saying "review and sign".
@@ -38,6 +44,7 @@ class InstructionsPanel extends StatelessWidget {
         create: (_) => InstructionsPanelBloc(
           applicationName: applicationName,
           platform: platform,
+          patchFailureId: patchFailureId,
           getPrompt: locator<GetUpgradePathPrompt>(),
           startRefresh: locator<StartUpgradePathRefresh>(),
           refreshStatus: locator<GetUpgradePathRefreshStatus>(),

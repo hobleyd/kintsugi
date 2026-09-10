@@ -316,6 +316,37 @@ middleware used to be. The OIDC provider is still configured at runtime from the
 (`DynamicOpenIdConnectOptionsConfigurator`), not at startup.
 
 
+## Applications is a menu, and Failed Updates is the second screen under it
+
+`/applications` is still the installed-applications view and **must stay there**: the Hosts screen's
+"N app updates" badge and every Vanta record's `externalUrl` deep-link into it with `?status=&host=`
+(see `VantaResourceBuilder`, and `.claude/rules/hand-mirrored-dtos.md`, which names that coupling).
+So the menu's parent points at it, the way Sync's parent points at Clients, and the sibling is
+`/applications/failed`. The parent highlights on `startsWith`, like Hosts.
+
+**The Failed Updates screen is a table plus the *existing* `InstructionsPanel`, and that reuse is the
+design.** Repairing a broken script is the same act as researching one — edit the instructions, send
+to the AI, review, save, sign — so it is the same widget, with its existing rule that a freshly
+generated or hand-edited script is unsigned until a human signs it. The only difference is one
+argument: `patchFailureId` reaches `GET /api/upgrade-paths/prompt`, and the *server* appends the
+failure's output and the current script to the ordinary research prompt. Composing that text in Dart
+instead would put a second author of an AI prompt in the client, free to drift from
+`AiUpgradePathResearchClient` — and it is the prompt that carries the `--update-version` / `--update`
+CLI contract every agent invokes a script by.
+
+The script sent is whatever the row holds **now**, not a snapshot taken when the failure was
+recorded: that is the one an agent would run on its next cycle, so it is the one worth fixing.
+
+**It does not poll.** Nothing here runs in the background on the server — a failure arrives when some
+agent's next patch cycle reports one, hours away. The one thing that does change while the screen is
+open is an AI repair, and the fix panel polls that itself and then asks the table to reload.
+
+**The default view is outstanding only.** Settled rows (patched since, or dismissed) are kept and
+reachable through the status filter rather than deleted, because "this used to fail and then patched"
+is the question somebody asks next. A row clears itself when the host reports that application
+patched successfully; "Dismiss" is for the ones that cannot recur.
+
+
 ## The remote-control viewer
 
 The rest of remote control — consent, the relay, and the three agents' capture and input — is in

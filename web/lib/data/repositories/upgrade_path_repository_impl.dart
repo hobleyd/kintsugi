@@ -80,11 +80,19 @@ class UpgradePathRepositoryImpl implements UpgradePathRepository {
       );
 
   @override
-  Future<UpgradePathPrompt> prompt({required String applicationName, String? platform}) async =>
+  Future<UpgradePathPrompt> prompt({
+    required String applicationName,
+    String? platform,
+    String? patchFailureId,
+  }) async =>
       upgradePathPromptFromJson(
         await _api.getJson(
           '/api/upgrade-paths/prompt',
-          query: {'applicationName': applicationName, 'platform': platform},
+          query: {
+            'applicationName': applicationName,
+            'platform': platform,
+            'patchFailureId': patchFailureId,
+          },
         ) as Map<String, dynamic>,
       );
 

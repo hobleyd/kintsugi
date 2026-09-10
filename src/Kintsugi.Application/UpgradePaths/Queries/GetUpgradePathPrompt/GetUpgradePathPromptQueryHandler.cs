@@ -1,5 +1,6 @@
 using MediatR;
 using Kintsugi.Application.Common.Interfaces;
+using Kintsugi.Application.PatchFailures;
 using Kintsugi.Application.UpgradePaths.Queries.PrepareUpgradePathScan;
 using Kintsugi.Domain.Enums;
 
@@ -10,12 +11,21 @@ public class GetUpgradePathPromptQueryHandler : IRequestHandler<GetUpgradePathPr
     private readonly ISender _sender;
     private readonly IUpgradePathResearchClient _researchClient;
     private readonly IUpgradePathRepository _upgradePathRepository;
+    private readonly IPatchFailureRepository _patchFailureRepository;
+    private readonly IHostRepository _hostRepository;
 
-    public GetUpgradePathPromptQueryHandler(ISender sender, IUpgradePathResearchClient researchClient, IUpgradePathRepository upgradePathRepository)
+    public GetUpgradePathPromptQueryHandler(
+        ISender sender,
+        IUpgradePathResearchClient researchClient,
+        IUpgradePathRepository upgradePathRepository,
+        IPatchFailureRepository patchFailureRepository,
+        IHostRepository hostRepository)
     {
         _sender = sender;
         _researchClient = researchClient;
         _upgradePathRepository = upgradePathRepository;
+        _patchFailureRepository = patchFailureRepository;
+        _hostRepository = hostRepository;
     }
 
     public async Task<UpgradePathPromptDto> Handle(GetUpgradePathPromptQuery request, CancellationToken cancellationToken)
@@ -58,9 +68,42 @@ public class GetUpgradePathPromptQueryHandler : IRequestHandler<GetUpgradePathPr
         var prompt = _researchClient.BuildDefaultPrompt(
             new UpgradePathScriptGenerationRequest(researchItem.ApplicationName, researchItem.Platform, researchItem.KnownVersions, researchItem.ApplicationIdentifier));
 
+        prompt += await BuildRepairBriefAsync(request.PatchFailureId, researchItem.ApplicationName, researchItem.Platform, cancellationToken);
+
         existingResult ??= await GetExistingResultAsync(researchItem.ApplicationName, researchItem.Platform, cancellationToken);
 
         return new UpgradePathPromptDto(true, researchItem.Platform, prompt, null, existingResult);
+    }
+
+    /// <summary>
+    /// The repair brief to append when this prompt was asked for on behalf of a reported failure —
+    /// empty when it was not, which is every ordinary call from the Applications screen.
+    /// </summary>
+    /// <remarks>
+    /// Composed here, on the server, rather than in the Flutter client. The brief quotes the stored
+    /// script, and building it client-side would mean the browser assembling the text an AI is about
+    /// to be sent from three separate round-trips — a second copy of a prompt whose only other
+    /// author is <c>AiUpgradePathResearchClient</c>, free to drift from it.
+    /// </remarks>
+    private async Task<string> BuildRepairBriefAsync(Guid? patchFailureId, string applicationName, string platform, CancellationToken cancellationToken)
+    {
+        if (patchFailureId is null)
+        {
+            return string.Empty;
+        }
+
+        var failure = await _patchFailureRepository.GetByIdAsync(patchFailureId.Value, cancellationToken);
+        if (failure is null)
+        {
+            // Dismissed and cleaned up, or a stale link. The ordinary research prompt is still a
+            // perfectly good answer, so this degrades rather than failing the request.
+            return string.Empty;
+        }
+
+        var path = await _upgradePathRepository.GetAsync(applicationName, platform, cancellationToken);
+        var host = await _hostRepository.GetByIdAsync(failure.HostId, cancellationToken);
+
+        return PatchFailureRepairPrompt.Build(failure, path, host?.Hostname ?? "an unknown host");
     }
 
     private async Task<UpgradePathResultDto?> GetExistingResultAsync(string applicationName, string platform, CancellationToken cancellationToken)

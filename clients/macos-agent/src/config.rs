@@ -204,6 +204,13 @@ impl Config {
         format!("{}/api/patch-results", self.api_base_url.trim_end_matches('/'))
     }
 
+    /// Tells the server an upgrade script ran on this host and failed — see
+    /// `upgrade::report_patch_failure` and Kintsugi.WebApi/Controllers/ApplicationsController.cs.
+    /// The counterpart to `patch_result_url`, and the same in all three agents.
+    pub fn patch_failure_url(&self) -> String {
+        format!("{}/api/patch-failures", self.api_base_url.trim_end_matches('/'))
+    }
+
     /// Tells the server a pending macOS update was just successfully installed — see
     /// `os_update::report_patched` and Kintsugi.WebApi/Controllers/HostsController.cs.
     pub fn os_patch_result_url(&self) -> String {

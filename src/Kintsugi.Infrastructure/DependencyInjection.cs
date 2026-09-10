@@ -30,6 +30,7 @@ public static class DependencyInjection
         services.AddScoped<IHostRepository, HostRepository>();
         services.AddScoped<IPatchRepository, PatchRepository>();
         services.AddScoped<IPatchDeploymentRepository, PatchDeploymentRepository>();
+        services.AddScoped<IPatchFailureRepository, PatchFailureRepository>();
         services.AddScoped<IInstalledApplicationRepository, InstalledApplicationRepository>();
         services.AddScoped<IAiAgentSettingsRepository, AiAgentSettingsRepository>();
         services.AddScoped<IUpgradePathRepository, UpgradePathRepository>();

@@ -14,6 +14,8 @@ public class GetUpgradePathPromptQueryHandlerTests
     private readonly Mock<ISender> _sender = new();
     private readonly Mock<IUpgradePathResearchClient> _researchClient = new();
     private readonly Mock<IUpgradePathRepository> _upgradePathRepository = new();
+    private readonly Mock<IPatchFailureRepository> _patchFailureRepository = new();
+    private readonly Mock<IHostRepository> _hostRepository = new();
 
     public GetUpgradePathPromptQueryHandlerTests()
     {
@@ -23,7 +25,8 @@ public class GetUpgradePathPromptQueryHandlerTests
             .ReturnsAsync(new UpgradePathScanPlan(false, null, []));
     }
 
-    private GetUpgradePathPromptQueryHandler CreateHandler() => new(_sender.Object, _researchClient.Object, _upgradePathRepository.Object);
+    private GetUpgradePathPromptQueryHandler CreateHandler() =>
+        new(_sender.Object, _researchClient.Object, _upgradePathRepository.Object, _patchFailureRepository.Object, _hostRepository.Object);
 
     [Fact]
     public async Task Handle_WhenTheExistingScriptIsSigned_ReportsScriptSignedTrue()

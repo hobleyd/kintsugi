@@ -140,6 +140,33 @@ public class UpgradePathRepository : IUpgradePathRepository
     }
 
     /// <inheritdoc />
+    public async Task<UpgradePath?> ResolveForHostAsync(string serialNumber, string applicationName, CancellationToken cancellationToken)
+    {
+        // Deliberately the same three steps GetStatusesAsync takes, through the same ResolvePath —
+        // this answers "which row would that agent have been served for this application?", and an
+        // approximation of it (the host's OS bucket alone, say) is exactly the wrong answer for
+        // every package-manager-managed installation.
+        var app = await _context.InstalledApplications
+            .Join(_context.Hosts, a => a.HostId, h => h.Id, (a, h) => new { a.Name, a.ParentApplicationId, h.SerialNumber, h.OperatingSystem })
+            .Where(x => x.SerialNumber == serialNumber && x.Name.ToLower() == applicationName.ToLower())
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (app is null)
+        {
+            return null;
+        }
+
+        var upgradePaths = await _context.UpgradePaths.ToListAsync(cancellationToken);
+        var packageManagerNames = await LoadPackageManagerNamesAsync([app.ParentApplicationId], cancellationToken);
+
+        return ResolvePath(
+            BuildByNameAndPlatformLookup(upgradePaths),
+            app.Name,
+            app.OperatingSystem,
+            PackageManagerOf(packageManagerNames, app.ParentApplicationId));
+    }
+
+    /// <inheritdoc />
     public async Task<IReadOnlyList<UpgradeStatusDto>> GetOutdatedStatusesAsync(CancellationToken cancellationToken)
     {
         var installed = await _context.InstalledApplications

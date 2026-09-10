@@ -347,7 +347,19 @@ impl queue::RequestHandler for DaemonRequestHandler<'_> {
         }
 
         logging::info(&format!("attempting to patch {} (method {:?}) as root", status.application_name, status.method));
-        upgrade::patch_one(&status, identity)?;
+        if let Err(err) = upgrade::patch_one(&status, identity) {
+            // Reported from here rather than by the per-user process, for the same reason the
+            // success below is: this is the side that ran the script and saw its output. The
+            // per-user process deliberately skips reporting anything that came back through
+            // `queue`, so a root-run failure is recorded exactly once.
+            //
+            // Note what sits *above* this line and so is never reported: no enrolled identity, no
+            // signed patchable path, and the `runs_as_root` refusal. Those are configuration
+            // problems rather than bugs in a script, and the Failed Updates screen exists for the
+            // ones a human or the AI can fix.
+            upgrade::report_patch_failure(self.client, self.config, self.serial_number, &status, &err);
+            return Err(err);
+        }
         logging::info(&format!("patched {} successfully", status.application_name));
 
         match &status.latest_version {

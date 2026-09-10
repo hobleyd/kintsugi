@@ -98,7 +98,10 @@ class KintsugiPalette extends ThemeExtension<KintsugiPalette> {
   Color forStatusKey(String statusKey) => switch (statusKey) {
         'up-to-date' || 'online' => green,
         'update-available' || 'review-sign' => amber,
-        'check-failed' || 'offline' => red,
+        // 'patch-failed' is the Failed Updates screen's outstanding row — the same red a failed
+        // update check gets, because both mean "this is not working right now".
+        'check-failed' || 'offline' || 'patch-failed' => red,
+        'patch-succeeded' => green,
         'not-found' || 'decommissioned' => amber,
         _ => muted,
       };

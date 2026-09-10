@@ -4,6 +4,7 @@ using Kintsugi.Application.Applications;
 using Kintsugi.Application.Applications.Commands.RegisterApplications;
 using Kintsugi.Application.Applications.Commands.ReportPatchResult;
 using Kintsugi.Application.Applications.Queries.GetApplicationSummaries;
+using Kintsugi.Application.PatchFailures.Commands.ReportPatchFailure;
 using Kintsugi.WebApi.Filters;
 
 namespace Kintsugi.WebApi.Controllers;
@@ -44,8 +45,9 @@ public class ApplicationsController : ControllerBase
     /// Records that an agent successfully patched one already-installed application to a new
     /// version — called right after a patch cycle applies an upgrade, so the server's record of
     /// what's installed reflects it immediately rather than waiting on that host's next full
-    /// inventory report. Nothing is reported here for a failed patch attempt; the previously
-    /// registered version is simply left as-is.
+    /// inventory report. The previously registered version is what a *failed* attempt leaves
+    /// in place, which is already correct; the failure itself is reported separately, to
+    /// <see cref="ReportPatchFailure"/>.
     /// </summary>
     [HttpPost("/api/patch-results")]
     [RequireAgentIdentity]
@@ -53,6 +55,30 @@ public class ApplicationsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
     public async Task<IActionResult> ReportPatchResult(ReportPatchResultCommand command, CancellationToken cancellationToken)
+    {
+        await _sender.Send(command, cancellationToken);
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Records that an upgrade script (or package-manager command) ran on a host and failed —
+    /// sent by whichever process actually ran it, carrying the host's own timestamp and the
+    /// command's captured output. Surfaced on the admin UI's Failed Updates screen, where the
+    /// script can be repaired by the AI or by hand and re-signed.
+    /// </summary>
+    /// <remarks>
+    /// Route registered here beside <see cref="ReportPatchResult"/>, its success counterpart, and
+    /// **added to nginx's exact-match agent regex in <c>nginx/default.conf</c>** — without that
+    /// edit the route is reachable with no client certificate at all, and nothing in this file
+    /// would say so.
+    /// </remarks>
+    [HttpPost("/api/patch-failures")]
+    [RequireAgentIdentity]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ReportPatchFailure(ReportPatchFailureCommand command, CancellationToken cancellationToken)
     {
         await _sender.Send(command, cancellationToken);
         return NoContent();

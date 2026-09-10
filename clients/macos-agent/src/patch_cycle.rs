@@ -334,7 +334,11 @@ fn run_patches(
         dialogs::notify("Kintsugi Patching", &format!("Patching {target}\n{}", dialogs::progress_bar(completed, total)));
         report(AgentStatus::Patching { current: target, completed, total });
 
-        let outcome = if upgrade::runs_as_root(app) {
+        // Which side reports this row's result to the server, success or failure: whichever one
+        // actually runs the script. See `upgrade::report_patch_failure`.
+        let ran_by_the_daemon = upgrade::runs_as_root(app);
+
+        let outcome = if ran_by_the_daemon {
             logging::info(&format!(
                 "attempting to patch {} (method {:?}) via the root daemon",
                 app.application_name, app.method
@@ -361,6 +365,14 @@ fn run_patches(
             Err(err) => {
                 failed += 1;
                 logging::error(&format!("failed to patch {}: {err:#}", app.application_name));
+
+                // Only for what this process ran itself. A daemon-run row's failure is reported by
+                // the daemon (see `main::DaemonRequestHandler::patch_application`), which is the
+                // side that saw the script fail and holds its full output; reporting it here as
+                // well would record every root-run failure twice.
+                if !ran_by_the_daemon {
+                    upgrade::report_patch_failure(client, config, serial_number, app, &err);
+                }
             }
         }
         completed += 1;

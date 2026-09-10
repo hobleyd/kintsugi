@@ -450,6 +450,57 @@ longer matches anything is a stale page and answers NotFound rather than acting 
 replaced it.
 
 
+## When a script fails on a host: the Failed Updates queue
+
+**A success and a failure are different kinds of fact, and they are stored differently.**
+`ReportPatchResultCommand` records that an application reached a version — the server folds it into
+its inventory and forgets it. `ReportPatchFailureCommand` (`POST /api/patch-failures`, agent-gated,
+**and in nginx's exact-match regex**) records that a script ran and did not work, which is a piece of
+work rather than a fact: somebody has to read the output and decide whether the script is wrong. So
+it is an entity, `PatchFailure`, and the admin UI's Failed Updates screen is the queue it forms.
+
+Four decisions there are worth knowing before changing any of it.
+
+**One row per (host, application), not per attempt.** A patch cycle runs on a schedule, so a broken
+script fails again every cycle forever; a row per attempt would bury the dozen distinct problems an
+administrator can act on under thousands saying the same thing. `RecordAnotherFailure` folds a repeat
+in, keeping the first and latest timestamps and a count — which is also the more useful reading,
+since "failing since Tuesday, 40 times" is what separates a blip from a broken script. A row that has
+been settled and starts failing again is `Reopen`ed rather than duplicated, so its history survives.
+
+**`Platform` is resolved by the server, never sent by the agent.** It is an `UpgradePath` platform
+*bucket* (see "Platform buckets" above), not an operating system, and it is half the key the failing
+script is stored under. An agent deriving it from its own OS would send "macOS" for a Homebrew row and
+the fix panel would load the wrong script or none. `ReportPatchFailureCommandHandler` calls
+`IUpgradePathRepository.ResolveForHostAsync`, which runs the same `ResolvePath` that served that
+agent its work list. Null when nothing resolves, which the screen shows as a failure it cannot offer
+a fix for rather than hiding.
+
+**The `Details` ceiling is a coupling with all three agents.** A failing script's stderr is unbounded.
+`ReportPatchFailureCommandValidator.MaxDetailsLength` (16000, matching the column) has to stay
+*above* each agent's `upgrade::MAX_REPORTED_FAILURE_BYTES` (4000): a report longer than the validator
+accepts is answered with a 400 and the failure is lost silently, for precisely the noisiest failures.
+Raise the server's figure before raising the agents', never after.
+
+**The repair prompt is composed here, not in Dart.** `GetUpgradePathPromptQuery` takes an optional
+`PatchFailureId`; when set, `PatchFailureRepairPrompt.Build` **appends** a brief — the failure's
+output and the row's *current* script — to the ordinary research prompt. Appended rather than
+substituted, and that is the whole design: the default prompt is where the `--update-version` /
+`--update` CLI contract, the server-versus-host split and the response's JSON shape are stated, so a
+replacement prompt gets back a fix that `ResearchApplicationUpgradePathCommandHandler` cannot parse,
+or one that no longer honours the contract every agent invokes it by. Everything after that is the
+existing flow unchanged — refresh with a prompt override, result persisted **unsigned**, a human
+signs it. A package-manager row still gets no AI prompt (the reason string says so, as it always
+has); hand-editing and re-signing it works exactly as on the Applications screen.
+
+**Nothing but a real execution failure belongs here.** An application with no signed patchable path,
+the macOS daemon's `runs_as_root` refusal, an unreachable server, an OS update — those are
+configuration problems or have no script to fix, and a queue full of them hides the ones the AI can
+repair. `ReportPatchResultCommandHandler` closes any outstanding failure for the same
+(host, application), so a fixed script clears its own row; `DismissPatchFailureCommand` is for the
+ones that cannot recur.
+
+
 ## Verifying a server-written upgrade script
 
 **Verifying it actually works.** `dotnet test` only asserts the shape

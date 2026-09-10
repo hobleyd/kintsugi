@@ -147,12 +147,23 @@ public class UpgradePathsController : ControllerBase
     /// running it — backs the Applications page's per-row instructions panel, letting a user
     /// review or hand-edit it before triggering <see cref="Refresh"/>.
     /// </summary>
+    /// <param name="applicationName">The application to build the prompt for.</param>
+    /// <param name="platform">Its platform bucket, or null to let the server resolve one.</param>
+    /// <param name="patchFailureId">A reported patch failure to build a *repair* prompt for instead:
+    /// the same research prompt with a brief describing that failure and the current script appended,
+    /// which is what the Failed Updates screen's "Fix with AI" loads. Optional; omitted by the
+    /// Applications screen.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
     // Admin-gated: discloses the research prompt and the applications it names.
     [HttpGet("prompt")]
     [RequireAdminSession]
     [ProducesResponseType(typeof(UpgradePathPromptDto), StatusCodes.Status200OK)]
-    public async Task<ActionResult<UpgradePathPromptDto>> GetPrompt([FromQuery] string applicationName, [FromQuery] string? platform, CancellationToken cancellationToken) =>
-        Ok(await _sender.Send(new GetUpgradePathPromptQuery(applicationName, platform), cancellationToken));
+    public async Task<ActionResult<UpgradePathPromptDto>> GetPrompt(
+        [FromQuery] string applicationName,
+        [FromQuery] string? platform,
+        [FromQuery] Guid? patchFailureId,
+        CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(new GetUpgradePathPromptQuery(applicationName, platform, patchFailureId), cancellationToken));
 
     /// <summary>
     /// Saves a hand-entered (or pasted-in) upgrade path directly, bypassing the AI entirely.

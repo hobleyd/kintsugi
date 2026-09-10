@@ -97,6 +97,7 @@ class _Sidebar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
+    final inApplications = location.startsWith(Routes.applications);
     final inSync = location == Routes.clients || location == Routes.upgradeScripts;
     final inSettings = location.startsWith('/settings');
 
@@ -131,10 +132,28 @@ class _Sidebar extends StatelessWidget {
                   selected: location == Routes.hosts || location.startsWith('${Routes.hosts}/'),
                 ),
                 const SizedBox(height: 8),
+                // The parent goes to Currently Installed, the same way Sync's goes to Clients:
+                // a menu heading that led nowhere would be the only dead entry in the sidebar.
                 _NavLink(
                   label: 'Applications',
                   path: Routes.applications,
-                  selected: location == Routes.applications,
+                  selected: inApplications,
+                ),
+                // Alphabetical by label, like every other subnav here. Keep it that way when
+                // adding one — the list is a lookup, not a workflow.
+                _SubNav(
+                  children: [
+                    _SubNavLink(
+                      label: 'Currently Installed',
+                      path: Routes.applications,
+                      selected: location == Routes.applications,
+                    ),
+                    _SubNavLink(
+                      label: 'Failed Updates',
+                      path: Routes.applicationsFailed,
+                      selected: location == Routes.applicationsFailed,
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 8),
                 _NavLink(label: 'Sync', path: Routes.clients, selected: inSync),

@@ -10,11 +10,23 @@ public class ReportPatchResultCommandHandlerTests
 {
     private readonly Mock<IHostRepository> _hostRepository = new();
     private readonly Mock<IInstalledApplicationRepository> _installedApplicationRepository = new();
+    private readonly Mock<IPatchFailureRepository> _patchFailureRepository = new();
     private readonly Mock<IUnitOfWork> _unitOfWork = new();
     private readonly Host _host = new("host-1", "SERIAL-1", "macOS 15.0");
 
+    public ReportPatchResultCommandHandlerTests()
+    {
+        // The handler closes any failure this success contradicts (see PatchFailureResolutionTests
+        // for that behaviour on its own). Moq answers an unstubbed IReadOnlyList-returning method
+        // with null rather than an empty list, so it is stubbed here for the tests that are not
+        // about failures at all.
+        _patchFailureRepository
+            .Setup(r => r.GetOutstandingForApplicationAsync(It.IsAny<Guid>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync([]);
+    }
+
     private ReportPatchResultCommandHandler CreateHandler() =>
-        new(_hostRepository.Object, _installedApplicationRepository.Object, _unitOfWork.Object);
+        new(_hostRepository.Object, _installedApplicationRepository.Object, _patchFailureRepository.Object, _unitOfWork.Object);
 
     [Fact]
     public async Task Handle_WhenNoHostWithThatSerialNumberIsRegistered_ThrowsNotFound()

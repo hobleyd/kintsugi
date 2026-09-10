@@ -6,6 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 use crate::config::{self, Config};
 use crate::identity::{self, AgentIdentity};
@@ -115,6 +117,110 @@ pub fn report_patch_result(client: &reqwest::blocking::Client, config: &Config, 
             logging::warn(&format!("could not report successful patch of {application_name} to the server: {err:#}"));
         }
     }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReportPatchFailureRequest<'a> {
+    serial_number: &'a str,
+    application_name: &'a str,
+    installed_version: &'a str,
+    attempted_version: Option<&'a str>,
+    failed_utc: String,
+    details: String,
+}
+
+/// The most of a failing script's output this agent will send to the server.
+///
+/// A failing script's stderr is unbounded — a loop printing a permission error per file in a
+/// bundle runs to megabytes — and it arrives here untruncated, since `run_script` bails with the
+/// whole of it. This has to stay comfortably *below* the server's own ceiling
+/// (`ReportPatchFailureCommandValidator.MaxDetailsLength`, currently 16000): a report longer than
+/// the validator accepts comes back as a 400 and the failure is lost, silently, for exactly the
+/// noisiest failures — which are the ones most worth reading. Raise the server's figure before
+/// raising this one, never after. Kept identical in the other two agents.
+const MAX_REPORTED_FAILURE_BYTES: usize = 4000;
+
+/// Tells the server this application's upgrade ran and failed, so it turns up on the admin UI's
+/// Failed Updates screen with the date and the output — where the script can be repaired by the AI
+/// or by hand and re-signed.
+///
+/// Called from the privileged side only — `main::ServiceHandler::patch_application`, which is the
+/// one place `patch_one` ever runs and the only side holding the identity every agent-only route
+/// requires. The per-user process reaches patching solely through `queue` (`QueueClient`), so it has
+/// nothing to report and deliberately does not; the macOS agent, which runs Homebrew rows as the
+/// logged-in user, is the one that has to make that distinction.
+///
+/// Deliberately not called for a patch that never ran — an application with no signed, patchable
+/// path, or a row the daemon refuses on `runs_as_root` grounds. Those are configuration problems
+/// rather than bugs in a script, and a screen full of them hides the ones the AI can actually fix.
+///
+/// Best-effort, like every other report: the failure has already happened and been logged locally,
+/// and the next patch cycle reports it again if the server was unreachable this time.
+pub fn report_patch_failure(
+    client: &reqwest::blocking::Client,
+    config: &Config,
+    serial_number: &str,
+    status: &UpgradeStatus,
+    error: &anyhow::Error,
+) {
+    // The host's own clock, not the server's arrival time: a Mac that patched overnight and could
+    // not reach the server until morning would otherwise report the failure as having happened
+    // when the network came back.
+    let failed_utc = match OffsetDateTime::now_utc().format(&Rfc3339) {
+        Ok(formatted) => formatted,
+        Err(err) => {
+            logging::warn(&format!("could not format the failure timestamp, not reporting: {err:#}"));
+            return;
+        }
+    };
+
+    let request = ReportPatchFailureRequest {
+        serial_number,
+        application_name: &status.application_name,
+        installed_version: &status.installed_version,
+        attempted_version: status.latest_version.as_deref(),
+        failed_utc,
+        details: truncate_for_report(&format!("{error:#}")),
+    };
+
+    match client.post(config.patch_failure_url()).json(&request).send() {
+        Ok(response) if response.status().is_success() => {
+            logging::info(&format!("reported the failed patch of {} to the server", status.application_name));
+        }
+        Ok(response) => {
+            logging::warn(&format!(
+                "server rejected the patch-failure report for {} (HTTP {})",
+                status.application_name,
+                response.status()
+            ));
+        }
+        Err(err) => {
+            logging::warn(&format!(
+                "could not report the failed patch of {} to the server: {err:#}",
+                status.application_name
+            ));
+        }
+    }
+}
+
+/// `truncate_for_log`'s rule, at the reporting limit rather than the logging one, and keeping the
+/// *tail* rather than the head: a script's last words are where its failure is, while its first
+/// are the same preamble every run prints.
+fn truncate_for_report(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.len() <= MAX_REPORTED_FAILURE_BYTES {
+        return trimmed.to_string();
+    }
+
+    // Back up to the nearest char boundary — a plain byte-index slice could otherwise land inside
+    // a multi-byte UTF-8 character and panic.
+    let mut cut = trimmed.len() - MAX_REPORTED_FAILURE_BYTES;
+    while !trimmed.is_char_boundary(cut) {
+        cut += 1;
+    }
+
+    format!("... [truncated, {cut} earlier byte(s) omitted]\n{}", &trimmed[cut..])
 }
 
 /// Whether `patch_one` has anything to actually do for this row — used to build the list a patch
@@ -335,6 +441,47 @@ fn run_script(application_name: &str, script: &str, args: &[&str]) -> Result<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_short_failure_is_reported_whole() {
+        assert_eq!(truncate_for_report("  exited with 1: Permission denied  "), "exited with 1: Permission denied");
+    }
+
+    /// The tail, not the head: a script's last words are where its failure is, while its first are
+    /// the same preamble every run prints.
+    #[test]
+    fn a_long_failure_keeps_its_end_rather_than_its_beginning() {
+        let text = format!("{}THE ACTUAL ERROR", "preamble ".repeat(MAX_REPORTED_FAILURE_BYTES));
+
+        let reported = truncate_for_report(&text);
+
+        assert!(reported.ends_with("THE ACTUAL ERROR"));
+        assert!(reported.starts_with("... [truncated,"));
+    }
+
+    /// The server rejects anything over ReportPatchFailureCommandValidator.MaxDetailsLength, and a
+    /// rejected report loses the failure silently — so what is sent has to stay under it however
+    /// much a script printed.
+    #[test]
+    fn a_reported_failure_never_exceeds_the_limit_by_more_than_its_own_notice() {
+        let text = "x".repeat(MAX_REPORTED_FAILURE_BYTES * 10);
+
+        let reported = truncate_for_report(&text);
+
+        assert!(reported.len() < MAX_REPORTED_FAILURE_BYTES + 100, "was {} bytes", reported.len());
+    }
+
+    /// A byte-index slice landing inside a multi-byte character panics, which would take the whole
+    /// patch cycle down while reporting that something else had already gone wrong.
+    #[test]
+    fn truncating_never_splits_a_multi_byte_character() {
+        // 3 bytes each, so the cut point lands mid-character for two thirds of possible lengths.
+        let text = "\u{2014}".repeat(MAX_REPORTED_FAILURE_BYTES);
+
+        let reported = truncate_for_report(&text);
+
+        assert!(reported.ends_with('\u{2014}'));
+    }
 
     fn status(name: &str, method: UpgradeMethod, update_available: bool) -> UpgradeStatus {
         UpgradeStatus {
