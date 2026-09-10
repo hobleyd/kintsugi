@@ -117,7 +117,9 @@ Two more are worth getting right before the first agent installs:
 
 * **`WEB_TLS_PORT`** is published to the host, and it is also hardcoded as `8443` in
   `nginx/default.conf` — nginx config gets no environment substitution, so changing one means
-  changing the other by hand.
+  changing the other by hand. `WEB_PORT` publishes the plain-HTTP listener, whose only job is to
+  301 to the TLS one; its redirect target is that same hardcoded `8443`, so it is the second thing
+  to change.
 * **`AGENT_API_BASE_URL`** is baked into every agent package the server publishes. It must name
   **nginx's own address and `WEB_TLS_PORT`**, which is not the address you browse the admin UI on
   whenever anything terminates TLS in front of nginx — a gateway, a load balancer, a CDN. nginx is
