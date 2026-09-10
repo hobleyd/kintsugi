@@ -79,6 +79,27 @@ class _RemoteShellViewState extends State<RemoteShellView> {
   /// request made inline is immediately undone and focus lands on the route's modal scope, with
   /// the keyboard going nowhere. Deferring to the end of the current event dispatch puts this
   /// last, which is the only position that survives.
+  /// **It has to run on pointer *up* as well, or Cmd-C after a drag-selection copies nothing.**
+  ///
+  /// The app-wide `SelectionArea` in `main.dart` puts a `SelectableRegion` above this widget, and
+  /// its `TapAndPanGestureRecognizer` arms a `kPressTimeout` (100ms) deadline on every press
+  /// whatever the gesture arena later decides. Hold the button down longer than that — which
+  /// dragging across several lines always does — and `_startNewMouseSelectionGesture` fires and
+  /// requests focus for the *region's* node, taking the keyboard off the terminal mid-drag. xterm
+  /// never takes it back: it focuses only from `onTapDown` (`TerminalView._onTapDown`), and its
+  /// drag path paints the selection without touching focus — `TerminalGestureHandler` wires no
+  /// `onDragEnd` at all.
+  ///
+  /// That matters because copy is resolved through focus: the Cmd-C map lives in
+  /// `TerminalView._handleKeyEvent`, on the terminal's own node, so an unfocused terminal never
+  /// sees the keypress. It reaches `SelectableRegion`'s copy action instead, which asks the region
+  /// for its selected content — and the terminal is a `CustomPaint` that registers no `Selectable`,
+  /// so it finds none and returns having done nothing. No clipboard write, no error anywhere.
+  /// Double-clicking a word escapes all of this by resolving inside the 100ms, which is why
+  /// copying one word worked and copying three lines did not.
+  ///
+  /// See test/presentation/remote_shell_copy_test.dart, which pins the copy and the focus halves
+  /// separately.
   void _takeKeyboard() => scheduleMicrotask(() {
         if (mounted) _focusNode.requestFocus();
       });
@@ -139,6 +160,10 @@ class _RemoteShellViewState extends State<RemoteShellView> {
       padding: const EdgeInsets.all(8),
       child: Listener(
         onPointerDown: (_) => _takeKeyboard(),
+        // And again on release, which is the half that makes Cmd-C work after a drag — see
+        // `_takeKeyboard`. The microtask lands after the arena is swept for this pointer, so it is
+        // the last word on focus for the whole press-drag-release.
+        onPointerUp: (_) => _takeKeyboard(),
         // **Space, and space alone, has to be taken back from the framework — on web this is the
         // difference between a terminal that types spaces and one that does not.**
         //
