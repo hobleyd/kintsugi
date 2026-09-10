@@ -178,9 +178,20 @@ class KintsugiTable extends StatelessWidget {
 class KintsugiTableRow {
   const KintsugiTableRow({
     required this.cells,
+    this.key,
     this.isChild = false,
     this.expanded,
   });
+
+  /// The row's identity, carried onto both the [TableRow] and the expanded panel.
+  ///
+  /// Needed by any table whose rows reorder under a row that is still on screen: without it
+  /// Flutter matches by position, so a re-sorted list hands an expanded panel's [State] to a
+  /// different row. That is what the CPE mapping queue did — confirming a mapping moves it out
+  /// of the suggested bucket the server sorts first, and the detail below moved with it while
+  /// the search, vendor and product fields stayed where they were, still holding the previous
+  /// row's text. Rows that never move can leave this null.
+  final LocalKey? key;
 
   final List<Widget> cells;
 
@@ -193,6 +204,7 @@ class KintsugiTableRow {
   final Widget? expanded;
 
   TableRow build(BuildContext context, List<TableColumnSpec> columns) => TableRow(
+        key: key,
         decoration: BoxDecoration(border: _border(context)),
         children: [
           for (var i = 0; i < columns.length; i++)
@@ -216,6 +228,10 @@ class KintsugiTableRow {
   Widget? buildExpanded(BuildContext context) {
     if (expanded == null) return null;
     return Container(
+      // The same key as the row it belongs to. It sits in a different parent — the [Column] of
+      // segments rather than a [Table] — so reusing the one [LocalKey] is fine, and this is the
+      // half that matters: the panel is where the stateful editors live.
+      key: key,
       decoration: BoxDecoration(
         border: _border(context),
         color: context.palette.accentWash(0.03),

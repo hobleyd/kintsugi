@@ -86,6 +86,12 @@ class _MappingsTable extends StatelessWidget {
         rows: [
           for (final mapping in state.mappings)
             KintsugiTableRow(
+              // Keyed by the mapping, because this list re-sorts under the reader:
+              // GetCpeMappingsQueryHandler puts suggested rows first, so confirming one moves it
+              // down the queue. Unkeyed, the detail panel's [State] — and with it the search,
+              // vendor and product fields — would stay at the position rather than follow the
+              // row, leaving another mapping's text under the row that had just moved.
+              key: ValueKey(mapping.id),
               cells: [
                 Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
