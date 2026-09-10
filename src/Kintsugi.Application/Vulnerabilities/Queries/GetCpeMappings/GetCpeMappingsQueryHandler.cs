@@ -24,6 +24,12 @@ public class GetCpeMappingsQueryHandler : IRequestHandler<GetCpeMappingsQuery, I
         var applicationHostCounts = (await _repository.GetInstalledApplicationSubjectsAsync(cancellationToken))
             .ToDictionary(s => s.Key, s => s.HostCount);
 
+        // Both batched, for the reason GetFindingsAsync is one query rather than N+1: this screen
+        // lists every subject the fleet has, so a per-row round trip makes 300 applications 600
+        // queries — on the screen an administrator sits on while draining the review backlog.
+        var versionsBySubject = await _repository.GetInstalledVersionsBySubjectAsync(cancellationToken);
+        var summaries = await _repository.GetAssessmentSummariesAsync(cancellationToken);
+
         // Operating systems are counted and versioned from the per-host facts rather than from the
         // distinct reported strings, because two hosts reporting the same "Windows 11 Pro 23H2
         // (22631)" can be at different update revisions and are two different questions for NVD.
@@ -69,9 +75,9 @@ public class GetCpeMappingsQueryHandler : IRequestHandler<GetCpeMappingsQuery, I
 
             var versions = isOs
                 ? osVersions.TryGetValue(mapping.SubjectKey, out var found) ? found.OrderBy(v => v).ToList() : new List<string>()
-                : (await _repository.GetInstalledVersionsForApplicationAsync(mapping.SubjectKey, cancellationToken)).OrderBy(v => v).ToList();
+                : versionsBySubject.TryGetValue(mapping.SubjectKey, out var installed) ? installed.ToList() : new List<string>();
 
-            var assessments = await _repository.GetAssessmentsForMappingAsync(mapping.Id, cancellationToken);
+            var summary = summaries.GetValueOrDefault(mapping.Id);
 
             result.Add(new CpeMappingDto(
                 mapping.Id,
@@ -86,12 +92,10 @@ public class GetCpeMappingsQueryHandler : IRequestHandler<GetCpeMappingsQuery, I
                 mapping.ConfirmedAtUtc,
                 isOs ? osHostCounts.GetValueOrDefault(mapping.SubjectKey) : applicationHostCounts.GetValueOrDefault(mapping.SubjectKey),
                 versions,
-                assessments.Sum(a => a.MatchCount),
-                assessments.Sum(a => a.KnownExploitedCount),
-                assessments.Count == 0 ? null : assessments.Max(a => a.LastAssessedUtc),
-                // The most recent failure across this subject's versions, so a product NVD has
-                // withdrawn shows its reason on the row rather than being silently stuck.
-                assessments.Where(a => a.LastError is not null).OrderByDescending(a => a.LastAssessedUtc).FirstOrDefault()?.LastError,
+                summary?.MatchCount ?? 0,
+                summary?.KnownExploitedCount ?? 0,
+                summary?.LastAssessedUtc,
+                summary?.LastError,
                 isOs ? osReasons.GetValueOrDefault(mapping.SubjectKey) : null));
         }
 
