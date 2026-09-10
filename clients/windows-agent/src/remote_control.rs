@@ -839,16 +839,39 @@ fn handle_server_message(
 
             match start_session_helper(console_session, connections) {
                 Ok((mut pipe, helper)) => {
-                    write_pipe(
+                    let handed_over = write_pipe(
                         &mut pipe,
                         &IpcMessage::SessionRequested {
-                            session_id,
-                            requested_by,
+                            session_id: session_id.clone(),
+                            requested_by: requested_by.clone(),
                             consent_timeout_seconds,
                         },
-                    )?;
-                    relay.pipe = Some(pipe);
-                    relay.helper = Some(helper);
+                    );
+
+                    match handed_over {
+                        Ok(()) => {
+                            relay.pipe = Some(pipe);
+                            relay.helper = Some(helper);
+                        }
+
+                        // The helper is running and has been told nothing, so it is stopped here.
+                        // It used to be dropped instead — `?` propagated, and neither the pipe nor
+                        // the process was in the `Relay` yet, so `Drop` could not reach it either —
+                        // which left exactly the orphan that goes on to break the *next* session.
+                        // Reported as a refusal for the same reason the arm below is, and
+                        // deliberately not propagated: one session's failed hand-off is no reason
+                        // to drop the control socket and make the whole host briefly unreachable.
+                        Err(err) => {
+                            drop(pipe);
+                            helper.stop();
+                            logging::error(&format!("could not hand the session to the helper: {err:#}"));
+                            queue(
+                                &mut relay.control,
+                                &AgentMessage::Consent { session_id, outcome: ConsentOutcome::Denied },
+                            )?;
+                            return Ok(Some(format!("{line}, but the session could not be handed over: {err:#}")));
+                        }
+                    }
                 }
                 Err(err) => {
                     // Nothing was captured and nobody was asked, so this is reported as a refusal
