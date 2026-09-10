@@ -1037,6 +1037,21 @@ see your screen now". So the per-user process holds one socket open for its life
 backoff. Sessions get their own socket so a frame stream can never queue behind a control message,
 and so a session dropping does not cost the host its reachability.
 
+**A session socket gets one chance where the control socket gets unlimited ones, and that asymmetry
+hid a flaky link for months.** The control socket's connect sits in a reconnect loop, so a connect
+that times out costs a log line and a few seconds of backoff before it succeeds — a host whose SYNs
+to the server are intermittently blackholed reports healthy check-ins, holds a live control socket
+and looks entirely well. A session socket was a single `connect`, so the *same* packet loss ended
+the session with "could not connect", and a screen session tried a minute later would work,
+"proving" the network was fine. That is exactly how one Windows host presented: terminal sessions
+failing, screen sessions succeeding, `Test-NetConnection` succeeding, and two `connection timed out`
+lines against the control socket in the log that nobody had reason to read. So all three agents
+retry the session connect (`connect_session_socket`), with a per-attempt timeout deliberately
+*shorter* than the control socket's — a blackholed SYN is not answered by waiting longer, it is
+answered by a fresh connection — and the whole budget is held inside the server's pairing window by
+a test. Log the peer address when changing any of this: `remote control socket open to {url}` named
+no address, which is why the diagnosis needed a support call rather than the log.
+
 **Consent timeouts have the opposite polarity to patching, and the code keeps them apart.**
 `dialogs::ConfirmChoice::TimedOut` means "nobody was at the desk, so count it as a delay" — the
 user never refused and patching happens regardless. `RemoteControlChoice::TimedOut` means **nobody
@@ -2157,6 +2172,25 @@ wedged by a release before this one need `Restart-Service KintsugiAgent` by hand
   that for ten hours, logging "socket open" once and nothing after, "unreachable" on the Hosts
   screen while its check-ins were fine. Set the timeout below the ping interval and every healthy
   host reconnects in a loop instead.
+- `remote_control::CONSENT_FLUSH_TIMEOUT` plus `SESSION_CONNECT_ATTEMPTS` × `SESSION_CONNECT_TIMEOUT`
+  (plus the retry delays) must stay *inside* `RemoteControlSessionBroker.RemoteControlPairingTimeout`
+  (30s), in all three agents. The agent has to run out of attempts before the server runs out of
+  patience: an agent still retrying when the relay gives up reports nothing, so its own message —
+  which names the address and the failure — is replaced by the server's "the other end never
+  connected", which names neither the host nor the reason. Each agent keeps its own copy of the
+  server's 30s as `SERVER_PAIRING_TIMEOUT` and a test asserts the sum against it; that copy is the
+  coupling, and nothing checks it still matches the server.
+- **The Windows service's pipe has one instance, so a connection handed out twice is a session
+  lost.** `ConnectNamedPipe` on an instance whose client is still connected does not wait for a new
+  one — it returns `ERROR_PIPE_CONNECTED` for the client already there, which reads as success — so
+  an accept loop that runs ahead of its consumer hands out the same client repeatedly, and dropping
+  any copy runs `DisconnectNamedPipe` on the instance the others are using. Combined with a helper
+  leaked by a `relay()` that returned `Err` (which is why `Relay` has a `Drop`), that cost the
+  *next* screen session: the stale helper's connection was discarded and took the freshly launched
+  helper's pipe with it, failing the first write with error 233 and losing the session before the
+  request was even sent. `PipeListener::accept` now waits for the outstanding connection to be
+  dropped, and `start_session_helper` drains the channel before launching. Keep both — either alone
+  leaves a window.
 - `/api/remote-control` is gated by its **own `=` location** in `nginx/default.conf`, not by the
   agent regex — the only agent route that is. A new agent route still belongs in the regex; this one
   is separate because a WebSocket needs an hour-long `proxy_read_timeout` that must not apply to

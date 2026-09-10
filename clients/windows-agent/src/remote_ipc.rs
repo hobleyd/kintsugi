@@ -225,6 +225,7 @@ mod platform {
     use std::mem::ManuallyDrop;
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::ptr;
+    use std::sync::{Arc, Condvar, Mutex};
 
     use anyhow::{anyhow, Context, Result};
     use windows_sys::Win32::Foundation::{
@@ -258,9 +259,24 @@ mod platform {
     /// checked for.
     const PIPE_SDDL: &str = "D:(A;;GA;;;SY)(A;;GA;;;BA)";
 
-    /// The service's end: creates the pipe and waits for the console session's tray to connect.
+    /// Whether the listener's single pipe instance is currently handed out, and a way to be woken
+    /// when it is not. Shared between the listener and whichever [`PipeConnection`] holds it.
+    type InstanceLock = Arc<(Mutex<bool>, Condvar)>;
+
+    /// Marks the instance free again and wakes whoever is waiting in [`PipeListener::accept`].
+    fn release_instance(lock: &InstanceLock) {
+        let (mutex, released) = &**lock;
+        // A poisoned lock is a panic somewhere else in this process, and refusing to release the
+        // instance because of it would cost every future session rather than the one that panicked.
+        let mut in_use = mutex.lock().unwrap_or_else(|err| err.into_inner());
+        *in_use = false;
+        released.notify_one();
+    }
+
+    /// The service's end: creates the pipe and waits for the console session's helper to connect.
     pub struct PipeListener {
         handle: OwnedHandle,
+        in_use: InstanceLock,
     }
 
     impl PipeListener {
@@ -322,7 +338,10 @@ mod platform {
             }
 
             // SAFETY: a valid handle this function now owns exclusively.
-            Ok(Self { handle: unsafe { OwnedHandle::from_raw_handle(handle as *mut _) } })
+            Ok(Self {
+                handle: unsafe { OwnedHandle::from_raw_handle(handle as *mut _) },
+                in_use: Arc::new((Mutex::new(false), Condvar::new())),
+            })
         }
 
         /// Blocks until something connects, and reports its process id alongside the connection.
@@ -334,20 +353,42 @@ mod platform {
         pub fn accept(&self) -> Result<(PipeConnection, u32)> {
             let raw = self.handle.as_raw_handle() as HANDLE;
 
+            // **Waited for, not raced.** There is one pipe instance, so a connection already handed
+            // out and not yet dropped still holds it — and `ConnectNamedPipe` on an instance that is
+            // still connected does not wait for anybody. It returns ERROR_PIPE_CONNECTED for the
+            // client that is *already* there, which the arm below reads as a success, so the same
+            // client is handed out a second time and dropping either copy disconnects the other.
+            //
+            // That is not hypothetical. A helper left over from a session whose relay died was
+            // accepted twice; discarding the stale pair ran `DisconnectNamedPipe` on the instance
+            // the *newly launched* helper had meanwhile been given, so the service's first write to
+            // it failed with ERROR_PIPE_NOT_CONNECTED (233) and the session was lost before the
+            // request could even be sent — with nothing in the log naming the cause.
+            {
+                let (mutex, released) = &*self.in_use;
+                let mut in_use = mutex.lock().unwrap_or_else(|err| err.into_inner());
+                while *in_use {
+                    in_use = released.wait(in_use).unwrap_or_else(|err| err.into_inner());
+                }
+                *in_use = true;
+            }
+
             // SAFETY: a documented call on a pipe handle this struct owns. ERROR_PIPE_CONNECTED
             // means a client won the race between CreateNamedPipeW and this call, which is a
-            // success rather than a failure.
+            // success rather than a failure — and, now that the instance is claimed above, can only
+            // mean that rather than a client somebody else is already using.
             let connected = unsafe { ConnectNamedPipe(raw, ptr::null_mut()) };
             if connected == 0 {
                 // SAFETY: no preconditions.
                 let error = unsafe { GetLastError() };
                 if error != ERROR_PIPE_CONNECTED {
+                    release_instance(&self.in_use);
                     return Err(anyhow!("could not accept a remote control pipe client (error {error})"));
                 }
             }
 
             let pid = client_process_id(raw).unwrap_or(0);
-            Ok((PipeConnection::adopt(raw), pid))
+            Ok((PipeConnection::adopt(raw, Arc::clone(&self.in_use)), pid))
         }
     }
 
@@ -373,8 +414,9 @@ mod platform {
     /// on that side must disconnect without closing; the client opened its own handle and must close
     /// it, or the helper leaks one per session.
     enum PipeRole {
-        /// The service's side. The handle belongs to `PipeListener`.
-        Listener,
+        /// The service's side. The handle belongs to `PipeListener`, and so does the instance this
+        /// connection is holding — released for the next `accept` when this is dropped.
+        Listener(InstanceLock),
         /// The session helper's side. The handle belongs to this connection.
         Client,
     }
@@ -394,13 +436,13 @@ mod platform {
     }
 
     impl PipeConnection {
-        fn adopt(handle: HANDLE) -> Self {
+        fn adopt(handle: HANDLE, in_use: InstanceLock) -> Self {
             // SAFETY: the caller has a connected pipe handle belonging to the listener. Wrapped so
             // it can be read and written through `File`; `Drop` disconnects without closing, since
             // the listener reuses this same handle for the next client.
             Self {
                 file: ManuallyDrop::new(unsafe { File::from_raw_handle(handle as *mut _) }),
-                role: PipeRole::Listener,
+                role: PipeRole::Listener(in_use),
             }
         }
 
@@ -460,9 +502,14 @@ mod platform {
                 // the tray once and then never again, and a tray that restarted (a logout, a
                 // self-update, a crash) would be locked out until the whole service was restarted.
                 // The handle itself is the listener's and must survive.
-                PipeRole::Listener => {
+                PipeRole::Listener(ref in_use) => {
                     // SAFETY: a connected pipe handle the listener still owns.
                     unsafe { DisconnectNamedPipe(self.file.as_raw_handle() as HANDLE) };
+
+                    // After the disconnect and never before: an `accept` woken first would call
+                    // `ConnectNamedPipe` on an instance still holding this client and be handed it
+                    // straight back, which is the duplicate-connection bug the wait exists to stop.
+                    release_instance(in_use);
                 }
 
                 // SAFETY: this end opened the handle, so this end closes it — via `File`'s own

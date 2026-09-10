@@ -109,6 +109,28 @@ const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(60);
 /// likely. Same reasoning and same value as the Windows agent.
 const CONSENT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long one attempt at the *session* socket's TCP connect may take, and how many are made.
+///
+/// Deliberately shorter than [`CONNECT_TIMEOUT`], and the difference is the whole point. The
+/// control socket can afford to wait, because a failure there costs a log line and a backoff before
+/// it tries again — which is exactly what made one fleet's flaky link invisible for months: a host
+/// whose SYNs to the server are intermittently blackholed reconnects its control socket a few
+/// seconds later and looks perfectly healthy, while a session socket, having had one attempt,
+/// reports "could not connect" and loses the session. A blackholed SYN is not answered by waiting
+/// longer, it is answered by a fresh connection, so this budget buys attempts rather than patience.
+const SESSION_CONNECT_TIMEOUT: Duration = Duration::from_secs(7);
+const SESSION_CONNECT_ATTEMPTS: u32 = 3;
+const SESSION_CONNECT_RETRY_DELAY: Duration = Duration::from_millis(300);
+
+/// The server's own deadline for pairing the two sockets of a session
+/// (`RemoteControlSessionBroker.RemoteControlPairingTimeout`).
+///
+/// Never consulted at runtime — it is here so the test below can hold every wait this agent makes
+/// before its socket arrives inside it. An agent still retrying when the server gives up reports
+/// nothing at all, and the administrator is told "the other end never connected", which names
+/// neither the host nor the reason.
+const SERVER_PAIRING_TIMEOUT: Duration = Duration::from_secs(30);
+
 type Socket = WebSocket<MaybeTlsStream<std::net::TcpStream>>;
 
 /// Runs for the life of the unit. Never returns.
@@ -217,7 +239,7 @@ fn relay(
     desktop_rx: &Receiver<IpcConnection>,
 ) -> Result<()> {
     let url = config.remote_control_url(serial_number, None);
-    let mut control = connect(&url, identity)?;
+    let mut control = connect(&url, identity, CONNECT_TIMEOUT)?;
     set_nonblocking(&control)?;
 
     logging::info(&format!("remote control socket open to {url}"));
@@ -497,6 +519,10 @@ fn start_shell_session(
     // Everything that can fail locally is done before the answer is sent, so a host that cannot
     // produce a terminal reports `Unavailable` rather than accepting a session and then failing.
     let started = shell_program().and_then(|(program, user)| {
+        // Logged before the spawn rather than after a successful connect, because a session that
+        // fails between the two used to name no program at all.
+        logging::info(&format!("starting a remote shell: {} as {user}", program.program.display()));
+
         let terminal = Pty::spawn(&program, INITIAL_COLS, INITIAL_ROWS)
             .with_context(|| format!("could not start {} in a terminal", program.program.display()))?;
         Ok((program, user, terminal))
@@ -529,7 +555,7 @@ fn start_shell_session(
         std::thread::sleep(POLL_INTERVAL);
     }
 
-    match connect(&config.remote_control_url(serial_number, Some(session_id)), identity) {
+    match connect_session_socket(config, serial_number, identity, session_id) {
         Ok(mut session) => {
             set_nonblocking(&session)?;
 
@@ -675,7 +701,7 @@ fn handle_agent_frame(
                 std::thread::sleep(POLL_INTERVAL);
             }
 
-            match connect(&config.remote_control_url(serial_number, Some(&session_id)), identity) {
+            match connect_session_socket(config, serial_number, identity, &session_id) {
                 Ok(session) => {
                     set_nonblocking(&session)?;
                     relay.session = Some(session);
@@ -877,8 +903,43 @@ fn flush(socket: &mut Socket) -> Result<bool> {
     }
 }
 
+/// Opens the session socket, retrying a connect that failed to establish.
+///
+/// Retried because a session socket has one chance where the control socket has unlimited ones —
+/// see [`SESSION_CONNECT_ATTEMPTS`]. Deliberately *not* a retry for the consent race, which
+/// [`CONSENT_FLUSH_TIMEOUT`] closes instead and which reconnecting could not fix anyway: the server
+/// accepts the upgrade and only then checks the grant, so a refusal arrives as a healthy connection
+/// that immediately closes.
+fn connect_session_socket(
+    config: &Config,
+    serial_number: &str,
+    identity: &AgentIdentity,
+    session_id: &str,
+) -> Result<Socket> {
+    let url = config.remote_control_url(serial_number, Some(session_id));
+    let mut last_error = None;
+
+    for attempt in 1..=SESSION_CONNECT_ATTEMPTS {
+        match connect(&url, identity, SESSION_CONNECT_TIMEOUT) {
+            Ok(socket) => return Ok(socket),
+            Err(err) => {
+                logging::warn(&format!(
+                    "attempt {attempt}/{SESSION_CONNECT_ATTEMPTS} to open the remote control session socket failed: {err:#}"
+                ));
+                last_error = Some(err);
+            }
+        }
+
+        if attempt < SESSION_CONNECT_ATTEMPTS {
+            std::thread::sleep(SESSION_CONNECT_RETRY_DELAY);
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow!("could not open the remote control session socket")))
+}
+
 /// Opens one `wss://` socket presenting this host's client certificate.
-fn connect(url: &str, identity: &AgentIdentity) -> Result<Socket> {
+fn connect(url: &str, identity: &AgentIdentity, connect_timeout: Duration) -> Result<Socket> {
     let tls = identity::to_rustls_client_config(identity)?;
     let request = url
         .into_client_request()
@@ -895,7 +956,15 @@ fn connect(url: &str, identity: &AgentIdentity) -> Result<Socket> {
     // the other agents do it: this is where the connect timeout can be bounded, and
     // `client_tls_with_config` is the only entry point that takes a rustls configuration carrying a
     // client certificate.
-    let stream = connect_tcp(host, port)?;
+    let stream = connect_tcp(host, port, connect_timeout)?;
+
+    // Which address this actually reached. Logged because the URL alone does not say, and on a name
+    // that resolves to more than one address — or resolves differently over time — that is the
+    // difference between "the server is unreachable" and "this host drew the address it cannot get
+    // to". Working that out from the outside cost a support call.
+    if let Ok(peer) = stream.peer_addr() {
+        logging::info(&format!("connected to {host} at {peer}"));
+    }
 
     // Nagle off: this carries keystrokes and tiles, which matter immediately, and coalescing them
     // into fuller packets trades exactly the latency a remote session is judged on.
@@ -943,7 +1012,7 @@ fn clear_handshake_timeouts(socket: &Socket) {
 /// without hairpin NAT. Taking only the first meant the control socket connected whenever it drew
 /// the private address, and the session socket timed out whenever it drew the other — a session that
 /// consented and then "could not connect", on a host that was plainly reachable.
-fn connect_tcp(host: &str, port: u16) -> Result<std::net::TcpStream> {
+fn connect_tcp(host: &str, port: u16, timeout: Duration) -> Result<std::net::TcpStream> {
     let addresses: Vec<_> = std::net::ToSocketAddrs::to_socket_addrs(&(host, port))
         .with_context(|| format!("could not resolve {host}"))?
         .collect();
@@ -953,7 +1022,7 @@ fn connect_tcp(host: &str, port: u16) -> Result<std::net::TcpStream> {
 
     let mut failures = Vec::with_capacity(addresses.len());
     for address in &addresses {
-        match std::net::TcpStream::connect_timeout(address, CONNECT_TIMEOUT) {
+        match std::net::TcpStream::connect_timeout(address, timeout) {
             Ok(stream) => return Ok(stream),
             Err(err) => failures.push(format!("{address}: {err}")),
         }
@@ -1026,6 +1095,26 @@ mod tests {
         // Which is 0711 — traverse-only, so an unprivileged process can reach this known path and
         // still cannot list the identity beside it.
         assert!(config::remote_control_socket_path().starts_with(config::state_dir()));
+    }
+
+    #[test]
+    fn every_wait_before_the_session_socket_fits_inside_the_server_s_pairing_window() {
+        // The agent must run out of attempts before the server runs out of patience, or its own
+        // reason — which names the address and the failure — is replaced by the server's "the other
+        // end never connected", which names neither.
+        let attempts = SESSION_CONNECT_ATTEMPTS;
+        let budget = CONSENT_FLUSH_TIMEOUT
+            + SESSION_CONNECT_TIMEOUT * attempts
+            + SESSION_CONNECT_RETRY_DELAY * (attempts - 1);
+
+        assert!(budget < SERVER_PAIRING_TIMEOUT, "{budget:?} is not inside {SERVER_PAIRING_TIMEOUT:?}");
+    }
+
+    #[test]
+    fn a_session_connect_attempt_gives_up_sooner_than_the_control_socket_s() {
+        // The control socket retries forever on a backoff, so it can afford to wait; a session
+        // socket cannot. Equal timeouts would spend the whole pairing window on one attempt.
+        assert!(SESSION_CONNECT_TIMEOUT < CONNECT_TIMEOUT);
     }
 
     #[test]

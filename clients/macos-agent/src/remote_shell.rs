@@ -432,14 +432,19 @@ fn now_epoch() -> u64 {
 fn run_session(config: &Config, serial_number: &str, identity: &AgentIdentity, session_id: &str) -> Result<()> {
     let (program, user) = shell_program()?;
 
+    // Logged before the spawn rather than after a successful connect, because a session that fails
+    // between the two used to name no program at all.
+    logging::info(&format!("starting a remote shell: {} as {user}", program.program.display()));
+
     let mut terminal = Pty::spawn(&program, INITIAL_COLS, INITIAL_ROWS)
         .with_context(|| format!("could not start {} in a terminal", program.program.display()))?;
 
-    // No connect retry and no consent flush here, unlike the screen session's own connect: the
-    // per-user process answered on the control socket and flushed it *before* writing the request
-    // this invocation was started by, so the grant is at the server by construction.
-    let url = config.remote_control_url(serial_number, Some(session_id));
-    let mut socket = remote_control::connect(&url, identity)?;
+    // No consent flush here, unlike the screen session's own connect: the per-user process answered
+    // on the control socket and flushed it *before* writing the request this invocation was started
+    // by, so the grant is at the server by construction. The connect is still retried, which is a
+    // different question entirely — the grant being present says nothing about whether this host's
+    // next SYN reaches the server.
+    let mut socket = remote_control::connect_session_socket(config, serial_number, identity, session_id)?;
     remote_control::set_nonblocking(&socket)?;
 
     // Before the first output frame, so the viewer can say what it is attached to — the shell
