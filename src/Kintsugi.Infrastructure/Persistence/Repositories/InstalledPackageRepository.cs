@@ -7,10 +7,20 @@ namespace Kintsugi.Infrastructure.Persistence.Repositories;
 
 /// <inheritdoc cref="IInstalledPackageRepository" />
 /// <remarks>
-/// The ecosystem is resolved in memory rather than in SQL, because <c>OsvEcosystem.For</c> is
-/// where that vocabulary lives and a LINQ translation of it would be a second copy to keep in
-/// step. The set it runs over is one row per (host, package), which is large but is read once per
-/// query and grouped immediately.
+/// <para>
+/// <b>Every query groups in the database first, and that is not an optimization.</b> The raw
+/// table is one row per (host, package) — a hundred Ubuntu hosts at ~1500 source packages each is
+/// 150,000 rows — and the Vulnerabilities screen touches two of these methods on every page view.
+/// Loading that cross product into memory to group it would make the screen slow in a way that
+/// reads as a server problem.
+/// </para>
+/// <para>
+/// The OSV ecosystem is still resolved in memory, because <c>OsvEcosystem.For</c> is where that
+/// vocabulary lives and a LINQ translation of it would be a second copy to keep in step. That
+/// costs nothing now: the grouping key includes the host's two os-release columns, so what comes
+/// back is one row per distinct (distribution, package, version) — thousands at most — and the
+/// mapping runs over that rather than over the cross product.
+/// </para>
 /// </remarks>
 public class InstalledPackageRepository : IInstalledPackageRepository
 {
@@ -32,40 +42,53 @@ public class InstalledPackageRepository : IInstalledPackageRepository
         await _context.InstalledPackages.AddRangeAsync(packages, cancellationToken);
     }
 
-    public async Task<IReadOnlyList<PackageTriple>> GetDistinctPackageTriplesAsync(CancellationToken cancellationToken)
-    {
-        var rows = await LiveRowsAsync(cancellationToken);
-
-        return rows
-            .Select(r => new { Ecosystem = OsvEcosystem.For(r.OsId, r.OsVersionId), r.Name, r.Version })
-            .Where(r => r.Ecosystem is not null)
-            .Select(r => new PackageTriple(r.Ecosystem!, r.Name, r.Version))
+    public async Task<IReadOnlyList<PackageTriple>> GetDistinctPackageTriplesAsync(CancellationToken cancellationToken) =>
+        (await GroupedAsync(cancellationToken))
+            .Select(g => Triple(g))
+            .Where(t => t is not null)
+            .Select(t => t!)
             .Distinct()
             .ToList();
-    }
 
     public async Task<int> GetUnsupportedPackageHostCountAsync(CancellationToken cancellationToken)
     {
-        var hosts = await (
+        // Distinct distributions rather than distinct hosts in memory: the number of os-release
+        // pairs across a fleet is tiny, and each carries its own host count.
+        var byDistribution = await (
             from package in _context.InstalledPackages.AsNoTracking()
             join host in _context.Hosts.AsNoTracking() on package.HostId equals host.Id
             where host.DeletedAtUtc == null
-            select new { host.Id, host.OperatingSystemId, host.OperatingSystemVersionId })
-            .Distinct()
-            .ToListAsync(cancellationToken);
+            group host.Id by new { host.OperatingSystemId, host.OperatingSystemVersionId } into grouped
+            select new
+            {
+                grouped.Key.OperatingSystemId,
+                grouped.Key.OperatingSystemVersionId,
+                HostCount = grouped.Distinct().Count()
+            }).ToListAsync(cancellationToken);
 
-        return hosts.Count(h => OsvEcosystem.For(h.OperatingSystemId, h.OperatingSystemVersionId) is null);
+        return byDistribution
+            .Where(d => OsvEcosystem.For(d.OperatingSystemId, d.OperatingSystemVersionId) is null)
+            .Sum(d => d.HostCount);
     }
 
     public async Task<IReadOnlyDictionary<PackageTriple, int>> GetHostCountsByTripleAsync(CancellationToken cancellationToken)
     {
-        var rows = await LiveRowsAsync(cancellationToken);
+        var counts = new Dictionary<PackageTriple, int>();
 
-        return rows
-            .Select(r => new { Ecosystem = OsvEcosystem.For(r.OsId, r.OsVersionId), r.Name, r.Version, r.HostId })
-            .Where(r => r.Ecosystem is not null)
-            .GroupBy(r => new PackageTriple(r.Ecosystem!, r.Name, r.Version))
-            .ToDictionary(g => g.Key, g => g.Select(r => r.HostId).Distinct().Count());
+        foreach (var group in await GroupedAsync(cancellationToken))
+        {
+            var triple = Triple(group);
+            if (triple is null)
+            {
+                continue;
+            }
+
+            // Summed rather than assigned: two distributions can map to one ecosystem (a point
+            // release and its major, say), so the same triple can arrive from two groups.
+            counts[triple] = counts.GetValueOrDefault(triple) + group.HostCount;
+        }
+
+        return counts;
     }
 
     public async Task<IReadOnlyList<Guid>> GetHostIdsForTriplesAsync(
@@ -76,43 +99,71 @@ public class InstalledPackageRepository : IInstalledPackageRepository
             return Array.Empty<Guid>();
         }
 
+        // Filtered in the database on the package half of the triple first, so only rows that
+        // could possibly match are read; the ecosystem half is checked in memory afterwards,
+        // since it is the part OsvEcosystem has to resolve.
+        var names = triples.Select(t => t.Name).Distinct().ToList();
+        var versions = triples.Select(t => t.Version).Distinct().ToList();
         var wanted = triples.ToHashSet();
-        var rows = await LiveRowsAsync(cancellationToken);
+
+        var rows = await (
+            from package in _context.InstalledPackages.AsNoTracking()
+            join host in _context.Hosts.AsNoTracking() on package.HostId equals host.Id
+            where host.DeletedAtUtc == null
+                  && names.Contains(package.Name)
+                  && versions.Contains(package.Version)
+            select new
+            {
+                package.HostId,
+                package.Name,
+                package.Version,
+                host.OperatingSystemId,
+                host.OperatingSystemVersionId
+            })
+            .Distinct()
+            .ToListAsync(cancellationToken);
 
         return rows
-            .Select(r => new { Ecosystem = OsvEcosystem.For(r.OsId, r.OsVersionId), r.Name, r.Version, r.HostId })
-            .Where(r => r.Ecosystem is not null && wanted.Contains(new PackageTriple(r.Ecosystem!, r.Name, r.Version)))
+            .Where(r =>
+            {
+                var ecosystem = OsvEcosystem.For(r.OperatingSystemId, r.OperatingSystemVersionId);
+                return ecosystem is not null && wanted.Contains(new PackageTriple(ecosystem, r.Name, r.Version));
+            })
             .Select(r => r.HostId)
             .Distinct()
             .ToList();
     }
 
-    public async Task<IReadOnlyList<string>> GetHostnamesForTripleAsync(PackageTriple triple, CancellationToken cancellationToken)
-    {
-        var rows = await (
-            from package in _context.InstalledPackages.AsNoTracking()
-            join host in _context.Hosts.AsNoTracking() on package.HostId equals host.Id
-            where host.DeletedAtUtc == null && package.Name == triple.Name && package.Version == triple.Version
-            select new { host.Hostname, host.OperatingSystemId, host.OperatingSystemVersionId })
-            .Distinct()
-            .ToListAsync(cancellationToken);
-
-        return rows
-            .Where(r => OsvEcosystem.For(r.OperatingSystemId, r.OperatingSystemVersionId) == triple.Ecosystem)
-            .Select(r => r.Hostname)
-            .Distinct()
-            .OrderBy(h => h, StringComparer.OrdinalIgnoreCase)
-            .ToList();
-    }
-
-    private async Task<List<PackageRow>> LiveRowsAsync(CancellationToken cancellationToken) =>
+    /// <summary>
+    /// One row per (distribution, package, version) across live hosts, with how many hosts carry
+    /// it — grouped by the database, so the result is thousands of rows rather than the
+    /// host × package cross product.
+    /// </summary>
+    private async Task<List<PackageGroup>> GroupedAsync(CancellationToken cancellationToken) =>
         await (
             from package in _context.InstalledPackages.AsNoTracking()
             join host in _context.Hosts.AsNoTracking() on package.HostId equals host.Id
             where host.DeletedAtUtc == null
-            select new PackageRow(
-                package.HostId, package.Name, package.Version, host.OperatingSystemId, host.OperatingSystemVersionId))
+            group host.Id by new
+            {
+                host.OperatingSystemId,
+                host.OperatingSystemVersionId,
+                package.Name,
+                package.Version
+            } into grouped
+            select new PackageGroup(
+                grouped.Key.OperatingSystemId,
+                grouped.Key.OperatingSystemVersionId,
+                grouped.Key.Name,
+                grouped.Key.Version,
+                grouped.Distinct().Count()))
             .ToListAsync(cancellationToken);
 
-    private record PackageRow(Guid HostId, string Name, string Version, string? OsId, string? OsVersionId);
+    private static PackageTriple? Triple(PackageGroup group)
+    {
+        var ecosystem = OsvEcosystem.For(group.OsId, group.OsVersionId);
+        return ecosystem is null ? null : new PackageTriple(ecosystem, group.Name, group.Version);
+    }
+
+    private record PackageGroup(string? OsId, string? OsVersionId, string Name, string Version, int HostCount);
 }

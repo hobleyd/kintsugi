@@ -300,6 +300,7 @@ abstract interface class VulnerabilitySettingsRepository {
     required bool clearNvdApiKey,
     required int? syncIntervalHours,
     required int? assessmentsPerRun,
+    required int? packagesPerRun,
     required bool? autoSuggestCpes,
   });
 }

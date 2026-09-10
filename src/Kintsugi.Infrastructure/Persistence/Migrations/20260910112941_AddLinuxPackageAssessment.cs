@@ -11,6 +11,14 @@ namespace Kintsugi.Infrastructure.Persistence.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
+            migrationBuilder.AddColumn<int>(
+                name: "PackagesPerRun",
+                schema: "patching",
+                table: "vulnerability_settings",
+                type: "integer",
+                nullable: false,
+                defaultValue: 0);
+
             migrationBuilder.CreateTable(
                 name: "installed_packages",
                 schema: "patching",
@@ -167,6 +175,11 @@ namespace Kintsugi.Infrastructure.Persistence.Migrations
             migrationBuilder.DropTable(
                 name: "package_assessments",
                 schema: "patching");
+
+            migrationBuilder.DropColumn(
+                name: "PackagesPerRun",
+                schema: "patching",
+                table: "vulnerability_settings");
         }
     }
 }

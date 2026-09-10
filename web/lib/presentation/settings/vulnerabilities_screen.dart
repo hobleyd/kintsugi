@@ -43,6 +43,7 @@ class _VulnerabilitiesFormState extends State<_VulnerabilitiesForm> {
   final _nvdApiKey = TextEditingController();
   final _syncIntervalHours = TextEditingController();
   final _assessmentsPerRun = TextEditingController();
+  final _packagesPerRun = TextEditingController();
 
   bool _enabled = false;
   bool _clearNvdApiKey = false;
@@ -54,18 +55,21 @@ class _VulnerabilitiesFormState extends State<_VulnerabilitiesForm> {
   /// that silently did not change.
   String? _syncIntervalError;
   String? _assessmentsPerRunError;
+  String? _packagesPerRunError;
 
   @override
   void dispose() {
     _nvdApiKey.dispose();
     _syncIntervalHours.dispose();
     _assessmentsPerRun.dispose();
+    _packagesPerRun.dispose();
     super.dispose();
   }
 
   void _hydrate(VulnerabilitySettings settings) {
     _syncIntervalHours.text = settings.syncIntervalHours.toString();
     _assessmentsPerRun.text = settings.assessmentsPerRun.toString();
+    _packagesPerRun.text = settings.packagesPerRun.toString();
 
     // Never repopulate the key field, even after a successful save: the value was never sent here
     // in the first place, and echoing a submitted one back would leave it sitting in the form.
@@ -76,14 +80,16 @@ class _VulnerabilitiesFormState extends State<_VulnerabilitiesForm> {
       _clearNvdApiKey = false;
       _syncIntervalError = null;
       _assessmentsPerRunError = null;
+      _packagesPerRunError = null;
     });
   }
 
   void _edited() {
-    if (_syncIntervalError != null || _assessmentsPerRunError != null) {
+    if (_syncIntervalError != null || _assessmentsPerRunError != null || _packagesPerRunError != null) {
       setState(() {
         _syncIntervalError = null;
         _assessmentsPerRunError = null;
+        _packagesPerRunError = null;
       });
     }
     context.read<VulnerabilitySettingsBloc>().add(const VulnerabilitySettingsEdited());
@@ -94,13 +100,19 @@ class _VulnerabilitiesFormState extends State<_VulnerabilitiesForm> {
     final perRunText = _assessmentsPerRun.text.trim();
     final interval = intervalText.isEmpty ? null : int.tryParse(intervalText);
     final perRun = perRunText.isEmpty ? null : int.tryParse(perRunText);
+    final packagesText = _packagesPerRun.text.trim();
+    final packages = packagesText.isEmpty ? null : int.tryParse(packagesText);
 
-    if ((intervalText.isNotEmpty && interval == null) || (perRunText.isNotEmpty && perRun == null)) {
+    if ((intervalText.isNotEmpty && interval == null)
+        || (perRunText.isNotEmpty && perRun == null)
+        || (packagesText.isNotEmpty && packages == null)) {
       setState(() {
         _syncIntervalError =
             intervalText.isNotEmpty && interval == null ? 'Enter a whole number of hours.' : null;
         _assessmentsPerRunError =
             perRunText.isNotEmpty && perRun == null ? 'Enter a whole number.' : null;
+        _packagesPerRunError =
+            packagesText.isNotEmpty && packages == null ? 'Enter a whole number.' : null;
       });
       return;
     }
@@ -111,6 +123,7 @@ class _VulnerabilitiesFormState extends State<_VulnerabilitiesForm> {
           clearNvdApiKey: _clearNvdApiKey,
           syncIntervalHours: interval,
           assessmentsPerRun: perRun,
+          packagesPerRun: packages,
           autoSuggestCpes: _autoSuggestCpes,
         ));
   }
@@ -213,6 +226,24 @@ class _VulnerabilitiesFormState extends State<_VulnerabilitiesForm> {
                         onChanged: (_) => _edited(),
                       ),
                     ),
+                    LabelledField(
+                      label: 'Linux packages checked per run',
+                      hints: const [
+                        HintText(
+                          'Its own figure, an order of magnitude larger than the one above, '
+                          'because the two are limited by different things: NVD allows a handful '
+                          'of requests a minute and takes one version at a time, while the '
+                          'database covering Linux packages takes two hundred per call and '
+                          'rate-limits nothing. Between 10 and 50000.',
+                        ),
+                      ],
+                      child: KintsugiTextField(
+                        controller: _packagesPerRun,
+                        hintText: '4000',
+                        errorText: _packagesPerRunError ?? state.settings.errorFor('PackagesPerRun'),
+                        onChanged: (_) => _edited(),
+                      ),
+                    ),
                     const SubHeadingTight('CPE mapping'),
                     KintsugiCheckbox(
                       label: 'Let the AI agent propose a CPE for applications it recognises',
@@ -262,10 +293,19 @@ class _VulnerabilitiesFormState extends State<_VulnerabilitiesForm> {
                     ),
                     SizedBox(height: 12),
                     HintText(
-                      'For a Linux distribution NVD holds far less than the distribution’s own '
-                      'security tracker does, because most Linux CVEs are filed per source '
-                      'package. Kintsugi does not inventory dpkg or rpm packages, so what is '
-                      'assessed there is the release itself.',
+                      'Linux hosts are assessed twice over. The release itself goes to NVD, which '
+                      'holds little about a distribution; the packages apt or dnf installed go to '
+                      'a database of the distributions’ own advisories, which is the one that '
+                      'matters — and which accounts for backported fixes, so a version your '
+                      'distribution has already patched is not reported as vulnerable. Packages '
+                      'need no CPE confirmation: a distribution’s own package name is '
+                      'unambiguous.',
+                    ),
+                    SizedBox(height: 12),
+                    HintText(
+                      'Those packages are recorded for assessment only. They never appear on the '
+                      'Applications screen, are never given an upgrade script, and are never '
+                      'patched by this system — apt and dnf remain outside what Kintsugi updates.',
                     ),
                   ],
                 ),

@@ -1221,6 +1221,9 @@ namespace Kintsugi.Infrastructure.Persistence.Migrations
                         .HasMaxLength(512)
                         .HasColumnType("character varying(512)");
 
+                    b.Property<int>("PackagesPerRun")
+                        .HasColumnType("integer");
+
                     b.Property<int>("SyncIntervalHours")
                         .HasColumnType("integer");
 

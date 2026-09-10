@@ -41,9 +41,6 @@ public interface IInstalledPackageRepository
     /// so a host exposed by both a package and an application is counted once.</summary>
     Task<IReadOnlyList<Guid>> GetHostIdsForTriplesAsync(
         IReadOnlyCollection<PackageTriple> triples, CancellationToken cancellationToken);
-
-    /// <summary>The hostnames running one triple, loaded only when a finding is expanded.</summary>
-    Task<IReadOnlyList<string>> GetHostnamesForTripleAsync(PackageTriple triple, CancellationToken cancellationToken);
 }
 
 /// <param name="Ecosystem">The OSV ecosystem, resolved from the host's os-release facts by

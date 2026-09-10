@@ -25,6 +25,7 @@ final class VulnerabilitySettingsSaveRequested extends VulnerabilitySettingsEven
     required this.clearNvdApiKey,
     required this.syncIntervalHours,
     required this.assessmentsPerRun,
+    required this.packagesPerRun,
     required this.autoSuggestCpes,
   });
 
@@ -37,11 +38,12 @@ final class VulnerabilitySettingsSaveRequested extends VulnerabilitySettingsEven
 
   final int? syncIntervalHours;
   final int? assessmentsPerRun;
+  final int? packagesPerRun;
   final bool autoSuggestCpes;
 
   @override
   List<Object?> get props =>
-      [enabled, nvdApiKey, clearNvdApiKey, syncIntervalHours, assessmentsPerRun, autoSuggestCpes];
+      [enabled, nvdApiKey, clearNvdApiKey, syncIntervalHours, assessmentsPerRun, packagesPerRun, autoSuggestCpes];
 }
 
 final class VulnerabilitySettingsEdited extends VulnerabilitySettingsEvent {
@@ -159,6 +161,7 @@ class VulnerabilitySettingsBloc extends Bloc<VulnerabilitySettingsEvent, Vulnera
         clearNvdApiKey: event.clearNvdApiKey,
         syncIntervalHours: event.syncIntervalHours,
         assessmentsPerRun: event.assessmentsPerRun,
+        packagesPerRun: event.packagesPerRun,
         autoSuggestCpes: event.autoSuggestCpes,
       );
       emit(state.copyWith(settings: state.settings.copyWith(value: saved, saving: false, saved: true)));

@@ -12,7 +12,7 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace Kintsugi.Infrastructure.Persistence.Migrations
 {
     [DbContext(typeof(ApplicationDbContext))]
-    [Migration("20260910110841_AddLinuxPackageAssessment")]
+    [Migration("20260910112941_AddLinuxPackageAssessment")]
     partial class AddLinuxPackageAssessment
     {
         /// <inheritdoc />
@@ -1223,6 +1223,9 @@ namespace Kintsugi.Infrastructure.Persistence.Migrations
                     b.Property<string>("NvdApiKey")
                         .HasMaxLength(512)
                         .HasColumnType("character varying(512)");
+
+                    b.Property<int>("PackagesPerRun")
+                        .HasColumnType("integer");
 
                     b.Property<int>("SyncIntervalHours")
                         .HasColumnType("integer");
