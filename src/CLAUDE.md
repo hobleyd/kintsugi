@@ -340,7 +340,54 @@ report nearly all of them against a patched machine. Linux needs os-release's `I
 because `PRETTY_NAME` is prose. One limit no agent release fixes: NVD's coverage of a Linux
 distribution *as an operating system* is thin — `canonical:ubuntu_linux:24.04` answers 25 CVEs
 against macOS 14.5's 1138 — because the real Linux surface is per source package and lives in the
-distributions' own trackers, which this system has no dpkg/rpm inventory to join to.
+distributions' own trackers. Those are now reachable — the Linux agent reports its dpkg/rpm
+inventory and the package stage below asks OSV about it — so the *release-level* answer here
+remains thin while the useful one comes from packages.
+
+
+### Linux packages: a second source, because NVD cannot answer this question
+
+**Distribution packages are assessed against OSV, never against NVD's CPE ranges, and that is a
+correctness requirement rather than a preference.** Distributions backport security fixes without
+changing the upstream version, so a CPE match on a dpkg version reports CVEs that were fixed
+months ago. Verified against the live API and then end to end through this code: Ubuntu 22.04's
+`openssl` answers 49 matches at `3.0.2-0ubuntu1.15` and 41 at `3.0.2-0ubuntu1.19` — the same
+upstream 3.0.2 either way. `PackageAssessment` exists separately from `CpeAssessment` for this
+reason; do not unify them.
+
+**The package name is the *source* package.** `libssl3` answers 0 vulnerabilities on Ubuntu 22.04
+where its source `openssl` answers 48, and `libc6` answers 0 where `glibc` answers 38 — OSV and
+the distributions both key on source packages. The agent reads `${source:Package}` from dpkg and
+parses rpm's from `%{SOURCERPM}`. Reporting binary names would under-report nearly everything
+while looking like it worked.
+
+**A package needs no mapping queue, unlike an application.** A CPE has to be confirmed by a human
+because "slack" could be Slackware; a distribution's own source-package name is unambiguous, so
+packages produce findings the moment they are reported. That also means a Linux-only fleet has
+real coverage with zero confirmed `CpeMapping`s — which is why `VulnerabilitySummaryDto` carries
+`AssessedPackageCount` and the screen's "nothing looked at yet" test reads both.
+
+**Query by name and ecosystem, never by purl, and batch per ecosystem.** `pkg:rpm/rocky/...`
+answers nothing where `{name, ecosystem: "Rocky Linux:9"}` answers ten. And OSV validates the
+ecosystem — an unrecognized one fails with **400 "invalid ecosystem"**, not with an empty result,
+which is the good failure: it is how a distribution OSV does not cover (Fedora) surfaces as a
+stated gap rather than as a clean host. Since that 400 fails the *whole* batch, batches are built
+per ecosystem so one unsupported distribution cannot take every other host's answer with it.
+
+**Most OSV identifiers name their own CVE; the ones that do not are cached forever.**
+`UBUNTU-CVE-2024-2511` needs no lookup (`OsvAdvisory.CveFromIdentifier`), but `USN-7980-1` stands
+for twelve CVEs and `RLSA-2022:7288` for two, and only their records say so. `osv_advisories`
+caches the answer including "no CVE at all", which is a real case for a distribution-only
+advisory and would otherwise be re-fetched every run. The CVE id is read from OSV's `upstream`
+field — `aliases` is read too, but every record checked carried them in `upstream`.
+
+**The package list rides in `POST /api/applications` and must never sink it.**
+`RegisterApplicationsCommandValidator.MaxPackages` (10000) sits deliberately above each agent's
+`MAX_REPORTED_PACKAGES` (5000) — the same asymmetry `MaxDetailsLength` keeps against
+`MAX_REPORTED_FAILURE_BYTES`, and for a sharper reason: the packages travel in the same request
+as the application inventory, so a report rejected for being one package over would take that
+host's applications down with it and leave the Applications screen quietly wrong. Raise the
+server's figure before raising the agents', never after.
 
 
 ## Audit event shipping: the Auditing settings
@@ -413,8 +460,16 @@ curl" depends on which repositories *that* host has configured, and one `pm:APT`
 Debian 12 and Ubuntu 24.04 overwriting each other's answer forever. So they are deliberately absent,
 and the Linux agent reports what they manage as *OS updates* instead: `apt`/`dnf` is to Linux what
 `softwareupdate` is to macOS — it patches the operating system and everything the vendor ships with
-it. That is why the Linux inventory lists only Flatpak and Snap applications and never dpkg/rpm
-packages, and it is not a gap. See its `os_update` and `main::collect_installed_applications`.
+it. That is why the Linux inventory lists only Flatpak and Snap **applications**, and it is not a
+gap. See its `os_update` and `main::collect_installed_applications`.
+
+**That reasoning is about patchability, and it survives the package inventory added later.** The
+Linux agent does now report every dpkg/rpm package — but as `InstalledPackage`, into its own
+table, purely so the vulnerability assessment can ask a distribution's advisories about it. No
+`upgrade_paths` row is created, nothing is offered to the AI, nothing is patchable, and nothing
+appears on the Applications screen. apt and dnf are still absent from `PackageManagerCatalog` for
+exactly the reason above, and reporting an inventory asks nothing of that catalogue. Do not read
+the package table as an invitation to add them.
 
 Every `*UpgradeScript.Build` must return **byte-identical content for every application** — the
 name and id are read from `--appName`/`--appId` at runtime, never baked in. That is what lets one

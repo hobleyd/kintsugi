@@ -83,7 +83,7 @@ original — then the others for what each platform forced to differ. The differ
 | Per-user half | LaunchAgent | logon-triggered task for `BUILTIN\Users` | systemd user unit, `graphical-session.target` |
 | Check-in schedule | rewrites its own plist, reloads launchd via a detached helper | computes its next wake in-process | rewrites its own `.timer`, `daemon-reload` |
 | Privilege handoff | queue: OS updates, AI-researched scripts and App Store rows; Homebrew stays per-user | queue, everything | queue, everything |
-| Inventory | `/Applications` bundles + Homebrew + App Store (by receipt) | uninstall registry (3 views) + winget + Chocolatey | Flatpak + Snap (not dpkg/rpm — see "Platform buckets" in src/CLAUDE.md) |
+| Inventory | `/Applications` bundles + Homebrew + App Store (by receipt) | uninstall registry (3 views) + winget + Chocolatey | Flatpak + Snap as *applications*; dpkg/rpm reported separately as packages (see below) |
 | OS updates | `softwareupdate` | Windows Update Agent COM API, via PowerShell | apt / dnf / yum / zypper / pacman / apk |
 | Host identity | hardware serial, always present | SMBIOS serial, **often a placeholder** | DMI serial, **often a placeholder** |
 | Nobody logged in | nothing patches | nothing patches | root service patches unattended — see below |
@@ -502,3 +502,32 @@ the point release in the first is not a version NVD indexes by. `system_info::os
 takes both keys from the *same* file — `/etc/os-release` shadows `/usr/lib/os-release` rather than
 merging with it, so taking `VERSION_ID` from the second while `ID` came from the first could pair a
 distribution with another's version.
+
+## Linux operating-system packages
+
+**The Linux agent reports its dpkg or rpm inventory, and it is not part of the application
+inventory.** `system_info::scan_os_packages` fills `RegisterApplicationsRequest.packages`, a
+separate list from `applications`, which the server stores in a separate table. They exist only
+so the vulnerability assessment can ask a distribution's own advisories about them: they never
+reach the Applications screen, never grow an `upgrade_paths` row, are never offered to the AI and
+are never patched. This does **not** make apt or dnf a package manager this system patches
+through — that decision is unchanged and is about something else (see "Platform buckets" in
+src/CLAUDE.md).
+
+**Source packages, not binary ones, and this is the part to get right.** Distributions track CVEs
+against source packages and so does OSV: on Ubuntu 22.04 the binary `libssl3` answers **0**
+vulnerabilities while its source `openssl` answers **48**, and `libc6` answers 0 where `glibc`
+answers 38. So dpkg is asked for `${source:Package}`/`${source:Version}` — never `${Package}` —
+and rpm's source name is parsed out of `%{SOURCERPM}` by stripping two hyphen-separated fields
+from the *right*, which is rpm's own filename grammar and the only split that survives a name
+containing hyphens (`xorg-x11-server-21.1.13-3.el9.src.rpm`). Reporting binary names would
+silently under-report almost everything, which is worse than reporting nothing because the screen
+would look clean.
+
+**`${db:Status-Status}` is checked**, because `dpkg-query -W` also lists `rc` packages — removed,
+configuration files still present. Those are not installed software.
+
+**`MAX_REPORTED_PACKAGES` (5000) sits below the server's own ceiling (10000) on purpose.** The
+package list travels in the same request as the application inventory, so a report rejected for
+being one package over the line would take that host's applications down with it. The agent
+truncates and warns instead. Raise the server's figure before raising this one, never after.

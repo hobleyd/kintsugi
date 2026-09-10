@@ -26,6 +26,22 @@ Nothing in CI cross-checks them, because the client and the agents are compiled 
   revision `.0` for a missing Windows build, both turn "no answer" into a wrong answer — and NVD
   matches Windows CVEs on the revision, so `.0` reports nearly every Windows CVE ever filed
   against a fully patched machine.
+- **`RegisterApplicationsCommand.Packages` is a second such exception, and it carries a size
+  coupling as well as a shape one.** Only the Linux agent sends it (macOS and Windows have no
+  equivalent inventory), and it is `Option`/nullable on both ends so that null means "this agent
+  does not report them" while an empty list means "this host has none" — a real difference on a
+  mixed fleet, where the wrong reading would let an older agent wipe what a newer one reported
+  from the same machine. The size coupling:
+  `RegisterApplicationsCommandValidator.MaxPackages` (10000) must stay **above** the Linux
+  agent's `system_info::MAX_REPORTED_PACKAGES` (5000), because the packages ride in the same
+  request as the application inventory — a report rejected for being one package over the line
+  takes that host's applications down with it and leaves the Applications screen quietly wrong,
+  with nothing but a log line to say so. Raise the server's figure first, never the agent's. Same
+  asymmetry, same direction, as `MaxDetailsLength` against `MAX_REPORTED_FAILURE_BYTES`.
+- **The package entries are source-package names, and that is a contract not a convention.** The
+  server hands them straight to OSV, which keys on source packages: `libssl3` answers 0
+  vulnerabilities on Ubuntu 22.04 where `openssl` answers 48. An agent "helpfully" switched to
+  binary names would under-report nearly everything with no error anywhere.
 - Rust structs are not the only hand-mirrored copies of a C# shape any more: `web/lib/data/models/`
   maps every DTO the admin UI reads, and `web/lib/domain/entities/enums.dart` mirrors the enums in
   declaration order because several of them cross the wire as ordinals. Changing a DTO's JSON shape

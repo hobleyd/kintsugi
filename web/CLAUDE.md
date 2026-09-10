@@ -491,6 +491,19 @@ every button on the page. The screen says why the search results are candidates 
 answer — "slack" ranks Slackware Linux first — because a reviewer who takes the top hit on trust
 is the failure mode the whole review step exists to prevent.
 
+**A finding says which database answered it, and that is not decoration.** An application is
+matched by version range against NVD; a Linux distribution package is matched against its own
+distribution's advisories, which account for backported fixes. The two claims mean different
+things, so `VulnerabilitySubjectKind.sourceLabel` states which one a reader is looking at, once
+per kind on an expanded finding. That enum is deliberately separate from `CpeSubjectKind` —
+a package has no CPE mapping at all — though their first two ordinals match on purpose and a
+test pins that.
+
+**`hasAnyCoverage` counts assessed packages as well as confirmed mappings.** A Linux-only fleet
+is fully assessed with zero `CpeMapping`s confirmed, because a distribution's source-package name
+needs no review; reading only `confirmedSubjectCount` would tell that fleet nothing had been
+looked at.
+
 **`PageNavigator.openInNewTab` exists for the links out to NVD.** `go` replaces the current page,
 which would lose whatever the administrator was reading; the new method goes through the same
 interface rather than reaching for `package:web`, because `BrowserPageNavigator` is deliberately
