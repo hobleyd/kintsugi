@@ -98,7 +98,7 @@ sequenceDiagram
         Note over Root: Returns here. The plist is gone,<br/>so the schedule is NOT rewritten.
     else normal check-in
         Root->>Root: scan installed applications (bundles, Homebrew, App Store by receipt)
-        Root->>Nginx: POST /api/applications {serialNumber, applications, packages}
+        Root->>Nginx: POST /api/applications {serialNumber, applications}
         Nginx->>Api: forward
         Api->>Api: delete and recreate this host's installed_applications rows
         Api->>Api: seed or update upgrade_paths for recognized package managers
@@ -239,6 +239,7 @@ sequenceDiagram
     participant Ci as GitHub Actions
     participant Gh as GitHub Releases
     participant Ui as Admin UI
+    participant Nginx as nginx
     participant Api as API
     participant Sign as ArtifactSigningService
     participant Store as Package storage
@@ -262,12 +263,15 @@ sequenceDiagram
     Api-->>Ui: the whole Clients screen state, plus per-platform outcomes
 
     Note over Agent: Later, at the end of a check-in (flow 2).
-    Agent->>Api: GET /api/agent-packages/{platform}/latest
+    Agent->>Nginx: GET /api/agent-packages/{platform}/latest
+    Nginx->>Api: forward
     Api-->>Agent: version, sha256, sha256Signature
     alt version differs from its own
         Agent->>Agent: verify the signed checksum against the pinned signing key
-        Agent->>Api: GET /api/agent-packages/{platform}/download (with its client cert)
-        Note over Api: A verified agent cert gets the archive byte-for-byte.<br/>An anonymous browser gets the enrollment token<br/>substituted in, which changes the bytes.
+        Agent->>Nginx: GET /api/agent-packages/{platform}/download, presenting its client cert
+        Note over Nginx: Outside the exact-match regex, so no cert is REQUIRED —<br/>but ssl_verify_client optional still verifies one that is offered.
+        Nginx->>Api: forward + X-Agent-Cert-Verified: SUCCESS
+        Note over Api: That header is the whole branch.<br/>SUCCESS returns the archive byte-for-byte.<br/>Anything else gets the enrollment token substituted<br/>into config.toml, which changes the bytes.
         Api-->>Agent: archive
         Agent->>Agent: hash the download, compare against the signed checksum
         Agent->>Agent: extract and install over the running binary
@@ -468,7 +472,7 @@ sequenceDiagram
     Note over Bg,Kev: Stage 1 — KEV refresh
     Bg->>Kev: fetch the Known Exploited Vulnerabilities catalogue
     Bg->>Db: ApplyKevEntry on each CVE, withdraw flags CISA no longer lists
-    Note over Bg,Db: A failed fetch withdraws nothing —<br/>"the download failed" is not "CISA delisted this".
+    Note over Bg,Db: A failed fetch withdraws nothing —<br/>the download failed is not the same fact as CISA delisted this.
     Bg->>Db: commit
     end
 
@@ -515,7 +519,7 @@ sequenceDiagram
         Bg->>Osv: query by {name, ecosystem}, never by purl
         Note over Osv: An unrecognized ecosystem fails the WHOLE batch with 400,<br/>which is why batches are not mixed.
         Osv-->>Bg: advisories
-        Bg->>Bg: resolve USN-/RLSA- style ids to CVEs, cached forever including "no CVE"
+        Bg->>Bg: resolve USN-/RLSA- style ids to CVEs, cached forever, the no-CVE answer included
         Bg->>Db: upsert, replace matches, commit
     end
     end

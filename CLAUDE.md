@@ -69,6 +69,12 @@ a file in that directory:
 | `clients/linux-agent-wayland/CLAUDE.md` | The portal, PipeWire, and the one binary in this fleet with a libc floor |
 | `nginx/CLAUDE.md` | Location precedence, client-certificate verification, the 495/496 remap |
 
+`ARCHITECTURE.md` at the root is the one file that is not scoped to a directory and not loaded
+automatically: sequence diagrams for the six flows — enrolment, check-in, patching, client updates,
+script creation and approval, vulnerability management — showing who calls whom in what order. It
+holds no reasoning of its own and names the `CLAUDE.md` that owns each detail instead, so read it to
+find your way to the right file, not to learn why anything is the way it is.
+
 Couplings that have **two ends in different directories** are path-scoped rules in `.claude/rules/`.
 They load when Claude reads a file at *either* end, which directory-scoped files cannot do:
 
