@@ -499,6 +499,13 @@ per kind on an expanded finding. That enum is deliberately separate from `CpeSub
 a package has no CPE mapping at all — though their first two ordinals match on purpose and a
 test pins that.
 
+**A score marked "calculated" was computed here, not published by NVD.** OSV carries a CVSS
+vector and no number, so a CVE found only through a Linux package is scored from its vector —
+which is exact arithmetic, not an estimate. The marker is there because the *vector* may be the
+distribution's analysis rather than NVD's, and the full vector is shown on the expanded row so
+the number is checkable against its input. Do not drop the marker on the grounds that the score
+is correct; it is, and that is not what the marker is about.
+
 **`hasAnyCoverage` counts assessed packages as well as confirmed mappings.** A Linux-only fleet
 is fully assessed with zero `CpeMapping`s confirmed, because a distribution's source-package name
 needs no review; reading only `confirmedSubjectCount` would tell that fleet nothing had been

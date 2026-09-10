@@ -309,6 +309,14 @@ class _SeverityCell extends StatelessWidget {
           finding.cvssBaseScore!.toStringAsFixed(1),
           style: Theme.of(context).textTheme.bodyMedium,
         ),
+        // Marked, not hidden. The number is exact for the vector it was computed from, but that
+        // vector is the distribution's analysis rather than NVD's, and the two can differ.
+        if (finding.cvssDerivedFromVector)
+          const Tooltip(
+            message: 'Computed from the advisory’s own CVSS vector, which is shown in full when '
+                'this row is expanded. NVD has published no score for this CVE.',
+            child: HintText('calculated'),
+          ),
       ],
     );
   }
@@ -377,7 +385,14 @@ class _FindingDetail extends StatelessWidget {
                 if (finding.cvssVector != null)
                   // Verbatim, and linked out rather than paraphrased into words: the vector is
                   // the precise claim, and NVD's own page is where the configuration ranges live.
+                  // It is also what a derived score is checkable against.
                   CodeText('CVSS v${finding.cvssVersion ?? '?'} ${finding.cvssVector}'),
+                if (finding.cvssDerivedFromVector)
+                  const HintText(
+                    'Score calculated from that vector — a CVSS base score is a fixed function of '
+                    'its vector — because NVD has published none. The vector is the distribution’s '
+                    'own analysis.',
+                  ),
                 LinkText(label: 'View on NVD', onTap: () => _openExternal(finding.nvdUrl)),
               ],
             ),

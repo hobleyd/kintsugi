@@ -17,6 +17,9 @@ public class OsvAdvisoryConfiguration : IEntityTypeConfiguration<OsvAdvisory>
         // column is sized for it rather than for the common one or two.
         builder.Property(a => a.CveIds).IsRequired().HasMaxLength(1024);
 
+        // A v3.1 base vector is 44 characters; temporal and environmental metrics can follow it.
+        builder.Property(a => a.CvssVector).HasMaxLength(255);
+
         builder.Ignore(a => a.Cves);
 
         builder.HasIndex(a => a.OsvId).IsUnique();

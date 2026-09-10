@@ -381,6 +381,34 @@ caches the answer including "no CVE at all", which is a real case for a distribu
 advisory and would otherwise be re-fetched every run. The CVE id is read from OSV's `upstream`
 field — `aliases` is read too, but every record checked carried them in `upstream`.
 
+**A CVE found only through a package would otherwise have no score, so one is computed.** OSV
+answers "this version is affected" and carries the advisory's CVSS *vector*; the base *score* is
+something NVD publishes. Left alone, the majority of a Linux fleet's findings would sit on the
+screen as "Unscored" — unsortable, unbandable — with everything needed to score them already
+downloaded. `CvssVector.Score` computes it.
+
+That is arithmetic, not estimation, and the distinction is the whole justification: a CVSS base
+score is a pure function of its vector, specified exactly by FIRST, so the number computed here
+for a vector is the number NVD publishes for that same vector. Verified end to end —
+CVE-2023-4911 derived as 7.8 HIGH v3.1 from Ubuntu's advisory, against NVD's published 7.8 HIGH
+v3.1, from an identical vector. Compare `VantaResourceBuilder`, which refuses to derive a
+severity: staleness has no such formula behind it, and that is exactly why one is refused there
+and computed here.
+
+Three rules hold it together. **NVD always wins** — `ApplyDerivedScore` returns early if a score
+is already held, and `ApplyNvdRecord` overwrites unconditionally *but only when NVD actually has a
+score*, so a re-run of an unanalysed CVE cannot blank a derived one. **The vector is always
+stored**, so the number is checkable against its input. And **`CvssDerivedFromVector` is on the
+wire and on the screen**, because the vector may be the distribution's analysis rather than NVD's
+and two analysts can reach different vectors for one CVE. Only v3.0 and v3.1 are computed; v4.0
+needs a MacroVector table and v2 is a different formula, and for either the score stays null
+rather than being guessed.
+
+The fetch that supplies the vector is **demand-driven**: an identifier that names its own CVE and
+whose CVE already has a score costs nothing, and every fetch is cached in `osv_advisories`
+permanently, so the expense shrinks each run. `OsvFetchesPerRun` bounds it because these are
+sequential where the batch query is not.
+
 **The package list rides in `POST /api/applications` and must never sink it.**
 `RegisterApplicationsCommandValidator.MaxPackages` (10000) sits deliberately above each agent's
 `MAX_REPORTED_PACKAGES` (5000) — the same asymmetry `MaxDetailsLength` keeps against

@@ -32,11 +32,16 @@ public class OsvAdvisory : BaseEntity
     /// uninteresting case rather than a failure, and is cached so it is not re-fetched.</summary>
     public string CveIds { get; private set; } = string.Empty;
 
+    /// <summary>The CVSS vector this advisory carries, when it carries one. Cached beside the CVE
+    /// ids because it arrives in the same fetch, and because it is what a base score is derived
+    /// from when NVD has published none — see <c>CvssVector</c>.</summary>
+    public string? CvssVector { get; private set; }
+
     private OsvAdvisory()
     {
     }
 
-    public static OsvAdvisory Create(string osvId, IEnumerable<string> cveIds)
+    public static OsvAdvisory Create(string osvId, IEnumerable<string> cveIds, string? cvssVector = null)
     {
         if (string.IsNullOrWhiteSpace(osvId))
         {
@@ -46,13 +51,15 @@ public class OsvAdvisory : BaseEntity
         return new OsvAdvisory
         {
             OsvId = osvId.Trim(),
-            CveIds = string.Join(' ', Normalize(cveIds))
+            CveIds = string.Join(' ', Normalize(cveIds)),
+            CvssVector = string.IsNullOrWhiteSpace(cvssVector) ? null : cvssVector.Trim()
         };
     }
 
-    public void Update(IEnumerable<string> cveIds)
+    public void Update(IEnumerable<string> cveIds, string? cvssVector = null)
     {
         CveIds = string.Join(' ', Normalize(cveIds));
+        CvssVector = string.IsNullOrWhiteSpace(cvssVector) ? null : cvssVector.Trim();
         MarkUpdated();
     }
 

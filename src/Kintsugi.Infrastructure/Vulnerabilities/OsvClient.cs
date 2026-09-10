@@ -103,7 +103,7 @@ public class OsvClient : IOsvClient
             .ToList();
     }
 
-    public async Task<IReadOnlyList<string>> GetCveIdsAsync(string osvId, CancellationToken cancellationToken)
+    public async Task<OsvAdvisoryRecord> GetAdvisoryAsync(string osvId, CancellationToken cancellationToken)
     {
         VulnRecord? record;
         try
@@ -117,7 +117,7 @@ public class OsvClient : IOsvClient
 
         if (record is null)
         {
-            return Array.Empty<string>();
+            return new OsvAdvisoryRecord(Array.Empty<string>(), null);
         }
 
         // Both fields, plus the identifier itself. Every record checked carried its CVEs in
@@ -141,7 +141,15 @@ public class OsvClient : IOsvClient
             _logger.LogDebug("OSV record {OsvId} names no CVE", osvId);
         }
 
-        return cves;
+        // Only CVSS entries. OSV also carries the distributions' own bands — Ubuntu publishes
+        // "low"/"high" alongside the vector — and those are a different scale with no formula
+        // behind them, so they are not treated as severity here.
+        var vector = record.Severity?
+            .FirstOrDefault(s => s.Type?.StartsWith("CVSS", StringComparison.OrdinalIgnoreCase) == true
+                                 && s.Score?.StartsWith("CVSS:", StringComparison.OrdinalIgnoreCase) == true)?
+            .Score;
+
+        return new OsvAdvisoryRecord(cves, vector);
     }
 
     /// <summary>Keeps an error body short enough to sit in a table cell and a log line.</summary>
@@ -167,5 +175,10 @@ public class OsvClient : IOsvClient
     private record VulnRecord(
         [property: JsonPropertyName("id")] string? Id,
         [property: JsonPropertyName("aliases")] IReadOnlyList<string>? Aliases,
-        [property: JsonPropertyName("upstream")] IReadOnlyList<string>? Upstream);
+        [property: JsonPropertyName("upstream")] IReadOnlyList<string>? Upstream,
+        [property: JsonPropertyName("severity")] IReadOnlyList<OsvSeverity>? Severity);
+
+    private record OsvSeverity(
+        [property: JsonPropertyName("type")] string? Type,
+        [property: JsonPropertyName("score")] string? Score);
 }

@@ -43,21 +43,31 @@ public interface IOsvClient
         IReadOnlyList<OsvPackageQuery> queries, CancellationToken cancellationToken);
 
     /// <summary>
-    /// The CVE identifiers one OSV record stands for.
+    /// One OSV record's CVE identifiers and its CVSS vector.
     /// </summary>
     /// <remarks>
-    /// Needed only for identifiers that do not name their CVE themselves — the RHEL family's
-    /// <c>RLSA-2022:7288</c> stands for two CVEs and says so nowhere in its name, while
-    /// <c>UBUNTU-CVE-2024-2511</c> needs no lookup at all (see
-    /// <c>OsvAdvisory.CveFromIdentifier</c>). The answer is cached in <c>osv_advisories</c>,
-    /// because it never changes.
+    /// Fetched for two reasons, and either alone is enough: an identifier that does not name its
+    /// own CVE (the RHEL family's <c>RLSA-2022:7288</c> stands for two and says so nowhere in its
+    /// name), or a CVE that still has no score. <c>UBUNTU-CVE-2024-2511</c> needs no fetch for
+    /// the first reason (see <c>OsvAdvisory.CveFromIdentifier</c>) but may still need one for the
+    /// second. The answer is cached in <c>osv_advisories</c>, because it never changes.
     ///
     /// Reads OSV's <c>upstream</c> and <c>aliases</c> both: every record checked carried its CVEs
     /// in <c>upstream</c> and none in <c>aliases</c>, but <c>aliases</c> is the older and more
     /// widely populated field and other ecosystems use it.
+    ///
+    /// The vector is the other half of why this fetch is worth making. OSV publishes no base
+    /// score — the distributions' advisories carry a vector and leave the number to NVD — so
+    /// without it a CVE found only through a Linux package would stay unscored forever. See
+    /// <c>CvssVector</c>, which turns the vector into the score.
     /// </remarks>
-    Task<IReadOnlyList<string>> GetCveIdsAsync(string osvId, CancellationToken cancellationToken);
+    Task<OsvAdvisoryRecord> GetAdvisoryAsync(string osvId, CancellationToken cancellationToken);
 }
+
+/// <param name="CvssVector">The first CVSS v3.x vector the record carries, or null. OSV can list
+/// several severity entries — including its own distribution-specific bands like Ubuntu's
+/// "low"/"high", which are not CVSS and are ignored.</param>
+public record OsvAdvisoryRecord(IReadOnlyList<string> CveIds, string? CvssVector);
 
 public record OsvPackageQuery(string Ecosystem, string Name, string Version);
 
