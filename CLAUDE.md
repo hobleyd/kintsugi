@@ -60,9 +60,9 @@ a file in that directory:
 
 | File | Covers |
 |---|---|
-| `src/CLAUDE.md` | Backend layering, the auth gap's detail, host removal, script approval, platform buckets, Vanta, Auditing, the remote-control relay |
-| `web/CLAUDE.md` | The Flutter admin UI: four layers, polling, `KintsugiTable`, enums on the wire, theme, text selection, the remote-control viewer and terminal |
-| `clients/CLAUDE.md` | What the three agents share: the table of differences, the queue, check-in scheduling, patch cycles, remote-control consent and sockets |
+| `src/CLAUDE.md` | Backend layering, the auth gap's detail, host removal, script approval, platform buckets, Vanta, vulnerability assessment, Auditing, the remote-control relay |
+| `web/CLAUDE.md` | The Flutter admin UI: four layers, polling, `KintsugiTable`, enums on the wire, theme, text selection, the remote-control viewer and terminal, the Vulnerabilities screen |
+| `clients/CLAUDE.md` | What the three agents share: the table of differences, the queue, check-in scheduling, patch cycles, remote-control consent and sockets, the OS facts only two of them report |
 | `clients/macos-agent/CLAUDE.md` | Identity file modes, the remote-shell launchd job, TCC, and the code-signing identity that makes a grant outlive a release |
 | `clients/windows-agent/CLAUDE.md` | Building via mingw, the serial-number chain, the SYSTEM session helper, ConPTY, self-update's service restart |
 | `clients/linux-agent/CLAUDE.md` | The state directory, two root entry points, the fourth root unit, X11 vs Wayland selection |

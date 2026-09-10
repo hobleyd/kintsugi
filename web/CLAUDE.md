@@ -464,3 +464,42 @@ US keyboard controlling a French host types the wrong letters.
   have to stay compatible. Bumping one without the other fails at image build time rather than at
   merge, which is the good failure but only if somebody builds the image.
 
+
+## The Vulnerabilities screen
+
+**It leads with what is being exploited, and that is the whole editorial decision.** One
+out-of-date Firefox and one macOS 14.5, assessed against the live NVD API, produced 2183 CVE
+matches of which exactly 10 were in CISA's exploited catalogue — among them CVE-2024-9680 and
+CVE-2025-43300, both real in-the-wild zero-days. A list of 2183 reads as noise and gets ignored,
+so the exploited set is the default view and a list, everything else is a number beside it, and
+`GetVulnerabilityOverviewQuery.KnownExploitedOnly` applies that filter *server-side* — the two are
+different questions of the database, not a client-side hide.
+
+**The second half of the screen is what it cannot see.** `unmappedSubjectCount` and
+`unassessableHostCount` are headline numbers, `_CoverageNotice` spells them out in words, and an
+empty findings table says which of the two empties it is — "nothing installed here is in CISA's
+catalogue" or "nothing has been assessed yet". A vulnerability screen that lists only what it
+managed to match reads as a clean bill of health, which is the same failure the Vanta screen
+refuses by naming the eleven resource types it does not sync.
+
+**The CPE mapping queue lives on the same screen because that is where an empty one gets fixed.**
+It is its own BLoC (`CpeMappingsBloc`) beside `VulnerabilitiesBloc` rather than one merged state:
+confirming a mapping reloads the queue and not the findings, which do not change until the next
+assessment run. Dictionary results are held per mapping id, so opening a second row does not wipe
+what the first was showing, and `busyId` is a single row's id so one confirm does not grey out
+every button on the page. The screen says why the search results are candidates rather than an
+answer — "slack" ranks Slackware Linux first — because a reviewer who takes the top hit on trust
+is the failure mode the whole review step exists to prevent.
+
+**`PageNavigator.openInNewTab` exists for the links out to NVD.** `go` replaces the current page,
+which would lose whatever the administrator was reading; the new method goes through the same
+interface rather than reaching for `package:web`, because `BrowserPageNavigator` is deliberately
+the only file in this app that imports it. `noopener,noreferrer` because this app is behind a
+session cookie.
+
+**The three new enums cross the wire as ordinals**, like `AuditProvider` and `AuthProvider` before
+them, so `CpeSubjectKind`, `CpeMappingStatus` and `CpeSuggestionSource` in
+`web/lib/domain/entities/enums.dart` mirror the C# declaration order and new members are appended,
+never inserted. `test/data/vulnerability_mapper_test.dart` pins the ordinal *positions* rather than
+just a round trip, because nothing in CI compares the two sides and a member inserted on either one
+silently re-maps every value.

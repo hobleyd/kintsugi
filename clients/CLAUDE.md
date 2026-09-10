@@ -478,3 +478,27 @@ would hide working hosts.
   Windows by tinting it black or white for the taskbar's `SystemUsesLightTheme` at load and on every
   `ImmersiveColorSet` broadcast. A replacement that bakes in a colour or a background breaks that on
   all three at once; `cmp` them after touching one.
+
+## Operating-system facts for the vulnerability assessment
+
+**Two of the three agents report machine-readable OS facts the `operatingSystem` string does not
+carry, and the third deliberately reports neither.** Linux sends os-release's `ID` and
+`VERSION_ID`; Windows sends `CurrentBuildNumber` joined to `UBR` (`"22631.4317"`, what `winver`
+shows as the OS build); macOS sends nothing new, because `sw_vers -productVersion` already puts the
+exact version into `operatingSystem`. That looks like a violation of the "change the struct in all
+three agents" rule and is not — see `.claude/rules/hand-mirrored-dtos.md`, which states the
+exception and why.
+
+**The Windows one is the one to understand before touching any of it.** NVD matches Windows CVEs on
+the update *revision*, not the build: `10.0.22631.4317` answers 1355 CVEs where `10.0.22631.6000`
+answers 793. `operating_system` carries only the bare build, so a server given nothing else and
+assuming `.0` would report nearly every Windows CVE ever filed against a fully patched machine. The
+server therefore refuses to assess rather than approximating (`OperatingSystemSubject`), and this
+field is what lifts the refusal. Do not "improve" either end by filling in a default.
+
+**Linux reports these rather than having the server parse them out of `PRETTY_NAME`**, because that
+string is prose: "Ubuntu 24.04.1 LTS", "openSUSE Leap 15.6" and "Alpine v3.20" share no grammar, and
+the point release in the first is not a version NVD indexes by. `system_info::os_release_identity`
+takes both keys from the *same* file — `/etc/os-release` shadows `/usr/lib/os-release` rather than
+merging with it, so taking `VERSION_ID` from the second while `ID` came from the first could pair a
+distribution with another's version.

@@ -256,6 +256,93 @@ because the sync normally runs on a timer with nothing in flight. HTTPS is enfor
 the domain entity, because Vanta requires it and the alternative is an opaque rejection a day later.
 
 
+## Vulnerability assessment: NVD and the KEV catalogue
+
+Settings > Vulnerabilities matches the fleet's installed versions against published CVEs, and the
+Vulnerabilities screen shows the result. It is the first thing here that reads a real vulnerability
+feed; everything the Vanta section above says about *not* having one remains true of that
+integration, which this deliberately does not feed.
+
+**NVD evaluates the version ranges, and that is the load-bearing fact of the whole feature.**
+Handing `virtualMatchString` a CPE name carrying a concrete version returns only the CVEs whose
+configurations actually cover it — verified against the live API: Firefox answers 3337 CVEs at
+`*`, 1508 at 60.0, 631 at 130.0 and 414 at 145.0. So nothing here parses `versionStartIncluding` or
+`versionEndExcluding`, and nothing should start. Re-implementing that matching locally would be a
+second, divergent opinion about which versions a CVE affects, against a source that already has
+one.
+
+**What is left is name → CPE, and it is a human decision.** NVD's own dictionary keyword-search
+ranks Slackware Linux first for "slack" and ZoomText first for "zoom", and the inventory carries a
+display name, not a vendor. So a `CpeMapping` is proposed by machine and **confirmed by a person**,
+and nothing is assessed until it has been. Two things make that safe rather than ceremonial:
+`INvdClient.CpeExistsAsync` discards a proposal NVD's dictionary does not contain (`a:mozilla:firefox`
+answers 1199, the invented `a:mozilla:firefax` answers 0, and so does the plausible `a:slack:slack`),
+and the check runs **again on confirm**, because a reviewer can type a correction by hand and a typo
+attributes another product's CVEs to this one.
+
+**The AI is asked for a search term, never for a fact.** `ICpeSuggestionClient` — implemented on
+`AiUpgradePathResearchClient` so it reuses that type's per-provider dispatch rather than growing a
+second copy — asks only for the vendor and product tokens NVD indexes a product under. It is not
+asked whether anything is vulnerable, which CVEs apply, or how serious they are. That is the same
+line `VantaResourceBuilder` draws at severity, and the difference that makes this side of it
+acceptable is that "does `a:mozilla:firefox` name a real product" has an external authority to check
+against and "how dangerous is being out of date" does not.
+
+**Nothing is keyed on `InstalledApplication.Id`, and that is not incidental.**
+`RegisterApplicationsCommandHandler` deletes and recreates every installed-application row on each
+routine inventory report, so a mapping keyed on one would evaporate hourly and take a human's
+confirmation with it. `CpeMapping` keys on the *reported name*, `CpeAssessment` keys on (mapping,
+version), and which hosts are affected is a join computed at query time. It is the same reasoning
+that makes a Vanta `uniqueId` a (serial, application name) pair.
+
+**A run is bounded and resumable, and a partial run is the normal case.** A full pass is one NVD
+query per (confirmed mapping, distinct installed version) — hundreds on a real fleet — against a
+limit of 5 requests per rolling 30 seconds anonymously and 50 with a free API key. So
+`RunVulnerabilityAssessmentCommandHandler` takes the least recently assessed pairs first, commits
+each as it completes, and stops at `VulnerabilitySettings.AssessmentsPerRun`; `CpeAssessment.LastAssessedUtc`
+is the cursor, and is stamped **even on failure** so a pair NVD keeps rejecting cannot park itself at
+the head of the queue and starve everything behind it. The four stages (KEV refresh, discovery,
+suggestion, assessment) each commit before the next and a failing stage does not abort the run —
+they fail for unrelated reasons, and an unconfigured AI provider must not stop a KEV refresh that
+needs no AI.
+
+**`NvdRateLimiter` is a singleton because the limit belongs to the server.** NVD counts per source
+address over a rolling window, so two components each keeping their own tally would each stay under
+the limit and together sail past it — and NVD answers that with a **403**, which reads like an
+authentication failure. It follows that a reviewer's dictionary search shares one allowance with a
+running assessment; that is why `/api/admin/vulnerabilities/cpe-dictionary` has its own nginx
+`location` with a 180s read timeout, since the general `/api` block's 60s would turn a correct
+31-second wait into a 504.
+
+**A KEV entry cannot tell you whether you are affected.** CISA's catalogue is a CVE id, a vendor, a
+product and a due date, with **no version ranges at all**. So `KnownExploited` is only ever an
+overlay on a match NVD's ranges already produced; scanning the inventory for KEV's product names
+instead would flag every host running any version of a named product, patched or not. The two
+sources also write to disjoint halves of `Vulnerability` — `ApplyKevEntry` and `ApplyNvdRecord`
+never touch each other's fields — because a CVE can reach the table from either one first. A failed
+KEV fetch withdraws nothing: "the download failed" and "CISA no longer lists this" are different
+facts and only the second may clear a flag.
+
+**Coverage this feature does not have is a first-class number, not an omission.** An application
+with no confirmed CPE has not been assessed at all, and a screen listing only what it matched would
+read as a clean bill of health — the failure the eleven unsynced Vanta resource types exist to
+avoid. So `VulnerabilitySummaryDto` carries `UnmappedSubjectCount` and `UnassessableHostCount`
+beside the findings, and an empty findings table distinguishes "nothing found" from "nothing looked
+at".
+
+**Operating systems go through the same queue, and coverage differs sharply by platform.**
+`OperatingSystemSubject` resolves an identity and a version and deliberately *not* a vendor or
+product — a table of `macOS → apple:macos` guesses here would be the same unchecked second opinion
+the mapping queue exists to prevent. macOS needs nothing from its agent. Windows needs the build's
+update revision, and **refuses to assess without it** rather than assuming `.0`: NVD matches on the
+revision, so `10.0.22631.4317` answers 1355 CVEs where `10.0.22631.6000` answers 793 and `.0` would
+report nearly all of them against a patched machine. Linux needs os-release's `ID` and `VERSION_ID`,
+because `PRETTY_NAME` is prose. One limit no agent release fixes: NVD's coverage of a Linux
+distribution *as an operating system* is thin — `canonical:ubuntu_linux:24.04` answers 25 CVEs
+against macOS 14.5's 1138 — because the real Linux surface is per source package and lives in the
+distributions' own trackers, which this system has no dpkg/rpm inventory to join to.
+
+
 ## Audit event shipping: the Auditing settings
 
 Settings > Auditing names the logging platform a record of what happens here is shipped to —
