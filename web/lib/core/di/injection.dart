@@ -11,6 +11,7 @@ import '../../data/repositories/settings_repository_impl.dart';
 import '../../data/repositories/upgrade_path_repository_impl.dart';
 import '../../data/repositories/upgrade_script_repository_impl.dart';
 import '../../domain/repositories/repositories.dart';
+import '../../data/repositories/vulnerability_repository_impl.dart';
 import '../../domain/usecases/application_usecases.dart';
 import '../../domain/usecases/client_usecases.dart';
 import '../../domain/usecases/host_usecases.dart';
@@ -21,6 +22,7 @@ import '../../domain/usecases/session_usecases.dart';
 import '../../domain/usecases/settings_usecases.dart';
 import '../../domain/usecases/upgrade_path_usecases.dart';
 import '../../domain/usecases/upgrade_script_usecases.dart';
+import '../../domain/usecases/vulnerability_usecases.dart';
 import '../network/api_client.dart';
 import '../network/unauthorized_notifier.dart';
 import '../platform/browser_full_screen.dart';
@@ -69,7 +71,9 @@ Future<void> configureDependencies() async {
     ..registerSingleton<AuthenticationSettingsRepository>(AuthenticationSettingsRepositoryImpl(api))
     ..registerSingleton<GitHubSettingsRepository>(GitHubSettingsRepositoryImpl(api))
     ..registerSingleton<PatchingPolicySettingsRepository>(PatchingPolicySettingsRepositoryImpl(api))
-    ..registerSingleton<VantaSettingsRepository>(VantaSettingsRepositoryImpl(api));
+    ..registerSingleton<VantaSettingsRepository>(VantaSettingsRepositoryImpl(api))
+    ..registerSingleton<VulnerabilityRepository>(VulnerabilityRepositoryImpl(api))
+    ..registerSingleton<VulnerabilitySettingsRepository>(VulnerabilitySettingsRepositoryImpl(api));
 
   _registerUseCases();
 }
@@ -89,6 +93,8 @@ void _registerUseCases() {
   final gitHub = locator<GitHubSettingsRepository>();
   final policy = locator<PatchingPolicySettingsRepository>();
   final vanta = locator<VantaSettingsRepository>();
+  final vulnerabilities = locator<VulnerabilityRepository>();
+  final vulnerabilitySettings = locator<VulnerabilitySettingsRepository>();
   final remoteControl = locator<RemoteControlRepository>();
 
   locator
@@ -138,5 +144,15 @@ void _registerUseCases() {
     ..registerSingleton(GetVantaSettings(vanta))
     ..registerSingleton(UpdateVantaSettings(vanta))
     ..registerSingleton(GetVantaSyncStatus(vanta))
-    ..registerSingleton(StartVantaSync(vanta));
+    ..registerSingleton(StartVantaSync(vanta))
+    ..registerSingleton(GetVulnerabilityOverview(vulnerabilities))
+    ..registerSingleton(GetCpeMappings(vulnerabilities))
+    ..registerSingleton(SearchCpeDictionary(vulnerabilities))
+    ..registerSingleton(ConfirmCpeMapping(vulnerabilities))
+    ..registerSingleton(MarkCpeMappingNotApplicable(vulnerabilities))
+    ..registerSingleton(ResetCpeMapping(vulnerabilities))
+    ..registerSingleton(GetVulnerabilityRunStatus(vulnerabilities))
+    ..registerSingleton(StartVulnerabilityRun(vulnerabilities))
+    ..registerSingleton(GetVulnerabilitySettings(vulnerabilitySettings))
+    ..registerSingleton(UpdateVulnerabilitySettings(vulnerabilitySettings));
 }

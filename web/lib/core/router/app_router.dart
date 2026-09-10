@@ -16,7 +16,9 @@ import '../../presentation/settings/github_screen.dart';
 import '../../presentation/settings/patching_policy_screen.dart';
 import '../../presentation/settings/vanta_screen.dart';
 import '../../presentation/shell/app_shell.dart';
+import '../../presentation/settings/vulnerabilities_screen.dart';
 import '../../presentation/upgrade_scripts/upgrade_scripts_screen.dart';
+import '../../presentation/vulnerabilities/vulnerabilities_screen.dart';
 import '../di/locator.dart';
 import '../platform/full_screen.dart';
 import 'bloc_listenable.dart';
@@ -42,6 +44,12 @@ abstract final class Routes {
   static const applications = '/applications';
   static const applicationsFailed = '/applications/failed';
   static const clients = '/clients';
+
+  /// Which published CVEs affect what this fleet has installed, and the CPE mapping queue that
+  /// decides what gets assessed at all. Top-level rather than under Applications: the question it
+  /// answers is about the fleet, not about one application's update state.
+  static const vulnerabilities = '/vulnerabilities';
+
   static const upgradeScripts = '/upgrade-scripts';
   static const settingsAiAgent = '/settings/ai-agent';
   static const settingsAuditing = '/settings/auditing';
@@ -49,6 +57,7 @@ abstract final class Routes {
   static const settingsGitHub = '/settings/github';
   static const settingsPatchingPolicy = '/settings/patching-policy';
   static const settingsVanta = '/settings/vanta';
+  static const settingsVulnerabilities = '/settings/vulnerabilities';
   static const signIn = '/login';
   static const starting = '/starting';
   static const unavailable = '/unavailable';
@@ -168,6 +177,11 @@ GoRouter createRouter(SessionBloc sessionBloc) {
             builder: (_, _) => const PatchingPolicySettingsScreen(),
           ),
           GoRoute(path: Routes.settingsVanta, builder: (_, _) => const VantaSettingsScreen()),
+          GoRoute(
+            path: Routes.settingsVulnerabilities,
+            builder: (_, _) => const VulnerabilitiesSettingsScreen(),
+          ),
+          GoRoute(path: Routes.vulnerabilities, builder: (_, _) => const VulnerabilitiesScreen()),
         ],
       ),
     ],

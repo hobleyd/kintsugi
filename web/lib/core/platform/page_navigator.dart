@@ -13,4 +13,11 @@ abstract interface class PageNavigator {
   /// Sign-out is a POST — as it was when it was a Razor form — because a GET that ends a session
   /// can be triggered by any page that can get the browser to load a URL.
   void post(String url);
+
+  /// Opens [url] in a new tab, leaving this one where it is.
+  ///
+  /// Distinct from [go], which replaces the current page. Used for links out to somebody else's
+  /// site — NVD's page for a CVE, say — where navigating away would lose whatever the
+  /// administrator was in the middle of reading.
+  void openInNewTab(String url);
 }

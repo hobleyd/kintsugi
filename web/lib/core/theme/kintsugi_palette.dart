@@ -103,6 +103,17 @@ class KintsugiPalette extends ThemeExtension<KintsugiPalette> {
         'check-failed' || 'offline' || 'patch-failed' => red,
         'patch-succeeded' => green,
         'not-found' || 'decommissioned' => amber,
+        // The Vulnerabilities screen. 'exploited' is its own key rather than reusing
+        // 'cve-critical', because CISA listing a CVE as actively exploited is a different claim
+        // from a high CVSS score and the screen sorts on it first — a 5.5 being exploited outranks
+        // a 9.8 that is not.
+        'exploited' || 'cve-critical' => red,
+        'cve-high' => amber,
+        'cve-medium' || 'mapping-suggested' => amber,
+        'mapping-confirmed' => green,
+        // Deliberately muted rather than red: an unmapped subject is missing coverage, which the
+        // screen states as a count, not a fault to alarm about on every row.
+        'cve-low' || 'mapping-unmapped' || 'mapping-not-applicable' => muted,
         _ => muted,
       };
 

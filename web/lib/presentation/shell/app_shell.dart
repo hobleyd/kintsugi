@@ -156,6 +156,16 @@ class _Sidebar extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 8),
+                // Its own top-level entry with no subnav, because it answers a question about the
+                // fleet rather than about one application's update state — and because the thing
+                // an administrator comes here for is "what is being exploited right now", which
+                // is not a sub-item of anything else in this list.
+                _NavLink(
+                  label: 'Vulnerabilities',
+                  path: Routes.vulnerabilities,
+                  selected: location == Routes.vulnerabilities,
+                ),
+                const SizedBox(height: 8),
                 _NavLink(label: 'Sync', path: Routes.clients, selected: inSync),
                 // Alphabetical by label. Keep it that way when adding one — the list is a lookup,
                 // not a workflow, so there is no order to it a reader could otherwise predict.
@@ -198,12 +208,18 @@ class _Sidebar extends StatelessWidget {
                       path: Routes.settingsPatchingPolicy,
                       selected: location == Routes.settingsPatchingPolicy,
                     ),
-                    // Alphabetical by label, and Vanta lands last. This subnav is a lookup rather
-                    // than a workflow, so there is no other order a reader could predict.
+                    // Alphabetical by label, and Vulnerabilities lands last. This subnav is a
+                    // lookup rather than a workflow, so there is no other order a reader could
+                    // predict.
                     _SubNavLink(
                       label: 'Vanta',
                       path: Routes.settingsVanta,
                       selected: location == Routes.settingsVanta,
+                    ),
+                    _SubNavLink(
+                      label: 'Vulnerabilities',
+                      path: Routes.settingsVulnerabilities,
+                      selected: location == Routes.settingsVulnerabilities,
                     ),
                   ],
                 ),

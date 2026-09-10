@@ -182,3 +182,60 @@ enum RemoteControlSessionKind {
         RemoteControlSessionKind.shell => 'Terminal',
       };
 }
+
+/// Mirrors `CpeSubjectKind`. Ordinal on the wire, so declaration order matches the C# enum and new
+/// members are appended, never inserted — see `.claude/rules/hand-mirrored-dtos.md`.
+enum CpeSubjectKind {
+  application,
+  operatingSystem;
+
+  String get label => switch (this) {
+        CpeSubjectKind.application => 'Application',
+        CpeSubjectKind.operatingSystem => 'Operating system',
+      };
+}
+
+/// Mirrors `CpeMappingStatus`. Ordinal on the wire; append only.
+enum CpeMappingStatus {
+  unmapped,
+  suggested,
+  confirmed,
+  notApplicable;
+
+  String get label => switch (this) {
+        CpeMappingStatus.unmapped => 'Not mapped',
+        CpeMappingStatus.suggested => 'Awaiting review',
+        CpeMappingStatus.confirmed => 'Mapped',
+        CpeMappingStatus.notApplicable => 'Not applicable',
+      };
+
+  /// What the mapping screen says this state means for coverage. Spelled out rather than left to
+  /// a colour, because "nothing has been assessed for this" is the part of the picture a
+  /// vulnerability screen most easily hides.
+  String get description => switch (this) {
+        CpeMappingStatus.unmapped =>
+          'Nothing has been assessed for this — no CPE has been confirmed, so NVD has never been asked about it.',
+        CpeMappingStatus.suggested =>
+          'A CPE has been proposed and confirmed to exist in NVD’s dictionary, but nothing is assessed '
+              'until somebody accepts it.',
+        CpeMappingStatus.confirmed => 'Assessed against NVD at every version the fleet has installed.',
+        CpeMappingStatus.notApplicable =>
+          'Deliberately not assessed. Excluded from the not-assessed count, because this is a decision '
+              'rather than a gap.',
+      };
+}
+
+/// Mirrors `CpeSuggestionSource`. Ordinal on the wire; append only.
+enum CpeSuggestionSource {
+  none,
+  ai,
+  dictionary,
+  manual;
+
+  String get label => switch (this) {
+        CpeSuggestionSource.none => '',
+        CpeSuggestionSource.ai => 'Suggested by AI',
+        CpeSuggestionSource.dictionary => 'From NVD’s dictionary',
+        CpeSuggestionSource.manual => 'Entered by hand',
+      };
+}

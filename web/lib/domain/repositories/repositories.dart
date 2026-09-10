@@ -19,6 +19,7 @@ import '../entities/session.dart';
 import '../entities/settings.dart';
 import '../entities/upgrade_path.dart';
 import '../entities/upgrade_script.dart';
+import '../entities/vulnerability.dart';
 
 abstract interface class SessionRepository {
   /// Reads `GET /api/session` — the anonymous bootstrap call.
@@ -258,6 +259,49 @@ abstract interface class VantaSettingsRepository {
   /// Starts a sync and returns its opening status. The run itself happens in the background — the
   /// screen polls [readSyncStatus] for the outcome.
   Future<VantaSyncStatus> startSync();
+}
+
+/// The Vulnerabilities screen and the CPE mapping queue behind it.
+abstract interface class VulnerabilityRepository {
+  /// The fleet's exposure. [knownExploitedOnly] is the screen's default: the exploited set is the
+  /// part anybody can act on, and the total arrives as a number in the summary rather than as tens
+  /// of thousands of rows.
+  Future<VulnerabilityOverview> readOverview({bool knownExploitedOnly = true});
+
+  Future<List<CpeMapping>> readMappings();
+
+  /// Candidates from NVD's own CPE dictionary. A weak signal offered to a human rather than
+  /// adopted — the live dictionary ranks Slackware Linux first for "slack".
+  Future<List<CpeCandidate>> searchCpeDictionary(String keyword);
+
+  /// Accepts a vendor and product. Throws if NVD's dictionary contains no such product: a typo
+  /// here silently attributes another product's CVEs to this one.
+  Future<void> confirmMapping({required String id, required String vendor, required String product});
+
+  Future<void> markMappingNotApplicable({required String id, String? notes});
+
+  Future<void> resetMapping(String id);
+
+  Future<VulnerabilityRunStatus> readRunStatus();
+
+  /// Starts an assessment and returns its opening status. The run happens in the background — the
+  /// screen polls [readRunStatus] for the outcome.
+  Future<VulnerabilityRunStatus> startRun();
+}
+
+abstract interface class VulnerabilitySettingsRepository {
+  Future<VulnerabilitySettings> read();
+
+  /// A blank NVD API key means "keep the stored one"; [clearNvdApiKey] is how one is removed,
+  /// since blank cannot mean both.
+  Future<VulnerabilitySettings> update({
+    required bool enabled,
+    required String? nvdApiKey,
+    required bool clearNvdApiKey,
+    required int? syncIntervalHours,
+    required int? assessmentsPerRun,
+    required bool? autoSuggestCpes,
+  });
 }
 
 abstract interface class GitHubSettingsRepository {
