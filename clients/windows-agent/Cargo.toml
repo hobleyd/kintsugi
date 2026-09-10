@@ -2,6 +2,7 @@
 name = "kintsugi-agent"
 version = "0.9.4"
 edition = "2021"
+license = "GPL-3.0-or-later"
 description = "Background agent that registers this PC with the patching system's host inventory."
 
 [[bin]]
