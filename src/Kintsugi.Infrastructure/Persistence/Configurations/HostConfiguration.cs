@@ -19,6 +19,10 @@ public class HostConfiguration : IEntityTypeConfiguration<Host>
         builder.Property(h => h.Status).HasConversion<string>().HasMaxLength(32);
         builder.Property(h => h.OperatingSystemLatestVersion).HasMaxLength(64);
         builder.Property(h => h.AgentVersion).HasMaxLength(64);
+        // os-release ID, and os-release VERSION_ID / the Windows build-with-revision. Both are
+        // short machine-readable tokens rather than the prose OperatingSystem carries.
+        builder.Property(h => h.OperatingSystemId).HasMaxLength(64);
+        builder.Property(h => h.OperatingSystemVersionId).HasMaxLength(64);
 
         builder.HasIndex(h => h.Hostname).IsUnique();
         builder.HasIndex(h => h.SerialNumber).IsUnique();

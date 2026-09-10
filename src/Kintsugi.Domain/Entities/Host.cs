@@ -21,6 +21,36 @@ public class Host : BaseEntity
     /// available, or the reporting agent couldn't determine a version for it.</summary>
     public string? OperatingSystemLatestVersion { get; private set; }
 
+    /// <summary>
+    /// The operating system's own machine-readable identifier, when the agent reports one:
+    /// os-release's <c>ID</c> on Linux (<c>ubuntu</c>, <c>debian</c>, <c>fedora</c>). Null on
+    /// macOS and Windows, where <see cref="OperatingSystem"/> already identifies the product
+    /// unambiguously, and null from any agent predating the release that sends it.
+    /// </summary>
+    /// <remarks>
+    /// Reported rather than parsed out of <see cref="OperatingSystem"/> because that string is
+    /// <c>PRETTY_NAME</c>, which is prose: "Ubuntu 24.04.1 LTS", "openSUSE Leap 15.6" and
+    /// "Alpine v3.20" share no grammar, and the vulnerability assessment needs a stable key to
+    /// hang a CPE mapping off. See each agent's <c>system_info::operating_system</c>.
+    /// </remarks>
+    public string? OperatingSystemId { get; private set; }
+
+    /// <summary>
+    /// The operating system's own machine-readable version, when the agent reports one:
+    /// os-release's <c>VERSION_ID</c> on Linux (<c>24.04</c>), and the full build with its update
+    /// revision on Windows (<c>22631.4317</c>).
+    /// </summary>
+    /// <remarks>
+    /// On Windows this is what makes an OS assessment honest rather than alarming.
+    /// <see cref="OperatingSystem"/> carries only the major build — "Windows 11 Pro 23H2 (22631)"
+    /// — and NVD's ranges are evaluated against the revision: querying build 22631.4317 returns
+    /// 1355 CVEs where 22631.6000 returns 793, so assuming revision zero reports nearly every
+    /// Windows CVE ever filed against a fully patched machine. Null from an agent predating the
+    /// release that sends it, which <c>OperatingSystemSubject</c> reports as an approximate
+    /// assessment rather than silently guessing.
+    /// </remarks>
+    public string? OperatingSystemVersionId { get; private set; }
+
     /// <summary>The version of the agent binary that last checked in, as it reports itself
     /// (each agent's <c>RegisterHostRequest.agent_version</c>, from <c>CARGO_PKG_VERSION</c>).
     /// Null until a release that reports one has checked in; older agents omit the field.</summary>
@@ -47,7 +77,9 @@ public class Host : BaseEntity
         string? ipAddress = null,
         bool? operatingSystemUpdateAvailable = null,
         string? operatingSystemLatestVersion = null,
-        string? agentVersion = null)
+        string? agentVersion = null,
+        string? operatingSystemId = null,
+        string? operatingSystemVersionId = null)
     {
         if (string.IsNullOrWhiteSpace(hostname))
         {
@@ -66,6 +98,8 @@ public class Host : BaseEntity
         OperatingSystemUpdateAvailable = operatingSystemUpdateAvailable;
         OperatingSystemLatestVersion = operatingSystemLatestVersion;
         AgentVersion = agentVersion;
+        OperatingSystemId = operatingSystemId;
+        OperatingSystemVersionId = operatingSystemVersionId;
     }
 
     public void RecordHeartbeat(HostStatus status)
@@ -109,7 +143,9 @@ public class Host : BaseEntity
         string? ipAddress,
         bool? operatingSystemUpdateAvailable = null,
         string? operatingSystemLatestVersion = null,
-        string? agentVersion = null)
+        string? agentVersion = null,
+        string? operatingSystemId = null,
+        string? operatingSystemVersionId = null)
     {
         if (string.IsNullOrWhiteSpace(hostname))
         {
@@ -151,6 +187,20 @@ public class Host : BaseEntity
         if (agentVersion is not null)
         {
             AgentVersion = agentVersion;
+        }
+
+        // Same null-means-not-reported rule again, and it matters most here: these two arrive only
+        // from agents new enough to send them, and blanking them on a mixed-version fleet would
+        // downgrade a host's OS assessment back to approximate every time an older sibling binary
+        // happened to check in from the same machine.
+        if (operatingSystemId is not null)
+        {
+            OperatingSystemId = operatingSystemId;
+        }
+
+        if (operatingSystemVersionId is not null)
+        {
+            OperatingSystemVersionId = operatingSystemVersionId;
         }
 
         RecordHeartbeat(HostStatus.Online);

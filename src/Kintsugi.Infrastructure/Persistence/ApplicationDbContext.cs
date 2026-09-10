@@ -25,6 +25,11 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
     public DbSet<GitHubSettings> GitHubSettings => Set<GitHubSettings>();
     public DbSet<VantaSettings> VantaSettings => Set<VantaSettings>();
     public DbSet<RemoteControlSession> RemoteControlSessions => Set<RemoteControlSession>();
+    public DbSet<VulnerabilitySettings> VulnerabilitySettings => Set<VulnerabilitySettings>();
+    public DbSet<CpeMapping> CpeMappings => Set<CpeMapping>();
+    public DbSet<Vulnerability> Vulnerabilities => Set<Vulnerability>();
+    public DbSet<CpeAssessment> CpeAssessments => Set<CpeAssessment>();
+    public DbSet<VulnerabilityMatch> VulnerabilityMatches => Set<VulnerabilityMatch>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
