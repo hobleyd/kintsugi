@@ -183,14 +183,48 @@ pub fn operating_system() -> Result<String> {
 }
 
 fn read_os_release_pretty_name(path: &Path) -> Option<String> {
-    parse_os_release_pretty_name(&fs::read_to_string(path).ok()?)
+    parse_os_release_key(&fs::read_to_string(path).ok()?, "PRETTY_NAME")
 }
 
-/// Pulls `PRETTY_NAME` out of an os-release file. The format is shell-ish: `KEY=value`, with the
-/// value optionally quoted, one per line, comments allowed.
-fn parse_os_release_pretty_name(contents: &str) -> Option<String> {
+/// The distribution's own machine-readable identity — os-release's `ID` and `VERSION_ID`, e.g.
+/// `("ubuntu", "24.04")`. Either half is `None` when the file does not carry it; a rolling
+/// release like Arch has an `ID` and no `VERSION_ID` at all.
+///
+/// Reported to the server as `operatingSystemId` / `operatingSystemVersionId`, alongside — not
+/// instead of — the `PRETTY_NAME` [`operating_system`] returns. The two answer different
+/// questions and neither substitutes for the other: `PRETTY_NAME` is prose for a human and is
+/// what `PlatformBucket.From` buckets on, while these are the stable tokens the server's
+/// vulnerability assessment hangs a CPE mapping off (see `OperatingSystemSubject`). Parsing them
+/// back out of the prose is not an option — "Ubuntu 24.04.1 LTS", "openSUSE Leap 15.6" and
+/// "Alpine v3.20" share no grammar, and the point release in the first is not a version NVD
+/// indexes by.
+pub fn os_release_identity() -> (Option<String>, Option<String>) {
+    for path in ["/etc/os-release", "/usr/lib/os-release"] {
+        let Ok(contents) = fs::read_to_string(Path::new(path)) else {
+            continue;
+        };
+
+        let id = parse_os_release_key(&contents, "ID");
+        let version_id = parse_os_release_key(&contents, "VERSION_ID");
+
+        // The first file that exists wins outright, even if it names only one of the two:
+        // /etc/os-release shadows /usr/lib/os-release rather than being merged with it, and
+        // taking VERSION_ID from the second while ID came from the first could pair a
+        // distribution with another's version.
+        if id.is_some() || version_id.is_some() {
+            return (id.map(|v| v.to_lowercase()), version_id);
+        }
+    }
+
+    (None, None)
+}
+
+/// Pulls one key out of an os-release file. The format is shell-ish: `KEY=value`, with the value
+/// optionally quoted, one per line, comments allowed.
+fn parse_os_release_key(contents: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
     contents.lines().find_map(|line| {
-        let value = line.trim().strip_prefix("PRETTY_NAME=")?;
+        let value = line.trim().strip_prefix(&prefix)?;
         let unquoted = value.trim().trim_matches('"').trim_matches('\'').trim();
         (!unquoted.is_empty()).then(|| unquoted.to_string())
     })
@@ -538,17 +572,37 @@ mod tests {
     fn parse_os_release_pretty_name_reads_a_quoted_value() {
         let contents = "NAME=\"Ubuntu\"\nVERSION=\"24.04.1 LTS (Noble Numbat)\"\nPRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\nID=ubuntu\n";
 
-        assert_eq!(parse_os_release_pretty_name(contents).as_deref(), Some("Ubuntu 24.04.1 LTS"));
+        assert_eq!(parse_os_release_key(contents, "PRETTY_NAME").as_deref(), Some("Ubuntu 24.04.1 LTS"));
     }
 
     #[test]
     fn parse_os_release_pretty_name_reads_an_unquoted_value() {
-        assert_eq!(parse_os_release_pretty_name("PRETTY_NAME=Arch Linux\n").as_deref(), Some("Arch Linux"));
+        assert_eq!(parse_os_release_key("PRETTY_NAME=Arch Linux\n", "PRETTY_NAME").as_deref(), Some("Arch Linux"));
+    }
+
+    #[test]
+    fn parse_os_release_key_reads_the_distribution_identity() {
+        // What the vulnerability assessment keys a CPE mapping on. Note VERSION_ID is "24.04"
+        // while PRETTY_NAME says "24.04.1 LTS" — the point release is not a version NVD indexes
+        // by, which is why this is reported rather than parsed back out of the prose.
+        let contents = "NAME=\"Ubuntu\"\nVERSION=\"24.04.1 LTS (Noble Numbat)\"\nID=ubuntu\nVERSION_ID=\"24.04\"\n";
+
+        assert_eq!(parse_os_release_key(contents, "ID").as_deref(), Some("ubuntu"));
+        assert_eq!(parse_os_release_key(contents, "VERSION_ID").as_deref(), Some("24.04"));
+    }
+
+    #[test]
+    fn parse_os_release_key_does_not_match_a_key_that_merely_ends_the_same_way() {
+        // "VERSION_ID" must not be answered by "ID", nor "ID" by "VERSION_ID". The prefix match
+        // is anchored at the start of the line, and this is what pins that.
+        let contents = "VERSION_ID=\"24.04\"\n";
+
+        assert_eq!(parse_os_release_key(contents, "ID"), None);
     }
 
     #[test]
     fn parse_os_release_pretty_name_returns_none_when_absent() {
-        assert_eq!(parse_os_release_pretty_name("NAME=\"Whatever\"\nID=whatever\n"), None);
+        assert_eq!(parse_os_release_key("NAME=\"Whatever\"\nID=whatever\n", "PRETTY_NAME"), None);
     }
 
     /// The whole point of `ensure_mentions_linux` — a distribution whose PRETTY_NAME never says

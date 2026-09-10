@@ -420,6 +420,31 @@ pub fn operating_system() -> Result<String> {
     })
 }
 
+/// The full build number including its update revision, e.g. `"22631.4317"` — the same thing
+/// `winver` shows as "OS build 22631.4317".
+///
+/// Reported to the server as `operatingSystemVersionId`, and it is what makes an operating-system
+/// vulnerability assessment honest rather than alarming. NVD evaluates Windows CVE ranges against
+/// the revision, not the build: querying `10.0.22631.4317` returns 1355 CVEs where
+/// `10.0.22631.6000` returns 793, so a server assuming revision zero would report nearly every
+/// Windows CVE ever filed against a fully patched machine. [`operating_system`] carries only the
+/// bare build (`"Windows 11 Pro 23H2 (22631)"`), so this is a separate reading rather than
+/// something the server can recover from that string — see the server's `OperatingSystemSubject`,
+/// which refuses to assess at all when this is absent.
+///
+/// `UBR` is a `REG_DWORD` and has existed since Windows 10; a machine old enough to lack it
+/// answers `None`, and the server treats that the same way it treats an older agent.
+pub fn operating_system_build() -> Option<String> {
+    let key = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey_with_flags(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion", KEY_READ | KEY_WOW64_64KEY)
+        .ok()?;
+
+    let build: String = key.get_value("CurrentBuildNumber").ok()?;
+    let ubr: u32 = key.get_value("UBR").ok()?;
+
+    Some(format!("{}.{ubr}", build.trim()))
+}
+
 /// Returns the local IP address this machine would use to route outbound traffic. Uses a UDP
 /// "connect" (no packets are actually sent — it only resolves the local route) so it works the
 /// same whether the target is reachable or not, and needs no extra permissions.

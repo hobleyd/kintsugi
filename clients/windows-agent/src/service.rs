@@ -61,6 +61,17 @@ struct RegisterHostRequest {
     /// running — mirrors `CreateHostCommand.AgentVersion`. Always sent: the agent always knows it.
     #[serde(rename = "agentVersion")]
     agent_version: &'static str,
+    /// The build with its update revision, e.g. `"22631.4317"` — mirrors
+    /// `CreateHostCommand.OperatingSystemVersionId`. Sent alongside `operating_system`, which
+    /// carries only the bare build, because NVD matches Windows CVEs on the revision: without it
+    /// the server refuses to assess this host's operating system rather than reporting every CVE
+    /// fixed in any revision of the build. See `system_info::operating_system_build`.
+    ///
+    /// The `operatingSystemId` half of that pair is deliberately never sent from Windows: it is
+    /// os-release's `ID`, which only Linux has, and `operating_system` already identifies the
+    /// product unambiguously here.
+    #[serde(rename = "operatingSystemVersionId", skip_serializing_if = "Option::is_none")]
+    operating_system_version_id: Option<String>,
 }
 
 /// Mirrors the backend's `CreateHostResult` — see
@@ -195,6 +206,7 @@ impl Agent {
             operating_system_update_available: os_update_status.as_ref().map(|s| s.available),
             operating_system_latest_version: os_update_status.and_then(|s| s.latest_version),
             agent_version: env!("CARGO_PKG_VERSION"),
+            operating_system_version_id: system_info::operating_system_build(),
         };
         let host_response: RegisterHostResponse =
             post_with_retry(&self.client, &self.config.register_host_url(), &host_request).context("failed to register host")?;

@@ -37,7 +37,9 @@ public class CreateHostCommandHandler : IRequestHandler<CreateHostCommand, Creat
                 request.IpAddress,
                 request.OperatingSystemUpdateAvailable,
                 request.OperatingSystemLatestVersion,
-                request.AgentVersion);
+                request.AgentVersion,
+                request.OperatingSystemId,
+                request.OperatingSystemVersionId);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
             return new CreateHostResult(HostDto.FromEntity(existing), WasCreated: false, suggestedCheckInMinute);
         }
@@ -51,7 +53,9 @@ public class CreateHostCommandHandler : IRequestHandler<CreateHostCommand, Creat
             request.IpAddress,
             request.OperatingSystemUpdateAvailable,
             request.OperatingSystemLatestVersion,
-            request.AgentVersion);
+            request.AgentVersion,
+            request.OperatingSystemId,
+            request.OperatingSystemVersionId);
         host.RecordHeartbeat(HostStatus.Online);
 
         await _hostRepository.AddAsync(host, cancellationToken);

@@ -14,6 +14,18 @@ Nothing in CI cross-checks them, because the client and the agents are compiled 
 
 - Rust request/response structs mirror C# command/DTO shapes by hand with explicit `serde(rename)`
   — changing a command's JSON shape means changing the matching struct in **all three** agents.
+- **`RegisterHostRequest` is the exception to "all three", deliberately, and the asymmetry is the
+  point.** `operatingSystemId` is sent only by Linux (it is os-release's `ID`, which no other
+  platform has) and `operatingSystemVersionId` only by Linux and Windows (VERSION_ID, and the
+  build-with-update-revision respectively). macOS sends neither, because `sw_vers` already puts the
+  exact version into `operatingSystem`. All three are `Option` + `skip_serializing_if` on the wire
+  and nullable in `CreateHostCommand`, so an agent that omits them is not a protocol error — the
+  server's `OperatingSystemSubject` reports such a host as one whose operating system it *cannot
+  assess*, with the reason, rather than guessing. Do not "tidy" this by having every agent send
+  every field: a Windows agent sending an invented `operatingSystemId`, or a server assuming
+  revision `.0` for a missing Windows build, both turn "no answer" into a wrong answer — and NVD
+  matches Windows CVEs on the revision, so `.0` reports nearly every Windows CVE ever filed
+  against a fully patched machine.
 - Rust structs are not the only hand-mirrored copies of a C# shape any more: `web/lib/data/models/`
   maps every DTO the admin UI reads, and `web/lib/domain/entities/enums.dart` mirrors the enums in
   declaration order because several of them cross the wire as ordinals. Changing a DTO's JSON shape

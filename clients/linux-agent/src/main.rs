@@ -95,6 +95,16 @@ struct RegisterHostRequest {
     /// running — mirrors `CreateHostCommand.AgentVersion`. Always sent: the agent always knows it.
     #[serde(rename = "agentVersion")]
     agent_version: &'static str,
+    /// os-release's `ID` and `VERSION_ID` — mirrors `CreateHostCommand.OperatingSystemId` /
+    /// `OperatingSystemVersionId`. Sent alongside `operating_system`, not instead of it: that one
+    /// is `PRETTY_NAME`, which is prose a human reads and `PlatformBucket.From` buckets on, while
+    /// these are the stable tokens the server's vulnerability assessment hangs a CPE mapping off
+    /// (see `OperatingSystemSubject`). Omitted when os-release does not carry them, which the
+    /// server reports as a host whose operating system it cannot assess rather than guessing.
+    #[serde(rename = "operatingSystemId", skip_serializing_if = "Option::is_none")]
+    operating_system_id: Option<String>,
+    #[serde(rename = "operatingSystemVersionId", skip_serializing_if = "Option::is_none")]
+    operating_system_version_id: Option<String>,
 }
 
 /// Mirrors the backend's `CreateHostResult` — see
@@ -301,6 +311,8 @@ fn register_and_report(config: &Config, checkin_minute: u8) -> Result<CheckInOut
     // GET per hourly invocation.
     let patching_policy = policy::refresh(&client, config, &config::policy_cache_path());
 
+    let (operating_system_id, operating_system_version_id) = system_info::os_release_identity();
+
     let host_request = RegisterHostRequest {
         hostname,
         serial_number: serial_number.clone(),
@@ -310,6 +322,8 @@ fn register_and_report(config: &Config, checkin_minute: u8) -> Result<CheckInOut
         operating_system_update_available: os_update_status.as_ref().map(|s| s.available),
         operating_system_latest_version: os_update_status.and_then(|s| s.latest_version),
         agent_version: env!("CARGO_PKG_VERSION"),
+        operating_system_id,
+        operating_system_version_id,
     };
     let host_response: RegisterHostResponse = post_with_retry(&client, &config.register_host_url(), &host_request)
         .context("failed to register host")?;
