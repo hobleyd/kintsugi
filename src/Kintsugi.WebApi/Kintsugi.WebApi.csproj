@@ -24,7 +24,7 @@
          Read the current value immediately before editing it rather than assuming - several
          sessions share this checkout, and this is one line that all of them now touch. If two
          bumps collide, take the higher and keep going. -->
-    <Version>1.4.2</Version>
+    <Version>1.4.3</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
 
