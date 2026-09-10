@@ -138,6 +138,33 @@ public class OperatingSystemSubjectTests
     }
 
     [Fact]
+    public void Derive_LinuxWithAndWithoutFacts_ProduceDifferentKeys()
+    {
+        // The reason discovery has to derive from each host's own facts rather than from the
+        // distinct reported strings. It shipped the other way for one commit: discovery keyed a
+        // Linux host on "ubuntu_24_04_1_lts_linux" while the assessment queue keyed it on
+        // "ubuntu", so a confirmed Linux mapping sat there and was never assessed. Nothing errored
+        // — there was simply no row, which is indistinguishable from "no CVEs" on the screen.
+        var withFacts = OperatingSystemSubject.Derive("Ubuntu 24.04.1 LTS (Linux)", "ubuntu", "24.04");
+        var withoutFacts = OperatingSystemSubject.Derive("Ubuntu 24.04.1 LTS (Linux)", null, null);
+
+        Assert.Equal("ubuntu", withFacts!.SubjectKey);
+        Assert.NotEqual(withFacts.SubjectKey, withoutFacts!.SubjectKey);
+    }
+
+    [Fact]
+    public void Derive_Windows_KeysTheSameWithOrWithoutTheRevision()
+    {
+        // Unlike Linux: the Windows key is family plus feature update, neither of which comes from
+        // OperatingSystemVersionId. Worth pinning, because it is why the discovery bug above was
+        // invisible on Windows and only showed up on Linux.
+        var withRevision = OperatingSystemSubject.Derive("Windows 11 Pro 23H2 (22631)", null, "22631.4317");
+        var withoutRevision = OperatingSystemSubject.Derive("Windows 11 Pro 23H2 (22631)", null, null);
+
+        Assert.Equal(withRevision!.SubjectKey, withoutRevision!.SubjectKey);
+    }
+
+    [Fact]
     public void Derive_AnUnknownPlatform_IsQueuedRatherThanDropped()
     {
         // Coverage this feature does not have has to be visible. A subject dropped here would
