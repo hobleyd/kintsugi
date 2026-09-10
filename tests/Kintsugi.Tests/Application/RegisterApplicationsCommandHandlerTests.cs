@@ -12,6 +12,7 @@ public class RegisterApplicationsCommandHandlerTests
 {
     private readonly Mock<IHostRepository> _hostRepository = new();
     private readonly Mock<IInstalledApplicationRepository> _installedApplicationRepository = new();
+    private readonly Mock<IInstalledPackageRepository> _installedPackageRepository = new();
     private readonly Mock<IUpgradePathRepository> _upgradePathRepository = new();
     private readonly Mock<IUnitOfWork> _unitOfWork = new();
     private readonly Host _host = new("host-1", "SERIAL-1", "macOS 15.0");
@@ -27,7 +28,8 @@ public class RegisterApplicationsCommandHandlerTests
     private static readonly string HomebrewScript = HomebrewUpgradeScript.Build();
 
     private RegisterApplicationsCommandHandler CreateHandler() =>
-        new(_hostRepository.Object, _installedApplicationRepository.Object, _upgradePathRepository.Object, _unitOfWork.Object);
+        new(_hostRepository.Object, _installedApplicationRepository.Object, _installedPackageRepository.Object,
+            _upgradePathRepository.Object, _unitOfWork.Object);
 
     private void SetUpHost(Host? host)
     {
@@ -54,6 +56,108 @@ public class RegisterApplicationsCommandHandlerTests
 
         await Assert.ThrowsAsync<NotFoundException>(() => CreateHandler().Handle(
             new RegisterApplicationsCommand("MISSING", Array.Empty<ApplicationEntry>()), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task Handle_OperatingSystemPackages_NeverBecomeInstalledApplications()
+    {
+        // The requirement in one test. Packages are inventory for the vulnerability assessment
+        // and must not appear on the Applications screen — which is enforced by their landing in
+        // a different table that nothing reading applications can see.
+        SetUpHost(_host);
+        List<InstalledApplication>? added = null;
+        _installedApplicationRepository
+            .Setup(r => r.AddRangeAsync(It.IsAny<IEnumerable<InstalledApplication>>(), It.IsAny<CancellationToken>()))
+            .Callback<IEnumerable<InstalledApplication>, CancellationToken>((apps, _) => added = apps.ToList());
+
+        await CreateHandler().Handle(
+            new RegisterApplicationsCommand(
+                "SERIAL-1",
+                new[] { new ApplicationEntry("Firefox", "130.0") },
+                new[] { new PackageEntry("openssl", "3.0.2-0ubuntu1.19", "dpkg") }),
+            CancellationToken.None);
+
+        Assert.NotNull(added);
+        Assert.Equal(new[] { "Firefox" }, added.Select(a => a.Name));
+    }
+
+    [Fact]
+    public async Task Handle_OperatingSystemPackages_GrowNoUpgradePath()
+    {
+        // The other half: no upgrade path, so nothing is ever offered to the AI, signed, or run
+        // by a patch cycle. apt and dnf stay out of PackageManagerCatalog and this does not
+        // change that — see clients/CLAUDE.md.
+        SetUpHost(_host);
+
+        await CreateHandler().Handle(
+            new RegisterApplicationsCommand(
+                "SERIAL-1",
+                Array.Empty<ApplicationEntry>(),
+                new[] { new PackageEntry("openssl", "3.0.2-0ubuntu1.19", "dpkg") }),
+            CancellationToken.None);
+
+        _upgradePathRepository.Verify(
+            r => r.AddAsync(It.IsAny<UpgradePath>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Handle_DedupesPackagesSharingOneSourceName()
+    {
+        // Several binary packages routinely share one source package, and the agent reports
+        // source names — so "openssl 3.0.2-0ubuntu1.19" arrives once for the CLI and once for
+        // the library.
+        SetUpHost(_host);
+        List<InstalledPackage>? stored = null;
+        _installedPackageRepository
+            .Setup(r => r.ReplaceForHostAsync(It.IsAny<Guid>(), It.IsAny<IEnumerable<InstalledPackage>>(), It.IsAny<CancellationToken>()))
+            .Callback<Guid, IEnumerable<InstalledPackage>, CancellationToken>((_, packages, _2) => stored = packages.ToList());
+
+        var result = await CreateHandler().Handle(
+            new RegisterApplicationsCommand(
+                "SERIAL-1",
+                Array.Empty<ApplicationEntry>(),
+                new[]
+                {
+                    new PackageEntry("openssl", "3.0.2-0ubuntu1.19", "dpkg"),
+                    new PackageEntry("openssl", "3.0.2-0ubuntu1.19", "dpkg"),
+                    new PackageEntry("glibc", "2.35-0ubuntu3.8", "dpkg"),
+                }),
+            CancellationToken.None);
+
+        Assert.NotNull(stored);
+        Assert.Equal(2, stored.Count);
+        Assert.Equal(2, result.PackageCount);
+    }
+
+    [Fact]
+    public async Task Handle_WithNoPackagesField_LeavesWhateverIsStoredAlone()
+    {
+        // Null means "this agent does not report them", which is what macOS, Windows and any
+        // Linux agent predating the field send. An empty list would mean "this host has none"
+        // and would clear the row — a real difference on a mixed fleet.
+        SetUpHost(_host);
+
+        await CreateHandler().Handle(
+            new RegisterApplicationsCommand("SERIAL-1", new[] { new ApplicationEntry("Firefox", "130.0") }),
+            CancellationToken.None);
+
+        _installedPackageRepository.Verify(
+            r => r.ReplaceForHostAsync(It.IsAny<Guid>(), It.IsAny<IEnumerable<InstalledPackage>>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task Handle_WithAnEmptyPackagesList_ClearsThem()
+    {
+        SetUpHost(_host);
+
+        await CreateHandler().Handle(
+            new RegisterApplicationsCommand("SERIAL-1", Array.Empty<ApplicationEntry>(), Array.Empty<PackageEntry>()),
+            CancellationToken.None);
+
+        _installedPackageRepository.Verify(
+            r => r.ReplaceForHostAsync(_host.Id, It.IsAny<IEnumerable<InstalledPackage>>(), It.IsAny<CancellationToken>()),
+            Times.Once);
     }
 
     [Fact]

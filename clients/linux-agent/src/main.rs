@@ -129,6 +129,18 @@ struct RegisterApplicationsRequest {
     #[serde(rename = "serialNumber")]
     serial_number: String,
     applications: Vec<InstalledApp>,
+    /// This host's operating-system packages, by **source** package name — mirrors
+    /// `RegisterApplicationsCommand.Packages`.
+    ///
+    /// Sent by this agent only; macOS and Windows have no equivalent inventory and the field is
+    /// optional server-side for that reason. It is deliberately a *separate* list from
+    /// `applications` rather than more entries in it: these are for vulnerability assessment and
+    /// nothing else, they land in their own table, and they must never reach the Applications
+    /// screen, `upgrade_paths`, the AI or a patch cycle. See `InstalledPackage` on the server.
+    ///
+    /// It also does not make apt or dnf a package manager this system patches through — that
+    /// decision is unchanged and is about something else entirely (see clients/CLAUDE.md).
+    packages: Vec<system_info::OsPackage>,
 }
 
 fn main() -> Result<()> {
@@ -337,9 +349,13 @@ fn register_and_report(config: &Config, checkin_minute: u8) -> Result<CheckInOut
     let applications = collect_installed_applications();
     logging::info(&format!("reporting {} installed application(s)", applications.len()));
 
+    let packages = system_info::scan_os_packages();
+    logging::info(&format!("reporting {} operating-system source package(s)", packages.len()));
+
     let applications_request = RegisterApplicationsRequest {
         serial_number: serial_number.clone(),
         applications,
+        packages,
     };
     let _: serde_json::Value = post_with_retry(&client, &config.register_applications_url(), &applications_request)
         .context("failed to register installed applications")?;

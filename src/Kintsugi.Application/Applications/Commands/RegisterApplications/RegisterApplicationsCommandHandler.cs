@@ -11,17 +11,20 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
 {
     private readonly IHostRepository _hostRepository;
     private readonly IInstalledApplicationRepository _installedApplicationRepository;
+    private readonly IInstalledPackageRepository _installedPackageRepository;
     private readonly IUpgradePathRepository _upgradePathRepository;
     private readonly IUnitOfWork _unitOfWork;
 
     public RegisterApplicationsCommandHandler(
         IHostRepository hostRepository,
         IInstalledApplicationRepository installedApplicationRepository,
+        IInstalledPackageRepository installedPackageRepository,
         IUpgradePathRepository upgradePathRepository,
         IUnitOfWork unitOfWork)
     {
         _hostRepository = hostRepository;
         _installedApplicationRepository = installedApplicationRepository;
+        _installedPackageRepository = installedPackageRepository;
         _upgradePathRepository = upgradePathRepository;
         _unitOfWork = unitOfWork;
     }
@@ -75,9 +78,15 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
 
         await UpsertPackageManagerUpgradePathsAsync(request.Applications, cancellationToken);
 
+        // Operating-system packages, if the agent sent any. Note what does *not* happen to them:
+        // no upgrade path is upserted, no package manager is recognized, nothing is linked as a
+        // parent. They are inventory for the vulnerability assessment and are invisible
+        // everywhere else — see InstalledPackage.
+        var packageCount = await ReplacePackagesAsync(host.Id, request.Packages, cancellationToken);
+
         await _unitOfWork.SaveChangesAsync(cancellationToken);
 
-        return new RegisterApplicationsResult(host.Id, newlyReported.Count);
+        return new RegisterApplicationsResult(host.Id, newlyReported.Count, packageCount);
     }
 
     /// <summary>
@@ -141,6 +150,53 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
     /// unsigned and unpatchable — which is exactly what happened.
     /// </para>
     /// </remarks>
+    /// <summary>
+    /// Replaces this host's operating-system package list.
+    /// </summary>
+    /// <remarks>
+    /// A null <c>Packages</c> means "this agent does not report them" and leaves whatever is
+    /// stored alone; an empty list means "this host has none" and clears it. The distinction
+    /// matters on a mixed fleet: a macOS or Windows agent, or a Linux agent predating the field,
+    /// must not wipe what a newer Linux agent reported from the same machine after a downgrade
+    /// or a reinstall. It is the same null-means-not-reported rule Host.Reregister follows.
+    /// </remarks>
+    private async Task<int> ReplacePackagesAsync(
+        Guid hostId, IReadOnlyList<PackageEntry>? packages, CancellationToken cancellationToken)
+    {
+        if (packages is null)
+        {
+            return 0;
+        }
+
+        // Deduped on (name, version): several binary packages routinely share one source
+        // package, and the agent reports source names, so "openssl 3.0.2-0ubuntu1.19" arrives
+        // once for the CLI and once for the library.
+        var entities = packages
+            .Where(p => !string.IsNullOrWhiteSpace(p.Name) && !string.IsNullOrWhiteSpace(p.Version))
+            .GroupBy(p => (p.Name.Trim(), p.Version.Trim()), StringTupleComparer.Instance)
+            .Select(g => new InstalledPackage(hostId, g.Key.Item1, g.Key.Item2, g.First().Source))
+            .ToList();
+
+        await _installedPackageRepository.ReplaceForHostAsync(hostId, entities, cancellationToken);
+        return entities.Count;
+    }
+
+    /// <summary>Case-insensitive comparison of the (name, version) pair the dedupe groups on.
+    /// dpkg and rpm are both case-sensitive in practice, but a host reporting one name in two
+    /// casings should still produce one row rather than a unique-index surprise.</summary>
+    private sealed class StringTupleComparer : IEqualityComparer<(string, string)>
+    {
+        public static readonly StringTupleComparer Instance = new();
+
+        public bool Equals((string, string) x, (string, string) y) =>
+            StringComparer.OrdinalIgnoreCase.Equals(x.Item1, y.Item1)
+            && StringComparer.OrdinalIgnoreCase.Equals(x.Item2, y.Item2);
+
+        public int GetHashCode((string, string) obj) => HashCode.Combine(
+            StringComparer.OrdinalIgnoreCase.GetHashCode(obj.Item1),
+            StringComparer.OrdinalIgnoreCase.GetHashCode(obj.Item2));
+    }
+
     private async Task UpsertPackageManagerUpgradePathsAsync(IReadOnlyList<ApplicationEntry> applications, CancellationToken cancellationToken)
     {
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);

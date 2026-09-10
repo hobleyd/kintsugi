@@ -239,3 +239,35 @@ enum CpeSuggestionSource {
         CpeSuggestionSource.manual => 'Entered by hand',
       };
 }
+
+
+/// Mirrors `VulnerabilitySubjectKind` — what a finding was matched against.
+///
+/// Deliberately not [CpeSubjectKind], even though the first two members line up with it (and
+/// their ordinals match on purpose). That one is about what a CPE mapping maps; a distribution
+/// package has no CPE mapping at all — it is matched against its distribution's own advisories,
+/// keyed by source-package name, with nothing for a human to confirm. Ordinal on the wire;
+/// append only.
+enum VulnerabilitySubjectKind {
+  application,
+  operatingSystem,
+  operatingSystemPackage;
+
+  String get label => switch (this) {
+        VulnerabilitySubjectKind.application => 'Application',
+        VulnerabilitySubjectKind.operatingSystem => 'Operating system',
+        VulnerabilitySubjectKind.operatingSystemPackage => 'OS package',
+      };
+
+  /// Where the answer came from, shown beside a finding so a reader knows which claim they are
+  /// looking at. The distinction is not cosmetic: a package's answer accounts for the
+  /// distribution's backported fixes, and an application's does not have to.
+  String get sourceLabel => switch (this) {
+        VulnerabilitySubjectKind.application ||
+        VulnerabilitySubjectKind.operatingSystem =>
+          'Matched by version range against the National Vulnerability Database.',
+        VulnerabilitySubjectKind.operatingSystemPackage =>
+          'Matched against this distribution’s own security advisories, so a backported fix counts '
+              'as fixed.',
+      };
+}

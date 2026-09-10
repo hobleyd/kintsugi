@@ -8,7 +8,23 @@ namespace Kintsugi.Application.Applications.Commands.RegisterApplications;
 /// its serial number. Replaces any previously reported list for that host
 /// (agents report a full inventory snapshot, not incremental changes).
 /// </summary>
-public record RegisterApplicationsCommand(string SerialNumber, IReadOnlyList<ApplicationEntry> Applications)
+/// <param name="Packages">
+/// The host's operating-system packages — dpkg or rpm entries, sent by the Linux agent only.
+/// Optional, so the macOS and Windows agents and any Linux agent predating the field are
+/// unaffected.
+/// </param>
+/// <remarks>
+/// <b><paramref name="Packages"/> is inventory for vulnerability assessment and nothing else.</b>
+/// It lands in its own table and is invisible to the Applications screen, to
+/// <c>upgrade_paths</c>, to the AI and to every patch cycle — see
+/// <see cref="Kintsugi.Domain.Entities.InstalledPackage"/> for why that is a separate table
+/// rather than a flag. Reporting it does not make apt or dnf a package manager this system
+/// patches through; that decision is unchanged and is about something else entirely.
+/// </remarks>
+public record RegisterApplicationsCommand(
+    string SerialNumber,
+    IReadOnlyList<ApplicationEntry> Applications,
+    IReadOnlyList<PackageEntry>? Packages = null)
     : IRequest<RegisterApplicationsResult>, IAgentScopedRequest;
 
 /// <summary>
@@ -49,4 +65,25 @@ public record ApplicationEntry(
     string? AvailableVersion = null,
     bool? UpdateAvailable = null);
 
-public record RegisterApplicationsResult(Guid HostId, int ApplicationCount);
+/// <summary>
+/// One reported operating-system package.
+/// </summary>
+/// <param name="Name">
+/// The <b>source</b> package name — <c>openssl</c>, not <c>libssl3</c>; <c>glibc</c>, not
+/// <c>libc6</c>. Distributions track CVEs against source packages and so does OSV: verified
+/// against the live API, <c>libssl3</c> answers 0 vulnerabilities on Ubuntu 22.04 where
+/// <c>openssl</c> answers 48. Sending binary names would silently under-report nearly
+/// everything, so the agent reads <c>${source:Package}</c> from dpkg and derives the name from
+/// <c>%{SOURCERPM}</c> for rpm.
+/// </param>
+/// <param name="Version">The distribution's own version, packaging revision included — that
+/// revision is what carries a backported fix, and is the difference between 48 vulnerabilities
+/// and 36 for the same upstream 3.0.2.</param>
+/// <param name="Source">Which packaging system reported it: <c>dpkg</c> or <c>rpm</c>.</param>
+public record PackageEntry(string Name, string Version, string Source);
+
+/// <param name="PackageCount">How many operating-system packages were recorded. Reported
+/// separately from <paramref name="ApplicationCount"/> because they are separate inventories with
+/// separate purposes, and an agent that has started sending packages should be able to see that
+/// they arrived.</param>
+public record RegisterApplicationsResult(Guid HostId, int ApplicationCount, int PackageCount = 0);

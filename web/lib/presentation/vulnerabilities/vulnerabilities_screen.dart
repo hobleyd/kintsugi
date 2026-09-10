@@ -130,6 +130,11 @@ class _SummaryPanel extends StatelessWidget {
               hint: 'Applications and operating systems with a confirmed CPE',
             ),
             _Stat(
+              value: '${summary.assessedPackageCount}',
+              label: 'OS packages assessed',
+              hint: 'Linux distribution packages, matched against their own distribution’s advisories',
+            ),
+            _Stat(
               value: '${summary.unmappedSubjectCount}',
               label: 'Not assessed',
               hint: 'No CPE confirmed, so NVD has never been asked about these',
@@ -391,6 +396,14 @@ class _FindingDetail extends StatelessWidget {
                   ],
                 ),
               ),
+            // Which database answered, said once per kind rather than per row. Not decoration:
+            // a distribution package's answer accounts for that distribution's backported fixes
+            // and an application's does not have to, so the two claims mean different things and
+            // a reader deciding what to do about one is entitled to know which they are reading.
+            for (final kind in finding.affectedSubjects.map((s) => s.subjectKind).toSet()) ...[
+              const SizedBox(height: 6),
+              HintText('${kind.label}: ${kind.sourceLabel}'),
+            ],
           ],
         ),
       );

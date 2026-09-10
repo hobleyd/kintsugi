@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
@@ -162,6 +162,172 @@ fn read_machine_id(path: &Path) -> Option<String> {
     // A machine ID is exactly 32 lowercase hex characters. An "uninitialized" one is empty, and
     // some container runtimes leave it as literal "uninitialized\n".
     (trimmed.len() == 32 && trimmed.chars().all(|c| c.is_ascii_hexdigit())).then(|| trimmed.to_string())
+}
+
+/// The maximum number of operating-system packages one inventory report will carry.
+///
+/// Deliberately below the server's own ceiling (`RegisterApplicationsCommandValidator.MaxPackages`,
+/// 10000), and the asymmetry is the point: the package list travels in the same request as the
+/// application inventory, so a report rejected for being one package over the line would take
+/// this host's applications down with it and leave the Applications screen quietly wrong. A large
+/// Debian desktop is around 2000 source packages, so nothing real comes near either figure — but
+/// if one ever does, truncating here and saying so beats losing the whole report. Raise the
+/// server's figure before raising this one, never after.
+pub const MAX_REPORTED_PACKAGES: usize = 5000;
+
+/// One operating-system package, as reported to the server for vulnerability assessment.
+///
+/// Mirrors `PackageEntry` in
+/// Kintsugi.Application/Applications/Commands/RegisterApplications/RegisterApplicationsCommand.cs.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+pub struct OsPackage {
+    pub name: String,
+    pub version: String,
+    pub source: String,
+}
+
+/// Every operating-system package installed on this host, named by **source** package.
+///
+/// # Why source packages, and not the binary ones `dpkg -l` shows
+///
+/// Distributions track CVEs against source packages, and so does the vulnerability database the
+/// server asks. Verified against the live OSV API: on Ubuntu 22.04 the binary package `libssl3`
+/// answers **0** vulnerabilities while its source package `openssl` answers **48**, and `libc6`
+/// answers 0 where `glibc` answers 38. Reporting binary names would silently under-report
+/// almost everything — which is worse than reporting nothing, because the screen would look
+/// clean. So dpkg is asked for `${source:Package}`/`${source:Version}` and rpm's source name is
+/// taken from `%{SOURCERPM}`.
+///
+/// The version matters as much as the name. A distribution's packaging revision is what carries a
+/// backported security fix, and it is the whole reason this path exists rather than reusing the
+/// CPE matching the server does for applications: `3.0.2-0ubuntu1.15` and `3.0.2-0ubuntu1.19` are
+/// the same upstream 3.0.2 and answer 48 and 36 vulnerabilities respectively.
+///
+/// Best-effort. A host with neither dpkg nor rpm reports nothing, which is a valid inventory
+/// rather than a failure — the server treats an empty list as "this host has no packages" and a
+/// missing one as "this agent does not report them".
+pub fn scan_os_packages() -> Vec<OsPackage> {
+    let mut packages: Vec<OsPackage> = scan_dpkg_packages();
+    if packages.is_empty() {
+        packages = scan_rpm_packages();
+    }
+
+    // Deduped because several binary packages routinely share one source package: reporting
+    // source names turns `openssl` and `libssl3` into the same entry, and the server would
+    // otherwise store it twice.
+    let mut seen = HashSet::new();
+    packages.retain(|p| seen.insert((p.name.clone(), p.version.clone())));
+
+    if packages.len() > MAX_REPORTED_PACKAGES {
+        crate::logging::warn(&format!(
+            "this host has {} source packages; reporting the first {MAX_REPORTED_PACKAGES} so the inventory report is not rejected",
+            packages.len()
+        ));
+        packages.truncate(MAX_REPORTED_PACKAGES);
+    }
+
+    packages
+}
+
+fn scan_dpkg_packages() -> Vec<OsPackage> {
+    // `${db:Status-Status}` is checked because `dpkg-query -W` also lists packages in the `rc`
+    // state — removed, configuration files still present. Those are not installed software and
+    // reporting vulnerabilities for them would be reporting them for something that is not on
+    // the machine.
+    let output = match Command::new("dpkg-query")
+        .args(["-W", "-f=${db:Status-Status}\t${source:Package}\t${source:Version}\n"])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        Ok(_) => return Vec::new(),
+        Err(_) => return Vec::new(),
+    };
+
+    parse_dpkg_packages(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The pure half of [`scan_dpkg_packages`].
+pub(crate) fn parse_dpkg_packages(listing: &str) -> Vec<OsPackage> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let status = fields.next()?.trim();
+            let name = fields.next()?.trim();
+            let version = fields.next()?.trim();
+
+            if status != "installed" || name.is_empty() || version.is_empty() {
+                return None;
+            }
+
+            Some(OsPackage {
+                name: name.to_string(),
+                version: version.to_string(),
+                source: "dpkg".to_string(),
+            })
+        })
+        .collect()
+}
+
+fn scan_rpm_packages() -> Vec<OsPackage> {
+    let output = match Command::new("rpm")
+        .args(["-qa", "--qf", "%{SOURCERPM}\t%{NAME}\t%{VERSION}-%{RELEASE}\n"])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        Ok(_) => return Vec::new(),
+        Err(_) => return Vec::new(),
+    };
+
+    parse_rpm_packages(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The pure half of [`scan_rpm_packages`].
+///
+/// rpm has no field that gives the source package's *name* directly — `%{SOURCERPM}` is a whole
+/// filename, `openssl-3.0.7-27.el9.src.rpm`, from which the name is everything before the
+/// version. Split from the right, because a name legitimately contains hyphens
+/// (`python3-libs-3.9.18-1.el9.src.rpm` has source name `python3`... and `xorg-x11-server` has
+/// two). The version-release pair is shared between a source rpm and the binaries built from it,
+/// so `%{VERSION}-%{RELEASE}` is already the right version to report.
+pub(crate) fn parse_rpm_packages(listing: &str) -> Vec<OsPackage> {
+    listing
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split('\t');
+            let source_rpm = fields.next()?.trim();
+            let binary_name = fields.next()?.trim();
+            let version = fields.next()?.trim();
+
+            if version.is_empty() {
+                return None;
+            }
+
+            // A package built from no source rpm — `gpg-pubkey`, which rpm carries as a pseudo
+            // package — falls back to its own name rather than being dropped, since it is still
+            // something installed.
+            let name = source_package_name(source_rpm).unwrap_or(binary_name);
+            if name.is_empty() {
+                return None;
+            }
+
+            Some(OsPackage {
+                name: name.to_string(),
+                version: version.to_string(),
+                source: "rpm".to_string(),
+            })
+        })
+        .collect()
+}
+
+/// `openssl-3.0.7-27.el9.src.rpm` -> `openssl`. Two hyphen-separated fields are stripped from the
+/// right (release, then version), which is rpm's own filename grammar and the only way to do this
+/// that survives a name containing hyphens.
+fn source_package_name(source_rpm: &str) -> Option<&str> {
+    let stem = source_rpm.strip_suffix(".src.rpm")?;
+    let without_release = stem.rsplit_once('-')?.0;
+    let (name, _version) = without_release.rsplit_once('-')?;
+    (!name.is_empty()).then_some(name)
 }
 
 /// Returns a human-readable OS name and version, e.g. "Ubuntu 24.04.1 LTS (Linux)".
@@ -578,6 +744,81 @@ mod tests {
     #[test]
     fn parse_os_release_pretty_name_reads_an_unquoted_value() {
         assert_eq!(parse_os_release_key("PRETTY_NAME=Arch Linux\n", "PRETTY_NAME").as_deref(), Some("Arch Linux"));
+    }
+
+    #[test]
+    fn parse_dpkg_packages_reports_the_source_package_not_the_binary_one() {
+        // The whole accuracy argument in one test. Verified against the live OSV API: on Ubuntu
+        // 22.04 the binary `libssl3` answers 0 vulnerabilities while its source `openssl`
+        // answers 48, and `libc6` answers 0 where `glibc` answers 38. dpkg-query is therefore
+        // asked for ${source:Package}, and this pins that the parser reads that column.
+        let listing = "installed\topenssl\t3.0.2-0ubuntu1.19\ninstalled\tglibc\t2.35-0ubuntu3.8\n";
+
+        let packages = parse_dpkg_packages(listing);
+
+        assert_eq!(packages.len(), 2);
+        assert_eq!(packages[0].name, "openssl");
+        assert_eq!(packages[0].version, "3.0.2-0ubuntu1.19");
+        assert_eq!(packages[0].source, "dpkg");
+        assert_eq!(packages[1].name, "glibc");
+    }
+
+    #[test]
+    fn parse_dpkg_packages_skips_a_removed_package_whose_config_remains() {
+        // `dpkg-query -W` lists `rc` packages too — removed, configuration files still present.
+        // They are not installed software, and reporting vulnerabilities for them would report
+        // them for something that is not on the machine.
+        let listing = "installed\topenssl\t3.0.2-0ubuntu1.19\nconfig-files\tnano\t6.2-1\n";
+
+        let packages = parse_dpkg_packages(listing);
+
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].name, "openssl");
+    }
+
+    #[test]
+    fn parse_dpkg_packages_ignores_a_malformed_line() {
+        // An empty inventory is a valid report; a half-line must not become a package with an
+        // empty name that the server then asks a vulnerability database about.
+        let packages = parse_dpkg_packages("installed\topenssl\ninstalled\t\t3.0.2\n\n");
+
+        assert!(packages.is_empty());
+    }
+
+    #[test]
+    fn parse_rpm_packages_takes_the_source_name_from_the_source_rpm() {
+        let listing = "openssl-3.0.7-27.el9.src.rpm\topenssl-libs\t3.0.7-27.el9\n";
+
+        let packages = parse_rpm_packages(listing);
+
+        assert_eq!(packages.len(), 1);
+        // Not "openssl-libs": OSV answers 0 for the binary and 10 for the source.
+        assert_eq!(packages[0].name, "openssl");
+        assert_eq!(packages[0].version, "3.0.7-27.el9");
+        assert_eq!(packages[0].source, "rpm");
+    }
+
+    #[test]
+    fn parse_rpm_packages_keeps_hyphens_inside_a_source_name() {
+        // Two fields are stripped from the right — release, then version — which is rpm's own
+        // filename grammar. Splitting from the left would turn this into "xorg".
+        let listing = "xorg-x11-server-21.1.13-3.el9.src.rpm\txorg-x11-server-Xwayland\t21.1.13-3.el9\n";
+
+        let packages = parse_rpm_packages(listing);
+
+        assert_eq!(packages[0].name, "xorg-x11-server");
+    }
+
+    #[test]
+    fn parse_rpm_packages_falls_back_for_a_package_with_no_source_rpm() {
+        // gpg-pubkey is a pseudo package rpm carries with no source. Still installed, so it is
+        // reported under its own name rather than dropped.
+        let listing = "(none)\tgpg-pubkey\t3228467c-613798eb\n";
+
+        let packages = parse_rpm_packages(listing);
+
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].name, "gpg-pubkey");
     }
 
     #[test]

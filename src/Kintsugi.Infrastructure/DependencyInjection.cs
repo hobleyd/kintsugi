@@ -52,6 +52,7 @@ public static class DependencyInjection
         services.AddScoped<IVulnerabilitySettingsRepository, VulnerabilitySettingsRepository>();
         services.AddScoped<IVulnerabilitySettingsProvider, VulnerabilitySettingsProvider>();
         services.AddScoped<IVulnerabilityRepository, VulnerabilityRepository>();
+        services.AddScoped<IInstalledPackageRepository, InstalledPackageRepository>();
         services.AddSingleton<IAgentPackageStorage, AgentPackageFileStorage>();
         services.AddSingleton<IAgentPackageArchiveRewriter, AgentPackageArchiveRewriter>();
         // The upstream client builds come from — see GitHubAgentPackageSourceClient and the
@@ -85,6 +86,9 @@ public static class DependencyInjection
         // sail past it — and NVD answers that with 403s that read like an authentication failure.
         services.AddHttpClient<INvdClient, NvdClient>();
         services.AddSingleton<NvdRateLimiter>();
+        // OSV, for Linux distribution packages. Deliberately not behind NvdRateLimiter: that
+        // limiter exists for NVD's per-address window, and OSV publishes no key and no limit.
+        services.AddHttpClient<IOsvClient, OsvClient>();
         services.AddScoped<IGooseCliClient, GooseCliClient>();
         services.AddScoped<IClaudeAgentSdkClient, ClaudeAgentSdkClient>();
         services.AddSingleton<ICaService, CaService>();

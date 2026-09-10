@@ -30,6 +30,12 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
     public DbSet<Vulnerability> Vulnerabilities => Set<Vulnerability>();
     public DbSet<CpeAssessment> CpeAssessments => Set<CpeAssessment>();
     public DbSet<VulnerabilityMatch> VulnerabilityMatches => Set<VulnerabilityMatch>();
+    // Linux operating-system packages, deliberately their own table rather than a flag on
+    // InstalledApplications — see InstalledPackage on why that separation is the design.
+    public DbSet<InstalledPackage> InstalledPackages => Set<InstalledPackage>();
+    public DbSet<PackageAssessment> PackageAssessments => Set<PackageAssessment>();
+    public DbSet<PackageVulnerabilityMatch> PackageVulnerabilityMatches => Set<PackageVulnerabilityMatch>();
+    public DbSet<OsvAdvisory> OsvAdvisories => Set<OsvAdvisory>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
