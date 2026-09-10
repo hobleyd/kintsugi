@@ -67,6 +67,17 @@ class PatchFailure extends Equatable {
 
   bool get isOutstanding => resolution == PatchFailureResolution.outstanding;
 
+  /// Whether a package manager owns this installation, read off the bucket's own `pm:` prefix (see
+  /// `PlatformBucket.ForPackageManager`).
+  ///
+  /// It decides what the fix panel can offer. A package manager's script is one fixed text shared
+  /// by *every* row of that bucket — the server writes it, no AI is involved, and rewriting it on
+  /// the back of one host's failure would change what the whole fleet runs. So AI repair is not
+  /// offered for these; editing and re-signing the script is, exactly as on the Currently Installed
+  /// screen. The screen says which of the two it is rather than leaving the missing button to be
+  /// noticed.
+  bool get isPackageManagerManaged => platform?.startsWith('pm:') ?? false;
+
   /// Whether this is a one-off or something that has been failing on a schedule — which is most of
   /// what tells a blip from a broken script.
   bool get isRepeating => failureCount > 1;

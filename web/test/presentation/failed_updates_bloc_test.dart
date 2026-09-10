@@ -147,6 +147,17 @@ void main() {
       expect(failure_(id: '1', hasScript: false).canFix, isFalse);
       expect(failure_(id: '1').canFix, isTrue);
     });
+
+    /// A package manager's script is one fixed text shared by every row of its bucket, so the panel
+    /// offers hand-editing but not AI repair — and the screen says which, rather than leaving a
+    /// missing button to be noticed. Read off the bucket's own `pm:` prefix, the way the server
+    /// writes it (`PlatformBucket.ForPackageManager`).
+    test('knows a package-manager row from an AI-researched one', () {
+      expect(failure_(id: '1', platform: 'pm:Homebrew').isPackageManagerManaged, isTrue);
+      expect(failure_(id: '1', platform: 'pm:winget').isPackageManagerManaged, isTrue);
+      expect(failure_(id: '1', platform: 'macOS').isPackageManagerManaged, isFalse);
+      expect(failure_(id: '1', platform: null).isPackageManagerManaged, isFalse);
+    });
   });
 
   group('dismissing', () {

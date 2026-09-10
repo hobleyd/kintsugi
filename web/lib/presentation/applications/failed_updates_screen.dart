@@ -61,10 +61,12 @@ class _FailedUpdatesView extends StatelessWidget {
               'broken shows up once rather than once per patch cycle.',
             ),
             HintText(
-              'Expand a row to repair it. The instructions box opens carrying the failure\'s own '
-              'output and the script as it stands now, so "Send to AI" asks for a fix rather than '
-              'fresh research — or edit the script directly and save it. Either way the result is '
-              'unsigned until somebody reviews and signs it, so no host runs it before then.',
+              'Expand a row to repair it. For an AI-researched script the instructions box opens '
+              'carrying the failure\'s own output and the script as it stands now, so "Send to AI" '
+              'asks for a fix rather than fresh research. A package-manager script (Homebrew, '
+              'winget, Flatpak and the rest) is one fixed text shared across that manager, so no AI '
+              'is offered for it — edit it by hand instead. Either way the result is unsigned until '
+              'somebody reviews and signs it, so no host runs it before then.',
             ),
             HintText(
               'A row clears itself when that host next reports the application patched successfully. '
@@ -312,6 +314,17 @@ class _FixPanel extends StatelessWidget {
         children: [
           _FailureDetails(failure: failure),
           const SizedBox(height: 20),
+          if (failure.canFix && failure.isPackageManagerManaged)
+            const Padding(
+              padding: EdgeInsets.only(bottom: 12),
+              child: AlertBox.info(
+                'This application is managed by a package manager, so its upgrade script is one '
+                'fixed text shared by every application that manager handles — the server writes '
+                'it, and no AI is involved. There is no "Send to AI" for it here, because a repair '
+                'aimed at one host would change what the whole fleet runs. Edit the script below '
+                'and sign it if it needs changing.',
+              ),
+            ),
           if (failure.canFix)
             InstructionsPanel(
               // Keyed on the failure, so collapsing one row and opening another rebuilds the panel

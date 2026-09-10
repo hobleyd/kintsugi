@@ -337,6 +337,17 @@ CLI contract every agent invokes a script by.
 The script sent is whatever the row holds **now**, not a snapshot taken when the failure was
 recorded: that is the one an agent would run on its next cycle, so it is the one worth fixing.
 
+**AI repair is offered only for AI-researched rows, and the screen says so rather than letting a
+missing button be noticed.** `GetUpgradePathPromptQueryHandler` answers `available: false` for a
+package-manager row — it always has, since that script is written by the server with no AI involved
+— so the panel shows the reason where "Send to AI" would be, and the script editor, Save and Sign
+work exactly as on Currently Installed. That is the right restriction rather than an omission: a
+manager's script is **one fixed text shared by every row of its bucket**, so rewriting it on the
+back of one host's failure would change what the whole fleet runs. Know the blast radius, though —
+the Linux agent inventories Flatpak and Snap only, so *every* Linux row is package-manager-managed,
+and so is most of macOS (Homebrew) and Windows (winget/Chocolatey). `PatchFailure.isPackageManagerManaged`
+reads it off the bucket's own `pm:` prefix so the screen can explain which of the two a row is.
+
 **It does not poll.** Nothing here runs in the background on the server — a failure arrives when some
 agent's next patch cycle reports one, hours away. The one thing that does change while the screen is
 open is an AI repair, and the fix panel polls that itself and then asks the table to reload.
