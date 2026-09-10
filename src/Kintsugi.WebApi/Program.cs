@@ -14,6 +14,7 @@ using Kintsugi.WebApi.RemoteControl;
 using Kintsugi.WebApi.Security;
 using Kintsugi.WebApi.UpgradePathScanning;
 using Kintsugi.WebApi.Vanta;
+using Kintsugi.WebApi.Vulnerabilities;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -95,6 +96,12 @@ builder.Services.AddHostedService<UpdateCheckBackgroundService>();
 builder.Services.AddSingleton<VantaSyncCoordinator>();
 builder.Services.AddSingleton<IVantaSyncCoordinator>(sp => sp.GetRequiredService<VantaSyncCoordinator>());
 builder.Services.AddHostedService<VantaSyncBackgroundService>();
+// Same three-line shape as Vanta's, and for a related-but-distinct reason: the coordinator is a
+// singleton because NVD's rate limit belongs to the server rather than to a request scope. See
+// VulnerabilityRunCoordinator.
+builder.Services.AddSingleton<VulnerabilityRunCoordinator>();
+builder.Services.AddSingleton<IVulnerabilityRunCoordinator>(sp => sp.GetRequiredService<VulnerabilityRunCoordinator>());
+builder.Services.AddHostedService<VulnerabilityAssessmentBackgroundService>();
 
 // Remote control's live half: which hosts are reachable right now, and the relay that joins an
 // administrator's browser socket to an agent's. Registered the same two ways as the coordinators

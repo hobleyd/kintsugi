@@ -35,7 +35,7 @@ namespace Kintsugi.Infrastructure.Ai;
 /// subscription's OAuth token rather than the metered API key <see cref="AiProvider.Anthropic"/>
 /// uses.
 /// </summary>
-public class AiUpgradePathResearchClient : IUpgradePathResearchClient
+public class AiUpgradePathResearchClient : IUpgradePathResearchClient, ICpeSuggestionClient
 {
     private const string OllamaWebSearchUrl = "https://ollama.com/api/web_search";
 
@@ -1479,6 +1479,108 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient
 
         return trimmed.Length == 0 ? null : trimmed;
     }
+
+    /// <inheritdoc cref="ICpeSuggestionClient.SuggestCpeAsync" />
+    /// <remarks>
+    /// Implemented here rather than as its own class purely to reuse
+    /// <see cref="AskProviderRawAsync"/> — the per-provider dispatch across Anthropic, OpenAI,
+    /// Ollama, Goose and the Claude Agent SDK. A second copy of that would be a second thing to
+    /// keep in step every time a provider is added.
+    /// </remarks>
+    public async Task<CpeSuggestion?> SuggestCpeAsync(
+        AiProviderSettings settings, string displayName, string part, CancellationToken cancellationToken)
+    {
+        // No web-search tool is offered, unlike script generation. The answer wanted is a token
+        // out of NVD's dictionary, which a model either knows or does not; searching the web for
+        // it invites a confident guess assembled from a vendor's marketing page. And a wrong guess
+        // costs nothing anyway, because NvdClient.CpeExistsAsync throws it away before a reviewer
+        // ever sees it.
+        var answer = await AskProviderRawAsync(settings, BuildCpeSuggestionPrompt(displayName, part), cancellationToken);
+
+        var json = CleanScriptText(answer);
+        if (json is null)
+        {
+            return null;
+        }
+
+        CpeSuggestionResponse? parsed;
+        try
+        {
+            parsed = JsonSerializer.Deserialize<CpeSuggestionResponse>(json, ModelResultJsonOptions);
+        }
+        catch (JsonException)
+        {
+            // A model that answered in prose has effectively declined. Not an exception: the
+            // caller treats null as "nothing to propose" and moves the subject to the back of the
+            // queue, which is the right outcome either way.
+            return null;
+        }
+
+        if (parsed?.Vendor is null || parsed.Product is null)
+        {
+            return null;
+        }
+
+        var vendor = parsed.Vendor.Trim().ToLowerInvariant();
+        var product = parsed.Product.Trim().ToLowerInvariant();
+
+        // "unknown" is what the prompt asks for when the model has no answer, and it is also a
+        // real CPE vendor token, so it is filtered here rather than being sent to the dictionary
+        // check where it would occasionally pass.
+        if (vendor.Length == 0 || product.Length == 0 || vendor == "unknown" || product == "unknown")
+        {
+            return null;
+        }
+
+        return new CpeSuggestion(vendor, product, parsed.Notes);
+    }
+
+    /// <summary>
+    /// Asks for a CPE vendor and product and nothing else.
+    /// </summary>
+    /// <remarks>
+    /// The prompt is deliberately narrow. It does not ask the model whether the application is
+    /// vulnerable, which CVEs affect it, or how serious they are — every one of those is a fact
+    /// with an authoritative source that this system already queries, and a model's answer would
+    /// be a plausible-looking second opinion nothing checks. Compare <c>VantaResourceBuilder</c>,
+    /// which refuses to derive a severity for exactly that reason. What is asked for here is a
+    /// lookup key, and NVD's dictionary is asked to confirm it before anybody sees it.
+    /// </remarks>
+    private static string BuildCpeSuggestionPrompt(string displayName, string part)
+    {
+        var kind = part == "o" ? "operating system" : "application";
+
+        // $$ so the JSON example's braces need no doubling beyond {{ }} — see the raw-string rules.
+        return $$"""
+            You are identifying the CPE (Common Platform Enumeration) vendor and product names that
+            the US National Vulnerability Database uses for a piece of software, so that its
+            published CVEs can be looked up.
+
+            The {{kind}} is named: {{displayName}}
+
+            Answer with the vendor and product components of its CPE 2.3 name — the third and
+            fourth fields of cpe:2.3:{{part}}:<vendor>:<product>:<version>:... — exactly as they
+            appear in NVD's CPE dictionary. They are lower case, use underscores rather than
+            spaces, and are frequently not what the vendor calls itself in marketing: Firefox is
+            mozilla:firefox, Visual Studio Code is microsoft:visual_studio_code, macOS is
+            apple:macos.
+
+            The name you have been given comes from a fleet inventory, so it may be a package
+            manager's token ("google-chrome"), a macOS bundle name ("Google Chrome.app") or a
+            Windows uninstall-registry display name ("Google Chrome"). All three mean the same
+            product.
+
+            If you do not know this software, or it is bespoke or in-house software that NVD would
+            not track, answer with "unknown" for both fields. That is a useful answer and is
+            preferred over a guess — a wrong mapping attributes another product's vulnerabilities
+            to this one.
+
+            Respond with JSON only, no explanation and no markdown code fences:
+            {"vendor": "...", "product": "...", "notes": "one short sentence on how confident you are and why"}
+            """;
+    }
+
+    private sealed record CpeSuggestionResponse(string? Vendor, string? Product, string? Notes);
 
     private sealed record HostingRepoResult(string Name, string? Url, string? Description, int Stars);
 

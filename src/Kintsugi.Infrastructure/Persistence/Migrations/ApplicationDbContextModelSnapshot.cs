@@ -1063,6 +1063,13 @@ namespace Kintsugi.Infrastructure.Persistence.Migrations
                     b.Property<bool>("Enabled")
                         .HasColumnType("boolean");
 
+                    b.Property<string>("KevCatalogVersion")
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<DateTimeOffset?>("KevRefreshedUtc")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<string>("NvdApiKey")
                         .HasMaxLength(512)
                         .HasColumnType("character varying(512)");

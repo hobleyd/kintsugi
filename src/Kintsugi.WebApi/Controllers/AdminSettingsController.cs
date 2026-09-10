@@ -18,6 +18,9 @@ using Kintsugi.Application.PatchingPolicy.Queries.GetPatchingPolicySettings;
 using Kintsugi.Application.Vanta;
 using Kintsugi.Application.Vanta.Commands.UpdateVantaSettings;
 using Kintsugi.Application.Vanta.Queries.GetVantaSettings;
+using Kintsugi.Application.Vulnerabilities;
+using Kintsugi.Application.Vulnerabilities.Commands.UpdateVulnerabilitySettings;
+using Kintsugi.Application.Vulnerabilities.Queries.GetVulnerabilitySettings;
 using Kintsugi.WebApi.Filters;
 
 namespace Kintsugi.WebApi.Controllers;
@@ -137,6 +140,20 @@ public class AdminSettingsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<ActionResult<PatchingPolicySettingsDto>> UpdatePatchingPolicy(
         UpdatePatchingPolicySettingsCommand command, CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(command, cancellationToken));
+
+    /// <summary>The vulnerability-assessment configuration. The NVD API key is never returned —
+    /// <c>HasNvdApiKey</c> stands in for it, the same way every other secret here is handled.</summary>
+    [HttpGet("vulnerabilities")]
+    [ProducesResponseType(typeof(VulnerabilitySettingsDto), StatusCodes.Status200OK)]
+    public async Task<ActionResult<VulnerabilitySettingsDto>> GetVulnerabilities(CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(new GetVulnerabilitySettingsQuery(), cancellationToken));
+
+    [HttpPut("vulnerabilities")]
+    [ProducesResponseType(typeof(VulnerabilitySettingsDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<VulnerabilitySettingsDto>> UpdateVulnerabilities(
+        UpdateVulnerabilitySettingsCommand command, CancellationToken cancellationToken) =>
         Ok(await _sender.Send(command, cancellationToken));
 
     [HttpGet("vanta")]

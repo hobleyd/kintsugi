@@ -12,6 +12,7 @@ using Kintsugi.Infrastructure.Persistence.Repositories;
 using Kintsugi.Infrastructure.Security;
 using Kintsugi.Infrastructure.Storage;
 using Kintsugi.Infrastructure.Vanta;
+using Kintsugi.Infrastructure.Vulnerabilities;
 
 namespace Kintsugi.Infrastructure;
 
@@ -48,6 +49,9 @@ public static class DependencyInjection
         // Scoped and read per call, for the same reason IGitHubSettingsProvider is: these values are
         // edited on a settings page while the process runs.
         services.AddScoped<IVantaSettingsProvider, VantaSettingsProvider>();
+        services.AddScoped<IVulnerabilitySettingsRepository, VulnerabilitySettingsRepository>();
+        services.AddScoped<IVulnerabilitySettingsProvider, VulnerabilitySettingsProvider>();
+        services.AddScoped<IVulnerabilityRepository, VulnerabilityRepository>();
         services.AddSingleton<IAgentPackageStorage, AgentPackageFileStorage>();
         services.AddSingleton<IAgentPackageArchiveRewriter, AgentPackageArchiveRewriter>();
         // The upstream client builds come from — see GitHubAgentPackageSourceClient and the
@@ -61,12 +65,26 @@ public static class DependencyInjection
         services.AddHttpClient<IScriptApprovalPublisher, GitHubScriptApprovalPublisher>();
         services.AddHttpClient<IOllamaModelsClient, OllamaModelsClient>();
         services.AddHttpClient<IUpgradePathResearchClient, AiUpgradePathResearchClient>();
+        // The same object under a second interface, not a second registration of the type: it is
+        // where the per-provider dispatch lives, and a separate instance would mean a separate
+        // HttpClient for one extra prompt. See ICpeSuggestionClient on why the concern is split
+        // even though the implementation is shared.
+        services.AddScoped<ICpeSuggestionClient>(sp => (AiUpgradePathResearchClient)sp.GetRequiredService<IUpgradePathResearchClient>());
         // The Vanta sync. Its access token is held by a *singleton* alongside the typed client
         // rather than inside it, because Vanta permits one active token per application and revokes
         // the previous one whenever a new one is issued — two components each holding their own
         // would spend a sync invalidating each other. See VantaAccessTokenProvider.
         services.AddHttpClient<IVantaSyncClient, VantaSyncClient>();
         services.AddSingleton<VantaAccessTokenProvider>();
+        // CISA's KEV catalogue: one public JSON document, no key, no paging.
+        services.AddHttpClient<IKevCatalogClient, KevCatalogClient>();
+        // The NVD 2.0 API. Its rate limiter is a *singleton* beside the typed client, for the same
+        // shape of reason VantaAccessTokenProvider is one: NVD counts requests per source address
+        // over a rolling window, so the allowance belongs to the server rather than to a scope.
+        // Two components each keeping their own tally would each stay under the limit and together
+        // sail past it — and NVD answers that with 403s that read like an authentication failure.
+        services.AddHttpClient<INvdClient, NvdClient>();
+        services.AddSingleton<NvdRateLimiter>();
         services.AddScoped<IGooseCliClient, GooseCliClient>();
         services.AddScoped<IClaudeAgentSdkClient, ClaudeAgentSdkClient>();
         services.AddSingleton<ICaService, CaService>();
