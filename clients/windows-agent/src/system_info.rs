@@ -456,7 +456,7 @@ const UNINSTALL_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstal
 /// `firefox`, and the registry as `Mozilla Firefox 154.0.1 (x64 en-US)` — so the join has to be made
 /// on every key each side can offer.
 pub fn scan_installed_programs(managed_keys: &ManagedKeys) -> Vec<InstalledApp> {
-    let mut apps = Vec::new();
+    let mut entries = Vec::new();
 
     for (root, flags) in [
         (HKEY_LOCAL_MACHINE, KEY_READ | KEY_WOW64_64KEY),
@@ -476,13 +476,23 @@ pub fn scan_installed_programs(managed_keys: &ManagedKeys) -> Vec<InstalledApp> 
                 continue;
             };
 
-            if let Some(app) = read_uninstall_entry(&subkey, &subkey_name, managed_keys) {
-                apps.push(app);
+            if let Some(entry) = read_uninstall_entry(&subkey, &subkey_name, managed_keys) {
+                entries.push(entry);
             }
         }
     }
 
-    apps
+    resolve_colliding_names(entries)
+}
+
+/// One uninstall-registry entry, paired with the `DisplayName` exactly as the installer wrote it.
+///
+/// The raw name is carried alongside the reportable application because
+/// [`resolve_colliding_names`] may have to put it back: stripping a version out of a name is only
+/// safe while it leaves two applications with two names.
+struct UninstallEntry {
+    app: InstalledApp,
+    reported_name: String,
 }
 
 /// Turns one uninstall-registry subkey into a reportable application, or `None` if it isn't one.
@@ -491,7 +501,7 @@ pub fn scan_installed_programs(managed_keys: &ManagedKeys) -> Vec<InstalledApp> 
 /// entries, and every component an installer registered but hid. The filtering below is what the
 /// `com.apple.` bundle-identifier check is on macOS — without it this reports several hundred
 /// entries per host, most of them noise.
-fn read_uninstall_entry(subkey: &RegKey, subkey_name: &str, managed_keys: &ManagedKeys) -> Option<InstalledApp> {
+fn read_uninstall_entry(subkey: &RegKey, subkey_name: &str, managed_keys: &ManagedKeys) -> Option<UninstallEntry> {
     let reported_name: String = subkey.get_value("DisplayName").ok()?;
     let reported_name = reported_name.trim().to_string();
     if reported_name.is_empty() {
@@ -551,14 +561,49 @@ fn read_uninstall_entry(subkey: &RegKey, subkey_name: &str, managed_keys: &Manag
 
     let version = display_version.unwrap_or_else(|| "unknown".to_string());
 
-    Some(InstalledApp {
-        name,
-        version,
-        package_manager: None,
-        application_identifier: Some(application_identifier),
-        available_version: None,
-        update_available: None,
+    Some(UninstallEntry {
+        app: InstalledApp {
+            name,
+            version,
+            package_manager: None,
+            application_identifier: Some(application_identifier),
+            available_version: None,
+            update_available: None,
+        },
+        reported_name,
     })
+}
+
+/// Puts a stripped name back the way the installer wrote it wherever two *different* entries
+/// stripped down to the same one.
+///
+/// [`display_name_without_version`] holds the majors of an application family apart only while the
+/// family's own `DisplayVersion` is what distinguishes them, and there are families where it is
+/// not: a host carrying `Microsoft .NET Runtime - 8.0.11 (x64)` beside `Microsoft .NET Runtime -
+/// 9.0.0 (x64)` strips both to one name, and one name is one `upgrade_paths` row carrying one
+/// researched, signed script for two different major versions. That is exactly the failure the
+/// anchored strip exists to avoid, so where it happens the strip is undone — both entries go back
+/// to the names they had, which is no worse than before any of this existed.
+///
+/// Entries that stripped to the same name *from the same* `DisplayName` are one application seen
+/// through more than one registry view and keep the stripped name; reverting those would revert
+/// every application on the host that appears in two views.
+fn resolve_colliding_names(mut entries: Vec<UninstallEntry>) -> Vec<InstalledApp> {
+    let mut reported_names: HashMap<String, HashSet<String>> = HashMap::new();
+    for entry in &entries {
+        reported_names
+            .entry(entry.app.name.to_lowercase())
+            .or_default()
+            .insert(entry.reported_name.to_lowercase());
+    }
+
+    for entry in &mut entries {
+        if reported_names.get(&entry.app.name.to_lowercase()).is_some_and(|names| names.len() > 1) {
+            entry.app.name = entry.reported_name.clone();
+        }
+    }
+
+    entries.into_iter().map(|entry| entry.app).collect()
 }
 
 /// Strips the version an installer baked into its own `DisplayName`, so one application keeps one
@@ -598,10 +643,16 @@ fn display_name_without_version(display_name: &str, display_version: Option<&str
         return name.to_string();
     };
 
+    // Whatever the version was glued on with goes with it. Left behind, a lone separator reads as
+    // part of the name wherever the version sat in the middle (`Microsoft .NET Runtime - (x64)`)
+    // and as a dangling dash where it sat at the end; a mid-name hit (`7-Zip 24.09 (x64)`) would
+    // otherwise keep a double space.
     let mut kept = tokens;
-    kept.remove(index);
-    // Whatever the version was glued on with goes with it: `... (x64) - 14.38.33130` would
-    // otherwise keep a trailing separator, and a mid-name hit (`7-Zip 24.09 (x64)`) a double space.
+    if index > 0 && is_separator_token(kept[index - 1]) {
+        kept.drain(index - 1..=index);
+    } else {
+        kept.remove(index);
+    }
     let stripped = kept.join(" ");
     let stripped = stripped.trim_matches(|c: char| c.is_whitespace() || matches!(c, '-' | '\u{2013}' | ',' | ':' | ';'));
 
@@ -612,6 +663,11 @@ fn display_name_without_version(display_name: &str, display_version: Option<&str
     } else {
         stripped.to_string()
     }
+}
+
+/// Whether a token is punctuation joining two halves of a name rather than a word of it.
+fn is_separator_token(token: &str) -> bool {
+    !token.is_empty() && token.chars().all(|c| matches!(c, '-' | '\u{2013}' | ',' | ':' | ';' | '|'))
 }
 
 /// Whether a `DisplayVersion` is specific enough to strip a name by. A vendor may write anything at
@@ -1395,6 +1451,12 @@ mod tests {
     }
 
     #[test]
+    fn display_name_without_version_takes_a_lone_separator_with_the_version() {
+        // Left behind, the dash reads as part of the name rather than as the join it was.
+        assert_eq!(display_name_without_version("Microsoft .NET Runtime - 8.0.11 (x64)", Some("8.0.11")), "Microsoft .NET Runtime (x64)");
+    }
+
+    #[test]
     fn display_name_without_version_matches_a_version_truncated_to_whole_components() {
         // Plenty of installers name themselves after the release and record a build number.
         assert_eq!(display_name_without_version("Foo 1.2", Some("1.2.3.4")), "Foo");
@@ -1434,6 +1496,50 @@ mod tests {
     fn display_name_without_version_never_reports_an_empty_name() {
         // An entry whose whole DisplayName is its version still has to be called something.
         assert_eq!(display_name_without_version("1.2.3", Some("1.2.3")), "1.2.3");
+    }
+
+    fn uninstall_entry(reported_name: &str, version: &str) -> UninstallEntry {
+        UninstallEntry {
+            app: InstalledApp {
+                name: display_name_without_version(reported_name, Some(version)),
+                version: version.to_string(),
+                package_manager: None,
+                application_identifier: Some(reported_name.to_string()),
+                available_version: None,
+                update_available: None,
+            },
+            reported_name: reported_name.to_string(),
+        }
+    }
+
+    #[test]
+    fn resolve_colliding_names_undoes_a_strip_that_merged_two_applications() {
+        // Two .NET majors install side by side and are distinguished only by the version in their
+        // names, so stripping it would key one upgrade_paths row — one researched, signed script —
+        // for both. Both go back to the names the installers wrote.
+        let resolved = resolve_colliding_names(vec![
+            uninstall_entry("Microsoft .NET Runtime - 8.0.11 (x64)", "8.0.11"),
+            uninstall_entry("Microsoft .NET Runtime - 9.0.0 (x64)", "9.0.0"),
+            uninstall_entry("LibreOffice 26.8.0.3", "26.8.0.3"),
+        ]);
+
+        let names: Vec<&str> = resolved.iter().map(|app| app.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["Microsoft .NET Runtime - 8.0.11 (x64)", "Microsoft .NET Runtime - 9.0.0 (x64)", "LibreOffice"]
+        );
+    }
+
+    #[test]
+    fn resolve_colliding_names_keeps_the_strip_for_one_application_seen_through_two_registry_views() {
+        // The same DisplayName twice is HKLM's 64-bit and 32-bit views of one install, not two
+        // applications — reverting those would revert nearly every application on the host.
+        let resolved = resolve_colliding_names(vec![
+            uninstall_entry("LibreOffice 26.8.0.3", "26.8.0.3"),
+            uninstall_entry("LibreOffice 26.8.0.3", "26.8.0.3"),
+        ]);
+
+        assert_eq!(resolved.iter().map(|app| app.name.as_str()).collect::<Vec<_>>(), vec!["LibreOffice", "LibreOffice"]);
     }
 
     #[test]
