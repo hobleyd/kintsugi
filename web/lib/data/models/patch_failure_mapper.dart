@@ -3,7 +3,7 @@ import '../../domain/entities/enums.dart';
 import '../../domain/entities/patch_failure.dart';
 import 'upgrade_path_mapper.dart';
 
-const _resolutionNames = ['Outstanding', 'PatchSucceeded', 'Dismissed'];
+const _resolutionNames = ['Outstanding', 'PatchSucceeded', 'Dismissed', 'ScriptRepaired'];
 
 PatchFailureResolution patchFailureResolutionFromJson(Object? raw) => enumFromJson(
       raw,

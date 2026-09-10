@@ -105,11 +105,13 @@ class UpgradePathRepositoryImpl implements UpgradePathRepository {
   Future<UpgradePathResult> signScript({
     required String applicationName,
     required String platform,
+    String? patchFailureId,
   }) async =>
       upgradePathResultFromJson(
         await _api.postJson('/api/upgrade-paths/sign-script', body: {
           'applicationName': applicationName,
           'platform': platform,
+          'patchFailureId': patchFailureId,
         }) as Map<String, dynamic>,
       );
 }

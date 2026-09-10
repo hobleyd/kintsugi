@@ -111,7 +111,13 @@ abstract interface class UpgradePathRepository {
   /// Deliberately takes no script content. Signing is the human review the whole trust model rests
   /// on, and a signature that covered text the client just supplied would not be a review of
   /// anything the fleet is going to execute.
-  Future<UpgradePathResult> signScript({required String applicationName, required String platform});
+  /// [patchFailureId] marks this signature as a *repair* driven from the Failed Updates screen,
+  /// which clears the failures that script was causing. Omitted by the Applications screen.
+  Future<UpgradePathResult> signScript({
+    required String applicationName,
+    required String platform,
+    String? patchFailureId,
+  });
 }
 
 /// The Failed Updates screen's data — reads `/api/admin/patch-failures`.

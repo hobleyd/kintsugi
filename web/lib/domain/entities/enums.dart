@@ -35,12 +35,14 @@ enum UpgradeMethod { unknown, directDownload, packageManagerCommand, manualSteps
 enum PatchFailureResolution {
   outstanding,
   patchSucceeded,
-  dismissed;
+  dismissed,
+  scriptRepaired;
 
   String get label => switch (this) {
         PatchFailureResolution.outstanding => 'Outstanding',
         PatchFailureResolution.patchSucceeded => 'Patched Since',
         PatchFailureResolution.dismissed => 'Dismissed',
+        PatchFailureResolution.scriptRepaired => 'Repaired',
       };
 }
 

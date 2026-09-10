@@ -310,6 +310,23 @@ void main() {
         patchFailureFromJson(body({'resolution': 2})).resolution,
         PatchFailureResolution.dismissed,
       );
+      // Appended, never inserted — an ordinal indexes into declaration order, so a member added
+      // anywhere but the end silently re-maps every value already stored.
+      expect(
+        patchFailureFromJson(body({'resolution': 3})).resolution,
+        PatchFailureResolution.scriptRepaired,
+      );
+    });
+
+    /// A resolution this client is too old to know about must degrade to something harmless rather
+    /// than blanking the screen — enumFromJson's fallback, pinned here because the fallback for
+    /// this enum is `outstanding`, which is the safe way to be wrong: a row shown that should have
+    /// been hidden, rather than a fix silently dropped from the queue.
+    test('falls back to outstanding for a resolution it does not know', () {
+      expect(
+        patchFailureFromJson(body({'resolution': 99})).resolution,
+        PatchFailureResolution.outstanding,
+      );
     });
 
     test('keeps the counts and both dates, which are what tell a blip from a broken script', () {

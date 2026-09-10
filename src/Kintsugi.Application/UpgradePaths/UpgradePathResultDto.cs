@@ -31,4 +31,9 @@ public record UpgradePathResultDto(
     bool ScriptSigned = false,
     ScriptApprovalPublishOutcome? ApprovalOutcome = null,
     string? ApprovalPullRequestUrl = null,
-    string? ApprovalMessage = null);
+    string? ApprovalMessage = null,
+    /// <summary>How many outstanding patch failures this signature cleared, when it was a repair
+    /// driven from the Failed Updates screen (see <c>SignUpgradePathScriptCommandHandler</c>). Zero
+    /// for every other signature. Reported so the screen can say that clearing one row also cleared
+    /// the other hosts failing on the same script, rather than doing that silently.</summary>
+    int ClearedPatchFailures = 0);

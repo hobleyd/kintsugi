@@ -25,6 +25,7 @@ class InstructionsPanel extends StatelessWidget {
     required this.platform,
     required this.onServerStateChanged,
     this.patchFailureId,
+    this.onScriptSigned,
   });
 
   final String applicationName;
@@ -34,6 +35,13 @@ class InstructionsPanel extends StatelessWidget {
   /// brief — the failure's own output and the current script — instead of the plain research
   /// prompt. Composed server-side; see [InstructionsPanelBloc.patchFailureId].
   final String? patchFailureId;
+
+  /// Called after a *successful sign*, with how many outstanding failures the server cleared.
+  ///
+  /// Separate from [onServerStateChanged], which fires for a save too: only the signature replaces
+  /// the script that was failing, so only the signature takes a row off the Failed Updates queue.
+  /// Null on the Applications screen, which has no queue to take anything off.
+  final void Function(int clearedFailures)? onScriptSigned;
 
   /// Called after a save or a sign, so the table above re-reads and the status column stops
   /// saying "review and sign".
@@ -51,14 +59,18 @@ class InstructionsPanel extends StatelessWidget {
           saveUpgradePath: locator<SaveUpgradePath>(),
           signScript: locator<SignUpgradePathScript>(),
         )..add(const PanelOpened()),
-        child: _PanelBody(onServerStateChanged: onServerStateChanged),
+        child: _PanelBody(
+          onServerStateChanged: onServerStateChanged,
+          onScriptSigned: onScriptSigned,
+        ),
       );
 }
 
 class _PanelBody extends StatefulWidget {
-  const _PanelBody({required this.onServerStateChanged});
+  const _PanelBody({required this.onServerStateChanged, this.onScriptSigned});
 
   final VoidCallback onServerStateChanged;
+  final void Function(int clearedFailures)? onScriptSigned;
 
   @override
   State<_PanelBody> createState() => _PanelBodyState();
@@ -92,6 +104,8 @@ class _PanelBodyState extends State<_PanelBody> {
           if (state.editorText != _editor.text) _editor.text = state.editorText;
 
           if (state.reloadTable) widget.onServerStateChanged();
+          // After the reload, so the screen acts on a table it has already asked to refresh.
+          if (state.justSigned) widget.onScriptSigned?.call(state.clearedPatchFailures);
         },
         builder: (context, state) {
           if (state.loading) {

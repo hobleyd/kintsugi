@@ -17,5 +17,8 @@ namespace Kintsugi.Application.UpgradePaths.Commands.SignUpgradePathScript;
 /// </summary>
 /// <param name="SignedBy">Who reviewed it, from the authenticated session — recorded in the published
 /// approval entry. Null when the site is running with authentication disabled.</param>
-public record SignUpgradePathScriptCommand(string ApplicationName, string Platform, string? SignedBy = null)
+/// <param name="PatchFailureId">Set when this signature is a *repair* driven from the Failed Updates
+/// screen, which clears the failures it addresses (see the handler). Null for an ordinary signature
+/// from the Applications screen, which clears nothing.</param>
+public record SignUpgradePathScriptCommand(string ApplicationName, string Platform, string? SignedBy = null, Guid? PatchFailureId = null)
     : IRequest<UpgradePathResultDto>;

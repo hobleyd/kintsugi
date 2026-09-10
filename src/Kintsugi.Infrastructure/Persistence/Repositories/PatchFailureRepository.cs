@@ -38,6 +38,13 @@ public class PatchFailureRepository : IPatchFailureRepository
                 && f.Resolution == PatchFailureResolution.Outstanding)
             .ToListAsync(cancellationToken);
 
+    public async Task<IReadOnlyList<PatchFailure>> GetOutstandingForPathAsync(string applicationName, string platform, CancellationToken cancellationToken) =>
+        await _context.PatchFailures
+            .Where(f => f.ApplicationName.ToLower() == applicationName.ToLower()
+                && f.Platform == platform
+                && f.Resolution == PatchFailureResolution.Outstanding)
+            .ToListAsync(cancellationToken);
+
     public async Task AddAsync(PatchFailure failure, CancellationToken cancellationToken) =>
         await _context.PatchFailures.AddAsync(failure, cancellationToken);
 

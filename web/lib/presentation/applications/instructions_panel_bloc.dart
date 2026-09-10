@@ -70,6 +70,8 @@ final class InstructionsPanelState extends Equatable {
     this.signApprovalUrl,
     this.loadError,
     this.reloadTable = false,
+    this.justSigned = false,
+    this.clearedPatchFailures = 0,
   });
 
   final bool loading;
@@ -104,6 +106,17 @@ final class InstructionsPanelState extends Equatable {
   /// Set for one state only, after a save or a sign, so the screen re-reads the table.
   final bool reloadTable;
 
+  /// Set for one state only, after a *successful sign* — never after a save.
+  ///
+  /// The distinction is the whole point: an unsigned script is one no agent will run, so saving a
+  /// fix and stopping there leaves the failure entirely live. Only the signature replaces what was
+  /// failing, and only then does the Failed Updates screen take its row off the queue.
+  final bool justSigned;
+
+  /// How many outstanding failures that signature cleared, from the server — see
+  /// [UpgradePathResult.clearedPatchFailures].
+  final int clearedPatchFailures;
+
   bool get canSign => inSyncWithServer && (result?.isSignable ?? false) && !signing && !saving;
 
   InstructionsPanelState copyWith({
@@ -121,6 +134,8 @@ final class InstructionsPanelState extends Equatable {
     String? signApprovalUrl,
     String? loadError,
     bool reloadTable = false,
+    bool justSigned = false,
+    int clearedPatchFailures = 0,
     bool clearResult = false,
     bool clearMessages = false,
   }) =>
@@ -143,6 +158,8 @@ final class InstructionsPanelState extends Equatable {
         signApprovalUrl: signApprovalUrl ?? (clearMessages ? null : this.signApprovalUrl),
         loadError: loadError ?? this.loadError,
         reloadTable: reloadTable,
+        justSigned: justSigned,
+        clearedPatchFailures: clearedPatchFailures,
       );
 
   @override
@@ -161,6 +178,8 @@ final class InstructionsPanelState extends Equatable {
         signApprovalUrl,
         loadError,
         reloadTable,
+        justSigned,
+        clearedPatchFailures,
       ];
 }
 
@@ -362,7 +381,13 @@ class InstructionsPanelBloc extends Bloc<InstructionsPanelEvent, InstructionsPan
     emit(state.copyWith(signing: true, clearMessages: true, signMessage: 'Signing...'));
 
     try {
-      final signed = await _signScript(applicationName: applicationName, platform: signPlatform);
+      final signed = await _signScript(
+        applicationName: applicationName,
+        platform: signPlatform,
+        // Only set when this panel was opened from the Failed Updates screen, which is what makes
+        // the signature a repair rather than an ordinary review — see [patchFailureId].
+        patchFailureId: patchFailureId,
+      );
       emit(state.copyWith(
         signing: false,
         result: signed,
@@ -373,6 +398,8 @@ class InstructionsPanelBloc extends Bloc<InstructionsPanelEvent, InstructionsPan
         signMessage: 'Signed. ${_describeApproval(signed)}',
         signApprovalUrl: signed.approvalPullRequestUrl,
         reloadTable: true,
+        justSigned: true,
+        clearedPatchFailures: signed.clearedPatchFailures,
       ));
     } on ApiException catch (error) {
       emit(state.copyWith(signing: false, signMessage: 'Failed: ${error.message}'));

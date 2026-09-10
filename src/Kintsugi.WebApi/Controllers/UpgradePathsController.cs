@@ -210,7 +210,8 @@ public class UpgradePathsController : ControllerBase
             // The reviewer's own name, recorded in the approval entry and shown in the pull request —
             // "a human reviewed this" is only an audit trail if it says which human. Null when the
             // site is deliberately running with authentication disabled.
-            new SignUpgradePathScriptCommand(request.ApplicationName, request.Platform, SignedBy: User.Identity?.Name),
+            new SignUpgradePathScriptCommand(
+                request.ApplicationName, request.Platform, SignedBy: User.Identity?.Name, PatchFailureId: request.PatchFailureId),
             cancellationToken));
 }
 
@@ -218,7 +219,10 @@ public record RefreshUpgradePathRequest(string ApplicationName, string? Platform
 
 public record CheckUpgradePathUpdateRequest(string ApplicationName, string Platform);
 
-public record SignUpgradePathScriptRequest(string ApplicationName, string Platform);
+/// <param name="PatchFailureId">Set by the Failed Updates screen when this signature repairs a
+/// reported failure, which clears the failures that script was causing. Omitted by the Applications
+/// screen, whose signature clears nothing.</param>
+public record SignUpgradePathScriptRequest(string ApplicationName, string Platform, Guid? PatchFailureId = null);
 
 public record SaveUpgradePathRequest(
     string ApplicationName,

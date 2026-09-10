@@ -493,6 +493,28 @@ existing flow unchanged — refresh with a prompt override, result persisted **u
 signs it. A package-manager row still gets no AI prompt (the reason string says so, as it always
 has); hand-editing and re-signing it works exactly as on the Applications screen.
 
+**Signing a repair clears the failures it addresses, and the scope is the path rather than the
+row.** `SignUpgradePathScriptCommand` takes an optional `PatchFailureId`; when set — which only the
+Failed Updates screen does — the handler resolves every outstanding failure for that
+(application, platform) as `ScriptRepaired`, in the same save as the signature, and reports the count
+so the screen can say the clearing reached other hosts rather than doing it silently. Three things
+about that:
+
+- **On sign, not on save.** An unsigned script is one no agent will run, so a fix that was saved and
+  not signed leaves the failure entirely live. Only the signature replaces what was failing.
+- **Path-scoped, not row-scoped.** A script is stored per (application, platform), not per host, so
+  the signature that replaces a broken script replaces it for every machine that was failing on it.
+  Clearing one row would leave the queue asserting the others are still broken by a script that no
+  longer exists.
+- **It claims nothing about whether the fix worked.** The next patch cycle decides that, and a
+  repair that did not take is reported again and *reopens* the row with its original count and
+  first-failed date intact. That is why `ScriptRepaired` is its own resolution rather than
+  `Dismissed`: dismissing says "this will not happen again", this says "the thing that failed is
+  gone, and we will find out".
+
+Signing from the Applications screen passes no id and so clears nothing — that is an ordinary
+review, which says nothing about whether anything was repaired.
+
 **Nothing but a real execution failure belongs here.** An application with no signed patchable path,
 the macOS daemon's `runs_as_root` refusal, an unreachable server, an OS update — those are
 configuration problems or have no script to fix, and a queue full of them hides the ones the AI can

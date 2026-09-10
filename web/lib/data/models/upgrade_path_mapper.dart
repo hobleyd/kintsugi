@@ -88,6 +88,7 @@ UpgradePathResult upgradePathResultFromJson(Map<String, dynamic> json) => Upgrad
           : null,
       approvalPullRequestUrl: json['approvalPullRequestUrl'] as String?,
       approvalMessage: json['approvalMessage'] as String?,
+      clearedPatchFailures: (json['clearedPatchFailures'] as num?)?.toInt() ?? 0,
       raw: json,
     );
 

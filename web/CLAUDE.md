@@ -352,6 +352,16 @@ reads it off the bucket's own `pm:` prefix so the screen can explain which of th
 agent's next patch cycle reports one, hours away. The one thing that does change while the screen is
 open is an AI repair, and the fix panel polls that itself and then asks the table to reload.
 
+**Signing takes the row off the queue; saving does not.** The panel's `onScriptSigned` fires only
+after a successful signature, separately from `onServerStateChanged`, which fires for a save too —
+because an unsigned script is one no agent will run, so a fix saved and not signed leaves the failure
+live and the row should keep saying so. The clearing itself happens server-side in the same save as
+the signature (see `src/CLAUDE.md`), and it is scoped to the (application, platform) *path*, so it
+clears every host failing on that script and not only the row that was open. The screen names the
+count for exactly that reason: it is a wider action than the operator asked for by name, and it
+should be visible rather than silent. Nothing here claims the fix worked — the row comes back, with
+its original count and first-failed date, if the next patch cycle still fails.
+
 **The default view is outstanding only.** Settled rows (patched since, or dismissed) are kept and
 reachable through the status filter rather than deleted, because "this used to fail and then patched"
 is the question somebody asks next. A row clears itself when the host reports that application

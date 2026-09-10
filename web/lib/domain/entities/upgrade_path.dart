@@ -127,6 +127,7 @@ class UpgradePathResult extends Equatable {
     required this.approvalPullRequestUrl,
     required this.approvalMessage,
     required this.raw,
+    this.clearedPatchFailures = 0,
   });
 
   final String applicationName;
@@ -150,6 +151,15 @@ class UpgradePathResult extends Equatable {
 
   final String? approvalPullRequestUrl;
   final String? approvalMessage;
+
+  /// How many outstanding patch failures this signature cleared, when it was a repair driven from
+  /// the Failed Updates screen. Zero for every other signature, and for a save.
+  ///
+  /// Reported by the server rather than counted here, because the set it cleared is fleet-wide —
+  /// every host failing on the same (application, platform) script — and the client only ever had
+  /// the one row in front of it. The screen says the number so that wider clearing is visible
+  /// rather than silent.
+  final int clearedPatchFailures;
 
   /// The decoded JSON this was read from.
   ///

@@ -19,6 +19,16 @@ public interface IPatchFailureRepository
     /// differ only in case, which is how the agents match applications everywhere else.</summary>
     Task<IReadOnlyList<PatchFailure>> GetOutstandingForApplicationAsync(Guid hostId, string applicationName, CancellationToken cancellationToken);
 
+    /// <summary>Every outstanding failure against one (application, platform) upgrade path, across
+    /// every host — what signing a repaired script clears.</summary>
+    /// <remarks>
+    /// Fleet-wide rather than per host, because a script is stored per (application, platform) and
+    /// not per host: the signature that replaces a broken script replaces it for every machine that
+    /// was failing on it. Clearing only the row the operator happened to be looking at would leave
+    /// the queue asserting that the other hosts are still broken by a script that no longer exists.
+    /// </remarks>
+    Task<IReadOnlyList<PatchFailure>> GetOutstandingForPathAsync(string applicationName, string platform, CancellationToken cancellationToken);
+
     Task AddAsync(PatchFailure failure, CancellationToken cancellationToken);
 
     /// <summary>Every failure, joined with the host that reported it and the upgrade path it is

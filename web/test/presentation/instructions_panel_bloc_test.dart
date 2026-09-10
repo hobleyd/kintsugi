@@ -21,6 +21,10 @@ class FakeUpgradePathRepository implements UpgradePathRepository {
   String? signedApplication;
   String? signedPlatform;
 
+  /// What marks a signature as a repair rather than an ordinary review — the server clears the
+  /// failures that script was causing only when this is set.
+  String? signedPatchFailureId;
+
   /// What the prompt route was asked for. The Failed Updates screen's whole repair flow is this one
   /// argument reaching the server — everything after it is the panel's ordinary behaviour.
   String? promptedPatchFailureId;
@@ -51,14 +55,19 @@ class FakeUpgradePathRepository implements UpgradePathRepository {
   Future<UpgradePathResult> signScript({
     required String applicationName,
     required String platform,
+    String? patchFailureId,
   }) async {
     signedApplication = applicationName;
     signedPlatform = platform;
+    signedPatchFailureId = patchFailureId;
     return result(
       applicationName: applicationName,
       platform: platform,
       script: '#!/bin/bash',
       scriptSigned: true,
+      // The server clears the failures a repair addresses and reports how many; an ordinary
+      // review clears nothing.
+      clearedPatchFailures: patchFailureId == null ? 0 : 3,
     );
   }
 
@@ -107,6 +116,7 @@ UpgradePathResult result({
   String platform = 'macOS',
   String? script = '#!/bin/bash',
   bool scriptSigned = false,
+  int clearedPatchFailures = 0,
   Map<String, dynamic>? raw,
 }) =>
     UpgradePathResult(
@@ -126,6 +136,7 @@ UpgradePathResult result({
       approvalOutcome: null,
       approvalPullRequestUrl: null,
       approvalMessage: null,
+      clearedPatchFailures: clearedPatchFailures,
       raw: raw ??
           {
             'applicationName': applicationName,
@@ -365,4 +376,64 @@ void main() {
       },
     );
   });
+
+  group('signing a repair', () {
+    /// Signing is what marks the failure repaired, so the id has to reach the sign route as well as
+    /// the prompt route — the server clears nothing without it.
+    blocTest<InstructionsPanelBloc, InstructionsPanelState>(
+      'tells the server which failure this signature repairs',
+      build: () => blocFor(repository, patchFailureId: 'failure-1'),
+      act: (bloc) => bloc
+        ..add(const PanelOpened())
+        ..add(const ScriptSignRequested()),
+      wait: const Duration(milliseconds: 20),
+      verify: (_) => expect(repository.signedPatchFailureId, 'failure-1'),
+    );
+
+    /// The Failed Updates screen takes a row off the queue on this signal and no other. It must not
+    /// fire for a save: an unsigned script is one no agent will run, so a fix saved and not signed
+    /// leaves the failure entirely live.
+    blocTest<InstructionsPanelBloc, InstructionsPanelState>(
+      'announces the signature, with what the server cleared',
+      build: () => blocFor(repository, patchFailureId: 'failure-1'),
+      act: (bloc) => bloc
+        ..add(const PanelOpened())
+        ..add(const ScriptSignRequested()),
+      wait: const Duration(milliseconds: 20),
+      verify: (bloc) {
+        expect(bloc.state.justSigned, isTrue);
+        expect(bloc.state.clearedPatchFailures, 3);
+      },
+    );
+
+    blocTest<InstructionsPanelBloc, InstructionsPanelState>(
+      'does not announce a signature for a save',
+      build: () => blocFor(repository, patchFailureId: 'failure-1'),
+      act: (bloc) => bloc
+        ..add(const PanelOpened())
+        ..add(const ScriptSaveRequested('#!/bin/bash\nfixed')),
+      wait: const Duration(milliseconds: 20),
+      verify: (bloc) {
+        expect(bloc.state.justSigned, isFalse);
+        // The table still reloads — the script changed — it just does not clear the row.
+        expect(bloc.state.reloadTable, isTrue);
+      },
+    );
+
+    /// The Applications screen signs the same way and must clear nothing: that is an ordinary
+    /// review, which says nothing about whether anything was repaired.
+    blocTest<InstructionsPanelBloc, InstructionsPanelState>(
+      'sends no failure id when signing from the Applications screen',
+      build: () => blocFor(repository),
+      act: (bloc) => bloc
+        ..add(const PanelOpened())
+        ..add(const ScriptSignRequested()),
+      wait: const Duration(milliseconds: 20),
+      verify: (bloc) {
+        expect(repository.signedPatchFailureId, isNull);
+        expect(bloc.state.clearedPatchFailures, 0);
+      },
+    );
+  });
+
 }

@@ -2,6 +2,7 @@ using MediatR;
 using Kintsugi.Application.Common.Exceptions;
 using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Application.ScriptApproval;
+using Kintsugi.Domain.Enums;
 using Kintsugi.Domain.Exceptions;
 
 namespace Kintsugi.Application.UpgradePaths.Commands.SignUpgradePathScript;
@@ -12,16 +13,19 @@ public class SignUpgradePathScriptCommandHandler : IRequestHandler<SignUpgradePa
     private readonly IArtifactSigningService _artifactSigningService;
     private readonly IUpgradePathResearchClient _researchClient;
     private readonly IScriptApprovalPublisher _approvalPublisher;
+    private readonly IPatchFailureRepository _patchFailureRepository;
     private readonly IUnitOfWork _unitOfWork;
 
     public SignUpgradePathScriptCommandHandler(
         IUpgradePathRepository upgradePathRepository, IArtifactSigningService artifactSigningService,
-        IUpgradePathResearchClient researchClient, IScriptApprovalPublisher approvalPublisher, IUnitOfWork unitOfWork)
+        IUpgradePathResearchClient researchClient, IScriptApprovalPublisher approvalPublisher,
+        IPatchFailureRepository patchFailureRepository, IUnitOfWork unitOfWork)
     {
         _upgradePathRepository = upgradePathRepository;
         _artifactSigningService = artifactSigningService;
         _researchClient = researchClient;
         _approvalPublisher = approvalPublisher;
+        _patchFailureRepository = patchFailureRepository;
         _unitOfWork = unitOfWork;
     }
 
@@ -65,6 +69,37 @@ public class SignUpgradePathScriptCommandHandler : IRequestHandler<SignUpgradePa
             existing.UpdateDiscoveredLatestVersion(latestVersion);
         }
 
+        // A repair signed from the Failed Updates screen clears the failures it addresses, in the
+        // same save as the signature — so the queue and the script can never disagree about whether
+        // a fix landed.
+        //
+        // Three things about the scope. It is keyed on the *path*, (application, platform), not on
+        // the one row the operator had open: a script is stored per path and not per host, so a
+        // signature replacing a broken script replaces it for every machine that was failing on it,
+        // and clearing one row would leave the queue asserting the others are still broken by a
+        // script that no longer exists. It happens on **sign** and not on save, because an unsigned
+        // script is one no agent will run — saving a fix and stopping there leaves the failure
+        // entirely live, and the row should say so. And it only ever runs when the caller passed an
+        // id, so signing from the Applications screen still clears nothing: that is an ordinary
+        // review, which says nothing about whether anything was repaired.
+        //
+        // Nothing here claims the fix *worked*. The next patch cycle decides that, and a repair that
+        // did not take is reported again and reopens the row with its original count and
+        // first-failed date intact (see PatchFailure.Reopen).
+        var clearedFailures = 0;
+        if (request.PatchFailureId is not null)
+        {
+            var outstanding = await _patchFailureRepository.GetOutstandingForPathAsync(
+                existing.ApplicationName, existing.Platform, cancellationToken);
+
+            foreach (var failure in outstanding)
+            {
+                failure.Resolve(PatchFailureResolution.ScriptRepaired);
+            }
+
+            clearedFailures = outstanding.Count;
+        }
+
         await _unitOfWork.SaveChangesAsync(cancellationToken);
 
         // Published *after* the save, deliberately. The approval repository is a record of decisions
@@ -94,6 +129,7 @@ public class SignUpgradePathScriptCommandHandler : IRequestHandler<SignUpgradePa
             existing.ScriptSignature is not null,
             approval.Outcome,
             approval.PullRequestUrl,
-            approval.Message);
+            approval.Message,
+            clearedFailures);
     }
 }

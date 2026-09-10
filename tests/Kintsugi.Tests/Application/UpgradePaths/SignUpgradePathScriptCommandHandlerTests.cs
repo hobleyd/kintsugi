@@ -16,6 +16,7 @@ public class SignUpgradePathScriptCommandHandlerTests
     private readonly Mock<IArtifactSigningService> _artifactSigningService = new();
     private readonly Mock<IUpgradePathResearchClient> _researchClient = new();
     private readonly Mock<IScriptApprovalPublisher> _approvalPublisher = new();
+    private readonly Mock<IPatchFailureRepository> _patchFailureRepository = new();
     private readonly Mock<IUnitOfWork> _unitOfWork = new();
 
     public SignUpgradePathScriptCommandHandlerTests()
@@ -33,7 +34,9 @@ public class SignUpgradePathScriptCommandHandlerTests
             .ReturnsAsync(new ScriptApprovalPublishResult(ScriptApprovalPublishOutcome.PullRequestOpened, "https://example.invalid/pull/1"));
     }
 
-    private SignUpgradePathScriptCommandHandler CreateHandler() => new(_repository.Object, _artifactSigningService.Object, _researchClient.Object, _approvalPublisher.Object, _unitOfWork.Object);
+    private SignUpgradePathScriptCommandHandler CreateHandler() => new(
+        _repository.Object, _artifactSigningService.Object, _researchClient.Object, _approvalPublisher.Object,
+        _patchFailureRepository.Object, _unitOfWork.Object);
 
     [Fact]
     public async Task Handle_SignsTheAlreadyPersistedScript_AndSaves()
@@ -216,4 +219,56 @@ public class SignUpgradePathScriptCommandHandlerTests
         Assert.Equal("GitHub said no.", result.ApprovalMessage);
         _unitOfWork.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Once);
     }
+
+    /// Signing a repair from the Failed Updates screen clears the failures that script was causing —
+    /// across every host, because a script is stored per (application, platform) and not per host.
+    /// Clearing only the row the operator had open would leave the queue asserting the others are
+    /// still broken by a script that no longer exists.
+    [Fact]
+    public async Task Handle_WhenRepairingAReportedFailure_ClearsEveryOutstandingFailureForThatPath()
+    {
+        var existing = UpgradePath.Create(
+            "Ollama", "macOS", UpgradePathStatus.Found, "0.33.3", UpgradeMethod.Script,
+            null, null, null, null, null, "#!/bin/bash\n...");
+        _repository.Setup(r => r.GetAsync("Ollama", "macOS", It.IsAny<CancellationToken>())).ReturnsAsync(existing);
+
+        var failures = new List<PatchFailure>
+        {
+            PatchFailure.Open(Guid.NewGuid(), "Ollama", "macOS", "0.32.14", "0.33.3", "exited with 1", DateTimeOffset.UtcNow),
+            PatchFailure.Open(Guid.NewGuid(), "Ollama", "macOS", "0.32.14", "0.33.3", "exited with 1", DateTimeOffset.UtcNow),
+        };
+        _patchFailureRepository
+            .Setup(r => r.GetOutstandingForPathAsync("Ollama", "macOS", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(failures);
+
+        var result = await CreateHandler().Handle(
+            new SignUpgradePathScriptCommand("Ollama", "macOS", PatchFailureId: Guid.NewGuid()), CancellationToken.None);
+
+        Assert.All(failures, f => Assert.Equal(PatchFailureResolution.ScriptRepaired, f.Resolution));
+        // Reported so the screen can say the other hosts were cleared too, rather than doing it
+        // silently.
+        Assert.Equal(2, result.ClearedPatchFailures);
+        _unitOfWork.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    /// The Applications screen signs without a failure id. That is an ordinary review, which says
+    /// nothing about whether anything was repaired — so it must not clear a queue it knows nothing
+    /// about.
+    [Fact]
+    public async Task Handle_WhenSigningWithoutAFailureId_ClearsNothing()
+    {
+        var existing = UpgradePath.Create(
+            "Ollama", "macOS", UpgradePathStatus.Found, "0.33.3", UpgradeMethod.Script,
+            null, null, null, null, null, "#!/bin/bash\n...");
+        _repository.Setup(r => r.GetAsync("Ollama", "macOS", It.IsAny<CancellationToken>())).ReturnsAsync(existing);
+
+        var result = await CreateHandler().Handle(
+            new SignUpgradePathScriptCommand("Ollama", "macOS"), CancellationToken.None);
+
+        Assert.Equal(0, result.ClearedPatchFailures);
+        _patchFailureRepository.Verify(
+            r => r.GetOutstandingForPathAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
 }

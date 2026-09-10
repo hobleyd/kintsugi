@@ -45,6 +45,20 @@ final class FailedUpdateRowExpansionToggled extends FailedUpdatesEvent {
   List<Object?> get props => [id];
 }
 
+/// A repaired script was signed from this row's fix panel. The server has already taken the
+/// failures that script was causing off the queue (see `SignUpgradePathScriptCommandHandler`), so
+/// this re-reads the list, closes the panel, and says what happened — including when the clearing
+/// reached other hosts failing on the same script, which the operator did not ask for by name.
+final class FailedUpdateScriptSigned extends FailedUpdatesEvent {
+  const FailedUpdateScriptSigned(this.id, this.clearedFailures);
+
+  final String id;
+  final int clearedFailures;
+
+  @override
+  List<Object?> get props => [id, clearedFailures];
+}
+
 final class FailedUpdateDismissed extends FailedUpdatesEvent {
   const FailedUpdateDismissed(this.id);
 
@@ -184,6 +198,7 @@ class FailedUpdatesBloc extends Bloc<FailedUpdatesEvent, FailedUpdatesState> {
             : state.copyWith(expandedId: event.id),
       ),
     );
+    on<FailedUpdateScriptSigned>(_onScriptSigned);
     on<FailedUpdateDismissed>(_onDismissed);
   }
 
@@ -198,6 +213,47 @@ class FailedUpdatesBloc extends Bloc<FailedUpdatesEvent, FailedUpdatesState> {
     } on ApiException catch (error) {
       emit(state.copyWith(loading: false, error: error.message));
     }
+  }
+
+  Future<void> _onScriptSigned(FailedUpdateScriptSigned event, Emitter<FailedUpdatesState> emit) async {
+    final application = state.failures
+        .where((failure) => failure.id == event.id)
+        .map((failure) => failure.applicationName)
+        .firstOrNull;
+
+    try {
+      emit(state.copyWith(
+        failures: await _getFailures(),
+        // The row this panel belonged to has just left the default view, and a panel expanded
+        // against a row nobody can see is a background refresh polling for nothing.
+        clearExpanded: true,
+        notice: _describeSigning(application, event.clearedFailures),
+      ));
+    } on ApiException catch (error) {
+      // The signature landed regardless — this is only the re-read. Say so rather than implying
+      // the fix did not save.
+      emit(state.copyWith(
+        clearExpanded: true,
+        error: 'Signed, but the list could not be re-read: ${error.message}',
+      ));
+    }
+  }
+
+  /// What the screen says after a repair is signed.
+  ///
+  /// Names the count whenever it is more than one, because clearing the row the operator had open
+  /// also clears every other host failing on that same script — a wider action than they asked for
+  /// by name, and one that should be visible rather than silent.
+  static String _describeSigning(String? application, int clearedFailures) {
+    final subject = application ?? 'this application';
+    final cleared = switch (clearedFailures) {
+      0 => 'Nothing was outstanding to clear',
+      1 => 'Cleared its failure',
+      _ => 'Cleared $clearedFailures failures across the hosts running it',
+    };
+
+    return 'Signed the repaired script for $subject. $cleared — it comes back if the next patch '
+        'cycle still fails.';
   }
 
   Future<void> _onDismissed(FailedUpdateDismissed event, Emitter<FailedUpdatesState> emit) async {

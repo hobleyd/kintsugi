@@ -187,4 +187,58 @@ void main() {
       verify: (bloc) => expect(bloc.state.expandedId, isNull),
     );
   });
+
+  group('signing a repair from a row', () {
+    /// The whole point of the signal: the script that failed no longer exists, so the row is stale
+    /// from that moment. It is not a claim the fix *worked* — the next patch cycle decides that,
+    /// and the row comes back if it did not.
+    blocTest<FailedUpdatesBloc, FailedUpdatesState>(
+      'takes the row off the queue and closes its panel',
+      build: () => blocFor(FakePatchFailureRepository([
+        failure_(id: '1', resolution: PatchFailureResolution.scriptRepaired),
+        failure_(id: '2'),
+      ])),
+      act: (bloc) => bloc
+        ..add(const FailedUpdatesRequested())
+        ..add(const FailedUpdateRowExpansionToggled('1'))
+        ..add(const FailedUpdateScriptSigned('1', 1)),
+      wait: const Duration(milliseconds: 20),
+      verify: (bloc) {
+        expect(bloc.state.visibleRows.map((f) => f.id), ['2']);
+        expect(bloc.state.expandedId, isNull);
+      },
+    );
+
+    /// Signing clears every host failing on that same script, not just the row that was open —
+    /// a wider action than the operator named, so the screen says the number rather than doing it
+    /// silently.
+    blocTest<FailedUpdatesBloc, FailedUpdatesState>(
+      'says how many hosts it cleared when it cleared more than the open row',
+      build: () => blocFor(FakePatchFailureRepository([failure_(id: '1')])),
+      act: (bloc) => bloc
+        ..add(const FailedUpdatesRequested())
+        ..add(const FailedUpdateScriptSigned('1', 4)),
+      wait: const Duration(milliseconds: 20),
+      verify: (bloc) {
+        expect(bloc.state.notice, contains('4 failures'));
+        expect(bloc.state.notice, contains('Ollama'));
+        // And says the fix is unproven, which is the whole arrangement.
+        expect(bloc.state.notice, contains('comes back'));
+      },
+    );
+
+    blocTest<FailedUpdatesBloc, FailedUpdatesState>(
+      'does not pluralise a single cleared failure into a fleet',
+      build: () => blocFor(FakePatchFailureRepository([failure_(id: '1')])),
+      act: (bloc) => bloc
+        ..add(const FailedUpdatesRequested())
+        ..add(const FailedUpdateScriptSigned('1', 1)),
+      wait: const Duration(milliseconds: 20),
+      verify: (bloc) {
+        expect(bloc.state.notice, contains('Cleared its failure'));
+        expect(bloc.state.notice, isNot(contains('across the hosts')));
+      },
+    );
+  });
+
 }

@@ -115,6 +115,14 @@ class SignUpgradePathScript {
 
   final UpgradePathRepository _repository;
 
-  Future<UpgradePathResult> call({required String applicationName, required String platform}) =>
-      _repository.signScript(applicationName: applicationName, platform: platform);
+  Future<UpgradePathResult> call({
+    required String applicationName,
+    required String platform,
+    String? patchFailureId,
+  }) =>
+      _repository.signScript(
+        applicationName: applicationName,
+        platform: platform,
+        patchFailureId: patchFailureId,
+      );
 }

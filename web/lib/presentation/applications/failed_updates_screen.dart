@@ -337,6 +337,12 @@ class _FixPanel extends StatelessWidget {
               // returns it appended to the ordinary instructions.
               patchFailureId: failure.id,
               onServerStateChanged: onServerStateChanged,
+              // Signing is what takes the row off the queue — not saving. An unsigned script is one
+              // no agent will run, so a fix that was saved and not signed leaves the failure live,
+              // and the row should keep saying so.
+              onScriptSigned: (clearedFailures) => context
+                  .read<FailedUpdatesBloc>()
+                  .add(FailedUpdateScriptSigned(failure.id, clearedFailures)),
             )
           else
             const AlertBox.info(
