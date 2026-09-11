@@ -94,21 +94,29 @@ class _BulkResultAlert extends StatelessWidget {
     return AlertBox(
       message,
       kind: result.skipped.isEmpty ? AlertKind.success : AlertKind.info,
-      child: result.skipped.isEmpty
-          ? null
-          : Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Every one of them, by name. A bulk action that reports a number and not the
-                  // rows behind it reads as a success, and the subjects it passed over are exactly
-                  // the ones that still need somebody.
-                  for (final skipped in result.skipped)
-                    HintText('${skipped.displayName} — ${skipped.reason}'),
-                ],
-              ),
+      child: Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Every one of them, by name. A bulk action that reports a number and not the rows
+            // behind it reads as a success, and the subjects it passed over are exactly the ones
+            // that still need somebody.
+            for (final skipped in result.skipped)
+              HintText('${skipped.displayName} — ${skipped.reason}'),
+            if (result.skipped.isNotEmpty) const SizedBox(height: 8),
+            // Dismissed by hand rather than on a timer: the skipped list is a work list, and a
+            // reviewer reading twenty-eight names must not have it vanish underneath them. It also
+            // goes when the next action supersedes it — see CpeMappingsBloc.
+            LinkText(
+              label: 'Dismiss',
+              muted: true,
+              onTap: () =>
+                  context.read<CpeMappingsBloc>().add(const CpeMappingsBulkResultDismissed()),
             ),
+          ],
+        ),
+      ),
     );
   }
 

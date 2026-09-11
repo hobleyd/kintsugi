@@ -50,16 +50,22 @@ public class ConfirmCpeMappingsCommandHandler : IRequestHandler<ConfirmCpeMappin
             }
 
             // No dictionary call, and this is the whole reason bulk confirmation is usable at all.
-            // Every stored suggestion was checked against NVD's dictionary before it was written —
-            // RunVulnerabilityAssessmentCommandHandler discards a pair the dictionary does not
-            // contain rather than storing it — so re-asking here would spend one NVD request per
-            // ticked row against an allowance of five per thirty seconds, to re-learn what this
-            // system established when it wrote the row. The single-row confirm still asks, because
-            // there the vendor and product may be something a reviewer has just typed.
+            // Every stored suggestion was checked against NVD's dictionary before it was written,
+            // so re-asking here would spend one NVD request per ticked row against an allowance of
+            // five per thirty seconds, to re-learn what this system established when it wrote the
+            // row.
             //
-            // The source is carried through rather than overwritten with Manual: nobody typed
-            // anything, so "Suggested by AI, accepted in bulk" is what happened, and the Confidence
-            // column says so.
+            // That rests on one fact worth naming, because nothing enforces it:
+            // RunVulnerabilityAssessmentCommandHandler's suggestion stage is the *only* caller of
+            // CpeMapping.Suggest in this codebase, and it calls INvdClient.CpeExistsAsync first and
+            // discards anything the dictionary does not contain. A second path that stored a
+            // suggestion without that check would make this loop accept an unverified pair — which
+            // is the "attribute another product's CVEs to yours" failure the whole review step
+            // exists to prevent. Add the check there, or make this ask.
+            //
+            // The source is carried through rather than overwritten: nobody typed anything here,
+            // and Manual means a pair a human entered — see ConfirmCpeMappingCommandHandler, which
+            // draws the same line for an unchanged pair.
             mapping.Confirm(mapping.Vendor, mapping.Product, mapping.SuggestionSource);
             applied++;
         }

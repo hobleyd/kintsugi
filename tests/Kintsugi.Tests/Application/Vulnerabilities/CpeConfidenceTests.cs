@@ -47,8 +47,25 @@ public class CpeConfidenceTests
         var assessment = CpeConfidence.Assess(
             "Firefox", "mozilla", "firefox", CpeMappingStatus.Confirmed, CpeSuggestionSource.Ai);
 
+        // The whole sentence, not a substring of it: this is read by a person, and SourceWords
+        // supplies its own article — "from a an AI suggestion" is what a Contains check waves
+        // through, on the path every bulk confirmation takes.
         Assert.Equal(CpeConfidenceLevel.High, assessment.Level);
-        Assert.Contains("AI", assessment.Reason);
+        Assert.Equal("Confirmed by a person, from an AI suggestion.", assessment.Reason);
+    }
+
+    [Fact]
+    public void EverySourceReadsAsASentence()
+    {
+        Assert.Equal(
+            "Confirmed by a person, from NVD's dictionary.",
+            CpeConfidence.Assess("Firefox", "mozilla", "firefox", CpeMappingStatus.Confirmed,
+                CpeSuggestionSource.Dictionary).Reason);
+
+        Assert.Equal(
+            "The reported name and zoom_workplace_desktop share a word but are not identical — "
+            + "check this is the same product. Proposed by an AI suggestion.",
+            Suggested("Zoom", "zoom", "zoom_workplace_desktop").Reason);
     }
 
     [Theory]

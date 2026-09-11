@@ -233,6 +233,31 @@ void main() {
 
     // The selection is spent, so the button cannot be pressed a second time by accident.
     expect(find.text('3 selected'), findsNothing);
+
+    // The list of skipped subjects is a work list; it goes when the reviewer says so.
+    await tester.tap(find.text('Dismiss'));
+    await tester.pumpAndSettle();
+    expect(find.text('2 subjects updated, 1 left unchanged.'), findsNothing);
+  });
+
+  testWidgets('a row action supersedes the banner describing the last bulk one', (tester) async {
+    await pumpQueue(tester);
+
+    await tester.tap(find.byTooltip('Select the 3 rows these filters leave'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(PrimaryButton, 'CONFIRM SELECTED'));
+    await tester.pumpAndSettle();
+    expect(find.text('2 subjects updated, 1 left unchanged.'), findsOneWidget);
+
+    // Marking one row not-applicable changes the table under the banner, which would otherwise
+    // read as a report on what just happened. Slack is the row with something left to decide.
+    await tester.tap(find.byTooltip(
+      'Not applicable: for in-house software, or anything NVD does not track. Takes it out of the '
+      'not-assessed count, because that is a decision rather than a gap.',
+    ).first);
+    await tester.pumpAndSettle();
+
+    expect(find.text('2 subjects updated, 1 left unchanged.'), findsNothing);
   });
 
   testWidgets('clear selected returns every ticked subject to the queue', (tester) async {

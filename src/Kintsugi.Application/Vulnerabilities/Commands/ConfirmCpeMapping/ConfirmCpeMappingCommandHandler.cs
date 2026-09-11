@@ -43,7 +43,20 @@ public class ConfirmCpeMappingCommandHandler : IRequestHandler<ConfirmCpeMapping
                 + "Search the dictionary for the right vendor and product, or mark this application as not applicable.");
         }
 
-        mapping.Confirm(request.Vendor, request.Product, CpeSuggestionSource.Manual);
+        // Manual means "a human entered this pair", not "a human pressed a button" — the Confidence
+        // column reads this field and says where the pair came from. Accepting a suggestion
+        // unchanged leaves its own source in place, which is what ConfirmCpeMappingsCommandHandler
+        // does for a bulk accept; only an edit makes it a hand-entered pair. Without this the two
+        // routes answer differently for the same action, because the queue's row tick submits
+        // exactly what the row already carries.
+        var unchanged = mapping.Vendor == request.Vendor
+            && mapping.Product == request.Product
+            && mapping.SuggestionSource != CpeSuggestionSource.None;
+
+        mapping.Confirm(
+            request.Vendor,
+            request.Product,
+            unchanged ? mapping.SuggestionSource : CpeSuggestionSource.Manual);
 
         // Re-pointing an already-confirmed mapping invalidates everything stored under it: those
         // findings describe the product it used to claim to be. Dropped rather than left to be

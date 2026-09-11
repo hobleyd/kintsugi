@@ -63,7 +63,9 @@ public static class CpeConfidence
                 CpeConfidenceLevel.High,
                 source == CpeSuggestionSource.Manual
                     ? "Confirmed by a person."
-                    : $"Confirmed by a person, from a {SourceWords(source)}.");
+                    // SourceWords carries its own article — "an AI suggestion", "NVD's
+                    // dictionary" — so this must not supply a second one.
+                    : $"Confirmed by a person, from {SourceWords(source)}.");
         }
 
         var name = Normalize(displayName);

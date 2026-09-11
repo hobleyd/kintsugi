@@ -534,7 +534,9 @@ class CpeMappingsBloc extends Bloc<CpeMappingsEvent, CpeMappingsState> {
   }
 
   Future<void> _onConfirm(CpeMappingConfirmed event, Emitter<CpeMappingsState> emit) async {
-    emit(state.copyWith(busyId: event.id, clearError: true));
+    // The bulk banner goes: it describes what the *last* action did, and leaving it above a table
+    // that has since changed under a row action makes it read as a report on this one.
+    emit(state.copyWith(busyId: event.id, clearError: true, clearBulkResult: true));
     try {
       await _confirmMapping(id: event.id, vendor: event.vendor, product: event.product);
       emit(state.copyWith(mappings: await _getMappings(), clearBusy: true));
@@ -546,7 +548,7 @@ class CpeMappingsBloc extends Bloc<CpeMappingsEvent, CpeMappingsState> {
   }
 
   Future<void> _onDismiss(CpeMappingDismissed event, Emitter<CpeMappingsState> emit) async {
-    emit(state.copyWith(busyId: event.id, clearError: true));
+    emit(state.copyWith(busyId: event.id, clearError: true, clearBulkResult: true));
     try {
       await _markNotApplicable(id: event.id);
       emit(state.copyWith(mappings: await _getMappings(), clearBusy: true));
@@ -556,7 +558,7 @@ class CpeMappingsBloc extends Bloc<CpeMappingsEvent, CpeMappingsState> {
   }
 
   Future<void> _onReset(CpeMappingReset event, Emitter<CpeMappingsState> emit) async {
-    emit(state.copyWith(busyId: event.id, clearError: true));
+    emit(state.copyWith(busyId: event.id, clearError: true, clearBulkResult: true));
     try {
       await _resetMapping(event.id);
       emit(state.copyWith(mappings: await _getMappings(), clearBusy: true));
