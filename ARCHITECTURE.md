@@ -544,7 +544,7 @@ sequenceDiagram
     participant Api as API
     participant Nvd as NVD
 
-    Human->>Ui: open the CPE mapping queue
+    Human->>Ui: open CVE Mapping (/vulnerabilities/mapping)
     opt search by hand
         Ui->>Api: GET /api/admin/vulnerabilities/cpe-dictionary?q=...
         Note over Api,Nvd: Its own nginx location with a 180s read timeout —<br/>the general /api block's 60s would turn a correct<br/>31-second rate-limit wait into a 504.
