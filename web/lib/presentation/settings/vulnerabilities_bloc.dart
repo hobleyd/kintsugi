@@ -207,6 +207,13 @@ class VulnerabilitySettingsBloc extends Bloc<VulnerabilitySettingsEvent, Vulnera
       // the run is inside an HTTP call to NVD or OSV and stops when it notices, which is what the
       // screen is now waiting to see.
       emit(state.copyWith(run: await _cancelRun()));
+
+      // Started here as well as in _onRun, and for the same reason: the answer says a run is still
+      // in flight, so there is something to wait for. Not merely defensive — _onRunStatus stops
+      // polling on any ApiException, so a transient 500 mid-run leaves nothing following the run,
+      // and without this the panel would sit on "Cancelling…" with a disabled button until
+      // somebody reloaded the page.
+      startPolling(_pollInterval, const VulnerabilityRunStatusRequested());
     } on ApiException catch (error) {
       // Includes the 409 for a run that finished between the screen drawing the button and this
       // request arriving — a real race on a five-second poll, and one the next poll corrects.
