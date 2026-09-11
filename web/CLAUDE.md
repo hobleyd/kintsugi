@@ -552,12 +552,15 @@ at the same figure — so Severity sorts by `VulnerabilityFindingSort.BandRank` 
 `CvssBaseScore`. A column that sorts by something other than what it displays is unreadable, which
 is what a single column carrying both did. Their filters differ for the same reason: Severity
 picks a band (plus `Unscored`), Score takes a *floor*, because "everything at 7 and above" is not
-"the ones labelled HIGH". A row counts as unscored when **either** half is missing — `_isUnscored`
-in the screen and the `Unscored` branch of the handler's filter are the same rule written twice, so
-keep them together or the cells and the filter come to disagree about which rows those are. An
-unscored row sinks to the bottom of both sorts in both directions: it is an unknown, not a mild
-one, and floating it to the top of an ascending sort buries the low-but-known rows somebody just
-asked to see.
+"the ones labelled HIGH". A row counts as unscored when **either** half is missing, and that
+rule has five call sites that must not drift: `_isUnscored` in the screen, and `IsUnscored` in the
+handler driving the Unscored filter, both sorts, the default order and the score floor. Keying any
+of them on one half instead is a table contradicting itself, and it shipped that way for a commit:
+a row reading "Unscored" sorted inside the HIGH block because the band sort asked only about the
+band, and a row with a blank Score cell answered a "7 and above" filter because the floor asked
+only about the number. An unscored row sinks to the bottom of every order in both directions: it
+is an unknown, not a mild one, and floating it to the top of an ascending sort buries the
+low-but-known rows somebody just asked to see.
 
 **The Platform column is `PlatformBucket`'s OS buckets, not a second classifier.** "macOS" has to
 mean the same thing here as in the Applications screen's Platform column, so the server buckets
