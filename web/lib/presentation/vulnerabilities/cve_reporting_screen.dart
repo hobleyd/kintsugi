@@ -253,12 +253,18 @@ class _FindingsTable extends StatelessWidget {
   @override
   Widget build(BuildContext context) => KintsugiTable(
         minWidth: 960,
-        columns: const [
-          TableColumnSpec(label: 'CVE', width: FixedColumnWidth(150)),
-          TableColumnSpec(label: 'Severity', width: FixedColumnWidth(130)),
-          TableColumnSpec(label: 'Exploited', width: FixedColumnWidth(120)),
-          TableColumnSpec(label: 'Affects', width: FlexColumnWidth(2)),
-          TableColumnSpec(label: 'Installs', width: FixedColumnWidth(90), alignRight: true),
+        columns: [
+          const TableColumnSpec(label: 'CVE', width: FixedColumnWidth(150)),
+          const TableColumnSpec(label: 'Severity', width: FixedColumnWidth(130)),
+          // Measured rather than guessed: the cell is a chip, which cannot be made narrower than
+          // its one word, and the table's own floor only covers the header label above it. At a
+          // hand-set 120 this was under two pixels short and rendered "EXPLOITE" over "D".
+          TableColumnSpec(
+            label: 'Exploited',
+            width: TableColumnSpec.forContent(StatusChip.widthFor(context, 'Exploited')),
+          ),
+          const TableColumnSpec(label: 'Affects', width: FlexColumnWidth(2)),
+          const TableColumnSpec(label: 'Installs', width: FixedColumnWidth(90), alignRight: true),
         ],
         rows: [
           for (final finding in findings)

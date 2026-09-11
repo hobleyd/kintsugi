@@ -17,21 +17,49 @@ class StatusChip extends StatelessWidget {
   final String label;
   final String statusKey;
 
+  /// The three numbers [widthFor] has to agree with. Named rather than written twice, because the
+  /// measurement is only useful while it matches what [build] actually draws.
+  static const _horizontalPadding = 10.0;
+  static const _borderWidth = 1.0;
+
+  static TextStyle _labelStyle(Color color) =>
+      AppTheme.display(color: color, size: 10.4, letterSpacing: 0.83);
+
+  /// How wide this chip will be carrying [label] — the uppercased label measured in the display
+  /// face, plus the padding and border around it.
+  ///
+  /// For sizing a table column whose cells are chips. `KintsugiTable` floors every column at the
+  /// longest *word* of its header label, which is what stops "ACTIONS" breaking to "ACTION" over
+  /// "S" — but nothing measures the cells, and a chip is just as unbreakable: one uppercase token
+  /// in a column too narrow for it wraps mid-word exactly the same way. The CVE Reporting table's
+  /// Exploited column was hand-set to 120px and rendered "EXPLOITE" over "D", short by under two
+  /// pixels, which is the kind of margin no number picked by eye can be trusted to keep.
+  static double widthFor(BuildContext context, String label) {
+    final painter = TextPainter(
+      text: TextSpan(text: label.toUpperCase(), style: _labelStyle(const Color(0xFF000000))),
+      textDirection: Directionality.of(context),
+    )..layout();
+    final labelWidth = painter.width;
+    painter.dispose();
+
+    return labelWidth + (_horizontalPadding + _borderWidth) * 2;
+  }
+
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
     final color = statusKey == '_accent' ? palette.neon : palette.forStatusKey(statusKey);
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+      padding: const EdgeInsets.symmetric(horizontal: _horizontalPadding, vertical: 3),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.08),
-        border: Border.all(color: color),
+        border: Border.all(color: color, width: _borderWidth),
         borderRadius: BorderRadius.circular(3),
       ),
       child: Text(
         label.toUpperCase(),
-        style: AppTheme.display(color: color, size: 10.4, letterSpacing: 0.83),
+        style: _labelStyle(color),
       ),
     );
   }

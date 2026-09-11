@@ -42,6 +42,18 @@ class TableColumnSpec {
   /// mapping queue's select-all checkbox. [label] is still what the column is floored at and what
   /// a screen reader is given, so it must still be set — pass the action's name.
   final Widget? headerContent;
+
+  /// A fixed width sized to something a cell cannot make narrower, with the gutters this table
+  /// insets every cell by added on.
+  ///
+  /// The counterpart to [_labelFloor] at the other end of the column: that floors a column at the
+  /// longest word of its *header*, and nothing measures the cells, so a column can still be too
+  /// narrow for the chip underneath and break it mid-word the same way. Pass
+  /// `StatusChip.widthFor(context, label)` rather than a number arrived at by eye — the CVE
+  /// Reporting table's Exploited column was hand-set to 120 and missed "EXPLOITED" by under two
+  /// pixels.
+  static TableColumnWidth forContent(double contentWidth) =>
+      FixedColumnWidth(contentWidth + _cellGutter * 2);
 }
 
 /// Which column a table is sorted by, and which way.

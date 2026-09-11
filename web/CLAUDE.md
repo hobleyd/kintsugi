@@ -80,6 +80,16 @@ so `_labelFloor` sizes every column to at least the longest *word* in its label 
 widget rather than left as a minimum each screen remembers per column, which is exactly the
 coupling nothing would have enforced.
 
+**`_labelFloor` only covers the header, and the same break happens under it.** Nothing measures a
+*cell*, and a `StatusChip` is as unbreakable as a header word — one uppercase token that a `Text`
+cannot narrow. The CVE Reporting table's Exploited column was hand-set to 120px, which is 1.7px
+less than "EXPLOITED" needs in Orbitron at 10.4px, and it rendered "EXPLOITE" above "D". So size
+such a column by measurement rather than by eye: `TableColumnSpec.forContent(StatusChip.widthFor(
+context, label))` adds the cell gutters to what the chip actually lays out at. Pinned in
+`test/presentation/status_chip_width_test.dart`, whose assertions are font-independent — the
+runner resolves no web font, so what they check is that `widthFor` agrees with what the chip
+draws and that the agreement is tight rather than lucky slack.
+
 Two consequences worth holding onto. `minWidth` is a floor, not a width: the table takes the
 panel's full width when there is more of it, which means that width has to be measured **outside**
 the horizontal `SingleChildScrollView` — one gives its child an unbounded width by definition, so
