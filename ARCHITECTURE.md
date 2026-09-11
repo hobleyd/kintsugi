@@ -589,7 +589,7 @@ sequenceDiagram
 | Flow | Owning file |
 |---|---|
 | Layering, auth gap, buckets, approval, vulnerability assessment | `src/CLAUDE.md` |
-| Polling, tables, enums on the wire, the Vulnerabilities screen | `web/CLAUDE.md` |
+| Polling, tables, enums on the wire, the Vulnerabilities screens | `web/CLAUDE.md` |
 | Queue, check-in scheduling, patch cycles, per-platform differences | `clients/CLAUDE.md` and each agent's own |
 | Location precedence, client-certificate verification, 495/496 | `nginx/CLAUDE.md` |
 | Couplings with two ends in different directories | `.claude/rules/` |

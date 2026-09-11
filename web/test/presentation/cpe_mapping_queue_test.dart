@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:kintsugi_web/core/di/locator.dart';
 import 'package:kintsugi_web/core/theme/app_theme.dart';
 import 'package:kintsugi_web/core/widgets/buttons.dart';
+import 'package:kintsugi_web/core/widgets/form_bits.dart';
 import 'package:kintsugi_web/domain/entities/enums.dart';
 import 'package:kintsugi_web/domain/entities/vulnerability.dart';
 import 'package:kintsugi_web/domain/repositories/repositories.dart';
@@ -258,6 +259,29 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('2 subjects updated, 1 left unchanged.'), findsNothing);
+  });
+
+  /// Alphabetical by the label a reader sees, not by the declaration order of
+  /// [CpeMappingStatus] — which is an ordinal on the wire and must not be reordered to get this.
+  /// Pinned here because a list sorted at the widget rather than at the enum is the kind of thing
+  /// the next edit to this column quietly drops.
+  testWidgets('the status filter offers its options in alphabetical order', (tester) async {
+    await pumpQueue(tester);
+
+    final dropdown = tester.widget<KintsugiDropdown<String>>(
+      find.byWidgetPredicate(
+        (w) => w is KintsugiDropdown<String> && w.items.contains('confirmed'),
+      ),
+    );
+    final labels = [for (final item in dropdown.items) dropdown.labelOf!(item)];
+
+    expect(labels, [
+      'Any status',
+      'Awaiting review',
+      'Mapped',
+      'Not applicable',
+      'Not mapped',
+    ]);
   });
 
   testWidgets('clear selected returns every ticked subject to the queue', (tester) async {

@@ -465,7 +465,14 @@ US keyboard controlling a French host types the wrong letters.
   merge, which is the good failure but only if somebody builds the image.
 
 
-## The Vulnerabilities screen
+## The Vulnerabilities screens
+
+**Two screens under one menu: CVE Reporting and CVE Mapping.** `/vulnerabilities` is CVE
+Reporting and `/vulnerabilities/mapping` is the queue, the same shape `/applications` and
+`/applications/failed` already had — the unsuffixed path stays the reporting view so anything
+already pointing at it lands where it did, and the sidebar's parent entry goes there too rather
+than to the first item under it, because what an administrator opens this menu for is what is
+being exploited right now.
 
 **It leads with what is being exploited, and that is the whole editorial decision.** One
 out-of-date Firefox and one macOS 14.5, assessed against the live NVD API, produced 2183 CVE
@@ -482,12 +489,22 @@ catalogue" or "nothing has been assessed yet". A vulnerability screen that lists
 managed to match reads as a clean bill of health, which is the same failure the Vanta screen
 refuses by naming the eleven resource types it does not sync.
 
-**The CPE mapping queue lives on the same screen because that is where an empty one gets fixed.**
-It is its own BLoC (`CpeMappingsBloc`) beside `VulnerabilitiesBloc` rather than one merged state:
-confirming a mapping reloads the queue and not the findings, which do not change until the next
-assessment run. Dictionary results are held per mapping id, so opening a second row does not wipe
-what the first was showing, and `busyId` is a single row's id so one confirm does not grey out
-every button on the page. The screen says why the search results are candidates rather than an
+**The CPE mapping queue is its own screen, and the two stay joined in words rather than in
+layout.** It began as the second half of the reporting screen, on the reasoning that an empty
+findings table is where somebody notices the queue needs draining — which holds for noticing and
+not for doing: draining three hundred rows is a session of its own, and it was happening below a
+findings table that does not change until the next assessment run, so every scroll, filter and
+bookmark carried a page of CVEs irrelevant to the work. What replaces the adjacency is copy:
+`_CoverageNotice` and the empty-findings panel both name CVE Mapping wherever they report a gap,
+so the screen that admits it cannot see something says where that is fixed. Keep that — a coverage
+gap reported with no next step is most of the way back to the clean-bill-of-health failure this
+screen exists to refuse. `CpeMappingQueue` stays a widget rather than becoming the screen itself,
+so `cpe_mapping_queue_test.dart` can pump it without a router; the screen is a `PageScaffold`
+around it, and the prose about what a CPE is lives in that scaffold's subtitle, not twice.
+It is its own BLoC (`CpeMappingsBloc`) beside `VulnerabilitiesBloc` — which is what made the split
+cheap, and still matters: confirming a mapping reloads the queue and not the findings. Dictionary
+results are held per mapping id, so opening a second row does not wipe what the first was showing,
+and `busyId` is a single row's id so one confirm does not grey out every button on the page. The screen says why the search results are candidates rather than an
 answer — "slack" ranks Slackware Linux first — because a reviewer who takes the top hit on trust
 is the failure mode the whole review step exists to prevent.
 
@@ -499,7 +516,10 @@ six subjects filled a display. Everything only the row being worked on needs —
 search, the candidate list, the installed versions, the last error — opens under that row and
 closes again, one at a time, the way the Applications screen's instructions panel behaves. Every
 column carries a filter in its own header (`TableColumnSpec.filter`), and the header checkbox uses
-`TableColumnSpec.headerContent`, which exists for exactly this.
+`TableColumnSpec.headerContent`, which exists for exactly this. The Status filter lists its options
+alphabetically **by the label a reader sees**, sorted at the widget (`_statusesByLabel`) and not by
+reordering `CpeMappingStatus` — that enum is an ordinal on the wire, so moving a member there would
+re-map every value on both sides.
 
 **Rows are keyed by mapping id, and that is load-bearing.** `GetCpeMappingsQueryHandler` sorts
 suggested rows first, so confirming one moves it down the table; without `KintsugiTableRow.key` the

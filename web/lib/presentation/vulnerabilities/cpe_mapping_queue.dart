@@ -16,7 +16,8 @@ import '../../domain/usecases/vulnerability_usecases.dart';
 import 'vulnerabilities_bloc.dart';
 
 /// The CPE mapping queue: everything this fleet has installed, and what NVD is being asked about
-/// it.
+/// it. The whole body of the CVE Mapping screen, and still a widget rather than a screen so a
+/// widget test can pump it without a router.
 ///
 /// This is the gate the whole feature runs through, and the reason it is a human decision rather
 /// than an automatic one is on the screen: NVD's own dictionary ranks Slackware Linux first for
@@ -52,16 +53,12 @@ class _MappingQueueView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => BlocBuilder<CpeMappingsBloc, CpeMappingsState>(
+        // No heading of its own: what a CPE is and why a human confirms it is the CVE Mapping
+        // screen's subtitle, and saying it twice on a page that is only this widget reads as two
+        // different sections.
         builder: (context, state) => Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const SubHeadingTight('CPE mapping queue'),
-            const HintText(
-              'NVD indexes vulnerabilities by CPE — a vendor and product name that is often not '
-              'what the software calls itself. Nothing is assessed for an application until '
-              'somebody confirms which one it is.',
-            ),
-            const SizedBox(height: 12),
             if (state.error != null) AlertBox.error(state.error!),
             if (state.bulkResult != null) _BulkResultAlert(result: state.bulkResult!),
             if (state.loading)
@@ -203,7 +200,7 @@ class _MappingsTable extends StatelessWidget {
           width: const FixedColumnWidth(165),
           filter: KintsugiDropdown<String>(
             value: filters.status,
-            items: ['all', ...CpeMappingStatus.values.map((s) => s.name)],
+            items: ['all', ..._statusesByLabel],
             labelOf: (value) =>
                 value == 'all' ? 'Any status' : CpeMappingStatus.values.byName(value).label,
             onChanged: (value) => filter(filters.copyWith(status: value)),
@@ -362,6 +359,17 @@ class _MappingsTable extends StatelessWidget {
       ),
     ];
   }
+
+  /// The four statuses in the order the dropdown offers them: alphabetical by the label a reader
+  /// sees, which is Awaiting review, Mapped, Not applicable, Not mapped. Sorted here rather than by
+  /// reordering [CpeMappingStatus], which crosses the wire as an ordinal — moving a member there
+  /// silently re-maps every value on both sides, and `vulnerability_mapper_test.dart` pins the
+  /// positions for exactly that reason. Sorting on `name` would also be the wrong order: it is the
+  /// label the list is being read as.
+  static final List<String> _statusesByLabel =
+      (CpeMappingStatus.values.toList()..sort((a, b) => a.label.compareTo(b.label)))
+          .map((status) => status.name)
+          .toList();
 
   static String _statusKey(CpeMappingStatus status) => switch (status) {
         CpeMappingStatus.confirmed => 'mapping-confirmed',

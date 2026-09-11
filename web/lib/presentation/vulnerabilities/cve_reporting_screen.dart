@@ -14,7 +14,6 @@ import '../../core/widgets/status_chip.dart';
 import '../../core/widgets/text_bits.dart';
 import '../../domain/entities/vulnerability.dart';
 import '../../domain/usecases/vulnerability_usecases.dart';
-import 'cpe_mapping_queue.dart';
 import 'vulnerabilities_bloc.dart';
 
 /// Which published CVEs affect the versions this fleet has installed.
@@ -27,9 +26,10 @@ import 'vulnerabilities_bloc.dart';
 /// It also states its own coverage. An application with no confirmed CPE has not been assessed at
 /// all, and a screen that listed only what it managed to match would read as a clean bill of
 /// health — the same failure the Vanta screen refuses by naming the eleven resource types it does
-/// not sync.
-class VulnerabilitiesScreen extends StatelessWidget {
-  const VulnerabilitiesScreen({super.key});
+/// not sync. What it cannot see is fixed next door, on CVE Mapping — so every sentence here that
+/// names a gap names that screen rather than pointing at something below it.
+class CveReportingScreen extends StatelessWidget {
+  const CveReportingScreen({super.key});
 
   @override
   Widget build(BuildContext context) => BlocProvider(
@@ -48,7 +48,7 @@ class _VulnerabilitiesView extends StatelessWidget {
           final overview = state.overview;
 
           return PageScaffold(
-            title: 'Vulnerabilities',
+            title: 'CVE Reporting',
             subtitle: 'Published CVEs affecting the versions this fleet has installed, matched by '
                 'the National Vulnerability Database and flagged where CISA lists them as actively '
                 'exploited in the wild.',
@@ -75,12 +75,10 @@ class _VulnerabilitiesView extends StatelessWidget {
                         // The distinction that matters: an empty table means one of two very
                         // different things, and only one of them is good news.
                         : 'Nothing has been assessed yet. Confirm what an application is on the '
-                            'CPE mapping queue below, and the next run will check it.',
+                            'CVE Mapping screen, and the next run will check it.',
                   )
                 else
                   _FindingsTable(findings: overview.findings),
-                const SizedBox(height: 32),
-                const CpeMappingQueue(),
               ] else if (state.loading)
                 const Padding(padding: EdgeInsets.all(24), child: LinearProgressIndicator()),
             ],
@@ -191,7 +189,8 @@ class _CoverageNotice extends StatelessWidget {
     final parts = <String>[
       if (summary.unmappedSubjectCount > 0)
         '${summary.unmappedSubjectCount} application(s) or operating system(s) have no confirmed '
-            'CPE, so nothing has been assessed for them.',
+            'CPE, so nothing has been assessed for them — confirm what they are on the CVE '
+            'Mapping screen.',
       if (summary.unassessableHostCount > 0)
         '${summary.unassessableHostCount} host(s) run an agent that does not report enough to '
             'assess their operating system — upgrade the agent on those hosts.',

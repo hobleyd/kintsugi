@@ -18,7 +18,8 @@ import '../../presentation/settings/vanta_screen.dart';
 import '../../presentation/shell/app_shell.dart';
 import '../../presentation/settings/vulnerabilities_screen.dart';
 import '../../presentation/upgrade_scripts/upgrade_scripts_screen.dart';
-import '../../presentation/vulnerabilities/vulnerabilities_screen.dart';
+import '../../presentation/vulnerabilities/cve_mapping_screen.dart';
+import '../../presentation/vulnerabilities/cve_reporting_screen.dart';
 import '../di/locator.dart';
 import '../platform/full_screen.dart';
 import 'bloc_listenable.dart';
@@ -45,10 +46,14 @@ abstract final class Routes {
   static const applicationsFailed = '/applications/failed';
   static const clients = '/clients';
 
-  /// Which published CVEs affect what this fleet has installed, and the CPE mapping queue that
-  /// decides what gets assessed at all. Top-level rather than under Applications: the question it
-  /// answers is about the fleet, not about one application's update state.
+  /// The Vulnerabilities menu's two screens. Top-level rather than under Applications: the
+  /// question they answer is about the fleet, not about one application's update state.
+  ///
+  /// `/vulnerabilities` stays CVE Reporting rather than moving under a new prefix, the same way
+  /// `/applications` stayed Currently Installed — it is the address anything already pointing here
+  /// points at, and it is what somebody opening the menu came to read.
   static const vulnerabilities = '/vulnerabilities';
+  static const vulnerabilitiesMapping = '/vulnerabilities/mapping';
 
   static const upgradeScripts = '/upgrade-scripts';
   static const settingsAiAgent = '/settings/ai-agent';
@@ -181,7 +186,11 @@ GoRouter createRouter(SessionBloc sessionBloc) {
             path: Routes.settingsVulnerabilities,
             builder: (_, _) => const VulnerabilitiesSettingsScreen(),
           ),
-          GoRoute(path: Routes.vulnerabilities, builder: (_, _) => const VulnerabilitiesScreen()),
+          GoRoute(path: Routes.vulnerabilities, builder: (_, _) => const CveReportingScreen()),
+          GoRoute(
+            path: Routes.vulnerabilitiesMapping,
+            builder: (_, _) => const CveMappingScreen(),
+          ),
         ],
       ),
     ],

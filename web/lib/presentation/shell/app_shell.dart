@@ -99,6 +99,9 @@ class _Sidebar extends StatelessWidget {
     final palette = context.palette;
     final inApplications = location.startsWith(Routes.applications);
     final inSync = location == Routes.clients || location == Routes.upgradeScripts;
+    // startsWith, so CVE Mapping keeps the parent lit. `/settings/vulnerabilities` is a different
+    // prefix and does not collide with it.
+    final inVulnerabilities = location.startsWith(Routes.vulnerabilities);
     final inSettings = location.startsWith('/settings');
 
     return Container(
@@ -156,14 +159,31 @@ class _Sidebar extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 8),
-                // Its own top-level entry with no subnav, because it answers a question about the
-                // fleet rather than about one application's update state — and because the thing
-                // an administrator comes here for is "what is being exploited right now", which
-                // is not a sub-item of anything else in this list.
+                // A top-level entry, because it answers a question about the fleet rather than
+                // about one application's update state. The parent goes to CVE Reporting and not
+                // to the first entry below it: what an administrator comes here for is "what is
+                // being exploited right now", and the mapping queue is the work that makes that
+                // answer complete rather than the answer.
                 _NavLink(
                   label: 'Vulnerabilities',
                   path: Routes.vulnerabilities,
-                  selected: location == Routes.vulnerabilities,
+                  selected: inVulnerabilities,
+                ),
+                // Alphabetical by label, like every other subnav here. Keep it that way when
+                // adding one — the list is a lookup, not a workflow.
+                _SubNav(
+                  children: [
+                    _SubNavLink(
+                      label: 'CVE Mapping',
+                      path: Routes.vulnerabilitiesMapping,
+                      selected: location == Routes.vulnerabilitiesMapping,
+                    ),
+                    _SubNavLink(
+                      label: 'CVE Reporting',
+                      path: Routes.vulnerabilities,
+                      selected: location == Routes.vulnerabilities,
+                    ),
+                  ],
                 ),
                 const SizedBox(height: 8),
                 _NavLink(label: 'Sync', path: Routes.clients, selected: inSync),
