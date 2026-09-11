@@ -72,6 +72,8 @@ public class AdminVulnerabilitiesController : ControllerBase
     /// <param name="sortAscending">Which way <paramref name="sortKey"/> runs.</param>
     /// <param name="cveSearch">Substring of the CVE id.</param>
     /// <param name="severity">A CVSS severity band, or "Unscored".</param>
+    /// <param name="minScore">A CVSS base score floor. A threshold, not a band — unscored rows
+    /// never pass it, because a missing score is not a low one.</param>
     /// <param name="platform">A <c>VulnerabilityPlatform</c> value.</param>
     /// <param name="subjectSearch">Substring of an affected product's name or version.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
@@ -89,6 +91,7 @@ public class AdminVulnerabilitiesController : ControllerBase
         [FromQuery] bool sortAscending = false,
         [FromQuery] string? cveSearch = null,
         [FromQuery] string? severity = null,
+        [FromQuery] double? minScore = null,
         [FromQuery] string? platform = null,
         [FromQuery] string? subjectSearch = null,
         CancellationToken cancellationToken = default) =>
@@ -101,6 +104,7 @@ public class AdminVulnerabilitiesController : ControllerBase
                 sortAscending,
                 cveSearch,
                 severity,
+                minScore,
                 platform,
                 subjectSearch),
             cancellationToken));

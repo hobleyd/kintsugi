@@ -538,6 +538,19 @@ package findings before taking 100 of them. Three consequences that are easy to 
   filter that was no longer applied. Guarded on the controller's own text as well as the old
   value, or a debounced round trip moves the cursor to the end mid-word.
 
+**Severity and Score are two columns because they are two orders.** The band is NVD's label and
+the score is the number behind it, and across CVSS revisions a v2 HIGH and a v3 HIGH do not begin
+at the same figure — so Severity sorts by `VulnerabilityFindingSort.BandRank` and Score sorts by
+`CvssBaseScore`. A column that sorts by something other than what it displays is unreadable, which
+is what a single column carrying both did. Their filters differ for the same reason: Severity
+picks a band (plus `Unscored`), Score takes a *floor*, because "everything at 7 and above" is not
+"the ones labelled HIGH". A row counts as unscored when **either** half is missing — `_isUnscored`
+in the screen and the `Unscored` branch of the handler's filter are the same rule written twice, so
+keep them together or the cells and the filter come to disagree about which rows those are. An
+unscored row sinks to the bottom of both sorts in both directions: it is an unknown, not a mild
+one, and floating it to the top of an ascending sort buries the low-but-known rows somebody just
+asked to see.
+
 **The Platform column is `PlatformBucket`'s OS buckets, not a second classifier.** "macOS" has to
 mean the same thing here as in the Applications screen's Platform column, so the server buckets
 through `PlatformBucket.From` and only renames the leftover: `generic` surfaces as `Unknown`,

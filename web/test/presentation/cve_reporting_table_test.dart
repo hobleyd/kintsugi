@@ -46,10 +46,67 @@ void main() {
     // invisible in a release build.
     repository.findings = [_finding('CVE-2024-0001')];
 
-    await pumpScreen(tester, width: 1200);
+    await pumpScreen(tester, width: 1340);
 
     expect(tester.takeException(), isNull);
     expect(find.text('PLATFORM'), findsOneWidget);
+    expect(find.text('SCORE'), findsOneWidget);
+  });
+
+  group('the Score column', () {
+    testWidgets('carries the number and its provenance, leaving the band to Severity',
+        (tester) async {
+      repository.findings = [_finding('CVE-2024-0001', score: 9.8, derived: true)];
+
+      await pumpScreen(tester);
+
+      expect(find.text('HIGH'), findsOneWidget);
+      expect(find.text('9.8'), findsOneWidget);
+      expect(find.text('calculated'), findsOneWidget);
+    });
+
+    testWidgets('is blank when the finding cannot be ranked, and Severity says why',
+        (tester) async {
+      // Either half missing means unscored, which is also what the Severity filter's Unscored
+      // option matches — the cells and the filter must not come to disagree about which rows
+      // those are.
+      repository.findings = [_finding('CVE-2024-0001', score: null, severity: null)];
+
+      await pumpScreen(tester);
+
+      expect(find.text('Unscored'), findsOneWidget);
+      expect(find.text('0.0'), findsNothing);
+    });
+
+    testWidgets('sorts on its own key, not the Severity column\'s', (tester) async {
+      // Two columns, two orders: a v2 HIGH and a v3 HIGH do not begin at the same figure.
+      repository.findings = [_finding('CVE-2024-0001')];
+
+      await pumpScreen(tester);
+      await tester.tap(find.text('SCORE'));
+      await tester.pumpAndSettle();
+
+      expect(repository.lastQuery.sortKey, VulnerabilitySortKey.score);
+
+      await tester.tap(find.text('SEVERITY'));
+      await tester.pumpAndSettle();
+
+      expect(repository.lastQuery.sortKey, VulnerabilitySortKey.severity);
+    });
+
+    testWidgets('filters by a floor rather than by a band', (tester) async {
+      repository.findings = [_finding('CVE-2024-0001')];
+
+      await pumpScreen(tester);
+      await tester.tap(find.text('Any score'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('7 and above').last);
+      await tester.pumpAndSettle();
+
+      expect(repository.lastQuery.minScore, '7');
+      expect(repository.lastQuery.page, 0);
+      expect(repository.lastQuery.hasFilters, isTrue);
+    });
   });
 
   group('the Platform column', () {
@@ -280,15 +337,21 @@ void main() {
   });
 }
 
-VulnerabilityFinding _finding(String cveId, {List<String> platforms = const ['macOS']}) =>
+VulnerabilityFinding _finding(
+  String cveId, {
+  List<String> platforms = const ['macOS'],
+  double? score = 7.5,
+  String? severity = 'HIGH',
+  bool derived = false,
+}) =>
     VulnerabilityFinding(
       cveId: cveId,
       description: null,
-      cvssBaseScore: 7.5,
-      cvssSeverity: 'HIGH',
+      cvssBaseScore: score,
+      cvssSeverity: severity,
       cvssVector: null,
       cvssVersion: '3.1',
-      cvssDerivedFromVector: false,
+      cvssDerivedFromVector: derived,
       publishedUtc: null,
       knownExploited: false,
       kevDateAddedUtc: null,

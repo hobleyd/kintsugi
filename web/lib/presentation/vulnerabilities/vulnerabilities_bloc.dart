@@ -36,13 +36,14 @@ final class VulnerabilitiesFilterChanged extends VulnerabilitiesEvent {
 /// One of the header dropdowns. Goes back to page one, because the row that was on page seven of
 /// the old set is not on page seven of the narrowed one.
 final class VulnerabilitiesHeaderFilterChanged extends VulnerabilitiesEvent {
-  const VulnerabilitiesHeaderFilterChanged({this.severity, this.platform});
+  const VulnerabilitiesHeaderFilterChanged({this.severity, this.minScore, this.platform});
 
   final String? severity;
+  final String? minScore;
   final String? platform;
 
   @override
-  List<Object?> get props => [severity, platform];
+  List<Object?> get props => [severity, minScore, platform];
 }
 
 /// One of the header search boxes. Debounced — see [VulnerabilitiesBloc._searchDebounce].
@@ -129,8 +130,14 @@ class VulnerabilitiesBloc extends Bloc<VulnerabilitiesEvent, VulnerabilitiesStat
     on<VulnerabilitiesFilterChanged>(
         (event, emit) => _load(emit, state.query.reset(knownExploitedOnly: event.knownExploitedOnly)));
 
-    on<VulnerabilitiesHeaderFilterChanged>((event, emit) =>
-        _load(emit, state.query.reset(severity: event.severity, platform: event.platform)));
+    on<VulnerabilitiesHeaderFilterChanged>((event, emit) => _load(
+          emit,
+          state.query.reset(
+            severity: event.severity,
+            minScore: event.minScore,
+            platform: event.platform,
+          ),
+        ));
 
     on<VulnerabilitiesSearchChanged>((event, emit) =>
         _load(emit, state.query.reset(cveSearch: event.cveSearch, subjectSearch: event.subjectSearch)));
@@ -153,6 +160,7 @@ class VulnerabilitiesBloc extends Bloc<VulnerabilitiesEvent, VulnerabilitiesStat
             cveSearch: '',
             subjectSearch: '',
             severity: VulnerabilityQuery.anyValue,
+            minScore: VulnerabilityQuery.anyValue,
             platform: VulnerabilityQuery.anyValue,
           ),
         ));

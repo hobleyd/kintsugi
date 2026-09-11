@@ -325,7 +325,7 @@ class _FindingsTable extends StatelessWidget {
     final query = state.query;
 
     return KintsugiTable(
-      minWidth: 1180,
+      minWidth: 1320,
       sort: query.sortKey == null
           ? null
           : TableSort(query.sortKey!, ascending: query.sortAscending),
@@ -343,7 +343,7 @@ class _FindingsTable extends StatelessWidget {
       columns: [
         TableColumnSpec(
           label: 'CVE',
-          width: const FixedColumnWidth(190),
+          width: const FixedColumnWidth(180),
           sortKey: VulnerabilitySortKey.cve,
           filter: SearchField(
             value: query.cveSearch,
@@ -355,13 +355,31 @@ class _FindingsTable extends StatelessWidget {
         ),
         TableColumnSpec(
           label: 'Severity',
-          width: const FixedColumnWidth(180),
+          width: const FixedColumnWidth(170),
+          // The band, not the number beside it. The two orders differ — a v2 HIGH and a v3 HIGH
+          // do not begin at the same figure — and a column that sorts by something other than
+          // what it shows is unreadable.
           sortKey: VulnerabilitySortKey.severity,
           filter: KintsugiDropdown<String>(
             value: query.severity,
             items: const [VulnerabilityQuery.anyValue, ...vulnerabilitySeverities],
             labelOf: (value) => value == VulnerabilityQuery.anyValue ? 'Any severity' : value,
             onChanged: (value) => bloc.add(VulnerabilitiesHeaderFilterChanged(severity: value)),
+          ),
+        ),
+        TableColumnSpec(
+          label: 'Score',
+          width: const FixedColumnWidth(170),
+          sortKey: VulnerabilitySortKey.score,
+          // A floor rather than the band boundaries under another name: beside a Severity filter,
+          // the question this one answers is "everything at 7 and above", which is not the same
+          // set as "the ones labelled HIGH".
+          filter: KintsugiDropdown<String>(
+            value: query.minScore,
+            items: const [VulnerabilityQuery.anyValue, ...vulnerabilityScoreFloors],
+            labelOf: (value) =>
+                value == VulnerabilityQuery.anyValue ? 'Any score' : '$value and above',
+            onChanged: (value) => bloc.add(VulnerabilitiesHeaderFilterChanged(minScore: value)),
           ),
         ),
         // Measured rather than guessed: the cell is a chip, which cannot be made narrower than
@@ -374,7 +392,7 @@ class _FindingsTable extends StatelessWidget {
         ),
         TableColumnSpec(
           label: 'Platform',
-          width: const FixedColumnWidth(190),
+          width: const FixedColumnWidth(175),
           filter: KintsugiDropdown<String>(
             value: query.platform,
             items: const [VulnerabilityQuery.anyValue, ...vulnerabilityPlatforms],
@@ -410,6 +428,7 @@ class _FindingsTable extends StatelessWidget {
               const SizedBox.shrink(),
               const SizedBox.shrink(),
               const SizedBox.shrink(),
+              const SizedBox.shrink(),
               HintText(_emptyRowMessage(query)),
             ],
           ),
@@ -419,6 +438,7 @@ class _FindingsTable extends StatelessWidget {
             cells: [
               LinkText(label: finding.cveId, onTap: () => _openExternal(finding.nvdUrl)),
               _SeverityCell(finding: finding),
+              _ScoreCell(finding: finding),
               if (finding.knownExploited)
                 const StatusChip('Exploited', statusKey: 'exploited')
               else
@@ -471,6 +491,14 @@ class _PlatformCell extends StatelessWidget {
 /// imports it.
 void _openExternal(String url) => locator<PageNavigator>().openInNewTab(url);
 
+/// Whether this finding can be ranked at all.
+///
+/// Either half missing means it cannot: a band with no number behind it is not something the
+/// table can order, and the Severity filter's "Unscored" option matches on exactly this, so the
+/// cells and the filter cannot come to disagree about which rows are which.
+bool _isUnscored(VulnerabilityFinding finding) =>
+    finding.cvssSeverity == null || finding.cvssBaseScore == null;
+
 class _SeverityCell extends StatelessWidget {
   const _SeverityCell({required this.finding});
 
@@ -478,18 +506,35 @@ class _SeverityCell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final severity = finding.cvssSeverity;
-    if (severity == null || finding.cvssBaseScore == null) {
+    if (_isUnscored(finding)) {
       // Common for recent CVEs, and said rather than shown as a zero — an unscored critical and a
       // genuinely harmless one would otherwise look identical.
       return const HintText('Unscored');
+    }
+
+    final severity = finding.cvssSeverity!;
+    return StatusChip(severity, statusKey: 'cve-${severity.toLowerCase()}');
+  }
+}
+
+/// The number behind the band, in its own column so it can be sorted and filtered on its own
+/// terms — "at least 7" is a different question from "labelled HIGH", and on a fleet spanning
+/// CVSS revisions the two sets genuinely differ.
+class _ScoreCell extends StatelessWidget {
+  const _ScoreCell({required this.finding});
+
+  final VulnerabilityFinding finding;
+
+  @override
+  Widget build(BuildContext context) {
+    if (_isUnscored(finding)) {
+      return const NoValue();
     }
 
     return Wrap(
       spacing: 6,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
-        StatusChip(severity, statusKey: 'cve-${severity.toLowerCase()}'),
         Text(
           finding.cvssBaseScore!.toStringAsFixed(1),
           style: Theme.of(context).textTheme.bodyMedium,
@@ -498,8 +543,8 @@ class _SeverityCell extends StatelessWidget {
         // vector is the distribution's analysis rather than NVD's, and the two can differ.
         if (finding.cvssDerivedFromVector)
           const Tooltip(
-            message: 'Computed from the advisory’s own CVSS vector, which is shown in full when '
-                'this row is expanded. NVD has published no score for this CVE.',
+            message: 'Computed from the advisory’s own CVSS vector, which is shown in full under '
+                'this row. NVD has published no score for this CVE.',
             child: HintText('calculated'),
           ),
       ],
