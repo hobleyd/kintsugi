@@ -325,6 +325,12 @@ fn register_and_report(config: &Config, checkin_minute: u8) -> Result<CheckInOut
 
     let (operating_system_id, operating_system_version_id) = system_info::os_release_identity();
 
+    // Pulled out before `os_update_status` is consumed below: `scan_os_packages` needs the
+    // pending binary-package names to attribute an `update_available` verdict to each source
+    // package it reports, and that happens after `os_update_status` is moved into the host
+    // request.
+    let pending_packages = os_update_status.as_ref().and_then(|s| s.pending_package_names.clone());
+
     let host_request = RegisterHostRequest {
         hostname,
         serial_number: serial_number.clone(),
@@ -349,7 +355,7 @@ fn register_and_report(config: &Config, checkin_minute: u8) -> Result<CheckInOut
     let applications = collect_installed_applications();
     logging::info(&format!("reporting {} installed application(s)", applications.len()));
 
-    let packages = system_info::scan_os_packages();
+    let packages = system_info::scan_os_packages(pending_packages.as_deref());
     logging::info(&format!("reporting {} operating-system source package(s)", packages.len()));
 
     let applications_request = RegisterApplicationsRequest {

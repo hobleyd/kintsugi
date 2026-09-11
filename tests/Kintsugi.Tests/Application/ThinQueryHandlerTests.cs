@@ -161,11 +161,12 @@ public class ThinQueryHandlerTests
     }
 
     [Fact]
-    public async Task GetHostsQueryHandler_SplitsDistributionPackageCves_ByTheHostsOwnOsUpdateStatus()
+    public async Task GetHostsQueryHandler_FallsBackToTheHostsOwnOsUpdateStatus_WhenThePackageItselfHasNoVerdict()
     {
-        // Package CVEs have no upgrade path of their own to check, so they ride the host's own OS
-        // Update verdict — apt/dnf patches the OS and every package it shipped in one pull. Three
-        // hosts: OS update pending, OS confirmed current, and OS never checked.
+        // An agent predating per-package reporting (or pacman/apk, which InstalledPackage never
+        // covers) reports no per-package verdict at all, so this falls back to exactly the
+        // host-wide reasoning used before per-package data existed. Three hosts: OS update
+        // pending, OS confirmed current, and OS never checked.
         var hostOsPending = new Host("host-1", "SERIAL-1", "Ubuntu 22.04", operatingSystemUpdateAvailable: true);
         var hostOsCurrent = new Host("host-2", "SERIAL-2", "Ubuntu 22.04", operatingSystemUpdateAvailable: false);
         var hostOsUnknown = new Host("host-3", "SERIAL-3", "Ubuntu 22.04");
@@ -187,9 +188,9 @@ public class ThinQueryHandlerTests
                 It.IsAny<IReadOnlyCollection<string>>(), It.IsAny<IReadOnlyCollection<string>>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new[]
             {
-                new HostPackageTriple(hostOsPending.Id, new PackageTriple("Ubuntu:22.04", "openssl", "3.0.2-0ubuntu1.15")),
-                new HostPackageTriple(hostOsCurrent.Id, new PackageTriple("Ubuntu:22.04", "openssl", "3.0.2-0ubuntu1.15")),
-                new HostPackageTriple(hostOsUnknown.Id, new PackageTriple("Ubuntu:22.04", "openssl", "3.0.2-0ubuntu1.15")),
+                new HostPackageTriple(hostOsPending.Id, new PackageTriple("Ubuntu:22.04", "openssl", "3.0.2-0ubuntu1.15"), UpdateAvailable: null),
+                new HostPackageTriple(hostOsCurrent.Id, new PackageTriple("Ubuntu:22.04", "openssl", "3.0.2-0ubuntu1.15"), UpdateAvailable: null),
+                new HostPackageTriple(hostOsUnknown.Id, new PackageTriple("Ubuntu:22.04", "openssl", "3.0.2-0ubuntu1.15"), UpdateAvailable: null),
             });
 
         var result = await new GetHostsQueryHandler(
@@ -202,6 +203,50 @@ public class ThinQueryHandlerTests
         Assert.Equal(1, result.Single(h => h.Id == hostOsCurrent.Id).PatchedCveCount);
         Assert.Equal(1, result.Single(h => h.Id == hostOsUnknown.Id).UnpatchedCveCount);
         Assert.Equal(0, result.Single(h => h.Id == hostOsUnknown.Id).PatchedCveCount);
+    }
+
+    [Fact]
+    public async Task GetHostsQueryHandler_PrefersThePackagesOwnVerdictOverTheHostsAggregateOsFlag()
+    {
+        // The whole point of per-package attribution: a package's own verdict must win even when
+        // it disagrees with the host-wide OS-update flag — a host with one trivial pending
+        // package (unrelated to openssl) must not have openssl's own CVEs marked unpatched, and a
+        // host mid-OS-update must still credit a package that already confirmed it has no update
+        // of its own pending.
+        var hostWithUnrelatedUpdatePending = new Host("host-1", "SERIAL-1", "Ubuntu 22.04", operatingSystemUpdateAvailable: true);
+        var hostWithNoOsUpdatePending = new Host("host-2", "SERIAL-2", "Ubuntu 22.04", operatingSystemUpdateAvailable: false);
+        var repository = new Mock<IHostRepository>();
+        repository.Setup(r => r.GetAllAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[] { hostWithUnrelatedUpdatePending, hostWithNoOsUpdatePending });
+        var upgradePathRepository = new Mock<IUpgradePathRepository>();
+        upgradePathRepository.Setup(r => r.GetInstallationPatchStatusesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<InstallationPatchStatus>());
+        var vulnerabilityRepository = new Mock<IVulnerabilityRepository>();
+        vulnerabilityRepository.Setup(r => r.GetApplicationCveMatchesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<ApplicationCveMatch>());
+        vulnerabilityRepository.Setup(r => r.GetOperatingSystemCveMatchesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<OperatingSystemCveMatch>());
+        vulnerabilityRepository.Setup(r => r.GetPackageCveMatchesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[] { new PackageCveMatch("Ubuntu:22.04", "openssl", "3.0.2-0ubuntu1.15", "CVE-2023-4911") });
+        var installedPackageRepository = new Mock<IInstalledPackageRepository>();
+        installedPackageRepository.Setup(r => r.GetHostPackageTriplesAsync(
+                It.IsAny<IReadOnlyCollection<string>>(), It.IsAny<IReadOnlyCollection<string>>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[]
+            {
+                // OS update pending fleet-wide, but *this* package confirmed no update of its own.
+                new HostPackageTriple(hostWithUnrelatedUpdatePending.Id, new PackageTriple("Ubuntu:22.04", "openssl", "3.0.2-0ubuntu1.15"), UpdateAvailable: false),
+                // OS confirmed current, but *this* package's own binary is pending.
+                new HostPackageTriple(hostWithNoOsUpdatePending.Id, new PackageTriple("Ubuntu:22.04", "openssl", "3.0.2-0ubuntu1.15"), UpdateAvailable: true),
+            });
+
+        var result = await new GetHostsQueryHandler(
+                repository.Object, upgradePathRepository.Object, vulnerabilityRepository.Object, installedPackageRepository.Object)
+            .Handle(new GetHostsQuery(), CancellationToken.None);
+
+        Assert.Equal(0, result.Single(h => h.Id == hostWithUnrelatedUpdatePending.Id).UnpatchedCveCount);
+        Assert.Equal(1, result.Single(h => h.Id == hostWithUnrelatedUpdatePending.Id).PatchedCveCount);
+        Assert.Equal(1, result.Single(h => h.Id == hostWithNoOsUpdatePending.Id).UnpatchedCveCount);
+        Assert.Equal(0, result.Single(h => h.Id == hostWithNoOsUpdatePending.Id).PatchedCveCount);
     }
 
     [Fact]

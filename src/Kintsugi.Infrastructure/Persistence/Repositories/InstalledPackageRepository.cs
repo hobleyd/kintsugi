@@ -156,6 +156,7 @@ public class InstalledPackageRepository : IInstalledPackageRepository
                 package.HostId,
                 package.Name,
                 package.Version,
+                package.UpdateAvailable,
                 host.OperatingSystemId,
                 host.OperatingSystemVersionId
             })
@@ -163,9 +164,9 @@ public class InstalledPackageRepository : IInstalledPackageRepository
             .ToListAsync(cancellationToken);
 
         return rows
-            .Select(r => new { r.HostId, r.Name, r.Version, Ecosystem = OsvEcosystem.For(r.OperatingSystemId, r.OperatingSystemVersionId) })
+            .Select(r => new { r.HostId, r.Name, r.Version, r.UpdateAvailable, Ecosystem = OsvEcosystem.For(r.OperatingSystemId, r.OperatingSystemVersionId) })
             .Where(r => r.Ecosystem is not null)
-            .Select(r => new HostPackageTriple(r.HostId, new PackageTriple(r.Ecosystem!, r.Name, r.Version)))
+            .Select(r => new HostPackageTriple(r.HostId, new PackageTriple(r.Ecosystem!, r.Name, r.Version), r.UpdateAvailable))
             .ToList();
     }
 

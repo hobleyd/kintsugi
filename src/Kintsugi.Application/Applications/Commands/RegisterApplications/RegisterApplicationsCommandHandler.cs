@@ -170,15 +170,34 @@ public class RegisterApplicationsCommandHandler : IRequestHandler<RegisterApplic
 
         // Deduped on (name, version): several binary packages routinely share one source
         // package, and the agent reports source names, so "openssl 3.0.2-0ubuntu1.19" arrives
-        // once for the CLI and once for the library.
+        // once for the CLI and once for the library — each carrying its own binary's
+        // UpdateAvailable verdict, folded below rather than taking whichever arrived first, or a
+        // pending binary could be shadowed by an already-current one sharing its source.
         var entities = packages
             .Where(p => !string.IsNullOrWhiteSpace(p.Name) && !string.IsNullOrWhiteSpace(p.Version))
             .GroupBy(p => (p.Name.Trim(), p.Version.Trim()), StringTupleComparer.Instance)
-            .Select(g => new InstalledPackage(hostId, g.Key.Item1, g.Key.Item2, g.First().Source))
+            .Select(g => new InstalledPackage(hostId, g.Key.Item1, g.Key.Item2, g.First().Source, MergeUpdateAvailable(g)))
             .ToList();
 
         await _installedPackageRepository.ReplaceForHostAsync(hostId, entities, cancellationToken);
         return entities.Count;
+    }
+
+    /// <summary>
+    /// True if any binary sharing this source package is pending an update, false only if every
+    /// one of them confirmed none is, null if none said anything — the same fold the Linux agent
+    /// already applies before sending, kept here too since the agent's own dedupe is defense in
+    /// depth rather than a guarantee this handler may assume.
+    /// </summary>
+    private static bool? MergeUpdateAvailable(IEnumerable<PackageEntry> group)
+    {
+        var verdicts = group.Select(p => p.UpdateAvailable).ToList();
+        if (verdicts.Any(v => v == true))
+        {
+            return true;
+        }
+
+        return verdicts.All(v => v == false) ? false : null;
     }
 
     /// <summary>Case-insensitive comparison of the (name, version) pair the dedupe groups on.

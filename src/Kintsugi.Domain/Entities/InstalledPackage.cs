@@ -55,11 +55,23 @@ public class InstalledPackage : BaseEntity
     /// </summary>
     public string Source { get; private set; } = default!;
 
+    /// <summary>
+    /// Whether the host's own package manager reported a pending update for one of this source
+    /// package's binaries — mirroring <see cref="InstalledApplication.UpdateAvailable"/>'s
+    /// three-state shape. True or false only from a Linux agent that resolved its pending-update
+    /// listing down to this source package; null when it did not (an agent predating this field,
+    /// pacman/apk — <c>scan_os_packages</c> never reports a package from either — or a failed
+    /// check). <c>GetHostsQueryHandler</c> falls back to the host's own
+    /// <c>OperatingSystemUpdateAvailable</c> when this is null, which is what keeps a host running
+    /// an older agent reading exactly as it did before this field existed.
+    /// </summary>
+    public bool? UpdateAvailable { get; private set; }
+
     private InstalledPackage()
     {
     }
 
-    public InstalledPackage(Guid hostId, string name, string version, string source)
+    public InstalledPackage(Guid hostId, string name, string version, string source, bool? updateAvailable = null)
     {
         if (hostId == Guid.Empty)
         {
@@ -80,5 +92,6 @@ public class InstalledPackage : BaseEntity
         Name = name.Trim();
         Version = version.Trim();
         Source = string.IsNullOrWhiteSpace(source) ? "unknown" : source.Trim().ToLowerInvariant();
+        UpdateAvailable = updateAvailable;
     }
 }

@@ -131,14 +131,19 @@ public class GetHostsQueryHandler : IRequestHandler<GetHostsQuery, IReadOnlyList
     }
 
     /// <summary>
-    /// The package sibling of <see cref="AddApplicationCveCounts"/>. A distribution package has
-    /// no upgrade path or latest-version of its own — apt, dnf, zypper and pacman are deliberately
-    /// outside <c>PackageManagerCatalog</c> (see src/CLAUDE.md) — but that does not mean no verdict
-    /// exists: apt/dnf patches the operating system *and every package it shipped* in one pull, the
-    /// same way <c>softwareupdate</c> does on macOS, so <see cref="Host.OperatingSystemUpdateAvailable"/>
-    /// already answers "is this package current" as surely as it answers that question for the OS
-    /// itself. Reusing it here is what stops a fully-patched Linux fleet — one whose distribution
-    /// simply has not backported a fix yet — from reading as entirely unpatched.
+    /// The package sibling of <see cref="AddApplicationCveCounts"/>. A distribution package has no
+    /// upgrade path of its own — apt, dnf, zypper and pacman are deliberately outside
+    /// <c>PackageManagerCatalog</c> (see src/CLAUDE.md) — but the Linux agent resolves its own
+    /// pending-update listing down to each installed source package
+    /// (<see cref="InstalledPackage.UpdateAvailable"/>), so most packages get an exact,
+    /// per-installation verdict rather than one borrowed from the whole host: a host with one
+    /// trivial pending package no longer marks every other package's CVEs unpatched. Only when
+    /// that verdict is null — an agent predating the field, or pacman/apk, which
+    /// <c>scan_os_packages</c> never reports a package from at all — does this fall back to
+    /// <see cref="Host.OperatingSystemUpdateAvailable"/>, the same host-wide reasoning this used
+    /// unconditionally before per-package data existed: apt/dnf patches the OS *and everything it
+    /// shipped* in one pull, so the host's own flag is still the best available answer for a
+    /// package that did not say for itself.
     /// </summary>
     private async Task AddPackageCveCountsAsync(
         IReadOnlyList<Host> hosts,
@@ -170,8 +175,11 @@ public class GetHostsQueryHandler : IRequestHandler<GetHostsQuery, IReadOnlyList
                 continue;
             }
 
-            var bucket = osUpdateAvailableByHost.GetValueOrDefault(hostPackage.HostId) == false ? patched : unpatched;
-            UnionInto(bucket, hostPackage.HostId, cveIds);
+            var patchedVerdict = hostPackage.UpdateAvailable == null
+                ? osUpdateAvailableByHost.GetValueOrDefault(hostPackage.HostId) == false
+                : hostPackage.UpdateAvailable == false;
+
+            UnionInto(patchedVerdict ? patched : unpatched, hostPackage.HostId, cveIds);
         }
     }
 

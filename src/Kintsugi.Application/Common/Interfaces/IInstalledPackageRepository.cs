@@ -44,11 +44,11 @@ public interface IInstalledPackageRepository
 
     /// <summary>
     /// Every live host running one of these (source package, version) pairs, each with its
-    /// resolved triple — one row per (host, triple), for the Hosts screen's CVE columns to fold
-    /// package findings in without loading the whole host × package cross product. Filtered by
-    /// name and version first in the database, the same way <see cref="GetHostIdsForTriplesAsync"/>
-    /// is, since only packages a caller already knows have a CVE match are worth resolving an
-    /// ecosystem for.
+    /// resolved triple and that installation's own <see cref="InstalledPackage.UpdateAvailable"/>
+    /// — one row per (host, triple), for the Hosts screen's CVE columns to fold package findings
+    /// in without loading the whole host × package cross product. Filtered by name and version
+    /// first in the database, the same way <see cref="GetHostIdsForTriplesAsync"/> is, since only
+    /// packages a caller already knows have a CVE match are worth resolving an ecosystem for.
     /// </summary>
     Task<IReadOnlyList<HostPackageTriple>> GetHostPackageTriplesAsync(
         IReadOnlyCollection<string> names, IReadOnlyCollection<string> versions, CancellationToken cancellationToken);
@@ -59,4 +59,7 @@ public interface IInstalledPackageRepository
 /// <param name="Name">The source package name.</param>
 public record PackageTriple(string Ecosystem, string Name, string Version);
 
-public record HostPackageTriple(Guid HostId, PackageTriple Triple);
+/// <param name="UpdateAvailable">This installation's own verdict — see
+/// <see cref="InstalledPackage.UpdateAvailable"/>. Null falls back to the host's aggregate
+/// <c>OperatingSystemUpdateAvailable</c> in <c>GetHostsQueryHandler</c>.</param>
+public record HostPackageTriple(Guid HostId, PackageTriple Triple, bool? UpdateAvailable);

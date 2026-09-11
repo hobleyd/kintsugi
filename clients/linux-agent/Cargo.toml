@@ -1,6 +1,6 @@
 [package]
 name = "kintsugi-agent"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Background agent that registers this Linux host with the patching system's host inventory."

@@ -6,12 +6,20 @@ use serde::Serialize;
 
 use crate::config::Config;
 
-/// The result of a standard OS-update check: whether one is pending, and the version it would
-/// bring the host to, when the check can determine that.
+/// The result of a standard OS-update check: whether one is pending, the version it would bring
+/// the host to when the check can determine that, and which binary packages are pending.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OsUpdateStatus {
     pub available: bool,
     pub latest_version: Option<String>,
+    /// The *binary* package names (`libssl3`, not `openssl`) this manager's listing says are
+    /// pending — `system_info::scan_os_packages` resolves each to the source package it belongs
+    /// to before attributing an "update available" verdict to a reported package. `Some` (possibly
+    /// empty) for a manager whose format names individual packages; `None` for one that does not,
+    /// exactly as `latest_version` is already `None` on every manager for a different reason (see
+    /// its own doc comment) — `scan_os_packages` never reports pacman or apk packages at all, so
+    /// there is nothing here for their pending names to be attributed to.
+    pub pending_package_names: Option<Vec<String>>,
 }
 
 /// The distribution's own package manager — this agent's counterpart to `softwareupdate` on macOS
@@ -102,7 +110,8 @@ pub fn check() -> Result<OsUpdateStatus> {
     );
 
     let count = count_pending_updates(manager, &combined);
-    let status = OsUpdateStatus { available: count > 0, latest_version: None };
+    let pending_package_names = extract_pending_package_names(manager, &combined);
+    let status = OsUpdateStatus { available: count > 0, latest_version: None, pending_package_names };
 
     crate::logging::info(&format!(
         "checked for OS updates with {}: {count} package(s) pending",
@@ -196,6 +205,50 @@ fn count_pending_updates(manager: PackageManager, output: &str) -> usize {
         PackageManager::Pacman => output.lines().filter(|line| line.contains("->")).count(),
         // "apk version -l '<'" prints a header line then "<pkg>-<ver> < <newver>" per package.
         PackageManager::Apk => output.lines().filter(|line| line.contains('<') && !line.starts_with("Installed")).count(),
+    }
+}
+
+/// Extracts the *binary* package names a manager's listing says are pending — the same lines
+/// `count_pending_updates` counts, with one more field pulled out. `None` for pacman and apk:
+/// `system_info::scan_os_packages` never reports a package from either (it only ever reads dpkg
+/// or rpm), so there is no installed-package inventory here for a pending name to be attributed
+/// to, and reporting one anyway would invite a resolution against packages that do not exist.
+fn extract_pending_package_names(manager: PackageManager, output: &str) -> Option<Vec<String>> {
+    match manager {
+        // "Inst libssl3 [3.0.11-1] (3.0.13-1 Ubuntu:24.04 [amd64])" -> "libssl3"
+        PackageManager::Apt => Some(
+            output
+                .lines()
+                .filter(|line| line.starts_with("Inst "))
+                .filter_map(|line| line.split_whitespace().nth(1))
+                .map(str::to_string)
+                .collect(),
+        ),
+        // "curl.x86_64  8.6.0-3.fc40  updates" -> "curl". The arch suffix is split at the *last*
+        // dot, since a package name may itself contain one ("python3.11.x86_64" -> "python3.11"),
+        // and the same dot is what `count_pending_updates` already requires a row to have.
+        PackageManager::Dnf | PackageManager::Yum => Some(
+            output
+                .lines()
+                .filter(|line| !line.starts_with(char::is_whitespace))
+                .filter_map(|line| {
+                    let mut fields = line.split_whitespace();
+                    let name = fields.next()?;
+                    (name.contains('.') && !name.contains(':') && fields.count() >= 2)
+                        .then(|| name.rsplit_once('.').map_or(name, |(pkg, _arch)| pkg).to_string())
+                })
+                .collect(),
+        ),
+        // "v | Update | curl  | 8.0.1-150400    | 8.6.0-150400      | x86_64" -> "curl"
+        PackageManager::Zypper => Some(
+            output
+                .lines()
+                .filter(|line| line.trim_start().starts_with("v |"))
+                .filter_map(|line| line.split('|').nth(2))
+                .map(|name| name.trim().to_string())
+                .collect(),
+        ),
+        PackageManager::Pacman | PackageManager::Apk => None,
     }
 }
 
@@ -364,6 +417,66 @@ mod tests {
     /// check-in — see `detect`'s own doc comment.
     #[test]
     fn os_update_status_defaults_to_nothing_available() {
-        assert_eq!(OsUpdateStatus::default(), OsUpdateStatus { available: false, latest_version: None });
+        assert_eq!(
+            OsUpdateStatus::default(),
+            OsUpdateStatus { available: false, latest_version: None, pending_package_names: None }
+        );
+    }
+
+    #[test]
+    fn extract_pending_package_names_apt_reads_the_binary_name() {
+        let output = concat!(
+            "NOTE: This is only a simulation!\n",
+            "Reading package lists...\n",
+            "Inst libssl3 [3.0.11-1] (3.0.13-1 Ubuntu:24.04 [amd64])\n",
+            "Conf libssl3 (3.0.13-1 Ubuntu:24.04 [amd64])\n",
+            "Inst curl [8.5.0] (8.5.1 Ubuntu:24.04 [amd64])\n",
+        );
+
+        let names = extract_pending_package_names(PackageManager::Apt, output).unwrap();
+
+        assert_eq!(names, vec!["libssl3", "curl"]);
+    }
+
+    #[test]
+    fn extract_pending_package_names_apt_reports_an_empty_list_when_up_to_date() {
+        let output = "NOTE: This is only a simulation!\nReading package lists...\n";
+
+        assert_eq!(extract_pending_package_names(PackageManager::Apt, output), Some(Vec::new()));
+    }
+
+    #[test]
+    fn extract_pending_package_names_dnf_strips_the_arch_suffix_at_the_last_dot() {
+        let output = concat!(
+            "Last metadata expiration check: 0:12:31 ago on Fri 30 Aug 2026.\n",
+            "\n",
+            "curl.x86_64                    8.6.0-3.fc40                    updates\n",
+            "python3.11.x86_64              3.11.9-1.fc40                   updates\n",
+        );
+
+        let names = extract_pending_package_names(PackageManager::Dnf, output).unwrap();
+
+        assert_eq!(names, vec!["curl", "python3.11"]);
+    }
+
+    #[test]
+    fn extract_pending_package_names_zypper_reads_the_name_column() {
+        let output = concat!(
+            "S | Repository | Name  | Current Version | Available Version | Arch\n",
+            "--+------------+-------+-----------------+-------------------+-------\n",
+            "v | Update     | curl  | 8.0.1-150400    | 8.6.0-150400      | x86_64\n",
+        );
+
+        let names = extract_pending_package_names(PackageManager::Zypper, output).unwrap();
+
+        assert_eq!(names, vec!["curl"]);
+    }
+
+    #[test]
+    fn extract_pending_package_names_is_none_for_pacman_and_apk() {
+        // `scan_os_packages` never reports a package from either manager's distribution, so there
+        // is no installed-package inventory to attribute a pending name to.
+        assert_eq!(extract_pending_package_names(PackageManager::Pacman, "curl 8.7.1-1 -> 8.8.0-1\n"), None);
+        assert_eq!(extract_pending_package_names(PackageManager::Apk, "curl-8.5.0-r0 < 8.6.0-r0\n"), None);
     }
 }

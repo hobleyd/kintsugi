@@ -179,11 +179,18 @@ pub const MAX_REPORTED_PACKAGES: usize = 5000;
 ///
 /// Mirrors `PackageEntry` in
 /// Kintsugi.Application/Applications/Commands/RegisterApplications/RegisterApplicationsCommand.cs.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct OsPackage {
     pub name: String,
     pub version: String,
     pub source: String,
+    /// Whether `os_update::check()`'s pending-update listing named one of this *source* package's
+    /// binaries. `None` when the check found no per-package listing to consult at all (pacman,
+    /// apk, an unrecognized distribution, or a failed check) — the same "no answer" `None` the
+    /// server already knows from `InstalledApplication.UpdateAvailable`, and which
+    /// `GetHostsQueryHandler` falls back to the host's own `OperatingSystemUpdateAvailable` for.
+    #[serde(rename = "updateAvailable", skip_serializing_if = "Option::is_none")]
+    pub update_available: Option<bool>,
 }
 
 /// Every operating-system package installed on this host, named by **source** package.
@@ -206,17 +213,39 @@ pub struct OsPackage {
 /// Best-effort. A host with neither dpkg nor rpm reports nothing, which is a valid inventory
 /// rather than a failure — the server treats an empty list as "this host has no packages" and a
 /// missing one as "this agent does not report them".
-pub fn scan_os_packages() -> Vec<OsPackage> {
-    let mut packages: Vec<OsPackage> = scan_dpkg_packages();
+/// `pending_binaries` is `os_update::OsUpdateStatus::pending_package_names` — the upgradable
+/// *binary* package names this host's manager just listed, before they are resolved to the source
+/// packages below. `None` means the check found no per-package listing to consult at all; `Some`
+/// (possibly empty) means it did, so every package gets a `Some(true)`/`Some(false)` verdict.
+pub fn scan_os_packages(pending_binaries: Option<&[String]>) -> Vec<OsPackage> {
+    let pending: Option<HashSet<&str>> = pending_binaries.map(|names| names.iter().map(String::as_str).collect());
+    let pending = pending.as_ref();
+
+    let mut packages: Vec<OsPackage> = scan_dpkg_packages(pending);
     if packages.is_empty() {
-        packages = scan_rpm_packages();
+        packages = scan_rpm_packages(pending);
     }
 
-    // Deduped because several binary packages routinely share one source package: reporting
-    // source names turns `openssl` and `libssl3` into the same entry, and the server would
-    // otherwise store it twice.
-    let mut seen = HashSet::new();
-    packages.retain(|p| seen.insert((p.name.clone(), p.version.clone())));
+    // Several binary packages routinely share one source package, so `openssl` and `libssl3`
+    // arrive as two entries that must fold into one — and the fold has to combine
+    // `update_available` (via `merge_update_available`) rather than keep whichever binary was
+    // scanned first, or a pending `libssl3` could be silently dropped in favor of an
+    // already-current `openssl-libs` reported for the same source and version.
+    let mut index_by_key: HashMap<(String, String), usize> = HashMap::new();
+    let mut merged: Vec<OsPackage> = Vec::new();
+    for package in packages.drain(..) {
+        let key = (package.name.clone(), package.version.clone());
+        match index_by_key.get(&key) {
+            Some(&index) => {
+                merged[index].update_available = merge_update_available(merged[index].update_available, package.update_available);
+            }
+            None => {
+                index_by_key.insert(key, merged.len());
+                merged.push(package);
+            }
+        }
+    }
+    let mut packages = merged;
 
     if packages.len() > MAX_REPORTED_PACKAGES {
         crate::logging::warn(&format!(
@@ -229,13 +258,25 @@ pub fn scan_os_packages() -> Vec<OsPackage> {
     packages
 }
 
-fn scan_dpkg_packages() -> Vec<OsPackage> {
+/// `Some(true)` if either side says an update is pending, `Some(false)` only when both sides
+/// agree none is, `None` only when neither has an answer — the "any pending binary" rule stated
+/// where `update_available` is folded across a source package's binaries.
+fn merge_update_available(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (None, None) => None,
+    }
+}
+
+fn scan_dpkg_packages(pending: Option<&HashSet<&str>>) -> Vec<OsPackage> {
     // `${db:Status-Status}` is checked because `dpkg-query -W` also lists packages in the `rc`
     // state — removed, configuration files still present. Those are not installed software and
     // reporting vulnerabilities for them would be reporting them for something that is not on
-    // the machine.
+    // the machine. `${Package}` (the *binary* name) is the extra field this scan didn't used to
+    // need — it is how a pending `libssl3` gets attributed to its source package `openssl`.
     let output = match Command::new("dpkg-query")
-        .args(["-W", "-f=${db:Status-Status}\t${source:Package}\t${source:Version}\n"])
+        .args(["-W", "-f=${db:Status-Status}\t${source:Package}\t${source:Version}\t${Package}\n"])
         .output()
     {
         Ok(output) if output.status.success() => output,
@@ -243,11 +284,11 @@ fn scan_dpkg_packages() -> Vec<OsPackage> {
         Err(_) => return Vec::new(),
     };
 
-    parse_dpkg_packages(&String::from_utf8_lossy(&output.stdout))
+    parse_dpkg_packages(&String::from_utf8_lossy(&output.stdout), pending)
 }
 
 /// The pure half of [`scan_dpkg_packages`].
-pub(crate) fn parse_dpkg_packages(listing: &str) -> Vec<OsPackage> {
+pub(crate) fn parse_dpkg_packages(listing: &str, pending: Option<&HashSet<&str>>) -> Vec<OsPackage> {
     listing
         .lines()
         .filter_map(|line| {
@@ -255,6 +296,9 @@ pub(crate) fn parse_dpkg_packages(listing: &str) -> Vec<OsPackage> {
             let status = fields.next()?.trim();
             let name = fields.next()?.trim();
             let version = fields.next()?.trim();
+            // Falls back to the source name when the fourth field is absent (a listing captured
+            // before this field existed), rather than treating the whole line as malformed.
+            let binary_name = fields.next().map(str::trim).unwrap_or(name);
 
             if status != "installed" || name.is_empty() || version.is_empty() {
                 return None;
@@ -264,12 +308,13 @@ pub(crate) fn parse_dpkg_packages(listing: &str) -> Vec<OsPackage> {
                 name: name.to_string(),
                 version: version.to_string(),
                 source: "dpkg".to_string(),
+                update_available: pending.map(|set| set.contains(binary_name)),
             })
         })
         .collect()
 }
 
-fn scan_rpm_packages() -> Vec<OsPackage> {
+fn scan_rpm_packages(pending: Option<&HashSet<&str>>) -> Vec<OsPackage> {
     let output = match Command::new("rpm")
         .args(["-qa", "--qf", "%{SOURCERPM}\t%{NAME}\t%{VERSION}-%{RELEASE}\n"])
         .output()
@@ -279,7 +324,7 @@ fn scan_rpm_packages() -> Vec<OsPackage> {
         Err(_) => return Vec::new(),
     };
 
-    parse_rpm_packages(&String::from_utf8_lossy(&output.stdout))
+    parse_rpm_packages(&String::from_utf8_lossy(&output.stdout), pending)
 }
 
 /// The pure half of [`scan_rpm_packages`].
@@ -289,8 +334,10 @@ fn scan_rpm_packages() -> Vec<OsPackage> {
 /// version. Split from the right, because a name legitimately contains hyphens
 /// (`python3-libs-3.9.18-1.el9.src.rpm` has source name `python3`... and `xorg-x11-server` has
 /// two). The version-release pair is shared between a source rpm and the binaries built from it,
-/// so `%{VERSION}-%{RELEASE}` is already the right version to report.
-pub(crate) fn parse_rpm_packages(listing: &str) -> Vec<OsPackage> {
+/// so `%{VERSION}-%{RELEASE}` is already the right version to report. `%{NAME}` — the binary this
+/// line is actually about — is already parsed for the source-rpm-less fallback below, and is
+/// reused as-is to resolve `update_available`.
+pub(crate) fn parse_rpm_packages(listing: &str, pending: Option<&HashSet<&str>>) -> Vec<OsPackage> {
     listing
         .lines()
         .filter_map(|line| {
@@ -315,6 +362,7 @@ pub(crate) fn parse_rpm_packages(listing: &str) -> Vec<OsPackage> {
                 name: name.to_string(),
                 version: version.to_string(),
                 source: "rpm".to_string(),
+                update_available: pending.map(|set| set.contains(binary_name)),
             })
         })
         .collect()
@@ -754,7 +802,7 @@ mod tests {
         // asked for ${source:Package}, and this pins that the parser reads that column.
         let listing = "installed\topenssl\t3.0.2-0ubuntu1.19\ninstalled\tglibc\t2.35-0ubuntu3.8\n";
 
-        let packages = parse_dpkg_packages(listing);
+        let packages = parse_dpkg_packages(listing, None);
 
         assert_eq!(packages.len(), 2);
         assert_eq!(packages[0].name, "openssl");
@@ -770,7 +818,7 @@ mod tests {
         // them for something that is not on the machine.
         let listing = "installed\topenssl\t3.0.2-0ubuntu1.19\nconfig-files\tnano\t6.2-1\n";
 
-        let packages = parse_dpkg_packages(listing);
+        let packages = parse_dpkg_packages(listing, None);
 
         assert_eq!(packages.len(), 1);
         assert_eq!(packages[0].name, "openssl");
@@ -780,16 +828,40 @@ mod tests {
     fn parse_dpkg_packages_ignores_a_malformed_line() {
         // An empty inventory is a valid report; a half-line must not become a package with an
         // empty name that the server then asks a vulnerability database about.
-        let packages = parse_dpkg_packages("installed\topenssl\ninstalled\t\t3.0.2\n\n");
+        let packages = parse_dpkg_packages("installed\topenssl\ninstalled\t\t3.0.2\n\n", None);
 
         assert!(packages.is_empty());
+    }
+
+    #[test]
+    fn parse_dpkg_packages_resolves_update_available_from_the_binary_name() {
+        // The line names the *source* package (openssl) but the pending-update list names the
+        // *binary* (libssl3) — this is the resolution the whole feature depends on.
+        let listing = "installed\topenssl\t3.0.2-0ubuntu1.19\tlibssl3\ninstalled\tglibc\t2.35-0ubuntu3.8\tlibc6\n";
+        let pending: HashSet<&str> = ["libssl3"].into_iter().collect();
+
+        let packages = parse_dpkg_packages(listing, Some(&pending));
+
+        assert_eq!(packages[0].name, "openssl");
+        assert_eq!(packages[0].update_available, Some(true));
+        assert_eq!(packages[1].name, "glibc");
+        assert_eq!(packages[1].update_available, Some(false));
+    }
+
+    #[test]
+    fn parse_dpkg_packages_reports_update_available_none_when_nothing_was_checked() {
+        let listing = "installed\topenssl\t3.0.2-0ubuntu1.19\tlibssl3\n";
+
+        let packages = parse_dpkg_packages(listing, None);
+
+        assert_eq!(packages[0].update_available, None);
     }
 
     #[test]
     fn parse_rpm_packages_takes_the_source_name_from_the_source_rpm() {
         let listing = "openssl-3.0.7-27.el9.src.rpm\topenssl-libs\t3.0.7-27.el9\n";
 
-        let packages = parse_rpm_packages(listing);
+        let packages = parse_rpm_packages(listing, None);
 
         assert_eq!(packages.len(), 1);
         // Not "openssl-libs": OSV answers 0 for the binary and 10 for the source.
@@ -804,7 +876,7 @@ mod tests {
         // filename grammar. Splitting from the left would turn this into "xorg".
         let listing = "xorg-x11-server-21.1.13-3.el9.src.rpm\txorg-x11-server-Xwayland\t21.1.13-3.el9\n";
 
-        let packages = parse_rpm_packages(listing);
+        let packages = parse_rpm_packages(listing, None);
 
         assert_eq!(packages[0].name, "xorg-x11-server");
     }
@@ -815,10 +887,38 @@ mod tests {
         // reported under its own name rather than dropped.
         let listing = "(none)\tgpg-pubkey\t3228467c-613798eb\n";
 
-        let packages = parse_rpm_packages(listing);
+        let packages = parse_rpm_packages(listing, None);
 
         assert_eq!(packages.len(), 1);
         assert_eq!(packages[0].name, "gpg-pubkey");
+    }
+
+    #[test]
+    fn parse_rpm_packages_resolves_update_available_from_the_binary_name() {
+        let listing = "openssl-3.0.7-27.el9.src.rpm\topenssl-libs\t3.0.7-27.el9\n";
+        let pending: HashSet<&str> = ["openssl-libs"].into_iter().collect();
+
+        let packages = parse_rpm_packages(listing, Some(&pending));
+
+        assert_eq!(packages[0].name, "openssl");
+        assert_eq!(packages[0].update_available, Some(true));
+    }
+
+    #[test]
+    fn scan_os_packages_merges_update_available_across_binaries_sharing_one_source() {
+        // Two binaries built from the same source at the same version, only one of them pending
+        // — the source package must read as pending overall, not as whichever happened first.
+        let listing = "installed\topenssl\t3.0.2-0ubuntu1.19\tlibssl3\ninstalled\topenssl\t3.0.2-0ubuntu1.19\topenssl\n";
+        let pending: HashSet<&str> = ["libssl3"].into_iter().collect();
+
+        let packages = parse_dpkg_packages(listing, Some(&pending));
+        // Reproduce the fold `scan_os_packages` applies over these two rows, since
+        // `scan_os_packages` itself shells out and can't be called directly from a test.
+        assert_eq!(packages.len(), 2);
+        let merged = packages
+            .into_iter()
+            .fold(None, |acc: Option<bool>, p| merge_update_available(acc, p.update_available));
+        assert_eq!(merged, Some(true));
     }
 
     #[test]

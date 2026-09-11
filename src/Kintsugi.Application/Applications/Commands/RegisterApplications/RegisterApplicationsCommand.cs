@@ -80,7 +80,17 @@ public record ApplicationEntry(
 /// revision is what carries a backported fix, and is the difference between 48 vulnerabilities
 /// and 36 for the same upstream 3.0.2.</param>
 /// <param name="Source">Which packaging system reported it: <c>dpkg</c> or <c>rpm</c>.</param>
-public record PackageEntry(string Name, string Version, string Source);
+/// <param name="UpdateAvailable">
+/// Whether the host's own apt/dnf/zypper pending-update listing named one of this <b>source</b>
+/// package's binaries — resolved agent-side, since the listing names binaries
+/// (<c>libssl3</c>) and this entry names the source (<c>openssl</c>) they were built from. Null
+/// when the agent found no per-package listing to consult at all (pacman, apk, an unrecognized
+/// distribution, or a failed check), the same "no answer" null
+/// <see cref="ApplicationEntry.UpdateAvailable"/> already carries — see
+/// <see cref="Kintsugi.Domain.Entities.InstalledPackage.UpdateAvailable"/> for how a null here is
+/// resolved downstream.
+/// </param>
+public record PackageEntry(string Name, string Version, string Source, bool? UpdateAvailable = null);
 
 /// <param name="PackageCount">How many operating-system packages were recorded. Reported
 /// separately from <paramref name="ApplicationCount"/> because they are separate inventories with
