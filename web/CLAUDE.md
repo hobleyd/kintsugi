@@ -489,6 +489,19 @@ catalogue" or "nothing has been assessed yet". A vulnerability screen that lists
 managed to match reads as a clean bill of health, which is the same failure the Vanta screen
 refuses by naming the eleven resource types it does not sync.
 
+**The Settings > Vulnerabilities run panel shows the stage, the subject and a bar — and one
+button that is Cancel while a run is in flight.** What stood there was "an assessment is
+running…", which on a run that takes an hour is indistinguishable from one that has hung; a moving
+package name is the difference. `VulnerabilityRunStatus.fraction` is null for a stage the server
+could not count, which is the `LinearProgressIndicator`'s indeterminate value — and it clamps,
+because that widget asserts on anything outside 0..1 and a stage miscounting itself is cosmetic
+rather than worth a red screen. The button is one control in two states rather than two controls,
+since exactly one of them is ever a thing that can be done; it goes disabled and reads "Cancelling…"
+once asked, because a second press is a 409 and "it is already stopping" is the honest answer. A
+stopped run renders as `AlertBox.info`, never as an error: every stage of a run commits as it goes,
+so a cancel kept real work — and `lastRunCancelled` has to be read *before* `lastRunSucceeded ==
+null`, which is also what a server that has run nothing looks like.
+
 **The CPE mapping queue is its own screen, and the two stay joined in words rather than in
 layout.** It began as the second half of the reporting screen, on the reasoning that an empty
 findings table is where somebody notices the queue needs draining — which holds for noticing and

@@ -191,6 +191,32 @@ public class AdminVulnerabilitiesController : ControllerBase
 
         return Accepted(_coordinator.GetStatus());
     }
+
+    /// <summary>
+    /// Stops the run in flight. Answers 409 when there is nothing running.
+    /// </summary>
+    /// <remarks>
+    /// Safe to press: every stage of a run commits as it goes, so a cancelled run keeps everything
+    /// it had already assessed and the queue resumes from where it stopped. The status reports it
+    /// as its own outcome rather than as a failure for that reason — see
+    /// <c>VulnerabilityRunCoordinator.Cancelled</c>.
+    ///
+    /// Accepted rather than NoContent, and answered before the run has actually stopped: the run
+    /// is on a background thread inside an HTTP call to NVD or OSV, so "stopping" is a state the
+    /// screen shows (<c>Cancelling</c>) rather than something this request can wait for.
+    /// </remarks>
+    [HttpDelete("run")]
+    [ProducesResponseType(typeof(VulnerabilityRunStatusDto), StatusCodes.Status202Accepted)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public ActionResult<VulnerabilityRunStatusDto> CancelRun()
+    {
+        if (!_coordinator.TryCancel())
+        {
+            return Conflict(new { message = "No assessment is running." });
+        }
+
+        return Accepted(_coordinator.GetStatus());
+    }
 }
 
 public record ConfirmCpeMappingRequest(string Vendor, string Product);

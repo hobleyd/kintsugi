@@ -35,6 +35,7 @@ public class AssessPackagesCveUpsertTests
     private readonly Mock<ICpeSuggestionClient> _cpeSuggestionClient = new() { DefaultValue = DefaultValue.Empty };
     private readonly Mock<IAiAgentSettingsRepository> _aiAgentSettingsRepository = new() { DefaultValue = DefaultValue.Empty };
     private readonly Mock<IUnitOfWork> _unitOfWork = new();
+    private readonly Mock<IVulnerabilityRunProgress> _progress = new();
 
     private readonly List<Vulnerability> _added = new();
 
@@ -112,7 +113,8 @@ public class AssessPackagesCveUpsertTests
         _packageRepository.Object,
         _cpeSuggestionClient.Object,
         _aiAgentSettingsRepository.Object,
-        _unitOfWork.Object);
+        _unitOfWork.Object,
+        _progress.Object);
 
     [Fact]
     public async Task Two_packages_in_one_batch_sharing_a_cve_create_one_vulnerability_row()

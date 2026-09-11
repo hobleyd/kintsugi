@@ -41,6 +41,12 @@ class ApiClient {
 
   Future<void> delete(String path) => _send('DELETE', path);
 
+  /// A DELETE whose answer is worth reading. Beside [delete] rather than replacing it, because
+  /// most of this app's deletes answer 204 and a caller that ignored a null would read the same
+  /// either way — but the assessment cancel answers 202 with the run's new status, and throwing
+  /// that away would make the screen wait a poll interval to learn what it had just been told.
+  Future<Object?> deleteJson(String path) => _send('DELETE', path);
+
   Future<Object?> _send(String method, String path, {Object? body, Map<String, String?>? query}) async {
     final uri = Uri.parse(path).replace(
       queryParameters: query == null

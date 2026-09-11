@@ -54,6 +54,11 @@ final class VulnerabilityRunRequested extends VulnerabilitySettingsEvent {
   const VulnerabilityRunRequested();
 }
 
+/// Asks the server to stop the run in flight.
+final class VulnerabilityRunCancelRequested extends VulnerabilitySettingsEvent {
+  const VulnerabilityRunCancelRequested();
+}
+
 final class VulnerabilityRunStatusRequested extends VulnerabilitySettingsEvent {
   const VulnerabilityRunStatusRequested();
 }
@@ -103,10 +108,12 @@ class VulnerabilitySettingsBloc extends Bloc<VulnerabilitySettingsEvent, Vulnera
     required UpdateVulnerabilitySettings updateSettings,
     required GetVulnerabilityRunStatus getRunStatus,
     required StartVulnerabilityRun startRun,
+    required CancelVulnerabilityRun cancelRun,
   })  : _getSettings = getSettings,
         _updateSettings = updateSettings,
         _getRunStatus = getRunStatus,
         _startRun = startRun,
+        _cancelRun = cancelRun,
         super(const VulnerabilitySettingsState()) {
     on<VulnerabilitySettingsRequested>(_onRequested);
     on<VulnerabilitySettingsSaveRequested>(_onSave);
@@ -114,6 +121,7 @@ class VulnerabilitySettingsBloc extends Bloc<VulnerabilitySettingsEvent, Vulnera
           settings: state.settings.copyWith(saved: false, clearError: true, fieldErrors: const {}),
         )));
     on<VulnerabilityRunRequested>(_onRun);
+    on<VulnerabilityRunCancelRequested>(_onCancel);
     on<VulnerabilityRunStatusRequested>(_onRunStatus);
   }
 
@@ -126,6 +134,7 @@ class VulnerabilitySettingsBloc extends Bloc<VulnerabilitySettingsEvent, Vulnera
   final UpdateVulnerabilitySettings _updateSettings;
   final GetVulnerabilityRunStatus _getRunStatus;
   final StartVulnerabilityRun _startRun;
+  final CancelVulnerabilityRun _cancelRun;
 
   Future<void> _onRequested(
       VulnerabilitySettingsRequested event, Emitter<VulnerabilitySettingsState> emit) async {
@@ -185,6 +194,22 @@ class VulnerabilitySettingsBloc extends Bloc<VulnerabilitySettingsEvent, Vulnera
       // Includes the 409 for a run already in flight, which is a real constraint rather than
       // politeness: NVD counts requests per source address over a rolling window, so two
       // overlapping runs would spend one allowance between them and collect 403s.
+      emit(state.copyWith(runError: error.message));
+    }
+  }
+
+  Future<void> _onCancel(
+      VulnerabilityRunCancelRequested event, Emitter<VulnerabilitySettingsState> emit) async {
+    emit(state.copyWith(clearRunError: true));
+    try {
+      // The answer carries the run's new status with `cancelling` set, so the button changes the
+      // moment the request returns rather than at the next five-second poll. Polling continues:
+      // the run is inside an HTTP call to NVD or OSV and stops when it notices, which is what the
+      // screen is now waiting to see.
+      emit(state.copyWith(run: await _cancelRun()));
+    } on ApiException catch (error) {
+      // Includes the 409 for a run that finished between the screen drawing the button and this
+      // request arriving — a real race on a five-second poll, and one the next poll corrects.
       emit(state.copyWith(runError: error.message));
     }
   }

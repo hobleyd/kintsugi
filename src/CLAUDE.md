@@ -365,6 +365,40 @@ inventory and the package stage below asks OSV about it — so the *release-leve
 remains thin while the useful one comes from packages.
 
 
+**A run reports what it is doing, and a run can be stopped — neither of which the Vanta
+coordinator this one was modelled on needs.** A sync there is one call over in seconds; a run here
+is minutes to hours, bounded by NVD's rate limit rather than by how fast this server works. So
+`IVulnerabilityRunProgress` carries a stage, the one subject being checked, and a count, and
+`IVulnerabilityRunCoordinator.TryCancel` fires a per-run `CancellationTokenSource` that
+`VulnerabilityAssessmentBackgroundService` links with the host's stopping token.
+
+Three decisions there are load-bearing.
+
+**Progress is per stage, never one total across the run.** The five stages cost wildly different
+amounts, so a single bar would sit between 4% and 6% for most of a run and then leap; each stage
+names itself and counts its own items, and a stage with nothing countable — the KEV download, the
+discovery pass — reports a total of zero, which the screen draws as an indeterminate bar rather
+than as "0 of 0". The package stage is named honestly at each granularity: the *batch* by ecosystem
+and size while OSV is being asked (it answers two hundred at once, so no one package is "being
+checked"), the *advisory id* during the per-record fetches that are the slow part, and the
+*package* while each answer is folded in. The stage labels are prose constants rather than an enum,
+because nothing branches on them and an enum would cross the wire as an ordinal.
+
+**A cancel must be told from a shutdown, or cancelling ends every future run.**
+`VulnerabilityAssessmentBackgroundService`'s `OperationCanceledException` branch used to assume the
+host was stopping and `break` out of its loop. With cancel wired in, that would silently stop the
+service scheduling anything again until the process restarted — under a status line blaming a
+shutdown that never happened. It now branches on `stoppingToken.IsCancellationRequested`.
+
+**A cancelled run is its own outcome, not a failure.** Every stage commits as it goes, so stopping
+one keeps everything already assessed and the queue resumes from there — reporting that in red as
+"the last assessment did not complete" would say the opposite of what happened, the same flattening
+`_CoverageNotice` refuses by being an info box. So `Cancelled()` sits beside `Complete` and `Fault`,
+leaves `LastRunSucceeded` **null** (it neither succeeded nor failed), sets `LastRunCancelled`, and
+composes its message out of the progress the coordinator was already holding — "Stopped while
+checking Linux packages, after 412 of 4000." The client reads `lastRunCancelled` *first*, because
+null `lastRunSucceeded` is also what "nothing has run since this server started" looks like.
+
 ### Linux packages: a second source, because NVD cannot answer this question
 
 **Distribution packages are assessed against OSV, never against NVD's CPE ranges, and that is a

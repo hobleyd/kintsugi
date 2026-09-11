@@ -298,6 +298,14 @@ abstract interface class VulnerabilityRepository {
   /// Starts an assessment and returns its opening status. The run happens in the background — the
   /// screen polls [readRunStatus] for the outcome.
   Future<VulnerabilityRunStatus> startRun();
+
+  /// Asks the run in flight to stop, and returns the status that answer came with.
+  ///
+  /// Safe to call: every stage of a run commits as it goes, so a cancelled run keeps everything it
+  /// had already assessed and the queue resumes from there. The status comes back with `running`
+  /// still true and `cancelling` set — the run is inside an HTTP call to NVD or OSV and stops when
+  /// it notices.
+  Future<VulnerabilityRunStatus> cancelRun();
 }
 
 abstract interface class VulnerabilitySettingsRepository {

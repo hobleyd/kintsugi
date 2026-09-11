@@ -154,6 +154,7 @@ void _registerUseCases() {
     ..registerSingleton(MarkCpeMappingNotApplicable(vulnerabilities))
     ..registerSingleton(ResetCpeMapping(vulnerabilities))
     ..registerSingleton(GetVulnerabilityRunStatus(vulnerabilities))
+    ..registerSingleton(CancelVulnerabilityRun(vulnerabilities))
     ..registerSingleton(StartVulnerabilityRun(vulnerabilities))
     ..registerSingleton(GetVulnerabilitySettings(vulnerabilitySettings))
     ..registerSingleton(UpdateVulnerabilitySettings(vulnerabilitySettings));

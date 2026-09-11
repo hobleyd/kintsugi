@@ -101,6 +101,10 @@ builder.Services.AddHostedService<VantaSyncBackgroundService>();
 // VulnerabilityRunCoordinator.
 builder.Services.AddSingleton<VulnerabilityRunCoordinator>();
 builder.Services.AddSingleton<IVulnerabilityRunCoordinator>(sp => sp.GetRequiredService<VulnerabilityRunCoordinator>());
+// The same object again, under the interface the *run* reports to rather than the one a caller
+// starts it with — see IVulnerabilityRunProgress on why they are separate. Its own line because
+// nothing fails without it until somebody presses Assess now.
+builder.Services.AddSingleton<IVulnerabilityRunProgress>(sp => sp.GetRequiredService<VulnerabilityRunCoordinator>());
 builder.Services.AddHostedService<VulnerabilityAssessmentBackgroundService>();
 
 // Remote control's live half: which hosts are reachable right now, and the relay that joins an

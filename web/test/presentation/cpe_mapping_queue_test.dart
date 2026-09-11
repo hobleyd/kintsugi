@@ -444,4 +444,7 @@ class _FakeVulnerabilityRepository implements VulnerabilityRepository {
 
   @override
   Future<VulnerabilityRunStatus> startRun() => throw UnimplementedError();
+
+  @override
+  Future<VulnerabilityRunStatus> cancelRun() => throw UnimplementedError();
 }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../core/di/locator.dart';
+import '../../core/theme/kintsugi_palette.dart';
 import '../../core/widgets/alert_box.dart';
 import '../../core/widgets/buttons.dart';
 import '../../core/widgets/form_bits.dart';
@@ -27,6 +28,7 @@ class VulnerabilitiesSettingsScreen extends StatelessWidget {
           updateSettings: locator<UpdateVulnerabilitySettings>(),
           getRunStatus: locator<GetVulnerabilityRunStatus>(),
           startRun: locator<StartVulnerabilityRun>(),
+          cancelRun: locator<CancelVulnerabilityRun>(),
         )..add(const VulnerabilitySettingsRequested()),
         child: const _VulnerabilitiesForm(),
       );
@@ -342,7 +344,13 @@ class _RunPanel extends StatelessWidget {
         const SubHeadingTight('Assessment run'),
         if (state.runError != null) AlertBox.error(state.runError!),
         if (run.running)
-          const HintText('An assessment is running…')
+          _RunProgress(run: run)
+        // Cancelled is read before the two below it, and has to be: a cancelled run reports
+        // `lastRunSucceeded` as null, the same as a server that has run nothing — and it is an
+        // info box rather than an error, because every stage commits as it goes, so stopping one
+        // kept real work. Red here would say the opposite of what happened.
+        else if (run.lastRunCancelled)
+          AlertBox.info(run.message ?? 'The last assessment was stopped.')
         else if (run.lastRunSucceeded == null)
           // In-memory status, so a restart resets it. Said plainly, because "no runs recorded" and
           // "the last run failed" are very different things to be looking at.
@@ -372,14 +380,108 @@ class _RunPanel extends StatelessWidget {
         const SizedBox(height: 12),
         Align(
           alignment: Alignment.centerLeft,
-          child: SecondaryButton(
-            label: 'Assess now',
-            tooltip: enabled ? null : 'Switch the assessment on first.',
-            onPressed: run.running || !enabled
-                ? null
-                : () => context.read<VulnerabilitySettingsBloc>().add(const VulnerabilityRunRequested()),
+          // One button in two states rather than two buttons, because at any moment exactly one of
+          // them is a thing that can be done — and a permanently-greyed Cancel beside Assess now
+          // would be a second dead control on a panel whose whole job is saying what is happening.
+          child: run.running
+              ? SecondaryButton(
+                  label: run.cancelling ? 'Cancelling…' : 'Cancel assessment',
+                  tooltip: run.cancelling
+                      ? 'Already stopping. The run is inside a request to NVD or OSV and stops '
+                          'when it answers.'
+                      : 'Stops the run. Everything already checked is saved, and the next run '
+                          'continues from there.',
+                  // Disabled once asked rather than left live: a second press is a 409, and the
+                  // honest answer to "I already pressed it" is that it is stopping, not an error.
+                  onPressed: run.cancelling
+                      ? null
+                      : () => context
+                          .read<VulnerabilitySettingsBloc>()
+                          .add(const VulnerabilityRunCancelRequested()),
+                )
+              : SecondaryButton(
+                  label: 'Assess now',
+                  tooltip: enabled ? null : 'Switch the assessment on first.',
+                  onPressed: enabled
+                      ? () => context
+                          .read<VulnerabilitySettingsBloc>()
+                          .add(const VulnerabilityRunRequested())
+                      : null,
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+/// What the run is doing right now: a bar, the stage, and the one thing being checked.
+///
+/// The subject is the reason this exists. A run is minutes to hours — bounded by NVD's five
+/// requests per thirty seconds rather than by how fast this server works — so "an assessment is
+/// running…", which is what stood here, is indistinguishable from a run that has hung. A moving
+/// package name is the difference.
+///
+/// **The bar measures the current stage, never the whole run.** The five stages cost wildly
+/// different amounts, so one bar across all of them would sit between 4% and 6% for most of a run
+/// and then leap; the stage names itself instead. A stage with nothing to count — the KEV
+/// download, the discovery pass — reports no total and gets an indeterminate bar, which is honest
+/// where "0 of 0" would not be.
+class _RunProgress extends StatelessWidget {
+  const _RunProgress({required this.run});
+
+  final VulnerabilityRunStatus run;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          run.stage ?? 'Starting the assessment…',
+          style: Theme.of(context).textTheme.bodyMedium,
+        ),
+        const SizedBox(height: 8),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(3),
+          child: LinearProgressIndicator(
+            // Null is the indeterminate animation, which is exactly right for a stage that cannot
+            // count itself — see VulnerabilityRunStatus.fraction.
+            value: run.fraction,
+            minHeight: 6,
+            backgroundColor: palette.border,
+            color: palette.neon,
           ),
         ),
+        const SizedBox(height: 6),
+        Row(
+          children: [
+            if (run.subject != null)
+              // Ellipsised rather than wrapped: a long package version must not make this panel
+              // grow and shrink as the name under the bar changes every few seconds.
+              Expanded(
+                child: Text(
+                  run.subject!,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(color: palette.muted),
+                ),
+              )
+            else
+              const Spacer(),
+            if (run.stepsTotal > 0) ...[
+              const SizedBox(width: 12),
+              HintText('${run.stepsCompleted} of ${run.stepsTotal}'),
+            ],
+          ],
+        ),
+        if (run.cancelling) ...[
+          const SizedBox(height: 6),
+          const HintText(
+            'Stopping. The run finishes the request it is in and keeps everything already checked.',
+          ),
+        ],
       ],
     );
   }
