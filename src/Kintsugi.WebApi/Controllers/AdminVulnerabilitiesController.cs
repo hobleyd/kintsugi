@@ -64,16 +64,46 @@ public class AdminVulnerabilitiesController : ControllerBase
     /// <param name="knownExploitedOnly">Defaults to true — the exploited set is the part anybody
     /// can act on, and the total is reported as a number in the summary rather than as a list of
     /// tens of thousands of rows.</param>
-    /// <param name="limit">Row ceiling, clamped to 1000. The summary's own counts cover every
-    /// match regardless, so a truncated list never reads as the whole picture.</param>
+    /// <param name="page">Zero-based. Clamped to the last page that exists, and the response says
+    /// which page it actually returned.</param>
+    /// <param name="pageSize">Rows per page, clamped to 500. The screen asks for 100.</param>
+    /// <param name="sortKey">A <c>VulnerabilityFindingSort</c> value; anything else falls back to
+    /// the default order rather than erroring.</param>
+    /// <param name="sortAscending">Which way <paramref name="sortKey"/> runs.</param>
+    /// <param name="cveSearch">Substring of the CVE id.</param>
+    /// <param name="severity">A CVSS severity band, or "Unscored".</param>
+    /// <param name="platform">A <c>VulnerabilityPlatform</c> value.</param>
+    /// <param name="subjectSearch">Substring of an affected product's name or version.</param>
     /// <param name="cancellationToken">Cancels the request.</param>
+    /// <remarks>The filters and the sort are applied here rather than in the browser because the
+    /// page is cut after them: sorting a page client-side would order the page, not the set, and
+    /// "the least-installed of the highest-scoring hundred" reads as the fleet's least-installed
+    /// while being nothing of the kind.</remarks>
     [HttpGet]
     [ProducesResponseType(typeof(VulnerabilityOverviewDto), StatusCodes.Status200OK)]
     public async Task<ActionResult<VulnerabilityOverviewDto>> GetOverview(
         [FromQuery] bool knownExploitedOnly = true,
-        [FromQuery] int limit = 200,
+        [FromQuery] int page = 0,
+        [FromQuery] int pageSize = 100,
+        [FromQuery] string? sortKey = null,
+        [FromQuery] bool sortAscending = false,
+        [FromQuery] string? cveSearch = null,
+        [FromQuery] string? severity = null,
+        [FromQuery] string? platform = null,
+        [FromQuery] string? subjectSearch = null,
         CancellationToken cancellationToken = default) =>
-        Ok(await _sender.Send(new GetVulnerabilityOverviewQuery(knownExploitedOnly, Math.Clamp(limit, 1, 1000)), cancellationToken));
+        Ok(await _sender.Send(
+            new GetVulnerabilityOverviewQuery(
+                knownExploitedOnly,
+                Math.Max(page, 0),
+                Math.Clamp(pageSize, 1, 500),
+                sortKey,
+                sortAscending,
+                cveSearch,
+                severity,
+                platform,
+                subjectSearch),
+            cancellationToken));
 
     /// <summary>The CPE mapping queue — every subject the fleet has, and how far each has got.</summary>
     [HttpGet("mappings")]

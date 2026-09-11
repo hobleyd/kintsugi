@@ -436,8 +436,7 @@ class _FakeVulnerabilityRepository implements VulnerabilityRepository {
   Future<void> resetMapping(String id) async {}
 
   @override
-  Future<VulnerabilityOverview> readOverview({bool knownExploitedOnly = true}) =>
-      throw UnimplementedError();
+  Future<VulnerabilityOverview> readOverview(VulnerabilityQuery query) => throw UnimplementedError();
 
   @override
   Future<VulnerabilityRunStatus> readRunStatus() => throw UnimplementedError();

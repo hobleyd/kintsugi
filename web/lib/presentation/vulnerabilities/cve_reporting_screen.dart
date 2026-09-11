@@ -67,24 +67,37 @@ class _VulnerabilitiesView extends StatelessWidget {
                 if (state.loading)
                   const Padding(padding: EdgeInsets.all(24), child: LinearProgressIndicator())
                 else if (overview.findings.isEmpty)
-                  EmptyPanel(
-                    overview.summary.hasAnyCoverage
-                        ? (state.knownExploitedOnly
-                            ? 'Nothing installed on this fleet is in CISA’s exploited catalogue.'
-                            : 'No published CVE matches any version this fleet has installed.')
-                        // The distinction that matters: an empty table means one of two very
-                        // different things, and only one of them is good news.
-                        : 'Nothing has been assessed yet. Confirm what an application is on the '
-                            'CVE Mapping screen, and the next run will check it.',
-                  )
-                else
-                  _FindingsTable(findings: overview.findings),
+                  EmptyPanel(_emptyMessage(state, overview))
+                else ...[
+                  _FindingsTable(findings: overview.findings, state: state),
+                  _Paginator(overview: overview),
+                ],
               ] else if (state.loading)
                 const Padding(padding: EdgeInsets.all(24), child: LinearProgressIndicator()),
             ],
           );
         },
       );
+}
+
+/// What an empty table means, which is three quite different things.
+///
+/// Nothing assessed, nothing found, and nothing *matching the filters* are not interchangeable —
+/// and the third is the only one with a way out, so it names it. Reporting the first as the
+/// second is the clean-bill-of-health failure this screen is built to refuse.
+String _emptyMessage(VulnerabilitiesState state, VulnerabilityOverview overview) {
+  if (!overview.summary.hasAnyCoverage) {
+    return 'Nothing has been assessed yet. Confirm what an application is on the CVE Mapping '
+        'screen, and the next run will check it.';
+  }
+
+  if (state.query.hasFilters) {
+    return 'No CVE matches these filters. Clear them from the table’s toolbar to see the rest.';
+  }
+
+  return state.knownExploitedOnly
+      ? 'Nothing installed on this fleet is in CISA’s exploited catalogue.'
+      : 'No published CVE matches any version this fleet has installed.';
 }
 
 /// The header numbers. Exploited first and largest, because it is the only one that is a list of
@@ -228,6 +241,9 @@ class _FilterBar extends StatelessWidget {
         runSpacing: 8,
         crossAxisAlignment: WrapCrossAlignment.center,
         children: [
+          // These two numbers count every match in the fleet and know nothing about the header
+          // filters, which is why the paginator below says "matching" and this does not: with a
+          // Platform filter on, this can honestly read 847 above a page of 31.
           SegmentedButton<bool>(
             segments: [
               ButtonSegment(value: true, label: Text('Known exploited ($knownExploitedCount)')),
@@ -239,51 +255,200 @@ class _FilterBar extends StatelessWidget {
                 .read<VulnerabilitiesBloc>()
                 .add(VulnerabilitiesFilterChanged(selection.first)),
           ),
-          if (!knownExploitedOnly && totalCveCount > 200)
-            const HintText('Showing the 200 highest-scoring; the count beside the button is the total.'),
         ],
       );
 }
 
-class _FindingsTable extends StatelessWidget {
-  const _FindingsTable({required this.findings});
+/// Which page of the matching findings is on screen, and how to reach the others.
+///
+/// It says "matching" deliberately. The count beside it is the filtered total, which is not the
+/// segmented button's total above — that one counts every match in the fleet — and two unlabelled
+/// numbers disagreeing on one screen is worse than either of them being absent.
+class _Paginator extends StatelessWidget {
+  const _Paginator({required this.overview});
 
-  final List<VulnerabilityFinding> findings;
+  final VulnerabilityOverview overview;
 
   @override
-  Widget build(BuildContext context) => KintsugiTable(
-        minWidth: 960,
-        columns: [
-          const TableColumnSpec(label: 'CVE', width: FixedColumnWidth(150)),
-          const TableColumnSpec(label: 'Severity', width: FixedColumnWidth(130)),
-          // Measured rather than guessed: the cell is a chip, which cannot be made narrower than
-          // its one word, and the table's own floor only covers the header label above it. At a
-          // hand-set 120 this was under two pixels short and rendered "EXPLOITE" over "D".
-          TableColumnSpec(
-            label: 'Exploited',
-            width: TableColumnSpec.forContent(StatusChip.widthFor(context, 'Exploited')),
+  Widget build(BuildContext context) {
+    if (overview.pageCount <= 1) {
+      return const SizedBox.shrink();
+    }
+
+    final bloc = context.read<VulnerabilitiesBloc>();
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Wrap(
+        spacing: 12,
+        runSpacing: 8,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          HintText('Showing ${overview.firstRowNumber}–${overview.lastRowNumber} '
+              'of ${overview.filteredCount} matching'),
+          SecondaryButton(
+            label: 'Previous',
+            // Null rather than hidden at the ends: a control that vanishes moves the one beside
+            // it under the pointer that was about to press it.
+            onPressed: overview.page == 0
+                ? null
+                : () => bloc.add(VulnerabilitiesPageChanged(overview.page - 1)),
           ),
-          const TableColumnSpec(label: 'Affects', width: FlexColumnWidth(2)),
-          const TableColumnSpec(label: 'Installs', width: FixedColumnWidth(90), alignRight: true),
+          HintText('Page ${overview.page + 1} of ${overview.pageCount}'),
+          SecondaryButton(
+            label: 'Next',
+            onPressed: overview.page >= overview.pageCount - 1
+                ? null
+                : () => bloc.add(VulnerabilitiesPageChanged(overview.page + 1)),
+          ),
         ],
-        rows: [
-          for (final finding in findings)
-            KintsugiTableRow(
-              cells: [
-                LinkText(label: finding.cveId, onTap: () => _openExternal(finding.nvdUrl)),
-                _SeverityCell(finding: finding),
-                if (finding.knownExploited)
-                  const StatusChip('Exploited', statusKey: 'exploited')
-                else
-                  const NoValue(),
-                _AffectsCell(subjects: finding.affectedSubjects),
-                CountBadge(finding.hostCount, alert: finding.knownExploited),
-              ],
-              expanded: _FindingDetail(finding: finding),
+      ),
+    );
+  }
+}
+
+/// The table. Every header control here sends a request rather than filtering what has already
+/// arrived, because the page is cut on the server after the filter and the sort — see
+/// `VulnerabilityQuery`. Sorting a page in the browser would order the page and not the set,
+/// which is how "the least-installed of the hundred highest-scoring" ends up reading as the
+/// fleet's least-installed.
+class _FindingsTable extends StatelessWidget {
+  const _FindingsTable({required this.findings, required this.state});
+
+  final List<VulnerabilityFinding> findings;
+  final VulnerabilitiesState state;
+
+  @override
+  Widget build(BuildContext context) {
+    final bloc = context.read<VulnerabilitiesBloc>();
+    final query = state.query;
+
+    return KintsugiTable(
+      minWidth: 1180,
+      sort: query.sortKey == null
+          ? null
+          : TableSort(query.sortKey!, ascending: query.sortAscending),
+      onSort: (key) => bloc.add(VulnerabilitiesSortChanged(key)),
+      toolbar: Row(
+        children: [
+          const Expanded(child: HintText('Search, filter and sort from the column headers below.')),
+          if (query.hasFilters)
+            SecondaryButton(
+              label: 'Clear Filters',
+              onPressed: () => bloc.add(const VulnerabilitiesFiltersCleared()),
             ),
         ],
-      );
+      ),
+      columns: [
+        TableColumnSpec(
+          label: 'CVE',
+          width: const FixedColumnWidth(190),
+          sortKey: VulnerabilitySortKey.cve,
+          filter: SearchField(
+            value: query.cveSearch,
+            hintText: 'CVE-2024-…',
+            // Through the bloc's own debounce rather than as an event: each of these runs on the
+            // server, so a keystroke is a round trip unless they are collapsed first.
+            onChanged: (value) => bloc.searchChanged(cveSearch: value),
+          ),
+        ),
+        TableColumnSpec(
+          label: 'Severity',
+          width: const FixedColumnWidth(180),
+          sortKey: VulnerabilitySortKey.severity,
+          filter: KintsugiDropdown<String>(
+            value: query.severity,
+            items: const [VulnerabilityQuery.anyValue, ...vulnerabilitySeverities],
+            labelOf: (value) => value == VulnerabilityQuery.anyValue ? 'Any severity' : value,
+            onChanged: (value) => bloc.add(VulnerabilitiesHeaderFilterChanged(severity: value)),
+          ),
+        ),
+        // Measured rather than guessed: the cell is a chip, which cannot be made narrower than
+        // its one word, and the table's own floor only covers the header label above it. At a
+        // hand-set 120 this was under two pixels short and rendered "EXPLOITE" over "D".
+        TableColumnSpec(
+          label: 'Exploited',
+          width: TableColumnSpec.forContent(StatusChip.widthFor(context, 'Exploited')),
+          sortKey: VulnerabilitySortKey.exploited,
+        ),
+        TableColumnSpec(
+          label: 'Platform',
+          width: const FixedColumnWidth(190),
+          filter: KintsugiDropdown<String>(
+            value: query.platform,
+            items: const [VulnerabilityQuery.anyValue, ...vulnerabilityPlatforms],
+            labelOf: (value) => value == VulnerabilityQuery.anyValue ? 'Any platform' : value,
+            onChanged: (value) => bloc.add(VulnerabilitiesHeaderFilterChanged(platform: value)),
+          ),
+        ),
+        TableColumnSpec(
+          label: 'Affects',
+          width: const FlexColumnWidth(2),
+          filter: SearchField(
+            value: query.subjectSearch,
+            hintText: 'Product or version...',
+            onChanged: (value) => bloc.searchChanged(subjectSearch: value),
+          ),
+        ),
+        const TableColumnSpec(
+          label: 'Installs',
+          width: FixedColumnWidth(110),
+          alignRight: true,
+          sortKey: VulnerabilitySortKey.installs,
+        ),
+      ],
+      rows: [
+        for (final finding in findings)
+          KintsugiTableRow(
+            key: ValueKey(finding.cveId),
+            cells: [
+              LinkText(label: finding.cveId, onTap: () => _openExternal(finding.nvdUrl)),
+              _SeverityCell(finding: finding),
+              if (finding.knownExploited)
+                const StatusChip('Exploited', statusKey: 'exploited')
+              else
+                const NoValue(),
+              _PlatformCell(platforms: finding.platforms),
+              _AffectsCell(subjects: finding.affectedSubjects),
+              CountBadge(finding.hostCount, alert: finding.knownExploited),
+            ],
+            expanded: _FindingDetail(finding: finding),
+          ),
+      ],
+    );
+  }
+}
 
+/// Which operating system families this CVE actually reaches in this fleet.
+///
+/// A list rather than a value, because one is the exception: an OpenSSL flaw arrives as a
+/// Homebrew install on the laptops and a distribution package on the servers, and a column
+/// showing only the first would send somebody to patch half the estate. "Unknown" is shown like
+/// any other platform — a host whose reported operating system nothing recognises is exposed
+/// just the same, and quietly omitting it is the failure this screen exists to refuse.
+class _PlatformCell extends StatelessWidget {
+  const _PlatformCell({required this.platforms});
+
+  final List<String> platforms;
+
+  @override
+  Widget build(BuildContext context) {
+    if (platforms.isEmpty) {
+      return const NoValue();
+    }
+
+    return Wrap(
+      spacing: 6,
+      runSpacing: 4,
+      children: [
+        for (final platform in platforms)
+          StatusChip(
+            platform,
+            statusKey: platform == 'Unknown' ? 'unknown' : '_accent',
+          ),
+      ],
+    );
+  }
 }
 
 /// Opens somebody else's page in a new tab. Through [PageNavigator] rather than `package:web`

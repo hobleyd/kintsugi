@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:bloc/bloc.dart';
 import 'package:equatable/equatable.dart';
 
@@ -12,13 +14,16 @@ sealed class VulnerabilitiesEvent extends Equatable {
   List<Object?> get props => const [];
 }
 
+/// Reload whatever the current query asks for. Re-dispatching this keeps the reader's page,
+/// sort and filters — it reads them off the state rather than starting over, so a refresh does
+/// not throw somebody back to page one mid-read.
 final class VulnerabilitiesRequested extends VulnerabilitiesEvent {
   const VulnerabilitiesRequested();
 }
 
-/// Switches between the exploited set and everything matched. Its own event rather than a
-/// parameter on the reload, because it is a different question of the server: the exploited set
-/// is a handful of rows and the full set is tens of thousands, so the filter is applied there.
+/// Switches between the exploited set and everything matched. Its own event rather than one of
+/// the header filters, because it is a different question of the server: the exploited set is a
+/// handful of rows and the full set is tens of thousands.
 final class VulnerabilitiesFilterChanged extends VulnerabilitiesEvent {
   const VulnerabilitiesFilterChanged(this.knownExploitedOnly);
 
@@ -28,55 +33,178 @@ final class VulnerabilitiesFilterChanged extends VulnerabilitiesEvent {
   List<Object?> get props => [knownExploitedOnly];
 }
 
+/// One of the header dropdowns. Goes back to page one, because the row that was on page seven of
+/// the old set is not on page seven of the narrowed one.
+final class VulnerabilitiesHeaderFilterChanged extends VulnerabilitiesEvent {
+  const VulnerabilitiesHeaderFilterChanged({this.severity, this.platform});
+
+  final String? severity;
+  final String? platform;
+
+  @override
+  List<Object?> get props => [severity, platform];
+}
+
+/// One of the header search boxes. Debounced — see [VulnerabilitiesBloc._searchDebounce].
+final class VulnerabilitiesSearchChanged extends VulnerabilitiesEvent {
+  const VulnerabilitiesSearchChanged({this.cveSearch, this.subjectSearch});
+
+  final String? cveSearch;
+  final String? subjectSearch;
+
+  @override
+  List<Object?> get props => [cveSearch, subjectSearch];
+}
+
+/// A header clicked. Same toggle semantics as every other table here: the same column again
+/// reverses it, a different column starts descending.
+final class VulnerabilitiesSortChanged extends VulnerabilitiesEvent {
+  const VulnerabilitiesSortChanged(this.key);
+
+  final String key;
+
+  @override
+  List<Object?> get props => [key];
+}
+
+final class VulnerabilitiesPageChanged extends VulnerabilitiesEvent {
+  const VulnerabilitiesPageChanged(this.page);
+
+  final int page;
+
+  @override
+  List<Object?> get props => [page];
+}
+
+/// Back to every row of the current set, leaving the exploited toggle and the sort alone. The way
+/// out of a filter combination that has emptied the table.
+final class VulnerabilitiesFiltersCleared extends VulnerabilitiesEvent {
+  const VulnerabilitiesFiltersCleared();
+}
+
 class VulnerabilitiesState extends Equatable {
   const VulnerabilitiesState({
     this.overview,
     this.loading = true,
-    this.knownExploitedOnly = true,
+    this.query = const VulnerabilityQuery(),
     this.error,
   });
 
   final VulnerabilityOverview? overview;
   final bool loading;
-  final bool knownExploitedOnly;
+
+  /// What was last asked of the server — and, while a request is in flight, what is about to be.
+  /// The header controls read their own values back out of this, so they show what is applied
+  /// rather than what was typed.
+  final VulnerabilityQuery query;
+
   final String? error;
+
+  bool get knownExploitedOnly => query.knownExploitedOnly;
 
   VulnerabilitiesState copyWith({
     VulnerabilityOverview? overview,
     bool? loading,
-    bool? knownExploitedOnly,
+    VulnerabilityQuery? query,
     String? error,
     bool clearError = false,
   }) =>
       VulnerabilitiesState(
         overview: overview ?? this.overview,
         loading: loading ?? this.loading,
-        knownExploitedOnly: knownExploitedOnly ?? this.knownExploitedOnly,
+        query: query ?? this.query,
         error: clearError ? null : (error ?? this.error),
       );
 
   @override
-  List<Object?> get props => [overview, loading, knownExploitedOnly, error];
+  List<Object?> get props => [overview, loading, query, error];
 }
 
 class VulnerabilitiesBloc extends Bloc<VulnerabilitiesEvent, VulnerabilitiesState> {
   VulnerabilitiesBloc({required GetVulnerabilityOverview getOverview})
       : _getOverview = getOverview,
         super(const VulnerabilitiesState()) {
-    on<VulnerabilitiesRequested>((_, emit) => _load(emit, state.knownExploitedOnly));
-    on<VulnerabilitiesFilterChanged>((event, emit) => _load(emit, event.knownExploitedOnly));
+    on<VulnerabilitiesRequested>((_, emit) => _load(emit, state.query));
+
+    on<VulnerabilitiesFilterChanged>(
+        (event, emit) => _load(emit, state.query.reset(knownExploitedOnly: event.knownExploitedOnly)));
+
+    on<VulnerabilitiesHeaderFilterChanged>((event, emit) =>
+        _load(emit, state.query.reset(severity: event.severity, platform: event.platform)));
+
+    on<VulnerabilitiesSearchChanged>((event, emit) =>
+        _load(emit, state.query.reset(cveSearch: event.cveSearch, subjectSearch: event.subjectSearch)));
+
+    on<VulnerabilitiesSortChanged>((event, emit) => _load(
+          emit,
+          state.query.reset(
+            sortKey: event.key,
+            // A new column starts descending — worst first is what anybody wants of a severity
+            // or an install count — and the same column again reverses.
+            sortAscending: state.query.sortKey == event.key ? !state.query.sortAscending : false,
+          ),
+        ));
+
+    on<VulnerabilitiesPageChanged>((event, emit) => _load(emit, state.query.atPage(event.page)));
+
+    on<VulnerabilitiesFiltersCleared>((_, emit) => _load(
+          emit,
+          state.query.reset(
+            cveSearch: '',
+            subjectSearch: '',
+            severity: VulnerabilityQuery.anyValue,
+            platform: VulnerabilityQuery.anyValue,
+          ),
+        ));
   }
 
   final GetVulnerabilityOverview _getOverview;
 
-  Future<void> _load(Emitter<VulnerabilitiesState> emit, bool knownExploitedOnly) async {
-    emit(state.copyWith(loading: true, knownExploitedOnly: knownExploitedOnly, clearError: true));
+  /// How long a search box sits still before it becomes a request. The two search filters run on
+  /// the server, so an un-debounced field is one round trip per keystroke — and the last one to
+  /// come back wins, which is not necessarily the last one sent.
+  static const _searchDebounce = Duration(milliseconds: 350);
+
+  Timer? _debounce;
+
+  /// Which request is current. A slow page-one answer arriving after a fast page-two answer would
+  /// otherwise overwrite it, leaving the table showing rows the paginator disagrees with.
+  int _generation = 0;
+
+  /// Called by the search fields instead of adding the event directly, so the keystrokes collapse
+  /// into one request. Public because debouncing belongs with the bloc that issues the request,
+  /// not spread across two header widgets.
+  void searchChanged({String? cveSearch, String? subjectSearch}) {
+    _debounce?.cancel();
+    _debounce = Timer(
+      _searchDebounce,
+      () => add(VulnerabilitiesSearchChanged(cveSearch: cveSearch, subjectSearch: subjectSearch)),
+    );
+  }
+
+  @override
+  Future<void> close() {
+    _debounce?.cancel();
+    return super.close();
+  }
+
+  Future<void> _load(Emitter<VulnerabilitiesState> emit, VulnerabilityQuery query) async {
+    final generation = ++_generation;
+    emit(state.copyWith(loading: true, query: query, clearError: true));
+
     try {
+      final overview = await _getOverview(query);
+      if (generation != _generation) return;
+
       emit(state.copyWith(
-        overview: await _getOverview(knownExploitedOnly: knownExploitedOnly),
+        overview: overview,
         loading: false,
+        // The server clamps the page to the last one that exists, so the query is corrected from
+        // the answer rather than left claiming a page nobody is on.
+        query: query.atPage(overview.page),
       ));
     } on ApiException catch (error) {
+      if (generation != _generation) return;
       emit(state.copyWith(loading: false, error: error.message));
     }
   }

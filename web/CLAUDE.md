@@ -500,10 +500,41 @@ different questions of the database, not a client-side hide.
 
 **The second half of the screen is what it cannot see.** `unmappedSubjectCount` and
 `unassessableHostCount` are headline numbers, `_CoverageNotice` spells them out in words, and an
-empty findings table says which of the two empties it is — "nothing installed here is in CISA's
-catalogue" or "nothing has been assessed yet". A vulnerability screen that lists only what it
-managed to match reads as a clean bill of health, which is the same failure the Vanta screen
-refuses by naming the eleven resource types it does not sync.
+empty findings table says which of the *three* empties it is — "nothing installed here is in
+CISA's catalogue", "nothing has been assessed yet", or "no CVE matches these filters", which is
+the only one with a way out and so the only one that names one. A vulnerability screen that lists
+only what it managed to match reads as a clean bill of health, which is the same failure the
+Vanta screen refuses by naming the eleven resource types it does not sync.
+
+**The table's headers filter and sort on the server, because the page is cut after them.** It
+used to fetch a 200-row ceiling and say so in a hint. Sorting that in the browser would have
+ordered the page rather than the set: re-sorting by Installs ascending shows the least-installed
+*of the two hundred highest-scoring* while reading as the fleet's least-installed, and the hint
+saying "showing the 200 highest-scoring" quietly stops being true the moment anybody re-sorts. So
+`VulnerabilityQuery` — the exploited toggle, four filters, a sort key and a page — goes to the
+server whole, and `GetVulnerabilityOverviewQueryHandler` filters and sorts the merged CPE and
+package findings before taking 100 of them. Three consequences that are easy to get wrong:
+
+- **Any change but the page resets it to zero.** The row that was on page seven of the old order
+  is not on page seven of the new one. `VulnerabilityQuery.reset` is the only way to build one
+  from another, precisely so that is not a thing a call site remembers.
+- **The two totals on screen are different numbers and will disagree.** The segmented button
+  shows `summary.totalCveCount`, every match in the fleet, which knows nothing about the header
+  filters; the paginator shows `filteredCount`. With a Platform filter on, 847 above a page of
+  31 is both correct and unreadable unless one of them is labelled, so the paginator says
+  "matching" and the segment does not.
+- **The search boxes debounce in the bloc, not in the widget.** Each is a round trip, and the
+  last answer back is not necessarily the last one sent — `VulnerabilitiesBloc` carries a
+  generation counter for that, so a slow page-one response cannot overwrite a fast page-two one.
+
+**The Platform column is `PlatformBucket`'s OS buckets, not a second classifier.** "macOS" has to
+mean the same thing here as in the Applications screen's Platform column, so the server buckets
+through `PlatformBucket.From` and only renames the leftover: `generic` surfaces as `Unknown`,
+which is a filterable value rather than a blank, because a host whose reported operating system
+nothing recognises is exposed just the same. A CVE carries a *list* — an OpenSSL flaw is a
+Homebrew install on the laptops and a distribution package on the servers, and a column showing
+one of them sends somebody to patch half the estate. Package findings are Linux by construction,
+since only the Linux agent reports packages at all.
 
 **The Settings > Vulnerabilities run panel shows the stage, the subject and a bar — and one
 button that is Cancel while a run is in flight.** What stood there was "an assessment is

@@ -263,10 +263,11 @@ abstract interface class VantaSettingsRepository {
 
 /// The Vulnerabilities screen and the CPE mapping queue behind it.
 abstract interface class VulnerabilityRepository {
-  /// The fleet's exposure. [knownExploitedOnly] is the screen's default: the exploited set is the
-  /// part anybody can act on, and the total arrives as a number in the summary rather than as tens
-  /// of thousands of rows.
-  Future<VulnerabilityOverview> readOverview({bool knownExploitedOnly = true});
+  /// One page of the fleet's exposure, filtered and sorted as [query] asks.
+  ///
+  /// Everything in [VulnerabilityQuery] is applied on the server, including the sort: the page is
+  /// cut after it, so ordering in the browser would order the page rather than the set.
+  Future<VulnerabilityOverview> readOverview(VulnerabilityQuery query);
 
   Future<List<CpeMapping>> readMappings();
 
