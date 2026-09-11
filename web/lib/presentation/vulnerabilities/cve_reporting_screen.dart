@@ -402,7 +402,16 @@ class _FindingsTable extends StatelessWidget {
         if (findings.isEmpty)
           KintsugiTableRow(
             key: const ValueKey('no-matches'),
-            cells: [HintText(_emptyRowMessage(query))],
+            // Placed under Affects rather than left to fall into cell zero: a short cell list is
+            // padded out with blanks, so the first column gets it — and CVE is 190px, which
+            // wraps a sentence into four lines beside five empty columns.
+            cells: [
+              const SizedBox.shrink(),
+              const SizedBox.shrink(),
+              const SizedBox.shrink(),
+              const SizedBox.shrink(),
+              HintText(_emptyRowMessage(query)),
+            ],
           ),
         for (final finding in findings)
           KintsugiTableRow(

@@ -40,6 +40,18 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  testWidgets('draws its header controls at the width it declares as its floor', (tester) async {
+    // 1180 is what a narrow display gets; the tests above all pump at 1600. A dropdown or a
+    // search box wider than its column does not shrink, it overflows — which throws here and is
+    // invisible in a release build.
+    repository.findings = [_finding('CVE-2024-0001')];
+
+    await pumpScreen(tester, width: 1200);
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('PLATFORM'), findsOneWidget);
+  });
+
   group('the Platform column', () {
     testWidgets('shows every family a CVE reaches, not just the first', (tester) async {
       // One is the exception, not the rule: an OpenSSL flaw is a Homebrew install on the laptops
@@ -234,6 +246,12 @@ void main() {
 
       expect(find.textContaining('No CVE matches these filters'), findsOneWidget);
       expect(find.widgetWithText(SecondaryButton, 'Clear Filters'.toUpperCase()), findsOneWidget);
+      // Under Affects, the wide column — not crammed into the 190px CVE column, which is where a
+      // short cell list lands by default.
+      expect(
+        tester.getRect(find.textContaining('No CVE matches these filters')).left,
+        greaterThan(tester.getRect(find.text('AFFECTS')).left - 1),
+      );
 
       repository.findings = [_finding('CVE-2024-0001')];
       repository.total = 1;
