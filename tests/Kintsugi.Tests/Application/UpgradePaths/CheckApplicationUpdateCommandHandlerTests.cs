@@ -81,6 +81,8 @@ public class CheckApplicationUpdateCommandHandlerTests
         var result = await CreateHandler().Handle(new CheckApplicationUpdateCommand("Firefox", PlatformBucket.MacOs), CancellationToken.None);
 
         Assert.False(result.Success);
+        // A script that ran and answered nothing has failed at something, unlike the guards above.
+        Assert.False(result.Skipped);
         Assert.False(result.VersionChanged);
         Assert.Equal("128.0", existing.LatestVersion);
         _unitOfWork.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Never);
@@ -94,6 +96,7 @@ public class CheckApplicationUpdateCommandHandlerTests
         var result = await CreateHandler().Handle(new CheckApplicationUpdateCommand("Firefox", PlatformBucket.MacOs), CancellationToken.None);
 
         Assert.False(result.Success);
+        Assert.True(result.Skipped);
         _researchClient.Verify(c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
@@ -108,6 +111,29 @@ public class CheckApplicationUpdateCommandHandlerTests
         var result = await CreateHandler().Handle(new CheckApplicationUpdateCommand("Firefox", PlatformBucket.MacOs), CancellationToken.None);
 
         Assert.False(result.Success);
+        Assert.True(result.Skipped);
+        _researchClient.Verify(c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    // Every guard above reports Skipped rather than a plain failure, and this is the one the
+    // fleet-wide run trips over most: GetScriptUpgradePathsAsync selects on Method and Script
+    // alone, so a row with no identifier is enumerated as a target and then declined here.
+    // Counted as a failure it produced runs reporting failures against rows the Applications table
+    // shows as perfectly healthy — the "Check Failed" badge is UpgradePathStatus.Failed, which
+    // only the AI scan writes.
+    [Fact]
+    public async Task Handle_WhenTheScriptPathHasNoApplicationIdentifier_ReportsSkipped_WithoutCallingTheResearchClient()
+    {
+        var existing = UpgradePath.Create(
+            "Firefox", PlatformBucket.MacOs, UpgradePathStatus.Found, "1.0", UpgradeMethod.Script,
+            null, null, null, null, null, "#!/bin/bash\n...", null);
+        _repository.Setup(r => r.GetAsync("Firefox", PlatformBucket.MacOs, It.IsAny<CancellationToken>())).ReturnsAsync(existing);
+
+        var result = await CreateHandler().Handle(new CheckApplicationUpdateCommand("Firefox", PlatformBucket.MacOs), CancellationToken.None);
+
+        Assert.False(result.Success);
+        Assert.True(result.Skipped);
+        Assert.Equal("No update script to check.", result.Note);
         _researchClient.Verify(c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
@@ -123,6 +149,7 @@ public class CheckApplicationUpdateCommandHandlerTests
         var result = await CreateHandler().Handle(new CheckApplicationUpdateCommand("Firefox", PlatformBucket.MacOs), CancellationToken.None);
 
         Assert.False(result.Success);
+        Assert.False(result.Skipped);
         Assert.Contains("subprocess timed out", result.Note);
     }
 }

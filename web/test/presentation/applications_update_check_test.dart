@@ -102,13 +102,19 @@ class FakeUpgradePathRepository implements UpgradePathRepository {
   dynamic noSuchMethod(Invocation invocation) => throw UnimplementedError();
 }
 
-UpdateCheckResult result({required bool success, bool versionChanged = false, String? note}) =>
+UpdateCheckResult result({
+  required bool success,
+  bool versionChanged = false,
+  String? note,
+  bool skipped = false,
+}) =>
     UpdateCheckResult(
       applicationName: 'Firefox',
       platform: 'macOS',
       success: success,
       versionChanged: versionChanged,
       note: note,
+      skipped: skipped,
     );
 
 void main() {
@@ -181,10 +187,32 @@ void main() {
     wait: Duration.zero,
     verify: (bloc) {
       expect(bloc.state.checkNotice?.success, isFalse);
+      // A script that ran and answered nothing failed at something, so this one is red.
+      expect(bloc.state.checkNotice?.skipped, isFalse);
       expect(
         bloc.state.checkNotice?.message,
         'Firefox on macOS: The script did not report a version.',
       );
+    },
+  );
+
+  blocTest<ApplicationsBloc, ApplicationsState>(
+    'a row with nothing to check is reported as neither a success nor a failure',
+    build: build,
+    act: (bloc) async {
+      bloc.add(ApplicationUpdateCheckRequested(rowFor(overview())));
+      await Future<void>.delayed(Duration.zero);
+      upgradePaths.completer.complete(
+        result(success: false, note: 'No update script to check.', skipped: true),
+      );
+    },
+    wait: Duration.zero,
+    verify: (bloc) {
+      // Nothing ran, so nothing broke — the screen draws this in neither green nor red, the same
+      // distinction the fleet-wide run's skipped count draws.
+      expect(bloc.state.checkNotice?.success, isFalse);
+      expect(bloc.state.checkNotice?.skipped, isTrue);
+      expect(bloc.state.checkNotice?.message, 'Firefox on macOS: No update script to check.');
     },
   );
 

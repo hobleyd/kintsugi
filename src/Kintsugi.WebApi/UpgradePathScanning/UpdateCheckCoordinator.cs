@@ -20,9 +20,11 @@ public class UpdateCheckCoordinator : IUpdateCheckCoordinator
     private int _updated;
     private int _unchanged;
     private int _failed;
+    private int _skipped;
     private DateTimeOffset? _startedUtc;
     private DateTimeOffset? _completedUtc;
     private string? _faultReason;
+    private readonly List<string> _notes = new();
 
     public bool TryRequestStart()
     {
@@ -34,7 +36,8 @@ public class UpdateCheckCoordinator : IUpdateCheckCoordinator
             }
 
             _running = true;
-            _total = _completed = _updated = _unchanged = _failed = 0;
+            _total = _completed = _updated = _unchanged = _failed = _skipped = 0;
+            _notes.Clear();
             _faultReason = null;
             _startedUtc = DateTimeOffset.UtcNow;
             _completedUtc = null;
@@ -64,7 +67,11 @@ public class UpdateCheckCoordinator : IUpdateCheckCoordinator
         {
             _completed++;
 
-            if (!result.Success)
+            if (result.Skipped)
+            {
+                _skipped++;
+            }
+            else if (!result.Success)
             {
                 _failed++;
             }
@@ -75,6 +82,14 @@ public class UpdateCheckCoordinator : IUpdateCheckCoordinator
             else
             {
                 _unchanged++;
+            }
+
+            // Same shape as UpgradePathScanCoordinator's: a successful check carries no note, so
+            // this collects exactly the rows a reader would otherwise have to go looking for —
+            // and would not find, since neither a skip nor a failure writes anything to the row.
+            if (!string.IsNullOrWhiteSpace(result.Note))
+            {
+                _notes.Add($"{result.ApplicationName} ({result.Platform}): {result.Note}");
             }
         }
     }
@@ -103,8 +118,8 @@ public class UpdateCheckCoordinator : IUpdateCheckCoordinator
         lock (_lock)
         {
             return new UpdateCheckStatusDto(
-                _running, _total, _completed, _updated, _unchanged, _failed,
-                _startedUtc, _completedUtc, _faultReason);
+                _running, _total, _completed, _updated, _unchanged, _failed, _skipped,
+                _startedUtc, _completedUtc, _faultReason, _notes.ToList());
         }
     }
 }

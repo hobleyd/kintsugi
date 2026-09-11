@@ -260,7 +260,8 @@ class UpgradePathScanStatus extends Equatable {
 ///
 /// A separate type from the scan above rather than a shared shape: this run re-executes each
 /// resolved script's own `--update-version` and makes no AI call, so its outcome counts are
-/// different ones (updated/unchanged/failed, not resolved/not-found/skipped).
+/// different ones (updated/unchanged/failed, not resolved/not-found), even though it shares the
+/// scan's distinction between work that failed and work there was nothing to do.
 class UpdateCheckStatus extends Equatable {
   const UpdateCheckStatus({
     required this.isRunning,
@@ -269,9 +270,11 @@ class UpdateCheckStatus extends Equatable {
     required this.updated,
     required this.unchanged,
     required this.failed,
+    required this.skipped,
     required this.startedUtc,
     required this.completedUtc,
     required this.faultReason,
+    required this.notes,
   });
 
   const UpdateCheckStatus.idle()
@@ -281,9 +284,11 @@ class UpdateCheckStatus extends Equatable {
         updated = 0,
         unchanged = 0,
         failed = 0,
+        skipped = 0,
         startedUtc = null,
         completedUtc = null,
-        faultReason = null;
+        faultReason = null,
+        notes = const [];
 
   final bool isRunning;
   final int total;
@@ -291,15 +296,37 @@ class UpdateCheckStatus extends Equatable {
   final int updated;
   final int unchanged;
   final int failed;
+
+  /// Rows the run declined to check — no script, or no application identifier to run one with.
+  /// Apart from [failed] because nothing about them is broken; counting them together is what had
+  /// a run reporting failures against a table where no row showed "Check Failed".
+  final int skipped;
+
   final DateTime? startedUtc;
   final DateTime? completedUtc;
   final String? faultReason;
 
+  /// Which rows were skipped or failed, and why. Listed rather than counted — that is the point of
+  /// them, and a count of failures cannot be reconciled against the table, because this run writes
+  /// no status onto a row: "Check Failed" is the AI scan's badge, never this one's.
+  final List<String> notes;
+
   double get fraction => total > 0 ? completed / total : 0;
 
   @override
-  List<Object?> get props =>
-      [isRunning, total, completed, updated, unchanged, failed, startedUtc, completedUtc, faultReason];
+  List<Object?> get props => [
+        isRunning,
+        total,
+        completed,
+        updated,
+        unchanged,
+        failed,
+        skipped,
+        startedUtc,
+        completedUtc,
+        faultReason,
+        notes,
+      ];
 }
 
 /// The outcome of re-checking one row's version. Mirrors `CheckApplicationUpdateResult`.
@@ -315,6 +342,7 @@ class UpdateCheckResult extends Equatable {
     required this.success,
     required this.versionChanged,
     required this.note,
+    this.skipped = false,
   });
 
   final String applicationName;
@@ -325,8 +353,14 @@ class UpdateCheckResult extends Equatable {
   /// Why the check did not succeed. Null on success.
   final String? note;
 
+  /// True when there was nothing to check — no script, or no identifier to run one with. Never
+  /// true together with [success], and reported apart from a failure because the row is not
+  /// broken: the notice says so in neither green nor red.
+  final bool skipped;
+
   @override
-  List<Object?> get props => [applicationName, platform, success, versionChanged, note];
+  List<Object?> get props =>
+      [applicationName, platform, success, versionChanged, note, skipped];
 }
 
 /// Progress of a single application's AI refresh. Mirrors `UpgradePathRefreshStatusDto`.

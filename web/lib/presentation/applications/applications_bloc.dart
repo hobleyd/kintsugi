@@ -246,13 +246,17 @@ final class ApplicationUpdateCheckRequested extends ApplicationsEvent {
 /// check that succeeded and found nothing new leaves Latest exactly as it was, which without this
 /// looks identical to the icon having done nothing.
 class UpdateCheckNotice extends Equatable {
-  const UpdateCheckNotice({required this.message, required this.success});
+  const UpdateCheckNotice({required this.message, required this.success, this.skipped = false});
 
   final String message;
   final bool success;
 
+  /// True when there was nothing to check on that row. Neither a success nor a failure, and shown
+  /// as neither — the fleet-wide run counts these apart from its failures for the same reason.
+  final bool skipped;
+
   @override
-  List<Object?> get props => [message, success];
+  List<Object?> get props => [message, success, skipped];
 }
 
 final class ApplicationsState extends Equatable {
@@ -554,6 +558,7 @@ class ApplicationsBloc extends Bloc<ApplicationsEvent, ApplicationsState>
       );
       notice = UpdateCheckNotice(
         success: result.success,
+        skipped: result.skipped,
         message: switch (result) {
           UpdateCheckResult(success: true, versionChanged: true) =>
             '$label: a newer version was found.',

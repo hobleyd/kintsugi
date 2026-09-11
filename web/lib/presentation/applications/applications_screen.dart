@@ -121,7 +121,13 @@ class _ApplicationsView extends StatelessWidget {
         const SizedBox(height: 20),
         if (state.error != null) AlertBox.error(state.error!),
         if (state.checkNotice case final notice?)
-          notice.success ? AlertBox.success(notice.message) : AlertBox.error(notice.message),
+          switch (notice) {
+            UpdateCheckNotice(success: true) => AlertBox.success(notice.message),
+            // A row with no script to run is not a row that failed: red here said the check broke
+            // when nothing was ever attempted.
+            UpdateCheckNotice(skipped: true) => AlertBox.info(notice.message),
+            _ => AlertBox.error(notice.message),
+          },
         if (state.loading && state.overview.applications.isEmpty)
           const _LoadingPanel()
         else if (state.overview.applications.isEmpty)

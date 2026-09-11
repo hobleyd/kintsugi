@@ -26,7 +26,12 @@ public class CheckApplicationUpdateCommandHandler : IRequestHandler<CheckApplica
         if (existing is null || existing.Method != UpgradeMethod.Script
             || string.IsNullOrWhiteSpace(existing.Script) || string.IsNullOrWhiteSpace(existing.ApplicationIdentifier))
         {
-            return new CheckApplicationUpdateResult(request.ApplicationName, request.Platform, false, false, "No update script to check.");
+            // Skipped, not failed: there is no script to run here (or no identifier to run one
+            // with), which is a state a row can legitimately sit in rather than something that
+            // went wrong. Counting it as a failure is what made a fleet-wide run report "8 failed"
+            // against a table in which no row wore "Check Failed" — that badge comes from
+            // UpgradePathStatus.Failed, which only the AI scan ever writes.
+            return new CheckApplicationUpdateResult(request.ApplicationName, request.Platform, false, false, "No update script to check.", Skipped: true);
         }
 
         try

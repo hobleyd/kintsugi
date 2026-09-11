@@ -19,13 +19,22 @@ RunProgress scanProgress(UpgradePathScanStatus status) => RunProgress(
 
 /// Turns "Check for Updates" into the same shape. Different counts, because this run re-executes
 /// each resolved script's own `--update-version` and makes no AI call.
+///
+/// "nothing to check" is this run's counterpart to the scan's "already known": a row with no
+/// script, or none this server can run, is not a row that failed at anything. And the notes matter
+/// more here than they do for the scan, because a failed check writes nothing to the row it
+/// failed on — the table's "Check Failed" badge belongs to the AI scan — so without them a count
+/// of failures names no rows and can be reconciled against nothing on screen.
 RunProgress updateCheckProgress(UpdateCheckStatus status) => RunProgress(
       isRunning: status.isRunning,
       fraction: status.fraction,
       detail: '${status.completed} / ${status.total} checked, ${status.updated} updated, '
-          '${status.unchanged} unchanged, ${status.failed} failed',
-      summary: '${status.updated} updated, ${status.unchanged} unchanged, ${status.failed} failed.',
+          '${status.unchanged} unchanged, ${status.failed} failed, '
+          '${status.skipped} with nothing to check',
+      summary: '${status.updated} updated, ${status.unchanged} unchanged, ${status.failed} failed, '
+          '${status.skipped} with nothing to check.',
       faultReason: status.faultReason,
+      notes: status.notes,
     );
 
 /// Rewraps a [RunStarted] so a start call reports the shared shape too.

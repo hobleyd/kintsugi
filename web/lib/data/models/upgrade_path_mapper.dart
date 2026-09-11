@@ -126,9 +126,11 @@ UpdateCheckStatus updateCheckStatusFromJson(Map<String, dynamic> json) => Update
       updated: (json['updated'] as num?)?.toInt() ?? 0,
       unchanged: (json['unchanged'] as num?)?.toInt() ?? 0,
       failed: (json['failed'] as num?)?.toInt() ?? 0,
+      skipped: (json['skipped'] as num?)?.toInt() ?? 0,
       startedUtc: dateTimeFromJson(json['startedUtc']),
       completedUtc: dateTimeFromJson(json['completedUtc']),
       faultReason: json['faultReason'] as String?,
+      notes: stringListFromJson(json['notes']),
     );
 
 /// Reads a `CheckApplicationUpdateResult`.
@@ -138,6 +140,7 @@ UpdateCheckResult updateCheckResultFromJson(Map<String, dynamic> json) => Update
       success: json['success'] as bool? ?? false,
       versionChanged: json['versionChanged'] as bool? ?? false,
       note: json['note'] as String?,
+      skipped: json['skipped'] as bool? ?? false,
     );
 
 /// Reads a `UpgradePathRefreshStatusDto`, flattening its nested `RefreshUpgradePathResult`.
