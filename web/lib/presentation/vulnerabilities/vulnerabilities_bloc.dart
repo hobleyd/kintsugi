@@ -68,6 +68,18 @@ final class VulnerabilitiesSortChanged extends VulnerabilitiesEvent {
   List<Object?> get props => [key];
 }
 
+/// The expander at the end of a row. One panel at a time, as the Applications table does it:
+/// these are tall, and the reason they are collapsed at all is that a hundred of them open is not
+/// a page anybody can read.
+final class VulnerabilitiesRowExpansionToggled extends VulnerabilitiesEvent {
+  const VulnerabilitiesRowExpansionToggled(this.cveId);
+
+  final String cveId;
+
+  @override
+  List<Object?> get props => [cveId];
+}
+
 final class VulnerabilitiesPageChanged extends VulnerabilitiesEvent {
   const VulnerabilitiesPageChanged(this.page);
 
@@ -88,11 +100,17 @@ class VulnerabilitiesState extends Equatable {
     this.overview,
     this.loading = true,
     this.query = const VulnerabilityQuery(),
+    this.expandedCveId,
     this.error,
   });
 
   final VulnerabilityOverview? overview;
   final bool loading;
+
+  /// Which row has its detail panel open, if any. Keyed by CVE id rather than by position,
+  /// because the list re-sorts and re-pages under the reader — position three is a different CVE
+  /// after a sort, and an unkeyed panel would be drawn against the wrong row.
+  final String? expandedCveId;
 
   /// What was last asked of the server — and, while a request is in flight, what is about to be.
   /// The header controls read their own values back out of this, so they show what is applied
@@ -107,18 +125,21 @@ class VulnerabilitiesState extends Equatable {
     VulnerabilityOverview? overview,
     bool? loading,
     VulnerabilityQuery? query,
+    String? expandedCveId,
     String? error,
+    bool clearExpanded = false,
     bool clearError = false,
   }) =>
       VulnerabilitiesState(
         overview: overview ?? this.overview,
         loading: loading ?? this.loading,
         query: query ?? this.query,
+        expandedCveId: clearExpanded ? null : (expandedCveId ?? this.expandedCveId),
         error: clearError ? null : (error ?? this.error),
       );
 
   @override
-  List<Object?> get props => [overview, loading, query, error];
+  List<Object?> get props => [overview, loading, query, expandedCveId, error];
 }
 
 class VulnerabilitiesBloc extends Bloc<VulnerabilitiesEvent, VulnerabilitiesState> {
@@ -153,6 +174,12 @@ class VulnerabilitiesBloc extends Bloc<VulnerabilitiesEvent, VulnerabilitiesStat
         ));
 
     on<VulnerabilitiesPageChanged>((event, emit) => _load(emit, state.query.atPage(event.page)));
+
+    on<VulnerabilitiesRowExpansionToggled>((event, emit) => emit(
+          state.expandedCveId == event.cveId
+              ? state.copyWith(clearExpanded: true)
+              : state.copyWith(expandedCveId: event.cveId),
+        ));
 
     on<VulnerabilitiesFiltersCleared>((_, emit) => _load(
           emit,
@@ -216,7 +243,10 @@ class VulnerabilitiesBloc extends Bloc<VulnerabilitiesEvent, VulnerabilitiesStat
 
   Future<void> _load(Emitter<VulnerabilitiesState> emit, VulnerabilityQuery query) async {
     final generation = ++_generation;
-    emit(state.copyWith(loading: true, query: query, clearError: true));
+    // The open panel closes with the request that replaces the rows under it. Keeping it open
+    // across a sort or a page would reopen a panel for a CVE that is no longer on screen the
+    // moment its row came back, which reads as the table remembering the wrong thing.
+    emit(state.copyWith(loading: true, query: query, clearExpanded: true, clearError: true));
 
     try {
       final overview = await _getOverview(query);

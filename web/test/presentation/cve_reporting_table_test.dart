@@ -46,11 +46,75 @@ void main() {
     // invisible in a release build.
     repository.findings = [_finding('CVE-2024-0001')];
 
-    await pumpScreen(tester, width: 1340);
+    await pumpScreen(tester, width: 1420);
 
     expect(tester.takeException(), isNull);
     expect(find.text('PLATFORM'), findsOneWidget);
     expect(find.text('SCORE'), findsOneWidget);
+    expect(find.text('DETAILS'), findsOneWidget);
+  });
+
+  group('the detail panel', () {
+    testWidgets('stays shut until the row is expanded', (tester) async {
+      // A hundred rows each carrying an advisory, a vector and a per-subject breakdown is not a
+      // page anybody reads.
+      repository.findings = [_finding('CVE-2024-0001', description: 'A heap overflow.')];
+
+      await pumpScreen(tester);
+      expect(find.text('A heap overflow.'), findsNothing);
+      expect(find.text('View on NVD'), findsNothing);
+
+      await tester.tap(find.byTooltip('CVE detail'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('A heap overflow.'), findsOneWidget);
+      expect(find.text('View on NVD'), findsOneWidget);
+      // The control says which way it will go next. Scoped to the button, because every dropdown
+      // in the header row draws the same chevron.
+      expect(
+        find.descendant(of: find.byTooltip('CVE detail'), matching: find.byIcon(Icons.expand_less)),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.byTooltip('CVE detail'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('A heap overflow.'), findsNothing);
+    });
+
+    testWidgets('opens one row at a time', (tester) async {
+      repository.findings = [
+        _finding('CVE-2024-0001', description: 'The first one.'),
+        _finding('CVE-2024-0002', description: 'The second one.'),
+      ];
+
+      await pumpScreen(tester);
+      await tester.tap(find.byTooltip('CVE detail').first);
+      await tester.pumpAndSettle();
+      expect(find.text('The first one.'), findsOneWidget);
+
+      await tester.tap(find.byTooltip('CVE detail').last);
+      await tester.pumpAndSettle();
+
+      expect(find.text('The first one.'), findsNothing);
+      expect(find.text('The second one.'), findsOneWidget);
+    });
+
+    testWidgets('closes when the rows under it are replaced', (tester) async {
+      // Kept open across a sort, the panel would reappear the moment that CVE's row came back —
+      // which reads as the table remembering the wrong thing.
+      repository.findings = [_finding('CVE-2024-0001', description: 'A heap overflow.')];
+
+      await pumpScreen(tester);
+      await tester.tap(find.byTooltip('CVE detail'));
+      await tester.pumpAndSettle();
+      expect(find.text('A heap overflow.'), findsOneWidget);
+
+      await tester.tap(find.text('SCORE'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('A heap overflow.'), findsNothing);
+    });
   });
 
   group('the Score column', () {
@@ -343,10 +407,11 @@ VulnerabilityFinding _finding(
   double? score = 7.5,
   String? severity = 'HIGH',
   bool derived = false,
+  String? description,
 }) =>
     VulnerabilityFinding(
       cveId: cveId,
-      description: null,
+      description: description,
       cvssBaseScore: score,
       cvssSeverity: severity,
       cvssVector: null,

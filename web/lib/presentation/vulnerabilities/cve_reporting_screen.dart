@@ -325,7 +325,7 @@ class _FindingsTable extends StatelessWidget {
     final query = state.query;
 
     return KintsugiTable(
-      minWidth: 1320,
+      minWidth: 1400,
       sort: query.sortKey == null
           ? null
           : TableSort(query.sortKey!, ascending: query.sortAscending),
@@ -355,7 +355,7 @@ class _FindingsTable extends StatelessWidget {
         ),
         TableColumnSpec(
           label: 'Severity',
-          width: const FixedColumnWidth(170),
+          width: const FixedColumnWidth(165),
           // The band, not the number beside it. The two orders differ — a v2 HIGH and a v3 HIGH
           // do not begin at the same figure — and a column that sorts by something other than
           // what it shows is unreadable.
@@ -369,7 +369,7 @@ class _FindingsTable extends StatelessWidget {
         ),
         TableColumnSpec(
           label: 'Score',
-          width: const FixedColumnWidth(170),
+          width: const FixedColumnWidth(165),
           sortKey: VulnerabilitySortKey.score,
           // A floor rather than the band boundaries under another name: beside a Severity filter,
           // the question this one answers is "everything at 7 and above", which is not the same
@@ -411,10 +411,13 @@ class _FindingsTable extends StatelessWidget {
         ),
         const TableColumnSpec(
           label: 'Installs',
-          width: FixedColumnWidth(110),
+          width: FixedColumnWidth(105),
           alignRight: true,
           sortKey: VulnerabilitySortKey.installs,
         ),
+        // The expander, at the end of the row. Its own column rather than an icon tucked into
+        // Installs, so the control sits in one predictable place down the whole table.
+        const TableColumnSpec(label: 'Details', width: FixedColumnWidth(95)),
       ],
       rows: [
         if (findings.isEmpty)
@@ -446,8 +449,21 @@ class _FindingsTable extends StatelessWidget {
               _PlatformCell(platforms: finding.platforms),
               _AffectsCell(subjects: finding.affectedSubjects),
               CountBadge(finding.hostCount, alert: finding.knownExploited),
+              IconActionButton(
+                icon: state.expandedCveId == finding.cveId
+                    ? Icons.expand_less
+                    : Icons.expand_more,
+                tooltip: 'CVE detail',
+                onPressed: () =>
+                    bloc.add(VulnerabilitiesRowExpansionToggled(finding.cveId)),
+              ),
             ],
-            expanded: _FindingDetail(finding: finding),
+            // Collapsed until asked for. A hundred rows each carrying an advisory, a vector and
+            // a per-subject breakdown is not a page anybody reads — the table is for finding the
+            // row, and the panel is for the one row that turned out to matter.
+            expanded: state.expandedCveId == finding.cveId
+                ? _FindingDetail(finding: finding)
+                : null,
           ),
       ],
     );
@@ -543,8 +559,8 @@ class _ScoreCell extends StatelessWidget {
         // vector is the distribution's analysis rather than NVD's, and the two can differ.
         if (finding.cvssDerivedFromVector)
           const Tooltip(
-            message: 'Computed from the advisory’s own CVSS vector, which is shown in full under '
-                'this row. NVD has published no score for this CVE.',
+            message: 'Computed from the advisory’s own CVSS vector, which is shown in full '
+                'when this row is expanded. NVD has published no score for this CVE.',
             child: HintText('calculated'),
           ),
       ],

@@ -538,6 +538,14 @@ package findings before taking 100 of them. Three consequences that are easy to 
   filter that was no longer applied. Guarded on the controller's own text as well as the old
   value, or a debounced round trip moves the cursor to the end mid-word.
 
+**The detail panel is collapsed, behind an expander in a trailing Details column.** A hundred
+rows each carrying a CISA advisory, a CVSS vector and a per-subject breakdown is not a page
+anybody reads — the table is for finding the row, the panel is for the one row that turned out to
+matter. One at a time, as the Applications table does it, and keyed by **CVE id** rather than by
+position because this list re-sorts and re-pages under the reader: position three is a different
+CVE after a sort. `_load` clears it with the request that replaces the rows, or the panel would
+reappear the moment that CVE's row came back.
+
 **Severity and Score are two columns because they are two orders.** The band is NVD's label and
 the score is the number behind it, and across CVSS revisions a v2 HIGH and a v3 HIGH do not begin
 at the same figure — so Severity sorts by `VulnerabilityFindingSort.BandRank` and Score sorts by
