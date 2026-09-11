@@ -132,14 +132,16 @@ const _oneDisplay = RemoteDisplayGeometry(
 ///
 /// Worth a widget test rather than only a bloc one, because both of the things that go wrong here
 /// are in the wiring. The picker must not appear for a host with one display — a control that can
-/// only be set to where it already is. And full screen has to be *requested in `initState`*, on the
-/// same turn as the click that navigated here: `requestFullscreen` needs transient user activation,
-/// so a request made after the host user's consent arrives — up to sixty seconds later — is refused
-/// every time.
+/// only be set to where it already is. And a *screen* session's full screen has to be **requested
+/// in `initState`**, on the same turn as the click that navigated here: `requestFullscreen` needs
+/// transient user activation, so a request made after the host user's consent arrives — up to sixty
+/// seconds later — is refused every time. A *shell* session must not make that request at all, and
+/// must still offer the toggle, which is the only route to a full-screen terminal.
 void main() {
   Future<(_FakeStream, _FakeFullScreen)> pump(
     WidgetTester tester, {
     bool fullScreenAgrees = true,
+    RemoteControlSessionKind kind = RemoteControlSessionKind.screen,
     Size window = const Size(1600, 1000),
   }) async {
     final stream = _FakeStream();
@@ -165,7 +167,12 @@ void main() {
     await tester.pumpWidget(MaterialApp(
       theme: AppTheme.light(),
       home: Scaffold(
-        body: RemoteControlScreen(hostId: 'host', hostname: 'mac-01', fullScreen: fullScreen),
+        body: RemoteControlScreen(
+          hostId: 'host',
+          kind: kind,
+          hostname: 'mac-01',
+          fullScreen: fullScreen,
+        ),
       ),
     ));
     await tester.pump();
@@ -184,11 +191,16 @@ void main() {
     String description,
     Future<void> Function(WidgetTester tester, _FakeStream stream, _FakeFullScreen fullScreen) run, {
     bool fullScreenAgrees = true,
+    RemoteControlSessionKind kind = RemoteControlSessionKind.screen,
     Size window = const Size(1600, 1000),
   }) {
     testWidgets(description, (tester) async {
-      final (stream, fullScreen) =
-          await pump(tester, fullScreenAgrees: fullScreenAgrees, window: window);
+      final (stream, fullScreen) = await pump(
+        tester,
+        fullScreenAgrees: fullScreenAgrees,
+        kind: kind,
+        window: window,
+      );
       await run(tester, stream, fullScreen);
       await tester.pumpWidget(const SizedBox());
     });
@@ -297,18 +309,42 @@ void main() {
   }, window: const Size(1600, 700));
 
   screenTest('lays a full-screen terminal out, which has no aspect ratio to size itself by',
-      (tester, stream, _) async {
+      (tester, stream, fullScreen) async {
     // The screen view survives an unbounded height because `AspectRatio` derives one from the
     // width; a terminal has no intrinsic height at all, so a frame that handed it one would throw
     // rather than render. Both kinds share this screen, so both have to be pumped through it.
+    //
+    // **Reached by pressing the toggle, because that is now the only way a terminal gets here.** A
+    // shell session does not ask for full screen as it opens, so a test that pumped one and
+    // asserted the full-screen layout would be asserting a state the app cannot produce.
     stream.emit(const RemoteShellInfo(shell: '/bin/zsh', user: 'root'));
     await tester.pumpAndSettle();
+
+    await tester.tap(find.text('FULL SCREEN'));
+    await tester.pumpAndSettle();
+    expect(fullScreen.isFullScreen, isTrue);
 
     expect(tester.takeException(), isNull);
     expect(find.byType(RemoteShellView), findsOneWidget);
     expect(tester.getRect(find.byType(RemoteShellView)).height, greaterThan(100));
     expect(find.text('DISCONNECT'), findsOneWidget);
-  });
+  }, kind: RemoteControlSessionKind.shell);
+
+  screenTest('leaves the window alone for a terminal, but still offers to take it',
+      (tester, stream, fullScreen) async {
+    // A desktop in a 240px-inset panel is the host's screen at half size; a terminal in that same
+    // panel is a usable terminal, so swallowing the whole browser to open one is a cost with no
+    // matching gain. The toggle stays, though — a terminal wants the height as much as a desktop
+    // wants the width, and this is the press that asks for it.
+    stream.emit(const RemoteShellInfo(shell: '/bin/zsh', user: 'root'));
+    await tester.pumpAndSettle();
+
+    expect(fullScreen.enterCalls, 0, reason: 'a shell session must not take the window by itself');
+    expect(fullScreen.isFullScreen, isFalse);
+    // PageScaffold upper-cases its title, so this is the shell heading as it is actually painted.
+    expect(find.text('REMOTE TERMINAL'), findsOneWidget);
+    expect(find.text('FULL SCREEN'), findsOneWidget);
+  }, kind: RemoteControlSessionKind.shell);
 
   screenTest('offers the button rather than an error when the browser refuses',
       (tester, _, fullScreen) async {

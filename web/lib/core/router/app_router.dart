@@ -151,7 +151,9 @@ GoRouter createRouter(SessionBloc sessionBloc) {
               kind: RemoteControlSessionKind.shell,
               hostname: state.uri.queryParameters['hostname'],
               // A terminal wants the height as much as a desktop wants the width, and both are the
-              // same screen — so the toggle is offered on this route too.
+              // same screen — so the toggle is offered on this route too. The screen does *not*
+              // ask for full screen as this route opens, though, and the asymmetry with /remote is
+              // deliberate rather than an oversight: see `RemoteControlScreen.initState`.
               fullScreen: locator<FullScreenController>(),
             ),
           ),

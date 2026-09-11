@@ -65,7 +65,9 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
   bool _isFullScreen = false;
 
   /// Set when the browser refused a full-screen request, so the screen can offer the button rather
-  /// than silently doing nothing. It refuses for one ordinary reason — see [initState].
+  /// than silently doing nothing. A screen session's automatic request refuses for one ordinary
+  /// reason — see [initState]; a shell session only ever asks from the toggle, which cannot be
+  /// refused, so this stays false there.
   bool _fullScreenRefused = false;
 
   @override
@@ -80,6 +82,13 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
       if (mounted) setState(() => _isFullScreen = isFullScreen);
     });
 
+    // **Only a screen session takes the window as it opens.** A remote desktop inside a 240px-inset
+    // panel is the host's screen at half the size it could be, so there is nothing to weigh; a
+    // terminal in that same panel is a perfectly usable terminal, and swallowing the administrator's
+    // whole browser to show it — hiding the sidebar and every other tab's chrome — costs more than
+    // the extra rows are worth. The toggle is still offered on both, so a shell that does want the
+    // height is one press away.
+    //
     // **Requested here, synchronously off the click that navigated here, and that timing is the
     // whole of it.** `requestFullscreen` needs transient user activation — about five seconds after
     // a gesture in Chrome — and `initState` runs on the same turn as the Connect press that pushed
@@ -89,7 +98,7 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
     // Deliberately not awaited before the first build: a refusal is ordinary rather than
     // exceptional (a bookmarked URL opened by pressing Enter has no gesture behind it), and the
     // answer only decides whether the toggle below says "Full screen" or "Exit full screen".
-    if (!_isFullScreen) {
+    if (!_isFullScreen && widget.kind == RemoteControlSessionKind.screen) {
       fullScreen.enter().then((entered) {
         if (mounted && !entered) setState(() => _fullScreenRefused = true);
       });

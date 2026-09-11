@@ -398,11 +398,17 @@ height back to unbounded. A 4:3 host in a wide window is the case that fails —
 has no intrinsic height at all and so needs the bounded box rather than merely tolerating it.
 
 
-**The admin UI takes the whole browser window for a session, and the request has to ride the click
-that opened it.** `requestFullscreen` needs *transient user activation* — about five seconds after a
-gesture in Chrome — so `RemoteControlScreen` asks in `initState`, which runs on the same turn as the
-Connect press. Asking after consent arrives would be asking up to sixty seconds after any gesture
-and would be refused every single time. A refusal is ordinary rather than exceptional (a bookmarked
+**The admin UI takes the whole browser window for a *screen* session, and the request has to ride
+the click that opened it.** `requestFullscreen` needs *transient user activation* — about five
+seconds after a gesture in Chrome — so `RemoteControlScreen` asks in `initState`, which runs on the
+same turn as the Connect press. Asking after consent arrives would be asking up to sixty seconds
+after any gesture and would be refused every single time. **A shell session deliberately does not
+ask**, though it is the same screen and still offers the toggle: a remote desktop inside the 240px
+sidebar and the panel's inset is the host's screen at half the size it could be, so there is nothing
+to weigh, whereas a terminal in that same panel is a perfectly usable terminal — and swallowing the
+administrator's whole browser, every other tab's chrome with it, buys only a few more rows. The
+toggle is what a shell that does want the height presses, which makes it the only route to a
+full-screen terminal and so the route the layout test has to take. A refusal is ordinary rather than exceptional (a bookmarked
 URL opened by pressing Enter has no gesture behind it), so it is answered with a "Full Screen" button
 rather than an error — pressing it *is* the gesture the browser was waiting for. Three further
 things. `FullScreenController` is an interface in `core/platform/` for the same reason
