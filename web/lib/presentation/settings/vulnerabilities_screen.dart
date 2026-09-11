@@ -144,7 +144,7 @@ class _VulnerabilitiesFormState extends State<_VulnerabilitiesForm> {
             subtitle: 'Matches the versions this fleet has installed against published CVEs from '
                 'the National Vulnerability Database, and flags the ones CISA lists as actively '
                 'exploited. Nothing is assessed until somebody has confirmed which CPE an '
-                'application is — see the Vulnerabilities screen’s mapping queue.',
+                'application is — see the CVE Mapping screen.',
             children: [
               if (state.settings.error != null) AlertBox.error(state.settings.error!),
               if (state.settings.saved) const AlertBox.success('Vulnerability settings saved.'),
