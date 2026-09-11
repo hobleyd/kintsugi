@@ -30,10 +30,19 @@ public class ThinQueryHandlerTests
         repository.Setup(r => r.GetAllAsync(It.IsAny<CancellationToken>()))
             .ReturnsAsync(new[] { hostA, hostB });
         var upgradePathRepository = new Mock<IUpgradePathRepository>();
-        upgradePathRepository.Setup(r => r.GetAppUpdateCountsByHostAsync(It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new Dictionary<Guid, int>());
+        upgradePathRepository.Setup(r => r.GetInstallationPatchStatusesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<InstallationPatchStatus>());
+        var vulnerabilityRepository = new Mock<IVulnerabilityRepository>();
+        vulnerabilityRepository.Setup(r => r.GetApplicationCveMatchesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<ApplicationCveMatch>());
+        vulnerabilityRepository.Setup(r => r.GetOperatingSystemCveMatchesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<OperatingSystemCveMatch>());
+        vulnerabilityRepository.Setup(r => r.GetPackageCveMatchesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<PackageCveMatch>());
+        var installedPackageRepository = new Mock<IInstalledPackageRepository>();
 
-        var result = await new GetHostsQueryHandler(repository.Object, upgradePathRepository.Object)
+        var result = await new GetHostsQueryHandler(
+                repository.Object, upgradePathRepository.Object, vulnerabilityRepository.Object, installedPackageRepository.Object)
             .Handle(new GetHostsQuery(), CancellationToken.None);
 
         Assert.Equal(2, result.Count);
@@ -48,14 +57,137 @@ public class ThinQueryHandlerTests
         repository.Setup(r => r.GetAllAsync(It.IsAny<CancellationToken>()))
             .ReturnsAsync(new[] { hostWithUpdates, hostUpToDate });
         var upgradePathRepository = new Mock<IUpgradePathRepository>();
-        upgradePathRepository.Setup(r => r.GetAppUpdateCountsByHostAsync(It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new Dictionary<Guid, int> { [hostWithUpdates.Id] = 3 });
+        upgradePathRepository.Setup(r => r.GetInstallationPatchStatusesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[]
+            {
+                new InstallationPatchStatus(hostWithUpdates.Id, "Chrome", "119.0", UpdateAvailable: true),
+                new InstallationPatchStatus(hostWithUpdates.Id, "Firefox", "130.0", UpdateAvailable: true),
+                new InstallationPatchStatus(hostWithUpdates.Id, "Slack", "4.0", UpdateAvailable: true),
+                new InstallationPatchStatus(hostUpToDate.Id, "Chrome", "120.0", UpdateAvailable: false),
+            });
+        var vulnerabilityRepository = new Mock<IVulnerabilityRepository>();
+        vulnerabilityRepository.Setup(r => r.GetApplicationCveMatchesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<ApplicationCveMatch>());
+        vulnerabilityRepository.Setup(r => r.GetOperatingSystemCveMatchesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<OperatingSystemCveMatch>());
+        vulnerabilityRepository.Setup(r => r.GetPackageCveMatchesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<PackageCveMatch>());
+        var installedPackageRepository = new Mock<IInstalledPackageRepository>();
 
-        var result = await new GetHostsQueryHandler(repository.Object, upgradePathRepository.Object)
+        var result = await new GetHostsQueryHandler(
+                repository.Object, upgradePathRepository.Object, vulnerabilityRepository.Object, installedPackageRepository.Object)
             .Handle(new GetHostsQuery(), CancellationToken.None);
 
         Assert.Equal(3, result.Single(h => h.Id == hostWithUpdates.Id).AppUpdatesAvailableCount);
         Assert.Equal(0, result.Single(h => h.Id == hostUpToDate.Id).AppUpdatesAvailableCount);
+    }
+
+    [Fact]
+    public async Task GetHostsQueryHandler_SplitsApplicationCveCounts_TreatingNoResolvedPathAsUnpatched()
+    {
+        var host = new Host("host-1", "SERIAL-1");
+        var repository = new Mock<IHostRepository>();
+        repository.Setup(r => r.GetAllAsync(It.IsAny<CancellationToken>())).ReturnsAsync(new[] { host });
+        var upgradePathRepository = new Mock<IUpgradePathRepository>();
+        upgradePathRepository.Setup(r => r.GetInstallationPatchStatusesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[]
+            {
+                // Two Chromium-based browsers, both behind, sharing CVE-2024-0001.
+                new InstallationPatchStatus(host.Id, "Chrome", "120.0", UpdateAvailable: true),
+                new InstallationPatchStatus(host.Id, "Edge", "120.0", UpdateAvailable: true),
+                // A current application whose latest version is still affected (a zero-day).
+                new InstallationPatchStatus(host.Id, "Firefox", "130.0", UpdateAvailable: false),
+                // No resolved upgrade path — nothing has researched it, so its CVE counts as
+                // unpatched rather than being dropped as a coverage gap.
+                new InstallationPatchStatus(host.Id, "Widget", "1.0", UpdateAvailable: null),
+            });
+        var vulnerabilityRepository = new Mock<IVulnerabilityRepository>();
+        vulnerabilityRepository.Setup(r => r.GetApplicationCveMatchesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[]
+            {
+                new ApplicationCveMatch("chrome", "120.0", "CVE-2024-0001"),
+                new ApplicationCveMatch("edge", "120.0", "CVE-2024-0001"),
+                new ApplicationCveMatch("firefox", "130.0", "CVE-2025-0002"),
+                new ApplicationCveMatch("widget", "1.0", "CVE-2026-0003"),
+            });
+        vulnerabilityRepository.Setup(r => r.GetOperatingSystemCveMatchesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<OperatingSystemCveMatch>());
+        vulnerabilityRepository.Setup(r => r.GetPackageCveMatchesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<PackageCveMatch>());
+        var installedPackageRepository = new Mock<IInstalledPackageRepository>();
+
+        var result = await new GetHostsQueryHandler(
+                repository.Object, upgradePathRepository.Object, vulnerabilityRepository.Object, installedPackageRepository.Object)
+            .Handle(new GetHostsQuery(), CancellationToken.None);
+
+        var dto = Assert.Single(result);
+        // CVE-2024-0001 (behind) and CVE-2026-0003 (no resolved path) — two distinct CVEs, not
+        // three rows, even though CVE-2024-0001 came from two applications.
+        Assert.Equal(2, dto.UnpatchedCveCount);
+        Assert.Equal(1, dto.PatchedCveCount);
+    }
+
+    [Fact]
+    public async Task GetHostsQueryHandler_SplitsOperatingSystemCveCounts_TreatingNeverCheckedAsUnpatched()
+    {
+        var hostBehind = new Host("host-1", "SERIAL-1", "macOS 14.5", operatingSystemUpdateAvailable: true);
+        var hostCurrent = new Host("host-2", "SERIAL-2", "macOS 14.5", operatingSystemUpdateAvailable: false);
+        var hostUnknown = new Host("host-3", "SERIAL-3", "macOS 14.5");
+        var repository = new Mock<IHostRepository>();
+        repository.Setup(r => r.GetAllAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[] { hostBehind, hostCurrent, hostUnknown });
+        var upgradePathRepository = new Mock<IUpgradePathRepository>();
+        upgradePathRepository.Setup(r => r.GetInstallationPatchStatusesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<InstallationPatchStatus>());
+        var vulnerabilityRepository = new Mock<IVulnerabilityRepository>();
+        vulnerabilityRepository.Setup(r => r.GetApplicationCveMatchesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<ApplicationCveMatch>());
+        vulnerabilityRepository.Setup(r => r.GetOperatingSystemCveMatchesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[] { new OperatingSystemCveMatch("macos", "14.5", "CVE-2025-9999") });
+        vulnerabilityRepository.Setup(r => r.GetPackageCveMatchesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<PackageCveMatch>());
+        var installedPackageRepository = new Mock<IInstalledPackageRepository>();
+
+        var result = await new GetHostsQueryHandler(
+                repository.Object, upgradePathRepository.Object, vulnerabilityRepository.Object, installedPackageRepository.Object)
+            .Handle(new GetHostsQuery(), CancellationToken.None);
+
+        Assert.Equal(1, result.Single(h => h.Id == hostBehind.Id).UnpatchedCveCount);
+        Assert.Equal(0, result.Single(h => h.Id == hostBehind.Id).PatchedCveCount);
+        Assert.Equal(0, result.Single(h => h.Id == hostCurrent.Id).UnpatchedCveCount);
+        Assert.Equal(1, result.Single(h => h.Id == hostCurrent.Id).PatchedCveCount);
+        Assert.Equal(1, result.Single(h => h.Id == hostUnknown.Id).UnpatchedCveCount);
+        Assert.Equal(0, result.Single(h => h.Id == hostUnknown.Id).PatchedCveCount);
+    }
+
+    [Fact]
+    public async Task GetHostsQueryHandler_CountsDistributionPackageCves_AsUnpatched()
+    {
+        var host = new Host("host-1", "SERIAL-1", "Ubuntu 22.04");
+        var repository = new Mock<IHostRepository>();
+        repository.Setup(r => r.GetAllAsync(It.IsAny<CancellationToken>())).ReturnsAsync(new[] { host });
+        var upgradePathRepository = new Mock<IUpgradePathRepository>();
+        upgradePathRepository.Setup(r => r.GetInstallationPatchStatusesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<InstallationPatchStatus>());
+        var vulnerabilityRepository = new Mock<IVulnerabilityRepository>();
+        vulnerabilityRepository.Setup(r => r.GetApplicationCveMatchesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<ApplicationCveMatch>());
+        vulnerabilityRepository.Setup(r => r.GetOperatingSystemCveMatchesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<OperatingSystemCveMatch>());
+        vulnerabilityRepository.Setup(r => r.GetPackageCveMatchesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[] { new PackageCveMatch("Ubuntu:22.04", "openssl", "3.0.2-0ubuntu1.15", "CVE-2023-4911") });
+        var installedPackageRepository = new Mock<IInstalledPackageRepository>();
+        installedPackageRepository.Setup(r => r.GetHostPackageTriplesAsync(
+                It.IsAny<IReadOnlyCollection<string>>(), It.IsAny<IReadOnlyCollection<string>>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[] { new HostPackageTriple(host.Id, new PackageTriple("Ubuntu:22.04", "openssl", "3.0.2-0ubuntu1.15")) });
+
+        var result = await new GetHostsQueryHandler(
+                repository.Object, upgradePathRepository.Object, vulnerabilityRepository.Object, installedPackageRepository.Object)
+            .Handle(new GetHostsQuery(), CancellationToken.None);
+
+        var dto = Assert.Single(result);
+        Assert.Equal(1, dto.UnpatchedCveCount);
+        Assert.Equal(0, dto.PatchedCveCount);
     }
 
     [Fact]

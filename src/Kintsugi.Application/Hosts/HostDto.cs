@@ -15,6 +15,8 @@ public record HostDto(
     bool? OperatingSystemUpdateAvailable,
     string? OperatingSystemLatestVersion,
     int AppUpdatesAvailableCount,
+    int UnpatchedCveCount,
+    int PatchedCveCount,
     bool RemovalRequested)
 {
     /// <summary>
@@ -22,7 +24,11 @@ public record HostDto(
     /// only ever records that the host was online at its last check-in, and the Hosts screen
     /// needs to know whether it still is.
     /// </summary>
-    public static HostDto FromEntity(Host host, int appUpdatesAvailableCount = 0) =>
+    public static HostDto FromEntity(
+        Host host,
+        int appUpdatesAvailableCount = 0,
+        int unpatchedCveCount = 0,
+        int patchedCveCount = 0) =>
         new(
             host.Id,
             host.Hostname,
@@ -35,5 +41,7 @@ public record HostDto(
             host.OperatingSystemUpdateAvailable,
             host.OperatingSystemLatestVersion,
             appUpdatesAvailableCount,
+            unpatchedCveCount,
+            patchedCveCount,
             host.RemovalRequested);
 }

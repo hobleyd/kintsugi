@@ -16,6 +16,8 @@ class HostSummary extends Equatable {
     required this.operatingSystemUpdateAvailable,
     required this.operatingSystemLatestVersion,
     required this.appUpdatesAvailableCount,
+    required this.unpatchedCveCount,
+    required this.patchedCveCount,
     required this.removalRequested,
   });
 
@@ -45,6 +47,17 @@ class HostSummary extends Equatable {
   final String? operatingSystemLatestVersion;
   final int appUpdatesAvailableCount;
 
+  /// CVEs on this host not confirmed fixed: applications with an update available or never
+  /// researched, distribution packages (never patchable through Kintsugi — apt/dnf are outside
+  /// its catalog), and the operating system when an update is pending or has never been checked.
+  /// Anything short of a confirmed-current verdict lands here rather than being dropped as a
+  /// coverage gap.
+  final int unpatchedCveCount;
+
+  /// CVEs matched against an application or operating system confirmed already current — a CVE
+  /// the latest known version does not fix, rather than one patching would clear.
+  final int patchedCveCount;
+
   /// True once removal has been requested and the agent has not yet confirmed it uninstalled
   /// itself.
   final bool removalRequested;
@@ -62,6 +75,8 @@ class HostSummary extends Equatable {
         operatingSystemUpdateAvailable,
         operatingSystemLatestVersion,
         appUpdatesAvailableCount,
+        unpatchedCveCount,
+        patchedCveCount,
         removalRequested,
       ];
 }

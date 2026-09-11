@@ -80,7 +80,7 @@ public interface IUpgradePathRepository
     /// only because the caller genuinely needs one row per (host, application): the Vanta sync sends
     /// exactly that shape, one package-vulnerability record per out-of-date installation, so there is
     /// no cheaper form of the same answer. It materializes the same installed-application rows
-    /// <see cref="GetSummariesAsync"/> and <see cref="GetAppUpdateCountsByHostAsync"/> already do,
+    /// <see cref="GetSummariesAsync"/> and <see cref="GetInstallationPatchStatusesAsync"/> already do,
     /// and returns only the out-of-date ones, so what comes back is bounded by how far behind the
     /// fleet is rather than by its size. It is not an agent-facing query and should not become one.
     /// </remarks>
@@ -98,7 +98,14 @@ public interface IUpgradePathRepository
     /// so the bucket has to be loaded and the rows compared in memory.</summary>
     Task<IReadOnlyList<UpgradePath>> GetScriptUpgradePathsAsync(string platform, CancellationToken cancellationToken);
 
-    /// <summary>Count of installed applications with a known update available, per host — hosts
-    /// with no such applications are absent from the result rather than present with a zero.</summary>
-    Task<IReadOnlyDictionary<Guid, int>> GetAppUpdateCountsByHostAsync(CancellationToken cancellationToken);
+    /// <summary>Whether each installed application is behind (unpatched), current (patched), or
+    /// unknown, one row per (host, application) pairing. An installation with no resolved upgrade
+    /// path carries <c>null</c> rather than being absent: nothing has researched it, so there is
+    /// no verdict — which the Hosts screen's App Updates count reads as "not behind" (unknown is
+    /// never counted as behind on a guess) and its CVE columns read as unpatched (a CVE match
+    /// against an unresearched application is not proven fixed). The two callers deliberately
+    /// disagree about which way an unknown verdict falls; see each one's own reasoning.</summary>
+    Task<IReadOnlyList<InstallationPatchStatus>> GetInstallationPatchStatusesAsync(CancellationToken cancellationToken);
 }
+
+public record InstallationPatchStatus(Guid HostId, string ApplicationName, string Version, bool? UpdateAvailable);

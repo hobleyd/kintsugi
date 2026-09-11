@@ -41,9 +41,22 @@ public interface IInstalledPackageRepository
     /// so a host exposed by both a package and an application is counted once.</summary>
     Task<IReadOnlyList<Guid>> GetHostIdsForTriplesAsync(
         IReadOnlyCollection<PackageTriple> triples, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Every live host running one of these (source package, version) pairs, each with its
+    /// resolved triple — one row per (host, triple), for the Hosts screen's CVE columns to fold
+    /// package findings in without loading the whole host × package cross product. Filtered by
+    /// name and version first in the database, the same way <see cref="GetHostIdsForTriplesAsync"/>
+    /// is, since only packages a caller already knows have a CVE match are worth resolving an
+    /// ecosystem for.
+    /// </summary>
+    Task<IReadOnlyList<HostPackageTriple>> GetHostPackageTriplesAsync(
+        IReadOnlyCollection<string> names, IReadOnlyCollection<string> versions, CancellationToken cancellationToken);
 }
 
 /// <param name="Ecosystem">The OSV ecosystem, resolved from the host's os-release facts by
 /// <c>OsvEcosystem.For</c> — e.g. <c>Ubuntu:24.04</c>.</param>
 /// <param name="Name">The source package name.</param>
 public record PackageTriple(string Ecosystem, string Name, string Version);
+
+public record HostPackageTriple(Guid HostId, PackageTriple Triple);

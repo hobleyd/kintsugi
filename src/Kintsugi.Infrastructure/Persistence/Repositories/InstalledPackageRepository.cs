@@ -134,6 +134,41 @@ public class InstalledPackageRepository : IInstalledPackageRepository
             .ToList();
     }
 
+    public async Task<IReadOnlyList<HostPackageTriple>> GetHostPackageTriplesAsync(
+        IReadOnlyCollection<string> names, IReadOnlyCollection<string> versions, CancellationToken cancellationToken)
+    {
+        if (names.Count == 0 || versions.Count == 0)
+        {
+            return Array.Empty<HostPackageTriple>();
+        }
+
+        // Filtered on the package half in the database first, the same way GetHostIdsForTriplesAsync
+        // is — only rows a caller already knows have a CVE match are worth resolving an ecosystem
+        // for, so this never touches the full host × package cross product.
+        var rows = await (
+            from package in _context.InstalledPackages.AsNoTracking()
+            join host in _context.Hosts.AsNoTracking() on package.HostId equals host.Id
+            where host.DeletedAtUtc == null
+                  && names.Contains(package.Name)
+                  && versions.Contains(package.Version)
+            select new
+            {
+                package.HostId,
+                package.Name,
+                package.Version,
+                host.OperatingSystemId,
+                host.OperatingSystemVersionId
+            })
+            .Distinct()
+            .ToListAsync(cancellationToken);
+
+        return rows
+            .Select(r => new { r.HostId, r.Name, r.Version, Ecosystem = OsvEcosystem.For(r.OperatingSystemId, r.OperatingSystemVersionId) })
+            .Where(r => r.Ecosystem is not null)
+            .Select(r => new HostPackageTriple(r.HostId, new PackageTriple(r.Ecosystem!, r.Name, r.Version)))
+            .ToList();
+    }
+
     /// <summary>
     /// One row per (distribution, package, version) across live hosts, with how many hosts carry
     /// it — grouped by the database, so the result is thousands of rows rather than the

@@ -233,8 +233,8 @@ public class UpgradePathRepository : IUpgradePathRepository
     {
         // Host identity (not just an aggregate count) has to survive into this method now, so the
         // Applications page can flag exactly which hosts are behind on a given application — same
-        // full materialization GetAppUpdateCountsByHostAsync already does below, and bounded the
-        // same way (by total installed-application rows, not by anything larger).
+        // full materialization GetInstallationPatchStatusesAsync does below, and bounded the same
+        // way (by total installed-application rows, not by anything larger).
         var installed = await _context.InstalledApplications
             .Join(_context.Hosts, a => a.HostId, h => h.Id, (a, h) => new { a.Name, a.Version, a.UpdateAvailable, a.HostId, a.ParentApplicationId, h.Hostname, h.OperatingSystem })
             .ToListAsync(cancellationToken);
@@ -333,7 +333,12 @@ public class UpgradePathRepository : IUpgradePathRepository
             .Where(p => p.Method == UpgradeMethod.Script && p.Script != null && p.Platform == platform)
             .ToListAsync(cancellationToken);
 
-    public async Task<IReadOnlyDictionary<Guid, int>> GetAppUpdateCountsByHostAsync(CancellationToken cancellationToken)
+    /// <summary>Whether each installed application is behind (unpatched), current (patched), or
+    /// unknown, one row per (host, application) pairing. Unknown (<c>null</c>) is what an
+    /// installation with no resolved upgrade path gets — nothing has researched it, so there is no
+    /// verdict to give, as distinct from a resolved path that says the installed version is
+    /// current.</summary>
+    public async Task<IReadOnlyList<InstallationPatchStatus>> GetInstallationPatchStatusesAsync(CancellationToken cancellationToken)
     {
         // Fleet-wide, but bounded by total installed-application rows (like GetSummariesAsync's
         // join below), not by anything larger — safe to pull into memory for the per-host matching.
@@ -345,25 +350,17 @@ public class UpgradePathRepository : IUpgradePathRepository
         var byNameAndPlatform = BuildByNameAndPlatformLookup(upgradePaths);
         var packageManagerNames = await LoadPackageManagerNamesAsync(installed.Select(x => x.ParentApplicationId), cancellationToken);
 
-        var counts = new Dictionary<Guid, int>();
+        var statuses = new List<InstallationPatchStatus>(installed.Count);
 
         foreach (var app in installed)
         {
             var path = ResolvePath(byNameAndPlatform, app.Name, app.OperatingSystem, PackageManagerOf(packageManagerNames, app.ParentApplicationId));
-            if (path is null)
-            {
-                continue;
-            }
+            var updateAvailable = path is null ? (bool?)null : ComputeUpdateAvailable(path, app.Version, app.UpdateAvailable);
 
-            if (!ComputeUpdateAvailable(path, app.Version, app.UpdateAvailable))
-            {
-                continue;
-            }
-
-            counts[app.HostId] = counts.GetValueOrDefault(app.HostId) + 1;
+            statuses.Add(new InstallationPatchStatus(app.HostId, app.Name, app.Version, updateAvailable));
         }
 
-        return counts;
+        return statuses;
     }
 
     /// <summary>

@@ -20,5 +20,7 @@ HostSummary hostFromJson(Map<String, dynamic> json) => HostSummary(
       operatingSystemUpdateAvailable: json['operatingSystemUpdateAvailable'] as bool?,
       operatingSystemLatestVersion: json['operatingSystemLatestVersion'] as String?,
       appUpdatesAvailableCount: (json['appUpdatesAvailableCount'] as num?)?.toInt() ?? 0,
+      unpatchedCveCount: (json['unpatchedCveCount'] as num?)?.toInt() ?? 0,
+      patchedCveCount: (json['patchedCveCount'] as num?)?.toInt() ?? 0,
       removalRequested: json['removalRequested'] as bool? ?? false,
     );

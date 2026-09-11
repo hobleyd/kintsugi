@@ -33,6 +33,16 @@ void main() {
       expect(reported.agentVersion, '0.6.1');
       expect(unreported.agentVersion, isNull);
     });
+
+    test('reads the unpatched and patched CVE counts, defaulting to zero when the server omits them', () {
+      final counted = hostFromJson({'id': 'a', 'unpatchedCveCount': 4, 'patchedCveCount': 2});
+      final uncounted = hostFromJson({'id': 'a'});
+
+      expect(counted.unpatchedCveCount, 4);
+      expect(counted.patchedCveCount, 2);
+      expect(uncounted.unpatchedCveCount, 0);
+      expect(uncounted.patchedCveCount, 0);
+    });
   });
 
   group('upgradePathSummaryFromJson', () {

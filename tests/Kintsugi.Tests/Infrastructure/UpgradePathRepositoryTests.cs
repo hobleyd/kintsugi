@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Application.UpgradePaths;
 using Kintsugi.Domain.Entities;
 using Kintsugi.Domain.Enums;
@@ -23,6 +24,16 @@ public class UpgradePathRepositoryTests
             .Options;
         return new ApplicationDbContext(options);
     }
+
+    /// <summary>How many of a host's installations are behind, from the tri-state list
+    /// <see cref="UpgradePathRepository.GetInstallationPatchStatusesAsync"/> returns. Only a
+    /// <c>true</c> verdict counts — unknown (<c>null</c>, no resolved path) is never counted as
+    /// behind on a guess, the same rule <c>ComputeUpdateAvailable</c> applies.</summary>
+    private static IReadOnlyDictionary<Guid, int> CountUpdatesByHost(IEnumerable<InstallationPatchStatus> statuses) =>
+        statuses
+            .Where(s => s.UpdateAvailable == true)
+            .GroupBy(s => s.HostId)
+            .ToDictionary(g => g.Key, g => g.Count());
 
     /// <summary>Where every Homebrew-managed row lives — see PlatformBucket.ForPackageManager.</summary>
     private static readonly string HomebrewBucket = PlatformBucket.ForPackageManager(PackageManagerCatalog.Homebrew);
@@ -491,7 +502,7 @@ public class UpgradePathRepositoryTests
     }
 
     [Fact]
-    public async Task GetAppUpdateCountsByHostAsync_ReturnsAnEmptyDictionary_WhenNoInstalledApplicationHasAKnownUpgradePath()
+    public async Task GetInstallationPatchStatusesAsync_CountsNoInstallationAsBehind_WhenNoneHasAKnownUpgradePath()
     {
         await using var context = CreateContext();
         var host = new Host("host-1", "SERIAL-1", "macOS 15.0");
@@ -500,13 +511,13 @@ public class UpgradePathRepositoryTests
         await context.SaveChangesAsync();
         var repository = new UpgradePathRepository(context);
 
-        var result = await repository.GetAppUpdateCountsByHostAsync(CancellationToken.None);
+        var result = CountUpdatesByHost(await repository.GetInstallationPatchStatusesAsync(CancellationToken.None));
 
         Assert.Empty(result);
     }
 
     [Fact]
-    public async Task GetAppUpdateCountsByHostAsync_CountsEachOutdatedApplicationOnceForItsHost()
+    public async Task GetInstallationPatchStatusesAsync_CountsEachOutdatedApplicationOnceForItsHost()
     {
         await using var context = CreateContext();
         var host = new Host("host-1", "SERIAL-1", "macOS 15.0");
@@ -520,13 +531,13 @@ public class UpgradePathRepositoryTests
         await context.SaveChangesAsync();
         var repository = new UpgradePathRepository(context);
 
-        var result = await repository.GetAppUpdateCountsByHostAsync(CancellationToken.None);
+        var result = CountUpdatesByHost(await repository.GetInstallationPatchStatusesAsync(CancellationToken.None));
 
         Assert.Equal(2, result[host.Id]);
     }
 
     [Fact]
-    public async Task GetAppUpdateCountsByHostAsync_ExcludesAnApplicationThatIsAlreadyUpToDate()
+    public async Task GetInstallationPatchStatusesAsync_ExcludesAnApplicationThatIsAlreadyUpToDate()
     {
         await using var context = CreateContext();
         var host = new Host("host-1", "SERIAL-1", "macOS 15.0");
@@ -540,13 +551,13 @@ public class UpgradePathRepositoryTests
         await context.SaveChangesAsync();
         var repository = new UpgradePathRepository(context);
 
-        var result = await repository.GetAppUpdateCountsByHostAsync(CancellationToken.None);
+        var result = CountUpdatesByHost(await repository.GetInstallationPatchStatusesAsync(CancellationToken.None));
 
         Assert.Equal(1, result[host.Id]);
     }
 
     [Fact]
-    public async Task GetAppUpdateCountsByHostAsync_WithNoKnownLatestVersion_DoesNotCountTheApplication()
+    public async Task GetInstallationPatchStatusesAsync_WithNoKnownLatestVersion_DoesNotCountTheApplicationAsBehind()
     {
         await using var context = CreateContext();
         var host = new Host("host-1", "SERIAL-1", "macOS 15.0");
@@ -556,13 +567,13 @@ public class UpgradePathRepositoryTests
         await context.SaveChangesAsync();
         var repository = new UpgradePathRepository(context);
 
-        var result = await repository.GetAppUpdateCountsByHostAsync(CancellationToken.None);
+        var result = CountUpdatesByHost(await repository.GetInstallationPatchStatusesAsync(CancellationToken.None));
 
         Assert.Empty(result);
     }
 
     [Fact]
-    public async Task GetAppUpdateCountsByHostAsync_FallsBackToThePackageManagersEntry_WhenNoPlatformSpecificOneExists()
+    public async Task GetInstallationPatchStatusesAsync_FallsBackToThePackageManagersEntry_WhenNoPlatformSpecificOneExists()
     {
         await using var context = CreateContext();
         var host = new Host("host-1", "SERIAL-1", "macOS 15.0");
@@ -574,13 +585,13 @@ public class UpgradePathRepositoryTests
         await context.SaveChangesAsync();
         var repository = new UpgradePathRepository(context);
 
-        var result = await repository.GetAppUpdateCountsByHostAsync(CancellationToken.None);
+        var result = CountUpdatesByHost(await repository.GetInstallationPatchStatusesAsync(CancellationToken.None));
 
         Assert.Equal(1, result[host.Id]);
     }
 
     [Fact]
-    public async Task GetAppUpdateCountsByHostAsync_KeepsCountsSeparateAcrossHosts()
+    public async Task GetInstallationPatchStatusesAsync_KeepsCountsSeparateAcrossHosts()
     {
         await using var context = CreateContext();
         var hostWithUpdate = new Host("host-1", "SERIAL-1", "macOS 15.0");
@@ -593,7 +604,7 @@ public class UpgradePathRepositoryTests
         await context.SaveChangesAsync();
         var repository = new UpgradePathRepository(context);
 
-        var result = await repository.GetAppUpdateCountsByHostAsync(CancellationToken.None);
+        var result = CountUpdatesByHost(await repository.GetInstallationPatchStatusesAsync(CancellationToken.None));
 
         Assert.Equal(1, result[hostWithUpdate.Id]);
         Assert.False(result.ContainsKey(hostUpToDate.Id));
@@ -618,7 +629,7 @@ public class UpgradePathRepositoryTests
         await context.SaveChangesAsync();
         var repository = new UpgradePathRepository(context);
 
-        var counts = await repository.GetAppUpdateCountsByHostAsync(CancellationToken.None);
+        var counts = CountUpdatesByHost(await repository.GetInstallationPatchStatusesAsync(CancellationToken.None));
         var statuses = await repository.GetStatusesAsync("SERIAL-1", CancellationToken.None);
         var outdated = await repository.GetOutdatedStatusesAsync(CancellationToken.None);
         var summaries = await repository.GetSummariesAsync(CancellationToken.None);
@@ -650,7 +661,7 @@ public class UpgradePathRepositoryTests
         await context.SaveChangesAsync();
         var repository = new UpgradePathRepository(context);
 
-        var counts = await repository.GetAppUpdateCountsByHostAsync(CancellationToken.None);
+        var counts = CountUpdatesByHost(await repository.GetInstallationPatchStatusesAsync(CancellationToken.None));
         var statuses = await repository.GetStatusesAsync("SERIAL-1", CancellationToken.None);
         var summary = (await repository.GetSummariesAsync(CancellationToken.None)).Single(s => s.ApplicationName == "Firefox");
 
@@ -677,7 +688,7 @@ public class UpgradePathRepositoryTests
         await context.SaveChangesAsync();
         var repository = new UpgradePathRepository(context);
 
-        var counts = await repository.GetAppUpdateCountsByHostAsync(CancellationToken.None);
+        var counts = CountUpdatesByHost(await repository.GetInstallationPatchStatusesAsync(CancellationToken.None));
         var statuses = await repository.GetStatusesAsync("SERIAL-1", CancellationToken.None);
 
         Assert.Equal(1, counts[host.Id]);

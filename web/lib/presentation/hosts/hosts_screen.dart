@@ -61,6 +61,14 @@ class _HostsView extends StatelessWidget {
       const TableColumnSpec(label: 'Operating System', width: FlexColumnWidth(1.2)),
       const TableColumnSpec(label: 'OS Update', width: FlexColumnWidth(1.2)),
       const TableColumnSpec(label: 'App Updates', width: FixedColumnWidth(130), alignRight: true),
+      // CVEs a host is confirmed to have cleared versus everything else — see
+      // `HostSummary.unpatchedCveCount`/`patchedCveCount`. "Unpatched" is the wider bucket: an
+      // application or OS with no researched/confirmed-current verdict lands here rather than
+      // being dropped as a coverage gap, and every distribution package CVE does too, since
+      // apt/dnf packages are never patchable through Kintsugi and so never earn a "patched"
+      // verdict. These two need not sum to any other column here.
+      const TableColumnSpec(label: 'Unpatched CVEs', width: FixedColumnWidth(130), alignRight: true),
+      const TableColumnSpec(label: 'Patched CVEs', width: FixedColumnWidth(130), alignRight: true),
       const TableColumnSpec(label: 'IP Address', width: FlexColumnWidth(1)),
       // Measured rather than guessed, because "Decommissioned" is one fourteen-character word and
       // a chip cannot be made narrower than that: at a hand-set 140 it broke mid-word, the way
@@ -106,7 +114,7 @@ class _HostsView extends StatelessWidget {
           // with the text still in it.
           KintsugiTable(
             columns: columns,
-            minWidth: 1180,
+            minWidth: 1440,
             rows: [
               for (final host in visible) KintsugiTableRow(cells: _cells(context, host, state)),
             ],
@@ -142,6 +150,18 @@ class _HostsView extends StatelessWidget {
                 ),
               )
             : CountBadge(host.appUpdatesAvailableCount),
+        CountBadge(
+          host.unpatchedCveCount,
+          alert: host.unpatchedCveCount > 0,
+          tooltip: 'CVEs on ${host.hostname} not confirmed fixed: applications with an update '
+              'available or never researched, distribution packages (never patchable through '
+              'Kintsugi), and the OS when an update is pending or has never been checked',
+        ),
+        CountBadge(
+          host.patchedCveCount,
+          tooltip: 'CVEs on ${host.hostname} against applications or the OS confirmed already up '
+              'to date — patching would not remove these',
+        ),
         host.ipAddress == null ? const NoValue() : Text(host.ipAddress!),
         // Centred on the chip, not on the column. The cell aligns its child left under loose
         // constraints, so this Column is only as wide as its widest child — the chip — and
