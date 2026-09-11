@@ -453,7 +453,9 @@ fixed sentence for every cause and every table — "An error occurred while savi
 See the inner exception for details." — and these strings are the only account of a failed run
 anybody gets, on the Vulnerabilities settings screen. `InnermostMessage` unwraps it, which is what
 turned the duplicate-CVE failure above from three identical unactionable sentences into a named
-constraint.
+constraint. Every stage's problem goes through it, not only the two saves that prompted it — each
+stage wraps a `SaveChangesAsync` of its own, and a failed HTTP call keeps the connection error in
+its inner exception too. A new `problems.Add` belongs there as well.
 
 **The package list rides in `POST /api/applications` and must never sink it.**
 `RegisterApplicationsCommandValidator.MaxPackages` (10000) sits deliberately above each agent's
