@@ -136,6 +136,24 @@ void main() {
       expect(repository.queries.length, before + 1);
       expect(repository.lastQuery.cveSearch, 'CVE-2024-0001');
     });
+
+    testWidgets('do not drop one search because the other was typed in next', (tester) async {
+      // With a single shared timer, moving between the two boxes inside the debounce window
+      // cancelled the first field's pending request, and the second field's event carried no
+      // value for it — so the text still visible in the first box was never applied.
+      repository.findings = [_finding('CVE-2024-0001')];
+
+      await pumpScreen(tester);
+      final fields = find.byType(TextField);
+
+      await tester.enterText(fields.first, 'CVE-2021');
+      await tester.pump(const Duration(milliseconds: 100));
+      await tester.enterText(fields.last, 'openssl');
+      await tester.pumpAndSettle(const Duration(milliseconds: 500));
+
+      expect(repository.lastQuery.cveSearch, 'CVE-2021');
+      expect(repository.lastQuery.subjectSearch, 'openssl');
+    });
   });
 
   group('the page', () {
@@ -198,8 +216,11 @@ void main() {
       expect(repository.lastQuery.hasFilters, isFalse);
     });
 
-    testWidgets('is what an empty filtered table points at', (tester) async {
-      // Three quite different empty tables, and only this one has a way out — so it names it.
+    testWidgets('is still on screen when the filters have emptied the table', (tester) async {
+      // The defect this is here for: the empty state replaced the whole table, and the toolbar
+      // holding Clear Filters went with it — so the message saying "clear them from the toolbar
+      // above" pointed at a control that was no longer drawn, and reloading the page was the
+      // only way back.
       repository.findings = [_finding('CVE-2024-0001')];
 
       await pumpScreen(tester);
@@ -212,6 +233,31 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.textContaining('No CVE matches these filters'), findsOneWidget);
+      expect(find.widgetWithText(SecondaryButton, 'Clear Filters'.toUpperCase()), findsOneWidget);
+
+      repository.findings = [_finding('CVE-2024-0001')];
+      repository.total = 1;
+      await tester.tap(find.widgetWithText(SecondaryButton, 'Clear Filters'.toUpperCase()));
+      await tester.pumpAndSettle();
+
+      expect(find.text('CVE-2024-0001'), findsOneWidget);
+    });
+
+    testWidgets('empties the search boxes as well as the query', (tester) async {
+      // SearchField seeds its controller once, so clearing the filters used to leave the typed
+      // text sitting in the box claiming a filter that was no longer applied.
+      repository.findings = [_finding('CVE-2024-0001')];
+
+      await pumpScreen(tester);
+      await tester.enterText(find.byType(TextField).first, 'CVE-2021');
+      await tester.pumpAndSettle(const Duration(milliseconds: 500));
+      expect(repository.lastQuery.cveSearch, 'CVE-2021');
+
+      await tester.tap(find.widgetWithText(SecondaryButton, 'Clear Filters'.toUpperCase()));
+      await tester.pumpAndSettle();
+
+      expect(repository.lastQuery.cveSearch, isEmpty);
+      expect(find.text('CVE-2021'), findsNothing);
     });
   });
 }

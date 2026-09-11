@@ -89,6 +89,22 @@ class SearchField extends StatefulWidget {
 class _SearchFieldState extends State<SearchField> {
   late final _controller = TextEditingController(text: widget.value);
 
+  /// Takes a value the field did not type itself — Clear Filters, or a filter restored from a
+  /// deep link. Without this the controller is seeded once and never again, so clearing the
+  /// filters emptied the query and left the typed text sitting in the box, claiming a filter
+  /// that was no longer applied.
+  ///
+  /// Guarded on the controller's own text as well as on the old value, because the CVE Reporting
+  /// screen's searches are debounced round trips: the value coming back is the one that was
+  /// typed, and assigning it again would move the cursor to the end mid-word.
+  @override
+  void didUpdateWidget(SearchField oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.value != oldWidget.value && widget.value != _controller.text) {
+      _controller.text = widget.value;
+    }
+  }
+
   @override
   void dispose() {
     _controller.dispose();

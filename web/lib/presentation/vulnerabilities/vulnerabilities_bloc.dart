@@ -165,7 +165,11 @@ class VulnerabilitiesBloc extends Bloc<VulnerabilitiesEvent, VulnerabilitiesStat
   /// come back wins, which is not necessarily the last one sent.
   static const _searchDebounce = Duration(milliseconds: 350);
 
-  Timer? _debounce;
+  /// One per field, not one shared. With a single timer, typing in CVE and then moving to
+  /// Affects inside the debounce window cancelled the CVE timer, and the event the second field
+  /// fired carried no CVE value — so `reset` fell back to the last *applied* one and the text
+  /// still sitting in the first box was silently dropped.
+  final Map<String, Timer> _debounces = {};
 
   /// Which request is current. A slow page-one answer arriving after a fast page-two answer would
   /// otherwise overwrite it, leaving the table showing rows the paginator disagrees with.
@@ -175,16 +179,30 @@ class VulnerabilitiesBloc extends Bloc<VulnerabilitiesEvent, VulnerabilitiesStat
   /// into one request. Public because debouncing belongs with the bloc that issues the request,
   /// not spread across two header widgets.
   void searchChanged({String? cveSearch, String? subjectSearch}) {
-    _debounce?.cancel();
-    _debounce = Timer(
-      _searchDebounce,
-      () => add(VulnerabilitiesSearchChanged(cveSearch: cveSearch, subjectSearch: subjectSearch)),
-    );
+    if (cveSearch != null) {
+      _schedule('cve', VulnerabilitiesSearchChanged(cveSearch: cveSearch));
+    }
+
+    if (subjectSearch != null) {
+      _schedule('subject', VulnerabilitiesSearchChanged(subjectSearch: subjectSearch));
+    }
+  }
+
+  void _schedule(String field, VulnerabilitiesSearchChanged event) {
+    _debounces.remove(field)?.cancel();
+    _debounces[field] = Timer(_searchDebounce, () {
+      _debounces.remove(field);
+      add(event);
+    });
   }
 
   @override
   Future<void> close() {
-    _debounce?.cancel();
+    for (final timer in _debounces.values) {
+      timer.cancel();
+    }
+
+    _debounces.clear();
     return super.close();
   }
 

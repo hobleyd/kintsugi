@@ -66,8 +66,13 @@ class _VulnerabilitiesView extends StatelessWidget {
                 const SizedBox(height: 12),
                 if (state.loading)
                   const Padding(padding: EdgeInsets.all(24), child: LinearProgressIndicator())
-                else if (overview.findings.isEmpty)
-                  EmptyPanel(_emptyMessage(state, overview))
+                // A fleet with nothing assessed has no table to show. Anything else keeps one,
+                // empty or not: the filters and the Clear Filters button live in its toolbar, and
+                // replacing the table with a panel that says "clear them from the toolbar" takes
+                // away the only control that would.
+                else if (!overview.summary.hasAnyCoverage)
+                  const EmptyPanel('Nothing has been assessed yet. Confirm what an application is '
+                      'on the CVE Mapping screen, and the next run will check it.')
                 else ...[
                   _FindingsTable(findings: overview.findings, state: state),
                   _Paginator(overview: overview),
@@ -82,20 +87,16 @@ class _VulnerabilitiesView extends StatelessWidget {
 
 /// What an empty table means, which is three quite different things.
 ///
-/// Nothing assessed, nothing found, and nothing *matching the filters* are not interchangeable —
-/// and the third is the only one with a way out, so it names it. Reporting the first as the
-/// second is the clean-bill-of-health failure this screen is built to refuse.
-String _emptyMessage(VulnerabilitiesState state, VulnerabilityOverview overview) {
-  if (!overview.summary.hasAnyCoverage) {
-    return 'Nothing has been assessed yet. Confirm what an application is on the CVE Mapping '
-        'screen, and the next run will check it.';
+/// Nothing assessed, nothing found, and nothing *matching the filters* are not interchangeable.
+/// The first is handled above, because it is the one case with no table at all; these two are
+/// rows inside the table, so the toolbar the third one points at is still on screen. Reporting
+/// any of them as another is the clean-bill-of-health failure this screen is built to refuse.
+String _emptyRowMessage(VulnerabilityQuery query) {
+  if (query.hasFilters) {
+    return 'No CVE matches these filters. Clear them from the toolbar above to see the rest.';
   }
 
-  if (state.query.hasFilters) {
-    return 'No CVE matches these filters. Clear them from the table’s toolbar to see the rest.';
-  }
-
-  return state.knownExploitedOnly
+  return query.knownExploitedOnly
       ? 'Nothing installed on this fleet is in CISA’s exploited catalogue.'
       : 'No published CVE matches any version this fleet has installed.';
 }
@@ -398,6 +399,11 @@ class _FindingsTable extends StatelessWidget {
         ),
       ],
       rows: [
+        if (findings.isEmpty)
+          KintsugiTableRow(
+            key: const ValueKey('no-matches'),
+            cells: [HintText(_emptyRowMessage(query))],
+          ),
         for (final finding in findings)
           KintsugiTableRow(
             key: ValueKey(finding.cveId),

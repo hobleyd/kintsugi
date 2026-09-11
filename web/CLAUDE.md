@@ -523,9 +523,20 @@ package findings before taking 100 of them. Three consequences that are easy to 
   filters; the paginator shows `filteredCount`. With a Platform filter on, 847 above a page of
   31 is both correct and unreadable unless one of them is labelled, so the paginator says
   "matching" and the segment does not.
-- **The search boxes debounce in the bloc, not in the widget.** Each is a round trip, and the
-  last answer back is not necessarily the last one sent — `VulnerabilitiesBloc` carries a
-  generation counter for that, so a slow page-one response cannot overwrite a fast page-two one.
+- **The search boxes debounce in the bloc, not in the widget, and one timer per field.** Each is
+  a round trip, and the last answer back is not necessarily the last one sent —
+  `VulnerabilitiesBloc` carries a generation counter for that, so a slow page-one response cannot
+  overwrite a fast page-two one. One *shared* timer is the subtler bug: moving between the two
+  boxes inside the debounce window cancels the first field's pending request, and the second
+  field's event carries nothing for it, so text still visible in the first box is never applied.
+- **An empty table keeps its table.** The filters and the Clear Filters button live in the
+  toolbar, so replacing the table with a panel that says "clear them from the toolbar above"
+  removes the only control that would — the empty message is a *row*, the way the mapping queue
+  does it, and only a fleet with nothing assessed at all gets a bare `EmptyPanel`.
+- **`SearchField` re-syncs its controller in `didUpdateWidget`.** It seeds the controller once,
+  so without that, Clear Filters emptied the query and left the typed text in the box claiming a
+  filter that was no longer applied. Guarded on the controller's own text as well as the old
+  value, or a debounced round trip moves the cursor to the end mid-word.
 
 **The Platform column is `PlatformBucket`'s OS buckets, not a second classifier.** "macOS" has to
 mean the same thing here as in the Applications screen's Platform column, so the server buckets
