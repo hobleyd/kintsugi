@@ -66,8 +66,9 @@ class _RemoteControlScreenState extends State<RemoteControlScreen> {
 
   /// Set when the browser refused a full-screen request, so the screen can offer the button rather
   /// than silently doing nothing. A screen session's automatic request refuses for one ordinary
-  /// reason — see [initState]; a shell session only ever asks from the toggle, which cannot be
-  /// refused, so this stays false there.
+  /// reason — see [initState]. A shell session only ever asks from the toggle, where the press
+  /// itself is the gesture the browser was waiting for, so this is set there only by a refusal with
+  /// some other cause: a permissions policy on the page, or a user agent configured to decline.
   bool _fullScreenRefused = false;
 
   @override
