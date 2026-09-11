@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
@@ -13,6 +15,7 @@ import '../../core/widgets/page_scaffold.dart';
 import '../../core/widgets/panel.dart';
 import '../../core/widgets/status_chip.dart';
 import '../../core/widgets/text_bits.dart';
+import '../../domain/entities/enums.dart';
 import '../../domain/entities/host.dart';
 import '../../domain/usecases/host_usecases.dart';
 import 'hosts_bloc.dart';
@@ -59,7 +62,18 @@ class _HostsView extends StatelessWidget {
       const TableColumnSpec(label: 'OS Update', width: FlexColumnWidth(1.2)),
       const TableColumnSpec(label: 'App Updates', width: FixedColumnWidth(130), alignRight: true),
       const TableColumnSpec(label: 'IP Address', width: FlexColumnWidth(1)),
-      const TableColumnSpec(label: 'Status', width: FixedColumnWidth(140)),
+      // Measured rather than guessed, because "Decommissioned" is one fourteen-character word and
+      // a chip cannot be made narrower than that: at a hand-set 140 it broke mid-word, the way
+      // the CVE Reporting table's Exploited column did. `KintsugiTable` floors a column at its
+      // *header* word only, so nothing else would have caught it.
+      TableColumnSpec(
+        label: 'Status',
+        width: TableColumnSpec.forContent(
+          HostStatus.values
+              .map((status) => StatusChip.widthFor(context, status.label))
+              .reduce(math.max),
+        ),
+      ),
       const TableColumnSpec(label: 'Last Seen', width: FlexColumnWidth(1)),
       // Three icons now (Connect, Terminal and Remove). The arithmetic is the reason this is not
       // still 150: three 40px buttons plus two 24px gaps is 168, which is more than the 126 that
