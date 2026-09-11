@@ -429,6 +429,32 @@ whose CVE already has a score costs nothing, and every fetch is cached in `osv_a
 permanently, so the expense shrinks each run. `OsvFetchesPerRun` bounds it because these are
 sequential where the batch query is not.
 
+**A CVE row is upserted once per OSV batch, because the save is once per batch.** This stage
+commits per batch where the NVD stage commits per pair, and `UpsertCveRowsAsync` finds an existing
+CVE with a *query* — which cannot see rows the current transaction has added and not yet saved. So
+upserting per package meant two packages in one batch sharing a CVE nobody had seen before each
+created a `Vulnerability` for it, and the second broke the unique index on `CveId`, taking the whole
+batch's save down. Not an edge case: the same source package at two installed versions is two
+triples in one ecosystem's batch sharing nearly all of its CVEs, and on a first run every CVE is
+new — it failed every batch of a real run. Keep the upsert at batch scope; the per-package loop
+below it only projects each package's own slice of what the batch already created.
+
+**A failed batch is detached, and that is the counterpart to keeping subjects tracked.**
+`DetachAssessedVulnerabilities` deliberately leaves assessments tracked so `RecordAssessment` on the
+next iteration is not mutating a detached object — right for the loop, wrong for a batch whose save
+has just failed, whose mutations would then be committed by the *next* batch's successful save.
+That would write a `MatchCount` for match rows `ReplacePackageMatchesAsync` had already deleted
+(`ExecuteDelete` commits on its own, outside the unit of work) and never re-inserted: a count with
+no findings behind it, which is the clean bill of health this whole feature exists to refuse. Hence
+`DetachPackageAssessments`, and hence a failed batch staying due for the next run.
+
+**A save failure is reported with its inner exception.** `DbUpdateException.Message` is the same
+fixed sentence for every cause and every table — "An error occurred while saving the entity changes.
+See the inner exception for details." — and these strings are the only account of a failed run
+anybody gets, on the Vulnerabilities settings screen. `InnermostMessage` unwraps it, which is what
+turned the duplicate-CVE failure above from three identical unactionable sentences into a named
+constraint.
+
 **The package list rides in `POST /api/applications` and must never sink it.**
 `RegisterApplicationsCommandValidator.MaxPackages` (10000) sits deliberately above each agent's
 `MAX_REPORTED_PACKAGES` (5000) — the same asymmetry `MaxDetailsLength` keeps against
