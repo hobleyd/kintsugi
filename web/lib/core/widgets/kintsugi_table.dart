@@ -23,6 +23,7 @@ class TableColumnSpec {
     this.alignRight = false,
     this.sortKey,
     this.filter,
+    this.headerContent,
   });
 
   final String label;
@@ -36,6 +37,11 @@ class TableColumnSpec {
   /// A control rendered under the header label — the search box and the two dropdowns the
   /// Applications table puts in its own header row, rather than in a toolbar above it.
   final Widget? filter;
+
+  /// Drawn *instead of* the label, for a column whose header is a control rather than a word: the
+  /// mapping queue's select-all checkbox. [label] is still what the column is floored at and what
+  /// a screen reader is given, so it must still be set — pass the action's name.
+  final Widget? headerContent;
 }
 
 /// Which column a table is sorted by, and which way.
@@ -285,6 +291,19 @@ class _HeaderCell extends StatelessWidget {
     final palette = context.palette;
     final sortable = column.sortKey != null && onSort != null;
     final active = sort != null && sort!.key == column.sortKey;
+
+    if (column.headerContent != null) {
+      return TableCell(
+        verticalAlignment: TableCellVerticalAlignment.top,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: _cellGutter, vertical: 14),
+          child: Align(
+            alignment: column.alignRight ? Alignment.centerRight : Alignment.centerLeft,
+            child: column.headerContent!,
+          ),
+        ),
+      );
+    }
 
     Widget label = Row(
       mainAxisSize: MainAxisSize.min,

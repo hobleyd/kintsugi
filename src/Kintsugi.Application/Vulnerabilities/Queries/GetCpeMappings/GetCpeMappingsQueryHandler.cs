@@ -73,6 +73,11 @@ public class GetCpeMappingsQueryHandler : IRequestHandler<GetCpeMappingsQuery, I
         {
             var isOs = mapping.SubjectKind == CpeSubjectKind.OperatingSystem;
 
+            // Computed per read rather than stored — see CpeConfidence for why a second copy of
+            // this would only fall out of step with the row it describes.
+            var confidence = CpeConfidence.Assess(
+                mapping.DisplayName, mapping.Vendor, mapping.Product, mapping.Status, mapping.SuggestionSource);
+
             var versions = isOs
                 ? osVersions.TryGetValue(mapping.SubjectKey, out var found) ? found.OrderBy(v => v).ToList() : new List<string>()
                 : versionsBySubject.TryGetValue(mapping.SubjectKey, out var installed) ? installed.ToList() : new List<string>();
@@ -96,7 +101,9 @@ public class GetCpeMappingsQueryHandler : IRequestHandler<GetCpeMappingsQuery, I
                 summary?.KnownExploitedCount ?? 0,
                 summary?.LastAssessedUtc,
                 summary?.LastError,
-                isOs ? osReasons.GetValueOrDefault(mapping.SubjectKey) : null));
+                isOs ? osReasons.GetValueOrDefault(mapping.SubjectKey) : null,
+                confidence.Level,
+                confidence.Reason));
         }
 
         // Most widely installed first, so the confirmations that buy the most coverage are the

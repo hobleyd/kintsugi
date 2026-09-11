@@ -3,7 +3,9 @@ using Microsoft.AspNetCore.Mvc;
 using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Application.Vulnerabilities;
 using Kintsugi.Application.Vulnerabilities.Commands.ConfirmCpeMapping;
+using Kintsugi.Application.Vulnerabilities.Commands.ConfirmCpeMappings;
 using Kintsugi.Application.Vulnerabilities.Commands.ResetCpeMapping;
+using Kintsugi.Application.Vulnerabilities.Commands.ResetCpeMappings;
 using Kintsugi.Application.Vulnerabilities.Commands.SetCpeMappingNotApplicable;
 using Kintsugi.Application.Vulnerabilities.Queries.GetCpeMappings;
 using Kintsugi.Application.Vulnerabilities.Queries.GetVulnerabilityOverview;
@@ -120,6 +122,31 @@ public class AdminVulnerabilitiesController : ControllerBase
         return NoContent();
     }
 
+    /// <summary>
+    /// Accepts what several subjects already propose, in one request — the queue's bulk Confirm.
+    /// </summary>
+    /// <remarks>
+    /// Its own route rather than the UI calling <see cref="Confirm"/> in a loop, and the reason is
+    /// NVD's rate limit: that route asks the dictionary whether the pair exists, which is right for
+    /// a value somebody has just typed and pointless for a stored suggestion that was checked
+    /// before it was written. Forty ticked rows would be forty NVD requests against an allowance of
+    /// five per thirty seconds, most of them failing. Answers 200 with what was applied and what
+    /// was skipped, never a partial failure the caller has to reassemble.
+    /// </remarks>
+    [HttpPost("mappings/confirm")]
+    [ProducesResponseType(typeof(BulkCpeMappingResultDto), StatusCodes.Status200OK)]
+    public async Task<ActionResult<BulkCpeMappingResultDto>> ConfirmMany(
+        [FromBody] BulkCpeMappingRequest request, CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(new ConfirmCpeMappingsCommand(request.Ids ?? Array.Empty<Guid>()), cancellationToken));
+
+    /// <summary>Returns several subjects to the mapping queue at once — the queue's bulk
+    /// Clear.</summary>
+    [HttpPost("mappings/reset")]
+    [ProducesResponseType(typeof(BulkCpeMappingResultDto), StatusCodes.Status200OK)]
+    public async Task<ActionResult<BulkCpeMappingResultDto>> ResetMany(
+        [FromBody] BulkCpeMappingRequest request, CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(new ResetCpeMappingsCommand(request.Ids ?? Array.Empty<Guid>()), cancellationToken));
+
     /// <summary>Records that a subject has no meaningful CPE, taking it out of the "not assessed"
     /// count — a decision rather than a gap.</summary>
     [HttpPost("mappings/{id:guid}/not-applicable")]
@@ -167,5 +194,9 @@ public class AdminVulnerabilitiesController : ControllerBase
 }
 
 public record ConfirmCpeMappingRequest(string Vendor, string Product);
+
+/// <summary>The selection a bulk Confirm or Clear applies to. Ids nothing matches are reported as
+/// skipped rather than failing the batch — the screen's list may be a few seconds old.</summary>
+public record BulkCpeMappingRequest(IReadOnlyList<Guid>? Ids);
 
 public record SetCpeMappingNotApplicableRequest(string? Notes);

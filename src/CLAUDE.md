@@ -288,6 +288,26 @@ line `VantaResourceBuilder` draws at severity, and the difference that makes thi
 acceptable is that "does `a:mozilla:firefox` name a real product" has an external authority to check
 against and "how dangerous is being out of date" does not.
 
+**Bulk confirmation deliberately does not re-ask the dictionary, and that is the only reason it is
+usable.** `ConfirmCpeMappingsCommand` accepts what each selected row already carries and makes no
+NVD call at all: a stored suggestion was checked before it was written, so re-asking would spend one
+request per ticked row against an allowance of five per thirty seconds to re-learn what this system
+established when it wrote the row. The single-row `ConfirmCpeMappingCommand` still asks, because
+there the pair may be something a reviewer has just typed — that is the check the bulk path is
+*not* skipping, and the distinction to keep if either route changes. It also carries each
+suggestion's own `CpeSuggestionSource` through rather than stamping it `Manual`: nobody typed
+anything, and the Confidence column reads that field. Rows with nothing proposed, rows already
+confirmed and ids that no longer exist come back in `BulkCpeMappingResultDto.Skipped`, by name — a
+bulk action that reports a number and not the rows behind it reads as a success.
+
+**`CpeConfidence` scores a proposal, and is computed on every read.** A function of the display
+name, the vendor and product and how they were arrived at — all already on the row — so persisting
+it would only create a second copy to fall out of step. The model is never asked how sure it is: a
+self-reported score has no external authority behind it, which is the same line
+`VantaResourceBuilder` draws at severity. What it compares is *whole words*, never substrings,
+because "slack" sits inside `slackware_linux` and "zoom" inside `zoomtext` — a containment test
+marks the two mappings this whole feature exists to prevent as near misses worth accepting.
+
 **Nothing is keyed on `InstalledApplication.Id`, and that is not incidental.**
 `RegisterApplicationsCommandHandler` deletes and recreates every installed-application row on each
 routine inventory report, so a mapping keyed on one would evaporate hourly and take a human's

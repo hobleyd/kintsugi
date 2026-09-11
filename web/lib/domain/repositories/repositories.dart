@@ -278,9 +278,20 @@ abstract interface class VulnerabilityRepository {
   /// here silently attributes another product's CVEs to this one.
   Future<void> confirmMapping({required String id, required String vendor, required String product});
 
+  /// Accepts what each of these subjects already proposes, in one request.
+  ///
+  /// Not a loop over [confirmMapping]: that route re-checks the pair against NVD's dictionary,
+  /// which is right for something a reviewer typed and, at five requests per thirty seconds, fatal
+  /// for forty ticked rows. The server skips the check for stored suggestions, which were checked
+  /// before they were written, and reports what it did not do.
+  Future<BulkMappingResult> confirmMappings(List<String> ids);
+
   Future<void> markMappingNotApplicable({required String id, String? notes});
 
   Future<void> resetMapping(String id);
+
+  /// Returns several subjects to the queue at once, discarding what each was matched against.
+  Future<BulkMappingResult> resetMappings(List<String> ids);
 
   Future<VulnerabilityRunStatus> readRunStatus();
 

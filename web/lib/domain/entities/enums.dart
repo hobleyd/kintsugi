@@ -225,6 +225,41 @@ enum CpeMappingStatus {
       };
 }
 
+/// How much the mapping queue's own evidence backs a proposed vendor and product. Computed by
+/// `CpeConfidence` on the server and never stored, so it moves the moment a mapping does. Ordinal
+/// on the wire; append only.
+enum CpeConfidence {
+  none,
+  low,
+  medium,
+  high;
+
+  String get label => switch (this) {
+        CpeConfidence.none => '—',
+        CpeConfidence.low => 'Low',
+        CpeConfidence.medium => 'Medium',
+        CpeConfidence.high => 'High',
+      };
+
+  /// How the Confidence column's own filter names each band.
+  String get filterLabel => switch (this) {
+        CpeConfidence.none => 'Nothing proposed',
+        CpeConfidence.low => 'Low confidence',
+        CpeConfidence.medium => 'Medium confidence',
+        CpeConfidence.high => 'High confidence',
+      };
+
+  /// Reuses the mapping-status colours rather than inventing a scale: high is the green a
+  /// confirmed row already has, low the red of a failed check, so the two columns read as one
+  /// picture instead of two palettes.
+  String get statusKey => switch (this) {
+        CpeConfidence.none => 'mapping-unmapped',
+        CpeConfidence.low => 'check-failed',
+        CpeConfidence.medium => 'mapping-suggested',
+        CpeConfidence.high => 'mapping-confirmed',
+      };
+}
+
 /// Mirrors `CpeSuggestionSource`. Ordinal on the wire; append only.
 enum CpeSuggestionSource {
   none,

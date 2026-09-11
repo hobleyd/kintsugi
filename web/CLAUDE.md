@@ -491,6 +491,41 @@ every button on the page. The screen says why the search results are candidates 
 answer — "slack" ranks Slackware Linux first — because a reviewer who takes the top hit on trust
 is the failure mode the whole review step exists to prevent.
 
+**The queue is one row per subject, and the row is the decision.** Ten columns — a selection
+checkbox, the application, its CPE, the vendor and product NVD matched, the confidence, the status,
+the host and CVE counts, and three action icons — because a reviewer draining a three-hundred-row
+backlog needs to compare rows, and this screen began as a stack of permanently-open panels where
+six subjects filled a display. Everything only the row being worked on needs — the dictionary
+search, the candidate list, the installed versions, the last error — opens under that row and
+closes again, one at a time, the way the Applications screen's instructions panel behaves. Every
+column carries a filter in its own header (`TableColumnSpec.filter`), and the header checkbox uses
+`TableColumnSpec.headerContent`, which exists for exactly this.
+
+**Rows are keyed by mapping id, and that is load-bearing.** `GetCpeMappingsQueryHandler` sorts
+suggested rows first, so confirming one moves it down the table; without `KintsugiTableRow.key` the
+open detail panel's `State` — three text editors — stays at the position instead of following the
+row, and a reviewer sees another subject's half-typed vendor under the row that just moved.
+
+**Select-all means "everything these filters leave", never everything in the queue**, and the bulk
+actions act on `state.actionableIds`, which is the ticked *visible* rows. A header checkbox that
+reached past a filter would confirm mappings nobody had read — which in this feature means
+attributing another product's CVEs to yours. The bulk result is reported with every skipped subject
+named: "12 of 40" and nothing else reads as a success, and the twenty-eight it passed over are
+precisely the ones that still need somebody.
+
+**The row's tick and the panel's Confirm are different actions.** The tick accepts the pair the row
+already carries, which the server confirms without asking NVD again — every stored suggestion was
+checked against the dictionary before it was written. The panel's button confirms what has just
+been typed, which is the path that re-checks. Bulk Confirm is the tick, forty times, for the same
+reason: `/mappings/confirm` exists because forty per-row confirms would be forty NVD requests
+against an allowance of five per thirty seconds.
+
+**The Confidence column is computed, not stored and not asked of the model.** `CpeConfidence` on
+the server scores the row from evidence anybody can re-derive — whether the reported name and the
+CPE share a whole word, and whether a human has already decided. Whole words, not substrings: 
+"slack" sits inside `slackware_linux` and "zoom" inside `zoomtext`, so a containment test would
+present both of this screen's canonical wrong answers as near misses.
+
 **A finding says which database answered it, and that is not decoration.** An application is
 matched by version range against NVD; a Linux distribution package is matched against its own
 distribution's advisories, which account for backported fixes. The two claims mean different

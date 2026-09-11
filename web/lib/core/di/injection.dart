@@ -149,6 +149,8 @@ void _registerUseCases() {
     ..registerSingleton(GetCpeMappings(vulnerabilities))
     ..registerSingleton(SearchCpeDictionary(vulnerabilities))
     ..registerSingleton(ConfirmCpeMapping(vulnerabilities))
+    ..registerSingleton(ConfirmCpeMappings(vulnerabilities))
+    ..registerSingleton(ResetCpeMappings(vulnerabilities))
     ..registerSingleton(MarkCpeMappingNotApplicable(vulnerabilities))
     ..registerSingleton(ResetCpeMapping(vulnerabilities))
     ..registerSingleton(GetVulnerabilityRunStatus(vulnerabilities))
