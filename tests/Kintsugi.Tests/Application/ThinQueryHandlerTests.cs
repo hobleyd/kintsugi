@@ -161,11 +161,17 @@ public class ThinQueryHandlerTests
     }
 
     [Fact]
-    public async Task GetHostsQueryHandler_CountsDistributionPackageCves_AsUnpatched()
+    public async Task GetHostsQueryHandler_SplitsDistributionPackageCves_ByTheHostsOwnOsUpdateStatus()
     {
-        var host = new Host("host-1", "SERIAL-1", "Ubuntu 22.04");
+        // Package CVEs have no upgrade path of their own to check, so they ride the host's own OS
+        // Update verdict — apt/dnf patches the OS and every package it shipped in one pull. Three
+        // hosts: OS update pending, OS confirmed current, and OS never checked.
+        var hostOsPending = new Host("host-1", "SERIAL-1", "Ubuntu 22.04", operatingSystemUpdateAvailable: true);
+        var hostOsCurrent = new Host("host-2", "SERIAL-2", "Ubuntu 22.04", operatingSystemUpdateAvailable: false);
+        var hostOsUnknown = new Host("host-3", "SERIAL-3", "Ubuntu 22.04");
         var repository = new Mock<IHostRepository>();
-        repository.Setup(r => r.GetAllAsync(It.IsAny<CancellationToken>())).ReturnsAsync(new[] { host });
+        repository.Setup(r => r.GetAllAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[] { hostOsPending, hostOsCurrent, hostOsUnknown });
         var upgradePathRepository = new Mock<IUpgradePathRepository>();
         upgradePathRepository.Setup(r => r.GetInstallationPatchStatusesAsync(It.IsAny<CancellationToken>()))
             .ReturnsAsync(Array.Empty<InstallationPatchStatus>());
@@ -179,15 +185,23 @@ public class ThinQueryHandlerTests
         var installedPackageRepository = new Mock<IInstalledPackageRepository>();
         installedPackageRepository.Setup(r => r.GetHostPackageTriplesAsync(
                 It.IsAny<IReadOnlyCollection<string>>(), It.IsAny<IReadOnlyCollection<string>>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(new[] { new HostPackageTriple(host.Id, new PackageTriple("Ubuntu:22.04", "openssl", "3.0.2-0ubuntu1.15")) });
+            .ReturnsAsync(new[]
+            {
+                new HostPackageTriple(hostOsPending.Id, new PackageTriple("Ubuntu:22.04", "openssl", "3.0.2-0ubuntu1.15")),
+                new HostPackageTriple(hostOsCurrent.Id, new PackageTriple("Ubuntu:22.04", "openssl", "3.0.2-0ubuntu1.15")),
+                new HostPackageTriple(hostOsUnknown.Id, new PackageTriple("Ubuntu:22.04", "openssl", "3.0.2-0ubuntu1.15")),
+            });
 
         var result = await new GetHostsQueryHandler(
                 repository.Object, upgradePathRepository.Object, vulnerabilityRepository.Object, installedPackageRepository.Object)
             .Handle(new GetHostsQuery(), CancellationToken.None);
 
-        var dto = Assert.Single(result);
-        Assert.Equal(1, dto.UnpatchedCveCount);
-        Assert.Equal(0, dto.PatchedCveCount);
+        Assert.Equal(1, result.Single(h => h.Id == hostOsPending.Id).UnpatchedCveCount);
+        Assert.Equal(0, result.Single(h => h.Id == hostOsPending.Id).PatchedCveCount);
+        Assert.Equal(0, result.Single(h => h.Id == hostOsCurrent.Id).UnpatchedCveCount);
+        Assert.Equal(1, result.Single(h => h.Id == hostOsCurrent.Id).PatchedCveCount);
+        Assert.Equal(1, result.Single(h => h.Id == hostOsUnknown.Id).UnpatchedCveCount);
+        Assert.Equal(0, result.Single(h => h.Id == hostOsUnknown.Id).PatchedCveCount);
     }
 
     [Fact]

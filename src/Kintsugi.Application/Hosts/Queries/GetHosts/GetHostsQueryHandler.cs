@@ -40,7 +40,7 @@ public class GetHostsQueryHandler : IRequestHandler<GetHostsQuery, IReadOnlyList
 
         AddApplicationCveCounts(patchStatuses, appCveMatches, unpatched, patched);
         AddOperatingSystemCveCounts(hosts, osCveMatches, unpatched, patched);
-        await AddPackageCveCountsAsync(packageCveMatches, unpatched, cancellationToken);
+        await AddPackageCveCountsAsync(hosts, packageCveMatches, unpatched, patched, cancellationToken);
 
         return hosts
             .Select(host => HostDto.FromEntity(
@@ -132,19 +132,27 @@ public class GetHostsQueryHandler : IRequestHandler<GetHostsQuery, IReadOnlyList
 
     /// <summary>
     /// The package sibling of <see cref="AddApplicationCveCounts"/>. A distribution package has
-    /// no patched state to offer at all — apt, dnf, zypper and pacman are deliberately outside
-    /// <c>PackageManagerCatalog</c> (see src/CLAUDE.md), so nothing here ever learns a newer
-    /// package version exists — every package CVE is therefore unpatched.
+    /// no upgrade path or latest-version of its own — apt, dnf, zypper and pacman are deliberately
+    /// outside <c>PackageManagerCatalog</c> (see src/CLAUDE.md) — but that does not mean no verdict
+    /// exists: apt/dnf patches the operating system *and every package it shipped* in one pull, the
+    /// same way <c>softwareupdate</c> does on macOS, so <see cref="Host.OperatingSystemUpdateAvailable"/>
+    /// already answers "is this package current" as surely as it answers that question for the OS
+    /// itself. Reusing it here is what stops a fully-patched Linux fleet — one whose distribution
+    /// simply has not backported a fix yet — from reading as entirely unpatched.
     /// </summary>
     private async Task AddPackageCveCountsAsync(
+        IReadOnlyList<Host> hosts,
         IReadOnlyList<PackageCveMatch> cveMatches,
         Dictionary<Guid, HashSet<string>> unpatched,
+        Dictionary<Guid, HashSet<string>> patched,
         CancellationToken cancellationToken)
     {
         if (cveMatches.Count == 0)
         {
             return;
         }
+
+        var osUpdateAvailableByHost = hosts.ToDictionary(h => h.Id, h => h.OperatingSystemUpdateAvailable);
 
         var cveIdsByTriple = cveMatches
             .GroupBy(m => new PackageTriple(m.Ecosystem, m.Name, m.Version))
@@ -157,10 +165,13 @@ public class GetHostsQueryHandler : IRequestHandler<GetHostsQuery, IReadOnlyList
 
         foreach (var hostPackage in hostPackages)
         {
-            if (cveIdsByTriple.TryGetValue(hostPackage.Triple, out var cveIds))
+            if (!cveIdsByTriple.TryGetValue(hostPackage.Triple, out var cveIds))
             {
-                UnionInto(unpatched, hostPackage.HostId, cveIds);
+                continue;
             }
+
+            var bucket = osUpdateAvailableByHost.GetValueOrDefault(hostPackage.HostId) == false ? patched : unpatched;
+            UnionInto(bucket, hostPackage.HostId, cveIds);
         }
     }
 

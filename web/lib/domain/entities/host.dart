@@ -48,14 +48,15 @@ class HostSummary extends Equatable {
   final int appUpdatesAvailableCount;
 
   /// CVEs on this host not confirmed fixed: applications with an update available or never
-  /// researched, distribution packages (never patchable through Kintsugi — apt/dnf are outside
-  /// its catalog), and the operating system when an update is pending or has never been checked.
-  /// Anything short of a confirmed-current verdict lands here rather than being dropped as a
-  /// coverage gap.
+  /// researched, and the operating system — and every distribution package it shipped, which has
+  /// no upgrade path of its own but is patched by the same OS update — when an OS update is
+  /// pending or has never been checked. Anything short of a confirmed-current verdict lands here
+  /// rather than being dropped as a coverage gap.
   final int unpatchedCveCount;
 
-  /// CVEs matched against an application or operating system confirmed already current — a CVE
-  /// the latest known version does not fix, rather than one patching would clear.
+  /// CVEs matched against an application, or against the OS and its packages when no OS update is
+  /// pending, confirmed already current — a CVE the latest known version does not fix, rather than
+  /// one patching would clear.
   final int patchedCveCount;
 
   /// True once removal has been requested and the agent has not yet confirmed it uninstalled

@@ -63,10 +63,11 @@ class _HostsView extends StatelessWidget {
       const TableColumnSpec(label: 'App Updates', width: FixedColumnWidth(130), alignRight: true),
       // CVEs a host is confirmed to have cleared versus everything else — see
       // `HostSummary.unpatchedCveCount`/`patchedCveCount`. "Unpatched" is the wider bucket: an
-      // application or OS with no researched/confirmed-current verdict lands here rather than
-      // being dropped as a coverage gap, and every distribution package CVE does too, since
-      // apt/dnf packages are never patchable through Kintsugi and so never earn a "patched"
-      // verdict. These two need not sum to any other column here.
+      // application with no researched/confirmed-current verdict lands here rather than being
+      // dropped as a coverage gap. A distribution package has no upgrade path of its own, but
+      // apt/dnf patches the OS and every package it shipped in one pull, so a package's verdict
+      // is the host's own OS Update column — current there means every package counts as
+      // patched too, not just the OS itself. These two need not sum to any other column here.
       const TableColumnSpec(label: 'Unpatched CVEs', width: FixedColumnWidth(130), alignRight: true),
       const TableColumnSpec(label: 'Patched CVEs', width: FixedColumnWidth(130), alignRight: true),
       const TableColumnSpec(label: 'IP Address', width: FlexColumnWidth(1)),
@@ -154,13 +155,14 @@ class _HostsView extends StatelessWidget {
           host.unpatchedCveCount,
           alert: host.unpatchedCveCount > 0,
           tooltip: 'CVEs on ${host.hostname} not confirmed fixed: applications with an update '
-              'available or never researched, distribution packages (never patchable through '
-              'Kintsugi), and the OS when an update is pending or has never been checked',
+              'available or never researched, and the OS (and every distribution package it '
+              'shipped) when an OS update is pending or has never been checked',
         ),
         CountBadge(
           host.patchedCveCount,
-          tooltip: 'CVEs on ${host.hostname} against applications or the OS confirmed already up '
-              'to date — patching would not remove these',
+          tooltip: 'CVEs on ${host.hostname} against applications, or against the OS and its '
+              'packages when no OS update is pending, confirmed already up to date — patching '
+              'would not remove these',
         ),
         host.ipAddress == null ? const NoValue() : Text(host.ipAddress!),
         // Centred on the chip, not on the column. The cell aligns its child left under loose
