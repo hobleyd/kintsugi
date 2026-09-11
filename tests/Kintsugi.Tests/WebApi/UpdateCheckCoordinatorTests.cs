@@ -71,6 +71,28 @@ public class UpdateCheckCoordinatorTests
     }
 
     [Fact]
+    public void ReportItem_StopsListingReasonsAtACeiling_AndSaysHowManyItLeftOut()
+    {
+        var coordinator = new UpdateCheckCoordinator();
+        coordinator.TryRequestStart();
+
+        for (var i = 0; i < 60; i++)
+        {
+            coordinator.ReportItem(
+                new($"App{i}", "pm:Homebrew", Success: false, VersionChanged: false, Note: "No update script to check.", Skipped: true));
+        }
+
+        var status = coordinator.GetStatus();
+
+        // The counts still cover every row; only the listing is bounded, and it says so rather
+        // than stopping at fifty as though fifty were all there was.
+        Assert.Equal(60, status.Skipped);
+        Assert.Equal(51, status.Notes.Count);
+        Assert.StartsWith("App49 (pm:Homebrew)", status.Notes[49]);
+        Assert.Equal("...and 10 more not listed. The counts above cover all of them.", status.Notes[50]);
+    }
+
+    [Fact]
     public void TryRequestStart_ClearsTheCountsAndNotesOfThePreviousRun()
     {
         var coordinator = new UpdateCheckCoordinator();
@@ -78,6 +100,7 @@ public class UpdateCheckCoordinatorTests
         coordinator.ReportItem(Skipped());
         coordinator.ReportItem(Failed("Unexpected error: subprocess timed out"));
         coordinator.Complete();
+
 
         Assert.True(coordinator.TryRequestStart());
         var status = coordinator.GetStatus();

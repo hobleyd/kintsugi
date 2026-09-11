@@ -11,6 +11,19 @@ namespace Kintsugi.WebApi.UpgradePathScanning;
 /// </summary>
 public class UpdateCheckCoordinator : IUpdateCheckCoordinator
 {
+    /// <summary>
+    /// How many per-row reasons are listed before the rest are reported as a count.
+    /// </summary>
+    /// <remarks>
+    /// A run targets every script row in the database, where the scan this is modelled on works
+    /// through applications and skips everything already resolved — so one broken bucket here can
+    /// produce a note per row, and the status is polled every three seconds for as long as the run
+    /// lasts. Capped rather than left unbounded for that reason, and the overflow is *stated* (see
+    /// <see cref="GetStatus"/>) rather than silently dropped: a list that stops at fifty with
+    /// nothing to say so reads as fifty being all there was.
+    /// </remarks>
+    private const int MaxNotes = 50;
+
     private readonly SemaphoreSlim _signal = new(0, 1);
     private readonly object _lock = new();
 
@@ -25,6 +38,7 @@ public class UpdateCheckCoordinator : IUpdateCheckCoordinator
     private DateTimeOffset? _completedUtc;
     private string? _faultReason;
     private readonly List<string> _notes = new();
+    private int _unlistedNotes;
 
     public bool TryRequestStart()
     {
@@ -38,6 +52,7 @@ public class UpdateCheckCoordinator : IUpdateCheckCoordinator
             _running = true;
             _total = _completed = _updated = _unchanged = _failed = _skipped = 0;
             _notes.Clear();
+            _unlistedNotes = 0;
             _faultReason = null;
             _startedUtc = DateTimeOffset.UtcNow;
             _completedUtc = null;
@@ -89,7 +104,14 @@ public class UpdateCheckCoordinator : IUpdateCheckCoordinator
             // and would not find, since neither a skip nor a failure writes anything to the row.
             if (!string.IsNullOrWhiteSpace(result.Note))
             {
-                _notes.Add($"{result.ApplicationName} ({result.Platform}): {result.Note}");
+                if (_notes.Count < MaxNotes)
+                {
+                    _notes.Add($"{result.ApplicationName} ({result.Platform}): {result.Note}");
+                }
+                else
+                {
+                    _unlistedNotes++;
+                }
             }
         }
     }
@@ -117,9 +139,15 @@ public class UpdateCheckCoordinator : IUpdateCheckCoordinator
     {
         lock (_lock)
         {
+            var notes = _notes.ToList();
+            if (_unlistedNotes > 0)
+            {
+                notes.Add($"...and {_unlistedNotes} more not listed. The counts above cover all of them.");
+            }
+
             return new UpdateCheckStatusDto(
                 _running, _total, _completed, _updated, _unchanged, _failed, _skipped,
-                _startedUtc, _completedUtc, _faultReason, _notes.ToList());
+                _startedUtc, _completedUtc, _faultReason, notes);
         }
     }
 }
