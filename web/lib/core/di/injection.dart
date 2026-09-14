@@ -23,6 +23,7 @@ import '../../domain/usecases/settings_usecases.dart';
 import '../../domain/usecases/upgrade_path_usecases.dart';
 import '../../domain/usecases/upgrade_script_usecases.dart';
 import '../../domain/usecases/vulnerability_usecases.dart';
+import '../diagnostics/diagnostics_log.dart';
 import '../network/api_client.dart';
 import '../network/unauthorized_notifier.dart';
 import '../platform/browser_full_screen.dart';
@@ -50,6 +51,10 @@ Future<void> configureDependencies() async {
     ApiClient(unauthorizedNotifier: locator<UnauthorizedNotifier>()),
   );
   locator.registerSingleton<PageNavigator>(const BrowserPageNavigator());
+  // One per page load, deliberately: the panel it feeds is the shell's, and its whole purpose is
+  // to outlive the screen that recorded into it. A per-screen instance would be the alert box it
+  // replaces. See DiagnosticsLog.
+  locator.registerSingleton<DiagnosticsLog>(DiagnosticsLog());
   // A singleton because it holds one broadcast stream over one document-level listener: a
   // per-screen instance would add a listener per remote-control session and never remove it.
   locator.registerSingleton<FullScreenController>(BrowserFullScreenController());

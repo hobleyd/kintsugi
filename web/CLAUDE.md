@@ -326,6 +326,63 @@ middleware used to be. The OIDC provider is still configured at runtime from the
 (`DynamicOpenIdConnectOptionsConfigurator`), not at startup.
 
 
+## The diagnostics panel: error and log output outlives the screen that produced it
+
+**A run's output is recorded into `core/diagnostics/diagnostics_log.dart` and drawn by the shell,
+not by the screen.** "Check for Updates" answers with counts plus a line per row it skipped or
+could not check — and the next thing anybody does with that list is open Upgrade Scripts, or
+Failed Updates, or one host under Hosts, every one of which used to destroy it. An alert above a
+table cannot survive a navigation, and this output is read *while* navigating. So `DiagnosticsLog`
+is a singleton registered in `injection.dart`, handed to `AppShell` from the router, and the panel
+is a child of the `ShellRoute`: navigating rebuilds the page beside it and nothing else. Nothing
+closes it but the person who opened it.
+
+**It sits between the sidebar and the page, and takes width from the page rather than covering
+it.** Both halves are forced rather than chosen. Over the left edge it would cover the navigation,
+which is the one thing a panel meant to be read across screens must not do; floating over the page
+it would permanently hide part of what it is being read alongside. The cost is real and worth
+knowing before you widen it: the Applications table floors at `minWidth: 1100`, the sidebar takes
+240 and the panel 320, so on a 1512-point display that table scrolls horizontally inside its own
+panel while the diagnostics panel is open — `KintsugiTable`'s `Scrollbar` is what makes that
+discoverable, and on web a scrollbar is not drawn until something scrolls. That is the same
+arithmetic the table's own `minWidth` comment describes; 320 rather than a roomier 380 is the whole
+of the mitigation.
+
+**A `ChangeNotifier` in `core/`, not a bloc**, for the same reason `UnauthorizedNotifier` and
+`FullScreenController` are plain classes there: this is not one screen's state machine, it is a
+cross-cutting thing many screens write to and one widget draws. Writers reach it through
+`DiagnosticsLogScope.maybeOf(context)`, which **returns null rather than throwing** — a widget test
+pumps one screen with no shell around it, which is how nearly every test in `test/presentation` is
+written, and a screen that demanded this would make every one of them register something first.
+Null means "nobody is collecting", and `RunProgressView` answers it by listing the notes inline the
+way it always did, so no test loses its subject and no output is ever dropped.
+
+**Record from a listener, never from a builder.** `record` calls `notifyListeners`, and a notifier
+fired during a build is an assertion in debug and a rebuild loop without one. `RunProgressView`
+widens its `listenWhen` to cover both transitions that produce output — a run that finished and a
+run that could not be started — and does all of its recording there.
+
+**Auto-open has exactly one exception, and it is the whole policy**: a plain success with nothing
+listed does not open the panel. It is still recorded, and the sidebar's Diagnostics button — which
+appears once anything has been recorded — brings it back. A run that worked and had nothing to say
+has already said so above the table, and sliding a panel over that table to repeat it would make
+the feature something to be endured.
+
+**What is wired, and what is not.** Only `RunProgressView` records, which covers both Applications
+runs — "Find Upgrade Paths" and "Check for Updates". Every other screen still shows its own
+`AlertBox` and nothing else; the facility is one `record` call away for any of them, and the
+candidates are the Vulnerabilities assessment run, the per-row check notice, and the Clients
+refresh. Two limits to state rather than discover:
+
+- **It shows entries, not a live tail.** The server exposes counts and a bounded note list over
+  `GET`-polled status, not a line-by-line log, so the panel gains an entry when a run *finishes*.
+  A running job's progress is still the bar on the screen that started it.
+- **A run abandoned mid-flight records nothing.** `BackgroundRunBloc` belongs to the
+  `/applications` route, so navigating away stops its polling; if the run finishes while you are
+  elsewhere, no entry appears. Coming back re-adopts a run still in progress —
+  `RunStatusRequested(adopt: true)` — and that one does record. Closing the gap properly means
+  hoisting the two run blocs above the `ShellRoute`, which changes who owns them.
+
 ## Applications is a menu, and Failed Updates is the second screen under it
 
 `/applications` is still the installed-applications view and **must stay there**: the Hosts screen's

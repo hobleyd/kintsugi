@@ -21,6 +21,7 @@ import '../../presentation/upgrade_scripts/upgrade_scripts_screen.dart';
 import '../../presentation/vulnerabilities/cve_mapping_screen.dart';
 import '../../presentation/vulnerabilities/cve_reporting_screen.dart';
 import '../di/locator.dart';
+import '../diagnostics/diagnostics_log.dart';
 import '../platform/full_screen.dart';
 import 'bloc_listenable.dart';
 
@@ -125,6 +126,11 @@ GoRouter createRouter(SessionBloc sessionBloc) {
           // So the sidebar steps aside for the remote-control viewer's full-screen mode. Passed
           // here rather than looked up inside the shell so a widget test can pump it without one.
           fullScreen: locator<FullScreenController>(),
+          // Resolved here rather than inside the shell so a widget test can pump one without
+          // registering anything — the same arrangement `fullScreen` uses, and for the same
+          // reason. The ShellRoute keeps this element across navigations, which is what makes the
+          // panel survive them.
+          diagnostics: locator<DiagnosticsLog>(),
           child: child,
         ),
         routes: [

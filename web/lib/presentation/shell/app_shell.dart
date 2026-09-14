@@ -3,6 +3,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/di/locator.dart';
+import '../../core/diagnostics/diagnostics_log.dart';
 import '../../core/router/app_router.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/theme/kintsugi_palette.dart';
@@ -10,6 +11,7 @@ import '../../core/platform/full_screen.dart';
 import '../../core/theme/theme_cubit.dart';
 import '../../domain/usecases/server_info_usecases.dart';
 import '../session/session_bloc.dart';
+import 'diagnostics_panel.dart';
 import 'server_version_cubit.dart';
 
 /// The sidebar and the page beside it — what `_Layout.cshtml` was.
@@ -18,10 +20,28 @@ import 'server_version_cubit.dart';
 /// rebuilds only the page: the sidebar keeps its scroll position and does not flicker, which is
 /// most of what "no full page refresh" means in practice.
 class AppShell extends StatelessWidget {
-  const AppShell({super.key, required this.location, required this.child, this.fullScreen});
+  const AppShell({
+    super.key,
+    required this.location,
+    required this.child,
+    this.fullScreen,
+    this.diagnostics,
+  });
 
   final String location;
   final Widget child;
+
+  /// The application-wide record of error and log output, and the panel that shows it.
+  ///
+  /// It belongs to the shell rather than to any screen because that is the whole point of it: the
+  /// output of "Check for Updates" is read *while* navigating to the screens it names, and a
+  /// screen-scoped alert is destroyed by the first of those navigations. The [ShellRoute] keeps
+  /// this element across them, so the panel neither closes nor reopens — see `app_router.dart`.
+  ///
+  /// Nullable, and passed in rather than looked up, for the same reason [fullScreen] is: null is
+  /// "nobody is collecting", which is what a widget test pumping this shell — or pumping one
+  /// screen with no shell at all — wants without having to register anything.
+  final DiagnosticsLog? diagnostics;
 
   /// Watched so the sidebar gets out of the way in full screen — which one screen asks for, the
   /// remote-control viewer, where the host's desktop is the whole point of the page and 240px of
@@ -47,25 +67,40 @@ class AppShell extends StatelessWidget {
     );
   }
 
-  Widget _build(BuildContext context, {required bool withSidebar}) => BlocProvider(
-        // Provided here rather than in main.dart beside SessionBloc: the route it reads is gated,
-        // so it must not be asked for until the router has decided this browser may use the app —
-        // which is exactly when this shell is first built. The ShellRoute keeps this element
-        // across navigations, so the version is fetched once per page load, not once per screen.
-        create: (_) => ServerVersionCubit(locator<GetServerVersion>()),
-        child: Scaffold(
-          body: DecoratedBox(
-            decoration: BoxDecoration(gradient: _backgroundWash(context)),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                if (withSidebar) _Sidebar(location: location),
-                Expanded(child: child),
-              ],
-            ),
+  Widget _build(BuildContext context, {required bool withSidebar}) {
+    final diagnostics = this.diagnostics;
+
+    final scaffold = BlocProvider(
+      // Provided here rather than in main.dart beside SessionBloc: the route it reads is gated,
+      // so it must not be asked for until the router has decided this browser may use the app —
+      // which is exactly when this shell is first built. The ShellRoute keeps this element
+      // across navigations, so the version is fetched once per page load, not once per screen.
+      create: (_) => ServerVersionCubit(locator<GetServerVersion>()),
+      child: Scaffold(
+        body: DecoratedBox(
+          decoration: BoxDecoration(gradient: _backgroundWash(context)),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (withSidebar) _Sidebar(location: location, diagnostics: diagnostics),
+              // Inside the sidebar rather than over it, because the panel's whole reason to exist
+              // is being read while navigating between the screens its output names — so it must
+              // not cover the navigation. Suppressed in full screen along with the sidebar: the
+              // remote viewer wants the window.
+              if (withSidebar && diagnostics != null) DiagnosticsPanel(log: diagnostics),
+              Expanded(child: child),
+            ],
           ),
         ),
-      );
+      ),
+    );
+
+    if (diagnostics == null) return scaffold;
+
+    // Above the page rather than around the panel: this is how a *screen* reaches the log to
+    // record into it, and screens are the `child` here. See `DiagnosticsLogScope.maybeOf`.
+    return DiagnosticsLogScope(log: diagnostics, child: scaffold);
+  }
 
   /// The two radial washes the body carried — accent from the top, pink from the bottom right.
   /// The 42px grid the stylesheet drew with repeating linear gradients is left out: at Flutter's
@@ -86,9 +121,13 @@ class AppShell extends StatelessWidget {
 }
 
 class _Sidebar extends StatelessWidget {
-  const _Sidebar({required this.location});
+  const _Sidebar({required this.location, this.diagnostics});
 
   final String location;
+
+  /// Null when nothing is collecting output, which is what a widget test pumping the shell gets —
+  /// the footer simply has no Diagnostics button in that case.
+  final DiagnosticsLog? diagnostics;
 
   /// 240px, as it was — sized so "Authentication" fits on one line in tracked-out Orbitron. It
   /// overflowed at the 210px this started as.
@@ -244,7 +283,7 @@ class _Sidebar extends StatelessWidget {
                   ],
                 ),
                 const Expanded(child: SizedBox(height: 24)),
-                const _SidebarFooter(),
+                _SidebarFooter(diagnostics: diagnostics),
               ],
             ),
           ),
@@ -429,15 +468,18 @@ class _HoverTargetState extends State<_HoverTarget> {
       );
 }
 
-/// The theme toggle and, when there is one, the signed-in account.
+/// The diagnostics toggle, the theme toggle and, when there is one, the signed-in account.
 class _SidebarFooter extends StatelessWidget {
-  const _SidebarFooter();
+  const _SidebarFooter({this.diagnostics});
+
+  final DiagnosticsLog? diagnostics;
 
   @override
   Widget build(BuildContext context) {
     final palette = context.palette;
     final session = context.watch<SessionBloc>().state;
     final user = session is SessionReady && session.session.signedIn ? session.session.userName : null;
+    final diagnostics = this.diagnostics;
 
     return Container(
       padding: const EdgeInsets.only(top: 16),
@@ -445,6 +487,24 @@ class _SidebarFooter extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // The way back to output that has been hidden. Without it, closing the panel would be
+          // the one irreversible action in the app: the entries survive, and nothing else on any
+          // screen would offer to show them again.
+          if (diagnostics != null)
+            AnimatedBuilder(
+              animation: diagnostics,
+              builder: (context, _) => diagnostics.isEmpty
+                  ? const SizedBox.shrink()
+                  : Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: _FooterButton(
+                        icon:
+                            diagnostics.isOpen ? Icons.receipt_long : Icons.receipt_long_outlined,
+                        label: 'Diagnostics (${diagnostics.count})',
+                        onTap: diagnostics.toggle,
+                      ),
+                    ),
+            ),
           _FooterButton(
             icon: context.watch<ThemeCubit>().state == ThemeMode.light
                 ? Icons.dark_mode_outlined

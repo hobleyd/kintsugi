@@ -112,8 +112,18 @@ class _ApplicationsView extends StatelessWidget {
             _UpdateCheckButton(),
           ],
         ),
-        RunProgressView<UpgradePathScanBloc>(onFinished: reload),
-        RunProgressView<UpdateCheckBloc>(onFinished: reload),
+        // The titles are the buttons' own labels, because the panel these are recorded into is
+        // read from other screens and "the run that failed" has to be identifiable there.
+        RunProgressView<UpgradePathScanBloc>(
+          title: 'Find Upgrade Paths',
+          source: 'Installed Applications',
+          onFinished: reload,
+        ),
+        RunProgressView<UpdateCheckBloc>(
+          title: 'Check for Updates',
+          source: 'Installed Applications',
+          onFinished: reload,
+        ),
         Text(
           '${state.overview.totalApplicationCount} distinct application(s) reported across all hosts',
           style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: context.palette.muted),
