@@ -68,8 +68,8 @@ class _HostsView extends StatelessWidget {
       // apt/dnf patches the OS and every package it shipped in one pull, so a package's verdict
       // is the host's own OS Update column — current there means every package counts as
       // patched too, not just the OS itself. These two need not sum to any other column here.
-      const TableColumnSpec(label: 'Unpatched CVEs', width: FixedColumnWidth(130), alignRight: true),
-      const TableColumnSpec(label: 'Patched CVEs', width: FixedColumnWidth(130), alignRight: true),
+      const TableColumnSpec(label: 'CVEs (patchable)', width: FixedColumnWidth(130), alignRight: true),
+      const TableColumnSpec(label: 'CVEs (unpatchable)', width: FixedColumnWidth(130), alignRight: true),
       const TableColumnSpec(label: 'IP Address', width: FlexColumnWidth(1)),
       // Measured rather than guessed, because "Decommissioned" is one fourteen-character word and
       // a chip cannot be made narrower than that: at a hand-set 140 it broke mid-word, the way
