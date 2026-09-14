@@ -25,12 +25,23 @@ import 'widgets/script_dialog.dart';
 /// Every application reported across the fleet, with its upgrade status inline.
 /// What `Pages/Applications.cshtml` was, and the busiest screen in the product.
 class ApplicationsScreen extends StatelessWidget {
-  const ApplicationsScreen({super.key, this.initialStatusKey, this.initialHostName});
+  const ApplicationsScreen({
+    super.key,
+    this.initialStatusKey,
+    this.initialHostName,
+    this.initialSearch,
+  });
 
   /// Deep-link filters, read from the query string exactly as the page read them off
-  /// `window.location.search`. The Hosts screen's "N app updates" badge links here with both set.
+  /// `window.location.search`. The Hosts screen's "N app updates" badge links here with the first
+  /// two set; the diagnostics panel's note lines link here with the third.
+  ///
+  /// They are read once, when the bloc is created — which is why `app_router.dart` keys this
+  /// screen on the query string. Without that, a link from this screen to a filtered view of
+  /// itself would change the address and nothing else.
   final String? initialStatusKey;
   final String? initialHostName;
+  final String? initialSearch;
 
   /// The status filter's options, keyed on the same `statusKey` the server computes.
   static const statusOptions = <String, String>{
@@ -52,6 +63,7 @@ class ApplicationsScreen extends StatelessWidget {
               checkUpdate: locator<CheckApplicationUpdate>(),
               forcePatchRuns: locator<RequestForcedPatchRuns>(),
               initialFilters: ApplicationFilters(
+                search: initialSearch ?? '',
                 statusKey: statusOptions.containsKey(initialStatusKey) ? initialStatusKey! : 'all',
                 // Held as given and matched case-insensitively when filtering: a query parameter
                 // whose case does not match the stored hostname would otherwise silently select

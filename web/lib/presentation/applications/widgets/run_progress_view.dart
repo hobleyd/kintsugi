@@ -6,6 +6,7 @@ import '../../../core/theme/kintsugi_palette.dart';
 import '../../../core/widgets/alert_box.dart';
 import '../../../core/widgets/text_bits.dart';
 import '../background_run_bloc.dart';
+import '../run_progress_mappers.dart';
 
 /// One background run's progress bar, and the message it leaves behind.
 ///
@@ -65,8 +66,9 @@ class RunProgressView<B extends BackgroundRunBloc> extends StatelessWidget {
             // The server bounds this list and says how many rows it left out — see
             // `UpdateCheckCoordinator`. Passed through as given rather than re-bounded here: the
             // panel scrolls, and silently shortening a list that already states its own overflow
-            // would make that statement wrong.
-            lines: fault == null ? state.progress.notes : const [],
+            // would make that statement wrong. `noteLine` is what makes each one a link back to
+            // the row it names.
+            lines: fault == null ? state.progress.notes.map(noteLine).toList() : const [],
           );
 
           if (fault == null) onFinished();

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/diagnostics/diagnostics_log.dart';
@@ -228,10 +229,63 @@ class _EntryCard extends StatelessWidget {
             for (final line in entry.lines)
               Padding(
                 padding: const EdgeInsets.only(bottom: 3),
-                child: Text(line, style: AppTheme.mono(color: palette.text, size: 11.5)),
+                child: _Line(line: line),
               ),
           ],
         ],
+      ),
+    );
+  }
+}
+
+/// One line of output — tappable when the producer worked out what it is about.
+///
+/// **A line without a route is drawn as plain text, and a line whose router is missing is too.**
+/// `GoRouter.maybeOf` is null when this panel is pumped outside the app, which is how the widget
+/// tests reach it; underlining a line there would offer a navigation that could not happen. The
+/// hover cursor and the underline are the whole affordance, so they have to be exactly as
+/// conditional as the tap is.
+class _Line extends StatefulWidget {
+  const _Line({required this.line});
+
+  final DiagnosticsLine line;
+
+  @override
+  State<_Line> createState() => _LineState();
+}
+
+class _LineState extends State<_Line> {
+  bool _hovering = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    final target = widget.line.target;
+    final router = GoRouter.maybeOf(context);
+    final linked = target != null && router != null;
+
+    final text = Text(
+      widget.line.text,
+      style: AppTheme.mono(
+        color: linked && _hovering ? palette.neon : palette.text,
+        size: 11.5,
+      ).copyWith(
+        decoration: linked ? TextDecoration.underline : null,
+        decorationColor: linked ? palette.neonDim : null,
+      ),
+    );
+
+    if (!linked) return text;
+
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hovering = true),
+      onExit: (_) => setState(() => _hovering = false),
+      child: GestureDetector(
+        // The panel stays open across this, which is the point of it being the shell's: the note
+        // said which row to look at, and the row and the note are now on screen together.
+        onTap: () => router.go(target),
+        child: Semantics(button: true, label: widget.line.text, child: text),
       ),
     );
   }

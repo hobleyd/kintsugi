@@ -375,6 +375,30 @@ appears once anything has been recorded — brings it back. A run that worked an
 has already said so above the table, and sliding a panel over that table to repeat it would make
 the feature something to be endured.
 
+**A note's line links to the row it names, and the link is parsed out of a string the server
+built.** A run reports "Slack (macOS): the script did not report a version", and the work that note
+creates is finding Slack among everything the fleet has installed. So `noteLine` in
+`run_progress_mappers.dart` pulls the application name back out and hands the panel a
+`DiagnosticsLine` targeting `Routes.applicationsNamed`. Three things hold it together:
+
+- **The format is `$"{ApplicationName} ({Platform}): {Note}"`**, written on one line in each of
+  `UpdateCheckCoordinator.cs` and `UpgradePathScanCoordinator.cs`, and nothing enforces that from
+  Dart. The name is matched **greedily** so "Microsoft Visual C++ 2015-2022 Redistributable (x64)
+  (Windows): …" keeps its own brackets; a platform bucket never contains one, which is what makes
+  the last bracketed group the right one to drop. **Anything that does not match falls back to
+  plain text** — the overflow line the server appends names no row, and a format that drifts should
+  produce no link rather than a link somewhere wrong.
+- **Name only, not name and platform.** `KintsugiDropdown` falls back to `null` when its value is
+  not among its items, and the platform options are read off the response — so a bucket that is no
+  longer there would select nothing behind a blank control. Imprecise beats empty.
+- **`app_router.dart` keys the Applications screen on `state.uri.query`, and that is load-bearing.**
+  This navigation is `/applications` → `/applications?search=Slack`: the *same* `GoRoute`, so
+  without a changing key go_router reuses the element, `BlocProvider.create` never runs again, and
+  the link changes the address and nothing else. The cost is that such a navigation rebuilds the
+  screen and re-reads the table. `test/presentation/diagnostics_link_test.dart` pumps the real
+  `createRouter` for exactly this reason — a test that navigated from Hosts instead would pass with
+  the key deleted.
+
 **Record on a transition, never on a state, and this is the trap in wiring a new producer.** Every
 one of these screens polls. A listener gated on `lastRunSucceeded == false` fires once per poll for
 as long as that stays the last outcome, *and* fires on mount for a run that failed hours before the

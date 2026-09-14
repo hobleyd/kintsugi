@@ -1,3 +1,4 @@
+import 'package:flutter/widgets.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../domain/entities/enums.dart';
@@ -44,6 +45,17 @@ abstract final class Routes {
   /// every Vanta record's `externalUrl` deep-link into it with `?status=&host=` — see
   /// `VantaResourceBuilder`.
   static const applications = '/applications';
+
+  /// Currently Installed, filtered to one application by name.
+  ///
+  /// What the diagnostics panel's note lines link to: a run reports "Slack (macOS): the script did
+  /// not report a version", and the work that note creates is finding Slack among everything the
+  /// fleet has installed. Name only, deliberately, even though the note also carries a platform —
+  /// the platform filter is a dropdown whose options are read off the response, so a bucket that
+  /// is no longer among them would select nothing behind a blank control. Imprecise beats empty.
+  static String applicationsNamed(String name) =>
+      '$applications?search=${Uri.encodeQueryComponent(name)}';
+
   static const applicationsFailed = '/applications/failed';
   static const clients = '/clients';
 
@@ -166,10 +178,21 @@ GoRouter createRouter(SessionBloc sessionBloc) {
           GoRoute(
             path: Routes.applications,
             builder: (context, state) => ApplicationsScreen(
+              // Keyed on the query string, and that is load-bearing rather than tidiness. The
+              // filters below are read once, when the screen's bloc is created — and a navigation
+              // from `/applications` to `/applications?search=Slack` is the *same* route, so
+              // without a changing key go_router reuses the element, `create` never runs again and
+              // the link silently does nothing. The cost is that such a navigation rebuilds the
+              // screen and re-reads the table, which is what it would have done arriving from
+              // anywhere else.
+              key: ValueKey(state.uri.query),
               // Deep-link filters, as the old page read them off window.location.search: the
-              // Hosts screen's "N app updates" badge links straight to a filtered view.
+              // Hosts screen's "N app updates" badge links straight to a filtered view, and the
+              // diagnostics panel's note lines link to one application — see
+              // `Routes.applicationsNamed`.
               initialStatusKey: state.uri.queryParameters['status'],
               initialHostName: state.uri.queryParameters['host'],
+              initialSearch: state.uri.queryParameters['search'],
             ),
           ),
           GoRoute(

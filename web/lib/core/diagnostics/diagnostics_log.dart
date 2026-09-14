@@ -4,6 +4,26 @@ import 'package:flutter/widgets.dart';
 /// reads the same colour in the panel as its summary did on the page that produced it.
 enum DiagnosticsKind { success, error, info }
 
+/// One line of a recorded entry's output, and — where the producer could work one out — the place
+/// in the app that line is about.
+///
+/// A run's notes name rows: "Slack (macOS): the script did not report a version." Reading that and
+/// then finding Slack among two thousand installed applications is the work the note creates, and
+/// [target] is how the panel hands it back. It is a route rather than a callback so the entry stays
+/// plain data that outlives the screen that recorded it — the panel navigates, nothing else has to
+/// know how.
+@immutable
+class DiagnosticsLine {
+  const DiagnosticsLine(this.text, {this.target});
+
+  final String text;
+
+  /// A route to go to when this line is tapped, or null for a line that is about nothing in
+  /// particular. Null lines are drawn as plain text — a line that looks tappable and does nothing
+  /// is worse than one that never offered.
+  final String? target;
+}
+
 /// One thing a run — or anything else with output worth keeping — had to say.
 ///
 /// [lines] is the part that earns the panel. A summary fits above a table; a line per row that
@@ -42,8 +62,9 @@ class DiagnosticsEntry {
   /// title already says it.
   final String? source;
 
-  /// The output proper, one string per line, in the order the producer gave them.
-  final List<String> lines;
+  /// The output proper, one line per item, in the order the producer gave them. A line may carry
+  /// a route it is about — see [DiagnosticsLine].
+  final List<DiagnosticsLine> lines;
 }
 
 /// The application-wide record of error and log output, and whether its panel is showing.
@@ -88,7 +109,7 @@ class DiagnosticsLog extends ChangeNotifier {
     required DiagnosticsKind kind,
     String? summary,
     String? source,
-    List<String> lines = const [],
+    List<DiagnosticsLine> lines = const [],
   }) {
     _entries.add(DiagnosticsEntry(
       id: _nextId++,

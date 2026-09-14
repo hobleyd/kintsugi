@@ -77,7 +77,7 @@ void main() {
         title: 'Check for Updates',
         kind: DiagnosticsKind.success,
         summary: '1 updated, 1 failed.',
-        lines: const ['Slack: the script did not report a version.'],
+        lines: const [DiagnosticsLine('Slack: the script did not report a version.')],
       );
       expect(log.isOpen, isTrue);
     });
@@ -154,7 +154,7 @@ void main() {
         kind: DiagnosticsKind.success,
         summary: '1 updated, 1 failed.',
         source: 'Installed Applications',
-        lines: const ['Slack: the script did not report a version.'],
+        lines: const [DiagnosticsLine('Slack: the script did not report a version.')],
       );
       await tester.pumpAndSettle();
 
@@ -246,7 +246,7 @@ void main() {
         kind: DiagnosticsKind.success,
         summary: '2 updated, 1 failed, 3 with nothing to check.',
         source: 'Installed Applications',
-        lines: const ['Slack (macOS): the script did not report a version.'],
+        lines: const [DiagnosticsLine('Slack (macOS): the script did not report a version.')],
       );
 
     final preferences = await SharedPreferences.getInstance();
@@ -314,13 +314,18 @@ void main() {
     testWidgets(
       'the notes go to the panel, and the page says so instead of repeating them',
       (tester) async {
-        await pumpRun(tester, status: _finished(notes: const ['Slack: no script to check.']));
+        await pumpRun(tester, status: _finished(notes: const ['Slack (macOS): no script to check.']));
 
         expect(log.count, 1);
         final entry = log.entries.single;
         expect(entry.title, 'Check for Updates');
         expect(entry.source, 'Installed Applications');
-        expect(entry.lines, const ['Slack: no script to check.']);
+        expect(entry.lines.single.text, 'Slack (macOS): no script to check.');
+        expect(
+          entry.lines.single.target,
+          '/applications?search=Slack',
+          reason: 'the line links back to the row it names — see Routes.applicationsNamed',
+        );
         expect(entry.summary, contains('1 updated'));
 
         expect(find.text('Worth a look:'), findsNothing);
@@ -333,7 +338,7 @@ void main() {
     testWidgets('a fault is recorded as one, with no notes attached', (tester) async {
       await pumpRun(
         tester,
-        status: _finished(notes: const ['Slack: no script to check.'], faultReason: 'The run died.'),
+        status: _finished(notes: const ['Slack (macOS): no script to check.'], faultReason: 'The run died.'),
       );
 
       expect(log.entries.single.kind, DiagnosticsKind.error);
@@ -353,11 +358,11 @@ void main() {
         await pumpRun(
           tester,
           collecting: false,
-          status: _finished(notes: const ['Slack: no script to check.']),
+          status: _finished(notes: const ['Slack (macOS): no script to check.']),
         );
 
         expect(find.text('Worth a look:'), findsOneWidget);
-        expect(find.text('- Slack: no script to check.'), findsOneWidget);
+        expect(find.text('- Slack (macOS): no script to check.'), findsOneWidget);
 
         await tester.pumpWidget(const SizedBox());
       },
