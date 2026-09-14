@@ -504,6 +504,45 @@ fn patch_via_daemon(app: &UpgradeStatus) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
+    fn app(name: &str) -> UpgradeStatus {
+        UpgradeStatus {
+            application_name: name.to_string(),
+            installed_version: "1.0".to_string(),
+            latest_version: Some("2.0".to_string()),
+            update_available: true,
+            method: crate::upgrade::UpgradeMethod::Script,
+            application_identifier: Some("com.example.app".to_string()),
+            command: None,
+            notes: None,
+            script: Some("#!/bin/bash\n".to_string()),
+            script_signature: None,
+            command_signature: None,
+            package_manager: None,
+        }
+    }
+
+    /// The two properties a forced run rests on, and the only place either is enforced: it patches
+    /// what was named and nothing else, and it never installs an OS update. `execute` and
+    /// `run_patches` both read `os_update_available` off the plan, so clearing it here is what
+    /// stops a forced run rebooting a machine over one application. Pinned in all three agents.
+    #[test]
+    fn narrowing_keeps_only_the_named_applications_and_drops_the_os_update() {
+        let work = PendingWork { apps: vec![app("Firefox"), app("GIMP")], os_update_available: true };
+
+        let narrowed = work.narrowed_to(&["gimp".to_string()]);
+
+        assert_eq!(narrowed.app_names(), vec!["GIMP".to_string()], "matched case-insensitively");
+        assert!(!narrowed.os_update_available, "a forced run patches one application, never the OS");
+        assert_eq!(narrowed.total(), 1);
+    }
+
+    #[test]
+    fn narrowing_to_something_this_host_cannot_patch_leaves_nothing_to_do() {
+        let work = PendingWork { apps: vec![app("Firefox")], os_update_available: true };
+
+        assert!(work.narrowed_to(&["LibreOffice".to_string()]).is_empty());
+    }
+
     #[test]
     fn a_notice_left_up_for_the_whole_period_leaves_nothing_to_wait_out() {
         assert_eq!(remaining_warning(WARNING_PERIOD), Duration::ZERO);

@@ -109,11 +109,30 @@ public class ForcedPatchRun : BaseEntity
     public bool IsCollectableAt(DateTimeOffset now) => CollectedUtc is null && now < ExpiresUtc;
 
     /// <summary>
-    /// Pushes an uncollected row's clock forward instead of opening a second one for the same
-    /// (host, application, platform). Two presses of the button thirty seconds apart mean "patch
-    /// this, now" once, not twice — and two rows would have the agent collect one, patch, and then
-    /// find the other still waiting on its next poll.
+    /// Pushes a row's clock forward instead of opening a second one for the same
+    /// (host, application, platform) — but only while it is still waiting to be collected.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Two presses of the button thirty seconds apart, before any agent has looked, mean "patch
+    /// this, now" once; a second row would sit there and be handed over on the poll *after* the one
+    /// that patches.
+    /// </para>
+    /// <para>
+    /// <strong>A press after the instruction has been collected is deliberately a new instruction,
+    /// not a renewal of that one.</strong> The first is already being carried out — quite possibly
+    /// failing — and an operator pressing again in an emergency means it, so
+    /// <c>IForcedPatchRunRepository.GetOutstandingAsync</c> looks only at uncollected rows and the
+    /// handler opens a fresh one. That costs nothing when the first attempt worked: the agent
+    /// re-plans, finds the application already current, and stops before it shows anyone a second
+    /// warning (see each agent's <c>patch_cycle::run_forced</c>).
+    /// </para>
+    /// <para>
+    /// So the guard below is unreachable from the handler, and is here to keep it that way: a
+    /// second lookup that stopped excluding collected rows would otherwise silently turn a
+    /// deliberate re-press into a no-op.
+    /// </para>
+    /// </remarks>
     public void Renew(DateTimeOffset requestedUtc, TimeSpan lifetime)
     {
         if (CollectedUtc is not null)

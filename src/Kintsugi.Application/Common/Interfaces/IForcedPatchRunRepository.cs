@@ -8,7 +8,8 @@ public interface IForcedPatchRunRepository
     /// — what a second press of "Patch now" renews rather than duplicating. Deliberately excludes a
     /// row an agent has already collected: that instruction has been delivered and is being carried
     /// out, so forcing the same application again is a new instruction, not an extension of the old
-    /// one.</summary>
+    /// one. See the remarks on <see cref="Domain.Entities.ForcedPatchRun.Renew"/>, which is the
+    /// other half of that decision.</summary>
     Task<ForcedPatchRun?> GetOutstandingAsync(Guid hostId, string applicationName, string platform, CancellationToken cancellationToken);
 
     /// <summary>Everything one host should be handed right now: raised, not yet collected, not yet

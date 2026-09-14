@@ -434,6 +434,37 @@ mod tests {
         assert_eq!(plan.total(), 2);
     }
 
+    /// The two properties a forced run rests on, and the only place either is enforced: it patches
+    /// what was named and nothing else, and it never installs an OS update. `execute` and
+    /// `run_patches` both read `os_update_available` off the plan, so clearing it here is what
+    /// stops a forced run rebooting a machine over one application. Pinned in all three agents.
+    #[test]
+    fn narrowing_keeps_only_the_named_applications_and_drops_the_os_update() {
+        let plan = Plan {
+            apps: vec![
+                PlannedApp { application_name: "Firefox".to_string(), latest_version: Some("2.0".to_string()) },
+                PlannedApp { application_name: "GIMP".to_string(), latest_version: Some("3.0".to_string()) },
+            ],
+            os_update_available: true,
+        };
+
+        let narrowed = plan.narrowed_to(&["gimp".to_string()]);
+
+        assert_eq!(narrowed.app_names(), vec!["GIMP".to_string()], "matched case-insensitively");
+        assert!(!narrowed.os_update_available, "a forced run patches one application, never the OS");
+        assert_eq!(narrowed.total(), 1);
+    }
+
+    #[test]
+    fn narrowing_to_something_this_host_cannot_patch_leaves_nothing_to_do() {
+        let plan = Plan {
+            apps: vec![PlannedApp { application_name: "Firefox".to_string(), latest_version: None }],
+            os_update_available: true,
+        };
+
+        assert!(plan.narrowed_to(&["LibreOffice".to_string()]).is_empty());
+    }
+
     #[test]
     fn process_queue_answers_a_forced_patch_runs_request_with_what_the_handler_collected() {
         let dir = scratch_dir("forced");

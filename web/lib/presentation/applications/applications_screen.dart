@@ -140,7 +140,12 @@ class _ApplicationsView extends StatelessWidget {
             _ => AlertBox.error(notice.message),
           },
         if (state.forceNotice case final notice?)
-          notice.success ? AlertBox.success(notice.message) : AlertBox.error(notice.message),
+          switch (notice) {
+            ForcedPatchRunNotice(success: true) => AlertBox.success(notice.message),
+            // Some told and some not: the message names which, and neither colour would be true.
+            ForcedPatchRunNotice(partial: true) => AlertBox.info(notice.message),
+            _ => AlertBox.error(notice.message),
+          },
         if (state.loading && state.overview.applications.isEmpty)
           const _LoadingPanel()
         else if (state.overview.applications.isEmpty)

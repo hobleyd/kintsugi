@@ -434,6 +434,12 @@ fn patch_unattended_if_nobody_is_logged_in(
     // Collected *after* the heartbeat check above, deliberately. On a desktop the per-user process
     // is the one polling, and a second collector would race it for instructions the server hands out
     // exactly once — the one that got there first would patch, the other would find nothing.
+    //
+    // And note what `run_unattended` below then does, since "a forced run never installs an OS
+    // update" is true of the forced run and not of the minute after it: if the scheduled cycle is
+    // also due, it runs here as it always has — every application and the OS with them. That is
+    // correct (the cycle was due), but it means the narrowing is a property of the forced run
+    // rather than a promise about this check-in.
     match forced_patch_run::collect(client, config, serial_number) {
         Ok(forced) if !forced.is_empty() => {
             logging::info(&format!(

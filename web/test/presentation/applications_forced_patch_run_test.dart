@@ -192,6 +192,8 @@ void main() {
       wait: Duration.zero,
       verify: (bloc) {
         expect(bloc.state.forceNotice!.success, isFalse);
+        // Neither green nor red: one host was missed and one was told, and the message names which.
+        expect(bloc.state.forceNotice!.partial, isTrue);
         expect(bloc.state.forceNotice!.message, contains('Not sent to beta'));
       },
     );
@@ -207,6 +209,7 @@ void main() {
       wait: Duration.zero,
       verify: (bloc) {
         expect(bloc.state.forceNotice!.success, isFalse);
+        expect(bloc.state.forceNotice!.partial, isFalse, reason: 'a refused request reached nobody');
         expect(bloc.state.forceNotice!.message, contains('Not signed in.'));
         expect(bloc.state.forcingRowKeys, isEmpty);
       },

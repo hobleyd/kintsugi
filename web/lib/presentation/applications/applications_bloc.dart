@@ -282,13 +282,19 @@ final class ApplicationForcedPatchRunRequested extends ApplicationsEvent {
 /// minute (up to an hour on a Linux server with nobody logged in) and then wait five more before
 /// patching. Silence would read as the icon having done nothing.
 class ForcedPatchRunNotice extends Equatable {
-  const ForcedPatchRunNotice({required this.message, required this.success});
+  const ForcedPatchRunNotice({required this.message, required this.success, this.partial = false});
 
   final String message;
   final bool success;
 
+  /// Some hosts were told and some were not — a filter naming a machine the server has since
+  /// removed. Neither a success nor a failure, and shown as neither: red would claim the emergency
+  /// patch did not happen when forty machines were instructed, and the thing worth noticing is
+  /// named in the message either way.
+  final bool partial;
+
   @override
-  List<Object?> get props => [message, success];
+  List<Object?> get props => [message, success, partial];
 }
 
 final class ApplicationsState extends Equatable {
@@ -721,9 +727,13 @@ class ApplicationsBloc extends Bloc<ApplicationsEvent, ApplicationsState>
         buffer.write(' Not sent to ${result.notRequested.join(', ')} — no such host is registered.');
       }
 
+      // A send that reached some hosts and not others is neither. Red would say the emergency
+      // patch failed when forty machines were told; green would bury the one the operator was
+      // probably looking at. See [ForcedPatchRunNotice.partial].
       notice = ForcedPatchRunNotice(
         message: buffer.toString(),
         success: result.notRequested.isEmpty && result.requested > 0,
+        partial: result.requested > 0 && result.notRequested.isNotEmpty,
       );
     } on ApiException catch (error) {
       notice = ForcedPatchRunNotice(message: '$label: ${error.message}', success: false);
