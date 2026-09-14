@@ -163,18 +163,20 @@ class _FailuresTable extends StatelessWidget {
       // "Last Failed" over a timestamp, which is the date the whole screen sorts and reads on —
       // the API carries it as `lastFailedUtc`, rendered in the browser's own timezone.
       const TableColumnSpec(label: 'Last Failed', width: FlexColumnWidth(1.1)),
-      const TableColumnSpec(label: 'Actions', width: FixedColumnWidth(80)),
+      // Still 120 with one button left in it: `_labelFloor` floors this column at the width of
+      // the word "ACTIONS", which is most of that already, so narrowing it buys the other columns
+      // almost nothing and the table's own floor below assumes it did not move.
+      const TableColumnSpec(label: 'Actions', width: FixedColumnWidth(120)),
     ];
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         KintsugiTable(
-          // Seven columns, though Actions is now a single expand button. The Versions cell carries
-          // two version strings stacked, and the output preview in the Application cell is what
-          // wants the rest — leave the other six columns any less than this between them and the
-          // timestamp column starts wrapping one value onto two lines.
-          minWidth: 1010,
+          // Seven columns. The Versions cell carries two version strings stacked, and the output
+          // preview in the Application cell is what wants the rest — below this the timestamp
+          // column starts wrapping one value onto two lines.
+          minWidth: 1050,
           columns: columns,
           toolbar: Row(
             children: [
