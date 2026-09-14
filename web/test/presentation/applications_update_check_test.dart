@@ -62,10 +62,26 @@ class FakeApplicationRepository implements ApplicationRepository {
   ApplicationOverview next;
   int reads = 0;
 
+  /// Every `forcePatchRuns` call, so the forced-run tests can assert what was actually sent.
+  final forced = <({String applicationName, String platform, List<String> hostNames})>[];
+  ForcedPatchRunResult forcedResult = const ForcedPatchRunResult(requested: 1, notRequested: []);
+  ApiException? forceFailure;
+
   @override
   Future<ApplicationOverview> overview() async {
     reads++;
     return next;
+  }
+
+  @override
+  Future<ForcedPatchRunResult> forcePatchRuns({
+    required String applicationName,
+    required String platform,
+    required List<String> hostNames,
+  }) async {
+    forced.add((applicationName: applicationName, platform: platform, hostNames: hostNames));
+    if (forceFailure case final failure?) throw failure;
+    return forcedResult;
   }
 }
 
@@ -124,6 +140,7 @@ void main() {
   ApplicationsBloc build() => ApplicationsBloc(
         getOverview: GetApplicationOverview(applications),
         checkUpdate: CheckApplicationUpdate(upgradePaths),
+        forcePatchRuns: RequestForcedPatchRuns(applications),
       );
 
   setUp(() {

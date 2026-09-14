@@ -18,3 +18,9 @@ ApplicationRow applicationRowFromJson(Map<String, dynamic> json) => ApplicationR
       upgradePaths: listFromJson(json['upgradePaths'], upgradePathSummaryFromJson),
       children: listFromJson(json['children'], applicationRowFromJson),
     );
+
+/// Reads a `RequestForcedPatchRunsResult`.
+ForcedPatchRunResult forcedPatchRunResultFromJson(Map<String, dynamic> json) => ForcedPatchRunResult(
+      requested: (json['requested'] as num?)?.toInt() ?? 0,
+      notRequested: stringListFromJson(json['notRequested']),
+    );

@@ -226,6 +226,51 @@ Where a failure goes next is flow 5: the Failed Updates screen's fix panel appen
 output and the current script to the ordinary research prompt, and signing the repair resolves
 every outstanding failure for that (application, platform).
 
+### Forcing a run out of cycle
+
+The Installed Applications screen's "Patch now" raises an instruction against the hosts the table
+is filtered to, for an emergency nobody is willing to wait a patching interval for. It is the same
+flow above with the confirm/delay step removed and the work list narrowed to one application —
+everything else, the signature check included, is unchanged.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Admin as Administrator
+    participant Web as Admin UI
+    participant Api as API
+    participant Agent as Agent - per-user
+    participant Root as Agent - root
+
+    Admin->>Web: Patch now, on a row, with the table filtered
+    Web->>Web: resolve the filter to the hosts behind on *this* row
+    Web->>Api: POST /api/admin/applications/forced-patch-runs<br/>{applicationName, platform, hostNames}
+    Api->>Api: host names to host ids; one forced_patch_runs row each,<br/>expiring in 24h; renew rather than duplicate
+    Api-->>Web: requested, notRequested[]
+
+    Note over Agent: Its own poll, on its own clock. Nothing is pushed.
+    Agent->>Api: GET /api/forced-patch-runs?serialNumber=...
+    Api->>Api: hand over everything collectable AND stamp it collected
+    Api-->>Agent: ForcedPatchRunDto[] — a name and a platform, no script
+    Agent->>Agent: plan() — the ordinary work list, is_patchable and all
+    Agent->>Agent: narrowed_to(names) — drop every other application,<br/>and the OS update with them
+    Agent->>Admin: five-minute warning, with nothing to click
+    Agent->>Root: the ordinary per-application patch path (above)
+    Note over Agent: register_completed is NOT called —<br/>the scheduled cycle stays exactly as due as it was.
+```
+
+- **Nothing is pushed.** The latency is the agent's own poll: within a minute on a host somebody is
+  logged in to (five on Linux — see `clients/CLAUDE.md`), at the next hourly check-in on a Linux
+  server with nobody on it, and never on a macOS or Windows host until somebody logs in, because
+  those two have no patching schedule outside the per-user process.
+- **Reading consumes.** The server stamps a row collected as it answers, so an instruction is
+  handed over exactly once; a row still collectable would start a fresh five-minute warning on
+  every poll. The cost is that an agent that dies between collecting and patching has lost it.
+- **It is an urgency override, not a trust override.** The instruction carries a name. The agent
+  re-fetches its work list and re-verifies the script's signature, so a forced run cannot make an
+  unsigned script runnable — and the screen disables the button on a row whose script is unsigned
+  rather than letting the press look like it did something.
+
 ---
 
 ## 4. Client updates: getting a new agent build onto the fleet

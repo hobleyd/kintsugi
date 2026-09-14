@@ -12,4 +12,18 @@ class ApplicationRepositoryImpl implements ApplicationRepository {
   Future<ApplicationOverview> overview() async => applicationOverviewFromJson(
         await _api.getJson('/api/admin/applications') as Map<String, dynamic>,
       );
+
+  @override
+  Future<ForcedPatchRunResult> forcePatchRuns({
+    required String applicationName,
+    required String platform,
+    required List<String> hostNames,
+  }) async =>
+      forcedPatchRunResultFromJson(
+        await _api.postJson('/api/admin/applications/forced-patch-runs', body: {
+          'applicationName': applicationName,
+          'platform': platform,
+          'hostNames': hostNames,
+        }) as Map<String, dynamic>,
+      );
 }

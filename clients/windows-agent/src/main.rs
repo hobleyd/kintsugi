@@ -1,6 +1,7 @@
 mod checkin_schedule;
 mod config;
 mod dialogs;
+mod forced_patch_run;
 mod identity;
 mod input_injection;
 mod logging;
@@ -357,6 +358,28 @@ fn spawn_cycle(
     })
 }
 
+/// `spawn_cycle` for a forced run — see `patch_cycle::run_forced`.
+///
+/// A second function rather than another `CycleFn`, because a forced run carries something the
+/// other two do not: the list of applications an administrator named. `CycleFn` is a plain function
+/// pointer precisely so the scheduler hands over *which* cycle without a flag to branch on, and
+/// widening it to a closure to carry one argument would cost that everywhere. Everything else here
+/// — the thread, the state by ownership, the join site — is `spawn_cycle`'s, for its reasons.
+///
+/// Kept identical in the other two agents.
+fn spawn_forced_cycle(
+    policy: &policy::PatchingPolicy,
+    mut state: ScheduleState,
+    report: StatusReporterFn,
+    application_names: Vec<String>,
+) -> std::thread::JoinHandle<ScheduleState> {
+    let policy = policy.clone();
+    std::thread::spawn(move || {
+        patch_cycle::run_forced(&policy, &mut state, &report, &application_names);
+        state
+    })
+}
+
 /// The background half of `run_ui_agent` — see its doc comment for why this is a separate thread.
 /// Reports its state to the menu via `report` at every meaningful transition, and treats a "Patch
 /// Now" click the same as a naturally due cycle except it skips the confirm/delay step entirely (see
@@ -383,6 +406,16 @@ fn run_scheduler(
     // PowerShell, and there is no reason to do that once a minute for a line that has not moved.
     let checkin_schedule_path = config::checkin_schedule_path();
     let mut shown_check_in: Option<CheckInStatus> = None;
+
+    // Forced patch runs are collected on a thread of their own here, unlike the other two agents —
+    // see `forced_patch_run::spawn_poller` for why the queue makes that necessary.
+    let forced_rx = forced_patch_run::spawn_poller(AGENT_POLL_INTERVAL);
+
+    // What the poller has collected and no cycle has run yet. A buffer rather than a straight read,
+    // because the poller keeps collecting while a cycle is in flight — the schedule state is inside
+    // that cycle (see `spawn_cycle`), so there is nothing to start a second one with — and an
+    // instruction the server has already marked collected has nowhere else to come back from.
+    let mut pending_forced: Vec<String> = Vec::new();
 
     loop {
         // Takes the schedule state back from a cycle that has finished, and says so. Reporting
@@ -452,7 +485,25 @@ fn run_scheduler(
                 shown_check_in = None;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if state.as_ref().is_some_and(|current| current.is_due()) {
+                for collected in forced_rx.try_iter() {
+                    logging::info(&format!(
+                        "collected {} forced patch run(s): {}",
+                        collected.len(),
+                        collected.iter().map(|run| format!("{} ({})", run.application_name, run.id)).collect::<Vec<_>>().join(", ")
+                    ));
+                    pending_forced.extend(collected.into_iter().map(|run| run.application_name));
+                }
+
+                // An administrator's forced run takes precedence over a naturally due cycle, because
+                // this is the emergency path and the two cannot run at once — the schedule state
+                // goes *into* a cycle by ownership (see `spawn_cycle`). Nothing is lost by the
+                // ordering: a forced run does not register a completed cycle (see
+                // `patch_cycle::run_forced`), so a cycle that was due stays due and the next tick
+                // starts it.
+                if !pending_forced.is_empty() && state.is_some() {
+                    let owned = state.take().expect("just checked that the state is here");
+                    in_flight = Some(spawn_forced_cycle(&current_policy, owned, report, std::mem::take(&mut pending_forced)));
+                } else if state.as_ref().is_some_and(|current| current.is_due()) {
                     let owned = state.take().expect("just checked that the state is here");
                     in_flight = Some(spawn_cycle(patch_cycle::run, &current_policy, owned, report));
                 }

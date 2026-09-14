@@ -1,6 +1,7 @@
 mod checkin_schedule;
 mod config;
 mod dialogs;
+mod forced_patch_run;
 mod identity;
 mod input_injection;
 mod lock;
@@ -425,6 +426,28 @@ fn patch_unattended_if_nobody_is_logged_in(
     let mut state = ScheduleState::load_or_default(&config::state_dir().join("schedule.json"), policy);
     let mut handler = ServiceHandler::new(client, config, serial_number, identity);
 
+    // An administrator's forced run comes first, and on a headless server this check-in is the only
+    // thing that will ever collect one: there is no per-user process here to poll the queue, so the
+    // hour between check-ins is this host's whole emergency latency. That is stated in the admin UI
+    // rather than left to be discovered.
+    //
+    // Collected *after* the heartbeat check above, deliberately. On a desktop the per-user process
+    // is the one polling, and a second collector would race it for instructions the server hands out
+    // exactly once — the one that got there first would patch, the other would find nothing.
+    match forced_patch_run::collect(client, config, serial_number) {
+        Ok(forced) if !forced.is_empty() => {
+            logging::info(&format!(
+                "collected {} forced patch run(s): {}",
+                forced.len(),
+                forced.iter().map(|run| format!("{} ({})", run.application_name, run.id)).collect::<Vec<_>>().join(", ")
+            ));
+            let names: Vec<String> = forced.into_iter().map(|run| run.application_name).collect();
+            patch_cycle::run_forced_unattended(&mut handler, policy, &mut state, &names);
+        }
+        Ok(_) => {}
+        Err(err) => logging::warn(&format!("could not check for forced patch runs: {err:#}")),
+    }
+
     patch_cycle::run_unattended(&mut handler, policy, &mut state);
 }
 
@@ -508,6 +531,20 @@ impl RequestHandler for ServiceHandler<'_> {
         Ok(Plan { apps, os_update_available })
     }
 
+    /// Asks the server what an administrator has forced against this host, and consumes it in the
+    /// same call — see `forced_patch_run::collect`. This side is the one that can ask: the per-user
+    /// process holds no identity and makes no network call at all, so it relays this through the
+    /// queue exactly as it does a plan.
+    ///
+    /// Nothing is *run* here. The answer is a list of names, and the per-user process turns it into
+    /// an ordinary `AppPatch` request per application, which comes straight back to
+    /// `patch_application` below — where the work list is re-fetched from the server and every
+    /// signature re-verified. That is what keeps a forced run an urgency override rather than a
+    /// trust override.
+    fn forced_patch_runs(&mut self) -> Result<Vec<forced_patch_run::ForcedPatchRun>> {
+        forced_patch_run::collect(self.client, self.config, self.serial_number)
+    }
+
     /// Re-fetches this host's upgrade paths and verifies the signature before running anything —
     /// the request that got here named an application and nothing more, so this is where that name
     /// becomes something runnable, against the server's answer rather than the requester's.
@@ -571,6 +608,16 @@ impl RequestHandler for QueueClient {
             anyhow::bail!("the kintsugi-agent service could not work out what is pending: {}", result.output.trim());
         }
         result.data.context("the service answered a plan request without a plan")
+    }
+
+    /// Present for the trait, and not what actually polls.
+    ///
+    /// A forced run is collected on its own thread (`forced_patch_run::spawn_poller`) rather than
+    /// from inside a cycle, because it is what *starts* one — so nothing in `patch_cycle` calls
+    /// this. Both go through `forced_patch_run::ask_service`, so there is one shape on the wire
+    /// whichever side asks.
+    fn forced_patch_runs(&mut self) -> Result<Vec<forced_patch_run::ForcedPatchRun>> {
+        forced_patch_run::ask_service(&self.queue_dir)
     }
 
     fn patch_application(&mut self, application_name: &str) -> Result<()> {
@@ -737,6 +784,30 @@ fn spawn_cycle(
     })
 }
 
+/// `spawn_cycle` for a forced run — see `patch_cycle::run_forced`.
+///
+/// A second function rather than another `CycleFn`, because a forced run carries something the
+/// other two do not: the list of applications an administrator named. `CycleFn` is a plain function
+/// pointer precisely so the scheduler hands over *which* cycle without a flag to branch on, and
+/// widening it to a closure to carry one argument would cost that everywhere. Everything else here
+/// — the thread, the state by ownership, the join site — is `spawn_cycle`'s, for its reasons.
+///
+/// Kept identical in the other two agents.
+fn spawn_forced_cycle(
+    queue_dir: &std::path::Path,
+    policy: &policy::PatchingPolicy,
+    mut state: ScheduleState,
+    report: StatusReporterFn,
+    application_names: Vec<String>,
+) -> std::thread::JoinHandle<ScheduleState> {
+    let mut handler = QueueClient { queue_dir: queue_dir.to_path_buf() };
+    let policy = policy.clone();
+    std::thread::spawn(move || {
+        patch_cycle::run_forced(&mut handler, &policy, &mut state, &report, &application_names);
+        state
+    })
+}
+
 /// The background half of `run_ui_agent` — see its doc comment for why this is a separate
 /// thread. Reports its state to the notification area via `report` at every meaningful
 /// transition, and treats a "Patch Now" click the same as a naturally due cycle except it skips
@@ -757,6 +828,17 @@ fn run_scheduler(
     // also why this loop can be sure it is never running two.
     let mut state = Some(state);
     let mut in_flight: Option<std::thread::JoinHandle<ScheduleState>> = None;
+
+    // Forced patch runs are collected on a thread of their own, and less often than a tick — see
+    // `forced_patch_run::spawn_poller` and `POLL_INTERVAL` for why the systemd unit behind the queue
+    // makes both true here and in neither of the other two agents.
+    let forced_rx = forced_patch_run::spawn_poller(forced_patch_run::POLL_INTERVAL);
+
+    // What the poller has collected and no cycle has run yet. A buffer rather than a straight read,
+    // because the poller keeps collecting while a cycle is in flight — the schedule state is inside
+    // that cycle (see `spawn_cycle`), so there is nothing to start a second one with — and an
+    // instruction the server has already marked collected has nowhere else to come back from.
+    let mut pending_forced: Vec<String> = Vec::new();
 
     // The root service's schedule, as last shown in the menu. Re-read every tick — the service
     // persists a minute on its first run and the server may move it on any check-in — but only
@@ -841,7 +923,25 @@ fn run_scheduler(
                 shown_check_in = None;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if state.as_ref().is_some_and(|current| current.is_due()) {
+                for collected in forced_rx.try_iter() {
+                    logging::info(&format!(
+                        "collected {} forced patch run(s): {}",
+                        collected.len(),
+                        collected.iter().map(|run| format!("{} ({})", run.application_name, run.id)).collect::<Vec<_>>().join(", ")
+                    ));
+                    pending_forced.extend(collected.into_iter().map(|run| run.application_name));
+                }
+
+                // An administrator's forced run takes precedence over a naturally due cycle, because
+                // this is the emergency path and the two cannot run at once — the schedule state
+                // goes *into* a cycle by ownership (see `spawn_cycle`). Nothing is lost by the
+                // ordering: a forced run does not register a completed cycle (see
+                // `patch_cycle::run_forced`), so a cycle that was due stays due and the next tick
+                // starts it.
+                if !pending_forced.is_empty() && state.is_some() {
+                    let owned = state.take().expect("just checked that the state is here");
+                    in_flight = Some(spawn_forced_cycle(&queue_dir, &current_policy, owned, report, std::mem::take(&mut pending_forced)));
+                } else if state.as_ref().is_some_and(|current| current.is_due()) {
                     let owned = state.take().expect("just checked that the state is here");
                     in_flight = Some(spawn_cycle(patch_cycle::run, &queue_dir, &current_policy, owned, report));
                 }

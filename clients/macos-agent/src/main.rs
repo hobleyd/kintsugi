@@ -1,6 +1,7 @@
 mod checkin_schedule;
 mod config;
 mod dialogs;
+mod forced_patch_run;
 mod identity;
 mod input_injection;
 mod logging;
@@ -525,6 +526,33 @@ fn spawn_cycle(
     })
 }
 
+/// `spawn_cycle` for a forced run — see `patch_cycle::run_forced`.
+///
+/// A second function rather than another `CycleFn`, because a forced run carries something the
+/// other two do not: the list of applications an administrator named. `CycleFn` is a plain function
+/// pointer precisely so the scheduler hands over *which* cycle without a flag to branch on, and
+/// widening it to a closure to carry one argument would cost that everywhere. Everything else here
+/// — the thread, the state by ownership, the join site — is `spawn_cycle`'s, for its reasons.
+///
+/// Kept identical in the other two agents.
+fn spawn_forced_cycle(
+    client: &reqwest::blocking::Client,
+    config: &Config,
+    policy: &policy::PatchingPolicy,
+    mut state: ScheduleState,
+    serial_number: &str,
+    identity: &identity::AgentIdentity,
+    report: StatusReporterFn,
+    application_names: Vec<String>,
+) -> std::thread::JoinHandle<ScheduleState> {
+    let (client, config, policy) = (client.clone(), config.clone(), policy.clone());
+    let (serial_number, identity) = (serial_number.to_string(), identity.clone());
+    std::thread::spawn(move || {
+        patch_cycle::run_forced(&client, &config, &policy, &mut state, &serial_number, &identity, &report, &application_names);
+        state
+    })
+}
+
 /// The background half of `run_ui_agent` — see its doc comment for why this is a separate
 /// thread. Reports its state to the menu bar via `report` at every meaningful transition, and
 /// treats a "Patch Now" click the same as a naturally due cycle except it skips the confirm/delay
@@ -657,7 +685,54 @@ fn run_scheduler(
                 shown_check_in = None;
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if state.as_ref().is_some_and(|current| current.is_due()) {
+                // An administrator's forced run is collected before the due check and takes
+                // precedence over it, because this is the emergency path and the two cannot run at
+                // once — the schedule state goes *into* a cycle by ownership (see `spawn_cycle`).
+                // Nothing is lost by the ordering: a forced run does not register a completed cycle
+                // (see `patch_cycle::run_forced`), so a cycle that was due stays due and the next
+                // tick starts it.
+                //
+                // Polled once a tick, which is the whole latency budget of an emergency patch on a
+                // host somebody is logged in to: a minute, against the hours a patching interval
+                // takes. The cost is one small GET per minute per logged-in host; the server
+                // answers an empty list, which is the usual answer.
+                //
+                // Gated on an identity because the request needs this host's client certificate to
+                // get past nginx at all, and a 403 once a minute would be noise rather than news.
+                let forced = match (state.as_ref(), &agent_identity) {
+                    (Some(_), Some(_)) => match forced_patch_run::collect(&client, &config, &serial_number) {
+                        Ok(runs) => runs,
+                        Err(err) => {
+                            logging::warn(&format!("could not check for forced patch runs: {err:#}"));
+                            Vec::new()
+                        }
+                    },
+                    _ => Vec::new(),
+                };
+
+                if !forced.is_empty() {
+                    logging::info(&format!(
+                        "collected {} forced patch run(s): {}",
+                        forced.len(),
+                        forced.iter().map(|run| format!("{} ({})", run.application_name, run.id)).collect::<Vec<_>>().join(", ")
+                    ));
+
+                    let application_names = forced.into_iter().map(|run| run.application_name).collect();
+                    // Both are Some — that is what the match above just established, and neither
+                    // can have changed since: this is the same loop iteration.
+                    let owned = state.take().expect("a forced run is only collected when the state is here");
+                    let identity = agent_identity.as_ref().expect("a forced run is only collected when an identity is here");
+                    in_flight = Some(spawn_forced_cycle(
+                        &client,
+                        &config,
+                        &current_policy,
+                        owned,
+                        &serial_number,
+                        identity,
+                        report,
+                        application_names,
+                    ));
+                } else if state.as_ref().is_some_and(|current| current.is_due()) {
                     match &agent_identity {
                         Some(identity) => {
                             let owned = state.take().expect("just checked that the state is here");

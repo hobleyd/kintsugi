@@ -5,6 +5,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::forced_patch_run::ForcedPatchRun;
+
 /// The privilege handoff between this agent's two halves, and the reason it exists at all.
 ///
 /// The macOS agent's handoff is partial: its per-user process holds this host's identity and runs
@@ -44,6 +46,17 @@ pub enum RequestKind {
     /// `checkin_schedule::request_now`. No body — the service runs the same check-in it runs on
     /// the hour (`service::Agent::check_in`), just now.
     CheckIn,
+    /// "Has an administrator forced a patch run against this host?" — asked once a scheduler tick,
+    /// because the tray holds no mutual-TLS identity and so cannot ask the server itself. No body,
+    /// and nothing a forged one could influence: the service asks the server about *this* host and
+    /// no other, the same as for a `Plan`.
+    ///
+    /// Note what a forged request can still do, since it is the one thing here that is not merely
+    /// an early read: the server marks the instructions collected as it answers, so a request the
+    /// real tray never sees consumes them. That costs a local user nothing they did not already
+    /// have — the tray process is theirs to kill, which stops patching altogether — but it is worth
+    /// knowing before this kind is given a body or a second reader.
+    ForcedPatchRuns,
 }
 
 impl RequestKind {
@@ -56,11 +69,12 @@ impl RequestKind {
             RequestKind::AppPatch => "app-patch.request",
             RequestKind::OsUpdate => "os-update.request",
             RequestKind::CheckIn => "check-in.request",
+            RequestKind::ForcedPatchRuns => "forced-patch-runs.request",
         }
     }
 
     fn from_file_name(file_name: &str) -> Option<Self> {
-        for kind in [RequestKind::Plan, RequestKind::AppPatch, RequestKind::OsUpdate, RequestKind::CheckIn] {
+        for kind in [RequestKind::Plan, RequestKind::AppPatch, RequestKind::OsUpdate, RequestKind::CheckIn, RequestKind::ForcedPatchRuns] {
             if file_name.ends_with(kind.extension()) {
                 return Some(kind);
             }
@@ -70,13 +84,21 @@ impl RequestKind {
 }
 
 /// What the service writes back for a completed request. `data` carries a `Plan`'s answer and is
-/// absent for the two action kinds, which have nothing to report beyond success and output.
+/// absent for the two action kinds, which have nothing to report beyond success and output;
+/// `forced` carries a [`RequestKind::ForcedPatchRuns`] answer and is empty for everything else.
+///
+/// Two fields rather than one polymorphic payload, because the two answers are different shapes and
+/// a tray process reading the wrong one would be a silent mismatch rather than a parse error. Both
+/// are defaulted on read, so a tray process and a service at different versions — which is the
+/// normal state of affairs for the seconds around a self-update — still understand each other.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RequestResult {
     pub success: bool,
     pub output: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<Plan>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forced: Vec<ForcedPatchRun>,
 }
 
 /// One application the server says is patchable on this host, reduced to just what the tray process
@@ -109,6 +131,28 @@ impl Plan {
 
     pub fn is_empty(&self) -> bool {
         self.total() == 0
+    }
+
+    /// Narrows this plan to the applications an administrator actually forced, and drops the
+    /// Windows update with it.
+    ///
+    /// Both halves matter. "Force this application" names one row on one screen, so a forced run
+    /// that also installed every other pending patch — and a Windows update, which reboots — would
+    /// do enormously more than was asked, in the one situation where the person asking is least
+    /// able to absorb the surprise. And the names are matched case-insensitively because that is
+    /// how applications are matched everywhere else in this agent and on the server.
+    ///
+    /// Lives on `Plan` here rather than in `patch_cycle` (where the other two agents keep it,
+    /// on their own `PendingWork`) only because `Plan` is this agent's version of that type and it
+    /// lives in this file. Kept identical in behaviour to the other two.
+    pub fn narrowed_to(self, application_names: &[String]) -> Plan {
+        let apps = self
+            .apps
+            .into_iter()
+            .filter(|app| application_names.iter().any(|name| name.eq_ignore_ascii_case(&app.application_name)))
+            .collect();
+
+        Plan { apps, os_update_available: false }
     }
 }
 
@@ -172,6 +216,9 @@ pub fn submit(queue_dir: &Path, kind: RequestKind, body: &str, timeout: Duration
 /// tested without any of that.
 pub trait RequestHandler {
     fn plan(&mut self) -> Result<Plan>;
+    /// Answers a [`RequestKind::ForcedPatchRuns`] — see `forced_patch_run::collect`, which is what
+    /// the service's implementation calls.
+    fn forced_patch_runs(&mut self) -> Result<Vec<ForcedPatchRun>>;
     fn patch_application(&mut self, application_name: &str) -> Result<()>;
     fn install_os_updates(&mut self) -> Result<()>;
     /// Answers a [`RequestKind::CheckIn`]. Returns the message the tray process shows.
@@ -241,25 +288,35 @@ fn run_request(kind: RequestKind, body: &str, handler: &mut impl RequestHandler)
                 success: true,
                 output: format!("{} application(s) pending, os_update_available={}", plan.apps.len(), plan.os_update_available),
                 data: Some(plan),
+                forced: Vec::new(),
             },
-            Err(err) => RequestResult { success: false, output: format!("{err:#}"), data: None },
+            Err(err) => RequestResult { success: false, output: format!("{err:#}"), data: None, forced: Vec::new() },
         },
         RequestKind::AppPatch => {
             if body.is_empty() {
-                return RequestResult { success: false, output: "no application name in the request".to_string(), data: None };
+                return RequestResult { success: false, output: "no application name in the request".to_string(), data: None, forced: Vec::new() };
             }
             match handler.patch_application(body) {
-                Ok(()) => RequestResult { success: true, output: format!("patched {body}"), data: None },
-                Err(err) => RequestResult { success: false, output: format!("{err:#}"), data: None },
+                Ok(()) => RequestResult { success: true, output: format!("patched {body}"), data: None, forced: Vec::new() },
+                Err(err) => RequestResult { success: false, output: format!("{err:#}"), data: None, forced: Vec::new() },
             }
         }
         RequestKind::OsUpdate => match handler.install_os_updates() {
-            Ok(()) => RequestResult { success: true, output: "installed pending Windows updates".to_string(), data: None },
-            Err(err) => RequestResult { success: false, output: format!("{err:#}"), data: None },
+            Ok(()) => RequestResult { success: true, output: "installed pending Windows updates".to_string(), data: None, forced: Vec::new() },
+            Err(err) => RequestResult { success: false, output: format!("{err:#}"), data: None, forced: Vec::new() },
         },
         RequestKind::CheckIn => match handler.check_in() {
-            Ok(output) => RequestResult { success: true, output, data: None },
-            Err(err) => RequestResult { success: false, output: format!("{err:#}"), data: None },
+            Ok(output) => RequestResult { success: true, output, data: None, forced: Vec::new() },
+            Err(err) => RequestResult { success: false, output: format!("{err:#}"), data: None, forced: Vec::new() },
+        },
+        RequestKind::ForcedPatchRuns => match handler.forced_patch_runs() {
+            Ok(forced) => RequestResult {
+                success: true,
+                output: format!("{} forced patch run(s) collected", forced.len()),
+                data: None,
+                forced,
+            },
+            Err(err) => RequestResult { success: false, output: format!("{err:#}"), data: None, forced: Vec::new() },
         },
     }
 }
@@ -297,6 +354,7 @@ mod tests {
         os_updates_installed: usize,
         plans_requested: usize,
         check_ins: usize,
+        forced_collections: usize,
         fail_patches: bool,
     }
 
@@ -325,6 +383,15 @@ mod tests {
         fn check_in(&mut self) -> Result<String> {
             self.check_ins += 1;
             Ok("checked in".to_string())
+        }
+
+        fn forced_patch_runs(&mut self) -> Result<Vec<ForcedPatchRun>> {
+            self.forced_collections += 1;
+            Ok(vec![ForcedPatchRun {
+                id: "3f1c1d7e-0000-4000-8000-000000000001".to_string(),
+                application_name: "Firefox".to_string(),
+                platform: "Windows".to_string(),
+            }])
         }
     }
 
@@ -365,6 +432,24 @@ mod tests {
         assert_eq!(plan.apps.len(), 1);
         assert!(plan.os_update_available);
         assert_eq!(plan.total(), 2);
+    }
+
+    #[test]
+    fn process_queue_answers_a_forced_patch_runs_request_with_what_the_handler_collected() {
+        let dir = scratch_dir("forced");
+        let request = write_request(&dir, RequestKind::ForcedPatchRuns, "").unwrap();
+        let mut handler = RecordingHandler::default();
+
+        process_queue(&dir, &mut handler);
+
+        let result: RequestResult = serde_json::from_str(&fs::read_to_string(result_path_for(&request)).unwrap()).unwrap();
+        assert!(result.success);
+        assert_eq!(handler.forced_collections, 1);
+        assert_eq!(result.forced.len(), 1);
+        assert_eq!(result.forced[0].application_name, "Firefox");
+        // The two payload fields are separate for a reason — see `RequestResult`. A forced-run
+        // answer must not arrive looking like a plan.
+        assert!(result.data.is_none(), "a forced-run answer carries no plan");
     }
 
     #[test]

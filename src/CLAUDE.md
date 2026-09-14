@@ -702,6 +702,49 @@ longer matches anything is a stale page and answers NotFound rather than acting 
 replaced it.
 
 
+## Forcing a patch run out of cycle
+
+**The emergency action, and the only thing in this backend that instructs a managed host to do
+something it did not ask for.** The Installed Applications screen's "Patch now" raises one
+`ForcedPatchRun` per host: run this application's upgrade script at your next opportunity, rather
+than at your own next scheduled cycle. Five things about it are decisions rather than mechanics.
+
+**The server still never pushes.** Nothing here opens a connection to a host — the one standing
+socket in the system (remote control) is held by the per-user process, so it is absent on exactly
+the headless servers an emergency is most likely to be about. A forced run is therefore a row an
+agent *collects*, from `GET /api/forced-patch-runs` (agent-gated, and **in nginx's exact-match
+regex** — that edit is part of the route, not a follow-up). The latency is the agent's own poll,
+and the admin UI states it rather than implying otherwise.
+
+**Reading consumes.** `ClaimForcedPatchRunsCommand` stamps every row it hands over as collected, in
+the same call, which is why a GET writes. A row left collectable is served again on the next poll
+sixty seconds later, and every serving starts a five-minute patching warning on that host. The cost
+is stated rather than hidden: an agent collected from that then dies has lost the instruction, and
+the operator presses the button again. That is the better failure of the two.
+
+**It expires.** `ForcedPatchRun.DefaultLifetime` is 24 hours. A laptop shut in a bag for three weeks
+would otherwise come back and start a five-minute countdown for an emergency that was over a
+fortnight ago; 24 hours covers a headless server's hourly check-in many times over and dies with the
+emergency that raised it.
+
+**The browser names the hosts; this server does not re-derive them.** The screen's filters are
+client-side, so the set the operator was looking at exists only in the browser —
+`RequestForcedPatchRunsCommand` carries the host list. They arrive as *names*, because that is what
+the Applications screen has (it has never carried a serial number), and translating a name to a host
+id is a lookup rather than filter logic. A name that resolves to nothing comes back in
+`NotRequested` rather than failing the call, and the handler reads `GetAllAsync`, which already
+excludes a host whose removal has been requested.
+
+**It is an urgency override, never a trust override.** The row carries an application name and a
+platform bucket and nothing else — no script crosses either route. The agent re-fetches its ordinary
+work list and `is_patchable` still verifies the signature against the key pinned at enrollment, so a
+forced run cannot make an unsigned script runnable. Do not add a script, a signature, or a "skip the
+check" flag to this shape; the admin UI disables the button on an unsigned row instead.
+
+The agents' half — the third `patch_cycle` entry point, why it keeps the five-minute warning that
+`run_now` skips, and why it does not register a completed cycle — is in `clients/CLAUDE.md`.
+
+
 ## When a script fails on a host: the Failed Updates queue
 
 **A success and a failure are different kinds of fact, and they are stored differently.**

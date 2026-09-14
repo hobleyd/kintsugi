@@ -123,7 +123,7 @@ pub fn run(handler: &mut impl RequestHandler, policy: &PatchingPolicy, state: &m
         }
     };
 
-    execute(handler, policy, state, work, report, Presentation::Interactive { warning });
+    execute(handler, policy, state, work, report, Presentation::Interactive { warning }, true);
 }
 
 /// The notification area's "Patch Now" item: skips the confirm/delay decision altogether, since
@@ -150,7 +150,7 @@ pub fn run_now(handler: &mut impl RequestHandler, policy: &PatchingPolicy, state
         return;
     }
 
-    execute(handler, policy, state, work, report, Presentation::Interactive { warning: Duration::ZERO });
+    execute(handler, policy, state, work, report, Presentation::Interactive { warning: Duration::ZERO }, true);
 }
 
 /// The root service's own cycle, for a host with nobody logged in to run the per-user half.
@@ -193,7 +193,93 @@ pub fn run_unattended(handler: &mut impl RequestHandler, policy: &PatchingPolicy
         work.os_update_available
     ));
 
-    execute(handler, policy, state, work, &|_| {}, Presentation::Unattended);
+    execute(handler, policy, state, work, &|_| {}, Presentation::Unattended, true);
+}
+
+/// An administrator's "patch this now" on a host somebody is logged in to — see
+/// `forced_patch_run::spawn_poller` and `queue::RequestKind::ForcedPatchRuns`. This is the
+/// emergency path: a named application is patched at the next poll rather than at this host's next
+/// scheduled cycle.
+///
+/// It is a third entry point rather than a flag on one of the others, because it answers the
+/// confirm/delay question and the warning question differently from all of them:
+///
+/// - **No confirm/delay dialog.** That dialog exists to let the person at the desk move an
+///   *automatic* cycle out of the way. An administrator forcing a run has already decided the
+///   emergency outranks the interruption, so offering "Delay" would be offering something the
+///   answer to has already been given.
+/// - **The full five-minute warning, all the same.** `run_now` skips it because the click came from
+///   the very person the interruption falls on (see [`Decision`]); that reasoning does not hold
+///   here, where the person deciding is somewhere else entirely. So the host gets the same notice a
+///   scheduled cycle gives — "Patching will begin in 5 minutes. Please save your work." — with
+///   nothing to click.
+/// - **The schedule is not touched.** A forced run patches one application; the scheduled cycle
+///   patches everything. Registering this as a completed cycle would push the real one a whole
+///   interval into the future, so an emergency patch would silently cost this host its next
+///   ordinary one. `execute`'s `reschedule` argument is what says so.
+///
+/// Kept identical in the other two agents.
+pub fn run_forced(
+    handler: &mut impl RequestHandler,
+    policy: &PatchingPolicy,
+    state: &mut ScheduleState,
+    report: &StatusReporter,
+    application_names: &[String],
+) {
+    forced(handler, policy, state, report, Presentation::Interactive { warning: WARNING_PERIOD }, application_names);
+}
+
+/// `run_forced` for a server with nobody logged in — the same instruction reaching this host
+/// through `main::patch_unattended_if_nobody_is_logged_in` instead of through the queue.
+///
+/// The five-minute notice is dropped rather than served to nobody, exactly as `run_unattended`
+/// drops it: the wait exists so a person can save their work, and sleeping five minutes on a
+/// headless server only delays the emergency it was raised for. This is the one place the three
+/// agents genuinely diverge on a forced run, and it is the same divergence they already have for a
+/// scheduled one.
+pub fn run_forced_unattended(
+    handler: &mut impl RequestHandler,
+    policy: &PatchingPolicy,
+    state: &mut ScheduleState,
+    application_names: &[String],
+) {
+    forced(handler, policy, state, &|_| {}, Presentation::Unattended, application_names);
+}
+
+fn forced(
+    handler: &mut impl RequestHandler,
+    policy: &PatchingPolicy,
+    state: &mut ScheduleState,
+    report: &StatusReporter,
+    presentation: Presentation,
+    application_names: &[String],
+) {
+    logging::info(&format!("running a forced patch cycle for: {}", application_names.join(", ")));
+
+    let work = match plan(handler) {
+        Ok(work) => work,
+        Err(err) => {
+            // Nothing is lost by giving up quietly here *except* the instruction itself: the server
+            // has already marked it collected, so the next poll will not bring it back. Said at warn
+            // level for that reason — this is the one branch where "try again later" is not true and
+            // an administrator may be waiting on a patch that is not coming.
+            logging::warn(&format!("could not check what to patch for a forced run, so it has been dropped: {err:#}"));
+            return;
+        }
+    };
+
+    let work = work.narrowed_to(application_names);
+
+    if work.is_empty() {
+        // Not a failure, and deliberately not a notification: the usual cause is that the host is
+        // already current on the application, or that its script is unsigned and therefore not
+        // runnable at all (`upgrade::is_patchable`). Neither is something to interrupt the person at
+        // this desk about for an instruction they did not raise.
+        logging::info("forced patch run has nothing to do on this host — nothing patchable matched");
+        return;
+    }
+
+    execute(handler, policy, state, work, report, presentation, false);
 }
 
 fn execute(
@@ -203,6 +289,10 @@ fn execute(
     work: Plan,
     report: &StatusReporter,
     presentation: Presentation,
+    // Whether finishing counts as this host's scheduled patch cycle. True for the whole-host
+    // cycles; false for a forced run, which patches one named application and must not push the
+    // real cycle an interval into the future — see `run_forced`.
+    reschedule: bool,
 ) {
     if !presentation.warning().is_zero() {
         let warning = presentation.warning();
@@ -227,7 +317,9 @@ fn execute(
     presentation.notify(&summary);
     logging::info(&format!("patch cycle finished: {summary}"));
 
-    state.register_completed(policy);
+    if reschedule {
+        state.register_completed(policy);
+    }
     report(AgentStatus::Idle { next_due_epoch: state.next_due_epoch() });
 }
 
@@ -460,6 +552,13 @@ mod tests {
             self.actions.push("check-in".to_string());
             Ok("checked in".to_string())
         }
+
+        fn forced_patch_runs(&mut self) -> anyhow::Result<Vec<crate::forced_patch_run::ForcedPatchRun>> {
+            // Never reached from here: a forced run is what *starts* a cycle, so it is collected
+            // before `run_forced` is called rather than from inside it. Present for the trait.
+            self.actions.push("forced-patch-runs".to_string());
+            Ok(Vec::new())
+        }
     }
 
     fn policy() -> PatchingPolicy {
@@ -541,6 +640,53 @@ mod tests {
 
         assert_eq!(handler.actions, vec!["plan", "patch:Firefox", "patch:GIMP", "os-update"]);
         assert!(!state.is_due(), "a cycle that finished with failures is still a finished cycle");
+    }
+
+    /// The three properties of a forced run that separate it from every other cycle, on the one
+    /// path a test can actually drive: `run_forced_unattended` skips the five-minute sleep, so the
+    /// narrowing, the dropped OS update and the untouched schedule are all observable without a
+    /// test that waits.
+    #[test]
+    fn a_forced_run_patches_only_what_was_named_and_never_the_os() {
+        let policy = policy();
+        let mut state = scratch_state("forced-narrowing", &policy);
+        state.force_due_for_test();
+        let mut handler = RecordingHandler { plan: plan_with(&["Firefox", "GIMP"], true), ..Default::default() };
+
+        run_forced_unattended(&mut handler, &policy, &mut state, &["gimp".to_string()]);
+
+        assert_eq!(
+            handler.actions,
+            vec!["plan", "patch:GIMP"],
+            "only the named application, matched case-insensitively, and never the OS update"
+        );
+    }
+
+    #[test]
+    fn a_forced_run_leaves_the_scheduled_cycle_exactly_as_due_as_it_found_it() {
+        let policy = policy();
+        let mut state = scratch_state("forced-schedule", &policy);
+        state.force_due_for_test();
+        let mut handler = RecordingHandler { plan: plan_with(&["Firefox"], false), ..Default::default() };
+
+        run_forced_unattended(&mut handler, &policy, &mut state, &["Firefox".to_string()]);
+
+        assert!(
+            state.is_due(),
+            "a forced run patches one application; counting it as the scheduled cycle would cost this host its next real one"
+        );
+    }
+
+    #[test]
+    fn a_forced_run_for_something_this_host_cannot_patch_does_nothing_at_all() {
+        let policy = policy();
+        let mut state = scratch_state("forced-nothing", &policy);
+        state.force_due_for_test();
+        let mut handler = RecordingHandler { plan: plan_with(&["Firefox"], true), ..Default::default() };
+
+        run_forced_unattended(&mut handler, &policy, &mut state, &["LibreOffice".to_string()]);
+
+        assert_eq!(handler.actions, vec!["plan"], "nothing matched, so nothing runs — the OS update included");
     }
 
     #[test]

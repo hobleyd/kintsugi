@@ -53,3 +53,19 @@ class ApplicationRow extends Equatable {
   @override
   List<Object?> get props => [name, hostCount, hostNames, upgradePaths, children];
 }
+
+/// What "Patch now" did. Mirrors `RequestForcedPatchRunsResult`.
+///
+/// Carries the hosts it could *not* reach rather than only a count, because that is the half an
+/// operator acting on an emergency has to see: a filter resolved in the browser can name a host the
+/// server has since removed, and "12 hosts told" would hide that the one machine they were looking
+/// at is not among them.
+class ForcedPatchRunResult extends Equatable {
+  const ForcedPatchRunResult({required this.requested, required this.notRequested});
+
+  final int requested;
+  final List<String> notRequested;
+
+  @override
+  List<Object?> get props => [requested, notRequested];
+}

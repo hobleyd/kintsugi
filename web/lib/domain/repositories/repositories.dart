@@ -68,6 +68,18 @@ abstract interface class RemoteControlRepository {
 
 abstract interface class ApplicationRepository {
   Future<ApplicationOverview> overview();
+
+  /// Tells [hostNames] to run [applicationName]'s upgrade script at their next opportunity, rather
+  /// than waiting for their own patching schedule.
+  ///
+  /// The host list is resolved here rather than server-side because the Applications screen's
+  /// filters are client-side — the set the operator is looking at exists only in the browser. See
+  /// `RequestForcedPatchRunsCommand`.
+  Future<ForcedPatchRunResult> forcePatchRuns({
+    required String applicationName,
+    required String platform,
+    required List<String> hostNames,
+  });
 }
 
 abstract interface class UpgradePathRepository {

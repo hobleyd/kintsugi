@@ -103,7 +103,7 @@ pub fn run(policy: &PatchingPolicy, state: &mut ScheduleState, report: &StatusRe
         }
     };
 
-    execute(policy, state, work, report, warning);
+    execute(policy, state, work, report, warning, true);
 }
 
 /// The menu's "Patch Now" item: skips the confirm/delay decision altogether, since asking whether to
@@ -130,10 +130,72 @@ pub fn run_now(policy: &PatchingPolicy, state: &mut ScheduleState, report: &Stat
         return;
     }
 
-    execute(policy, state, work, report, Duration::ZERO);
+    execute(policy, state, work, report, Duration::ZERO, true);
 }
 
-fn execute(policy: &PatchingPolicy, state: &mut ScheduleState, work: Plan, report: &StatusReporter, warning: Duration) {
+/// An administrator's "patch this now", collected from the server by the scheduler loop — see
+/// `forced_patch_run::collect` and `queue::RequestKind::ForcedPatchRuns`. This is the emergency
+/// path: a named application is patched on this host at the next poll tick rather than at this
+/// host's next scheduled cycle.
+///
+/// It is the third entry point rather than a flag on one of the other two, because it answers the
+/// confirm/delay question and the warning question differently from both:
+///
+/// - **No confirm/delay dialog.** That dialog exists to let the person at the desk move an
+///   *automatic* cycle out of the way. An administrator forcing a run has already decided the
+///   emergency outranks the interruption, so offering "Delay" would be offering something the
+///   answer to has already been given.
+/// - **The full five-minute warning, all the same.** `run_now` skips it because the click came from
+///   the very person the interruption falls on (see [`Decision`]); that reasoning does not hold
+///   here, where the person deciding is somewhere else entirely. So the host gets the same notice a
+///   scheduled cycle gives — "Patching will begin in 5 minutes. Please save your work." — with
+///   nothing to click.
+/// - **The schedule is not touched.** A forced run patches one application; the scheduled cycle
+///   patches everything. Registering this as a completed cycle would push the real one a whole
+///   interval into the future, so an emergency patch would silently cost this host its next
+///   ordinary one. `execute`'s `reschedule` argument is what says so.
+///
+/// Kept identical in the other two agents.
+pub fn run_forced(policy: &PatchingPolicy, state: &mut ScheduleState, report: &StatusReporter, application_names: &[String]) {
+    logging::info(&format!("running a forced patch cycle for: {}", application_names.join(", ")));
+
+    let work = match plan() {
+        Ok(work) => work,
+        Err(err) => {
+            // Nothing is lost by giving up quietly here *except* the instruction itself: the server
+            // has already marked it collected, so the next tick will not bring it back. Said at
+            // warn level for that reason — this is the one branch where "try again later" is not
+            // true and an administrator may be waiting on a patch that is not coming.
+            logging::warn(&format!("could not check what to patch for a forced run, so it has been dropped: {err:#}"));
+            return;
+        }
+    };
+
+    let work = work.narrowed_to(application_names);
+
+    if work.is_empty() {
+        // Not a failure, and deliberately not a notification: the usual cause is that the host is
+        // already current on the application, or that its script is unsigned and therefore not
+        // runnable at all (`upgrade::is_patchable`). Neither is something to interrupt the person
+        // at this desk about for an instruction they did not raise.
+        logging::info("forced patch run has nothing to do on this host — nothing patchable matched");
+        return;
+    }
+
+    execute(policy, state, work, report, WARNING_PERIOD, false);
+}
+
+fn execute(
+    policy: &PatchingPolicy,
+    state: &mut ScheduleState,
+    work: Plan,
+    report: &StatusReporter,
+    warning: Duration,
+    // Whether finishing counts as this host's scheduled patch cycle. True for the two whole-host
+    // cycles; false for a forced run, which patches one named application and must not push the
+    // real cycle an interval into the future — see `run_forced`.
+    reschedule: bool,
+) {
     if !warning.is_zero() {
         let minutes = (warning.as_secs() + 59) / 60;
         let warning_message =
@@ -156,7 +218,9 @@ fn execute(policy: &PatchingPolicy, state: &mut ScheduleState, work: Plan, repor
     dialogs::notify("Kintsugi Patching", &summary);
     logging::info(&format!("patch cycle finished: {summary}"));
 
-    state.register_completed(policy);
+    if reschedule {
+        state.register_completed(policy);
+    }
     report(AgentStatus::Idle { next_due_epoch: state.next_due_epoch() });
 }
 

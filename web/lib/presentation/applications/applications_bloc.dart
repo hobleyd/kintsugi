@@ -259,6 +259,38 @@ class UpdateCheckNotice extends Equatable {
   List<Object?> get props => [message, success, skipped];
 }
 
+/// Tells every host this row is currently filtered to that it should run this application's upgrade
+/// script now, rather than at its own next scheduled patch cycle — the emergency action, and the one
+/// thing on this screen that reaches out and changes managed machines.
+///
+/// The host list is not on the event: it is derived from the state, by
+/// [ApplicationsState.forcedRunHostNamesFor], so the set that is sent is the set the table is
+/// showing rather than one a call site assembled separately.
+final class ApplicationForcedPatchRunRequested extends ApplicationsEvent {
+  const ApplicationForcedPatchRunRequested(this.row);
+
+  final ApplicationTableRow row;
+
+  @override
+  List<Object?> get props => [row];
+}
+
+/// What the most recent "Patch now" reported, shown above the table.
+///
+/// It has to say something even when everything worked, because nothing else on the screen will: no
+/// column moves when an instruction is raised, and the hosts themselves do not act on it for up to a
+/// minute (up to an hour on a Linux server with nobody logged in) and then wait five more before
+/// patching. Silence would read as the icon having done nothing.
+class ForcedPatchRunNotice extends Equatable {
+  const ForcedPatchRunNotice({required this.message, required this.success});
+
+  final String message;
+  final bool success;
+
+  @override
+  List<Object?> get props => [message, success];
+}
+
 final class ApplicationsState extends Equatable {
   const ApplicationsState({
     this.overview = const ApplicationOverview.empty(),
@@ -270,6 +302,8 @@ final class ApplicationsState extends Equatable {
     this.error,
     this.checkingRowKeys = const {},
     this.checkNotice,
+    this.forcingRowKeys = const {},
+    this.forceNotice,
   });
 
   final ApplicationOverview overview;
@@ -298,6 +332,47 @@ final class ApplicationsState extends Equatable {
   final Set<String> checkingRowKeys;
 
   final UpdateCheckNotice? checkNotice;
+
+  /// Rows whose "Patch now" request is in flight, by [ApplicationTableRow.key] — the same shape as
+  /// [checkingRowKeys] and for the same reason.
+  final Set<String> forcingRowKeys;
+
+  final ForcedPatchRunNotice? forceNotice;
+
+  /// The hosts "Patch now" would target for [row]: the ones behind on *this* row's application and
+  /// platform, narrowed to the host the table is filtered to when it is filtered to one.
+  ///
+  /// Two decisions are in here and both are worth stating.
+  ///
+  /// It reads the row's own host list rather than the application's, for the reason
+  /// [ApplicationFilters.matches] gives: `ApplicationRow.hostNames` is keyed on the application's
+  /// name alone, so an application installed from Homebrew on a Mac and from winget on a PC is two
+  /// rows sharing one list — forcing the Homebrew row would otherwise instruct the Windows hosts
+  /// too. When the platform filter names a bucket, the row is already that bucket, so no further
+  /// narrowing is needed; the filter decides which rows are on screen, and this decides which hosts
+  /// one of those rows covers.
+  ///
+  /// And it takes the hosts *needing the update*, not every host with the application installed. An
+  /// agent only patches a row its work list reports as `updateAvailable` (`upgrade::is_patchable` in
+  /// all three), so an instruction to a host already on the latest version is guaranteed to do
+  /// nothing — it would inflate the count this screen reports and leave a row in the database
+  /// nobody can explain. The fallback to the row's full host list covers a server older than the
+  /// field, which sends it empty; see [UpgradePathSummary.hostNamesNeedingUpdate].
+  List<String> forcedRunHostNamesFor(ApplicationTableRow row) {
+    final needingUpdate = row.upgradePath?.hostNamesNeedingUpdate ?? const <String>[];
+    final rowHosts = row.upgradePath?.hostNames ?? const <String>[];
+    final candidates = needingUpdate.isNotEmpty
+        ? needingUpdate
+        : (rowHosts.isNotEmpty ? rowHosts : row.application.hostNames);
+
+    if (filters.hostName == 'all') return List.of(candidates);
+
+    final host = filters.hostName.toLowerCase();
+    return [
+      for (final name in candidates)
+        if (name.toLowerCase() == host) name,
+    ];
+  }
 
   /// Every row the response produced, before filtering, with children flattened in directly after
   /// their parent.
@@ -424,9 +499,12 @@ final class ApplicationsState extends Equatable {
     String? error,
     Set<String>? checkingRowKeys,
     UpdateCheckNotice? checkNotice,
+    Set<String>? forcingRowKeys,
+    ForcedPatchRunNotice? forceNotice,
     bool clearError = false,
     bool clearExpanded = false,
     bool clearCheckNotice = false,
+    bool clearForceNotice = false,
   }) =>
       ApplicationsState(
         overview: overview ?? this.overview,
@@ -438,6 +516,8 @@ final class ApplicationsState extends Equatable {
         error: clearError ? null : (error ?? this.error),
         checkingRowKeys: checkingRowKeys ?? this.checkingRowKeys,
         checkNotice: clearCheckNotice ? null : (checkNotice ?? this.checkNotice),
+        forcingRowKeys: forcingRowKeys ?? this.forcingRowKeys,
+        forceNotice: clearForceNotice ? null : (forceNotice ?? this.forceNotice),
       );
 
   @override
@@ -451,6 +531,8 @@ final class ApplicationsState extends Equatable {
         error,
         checkingRowKeys,
         checkNotice,
+        forcingRowKeys,
+        forceNotice,
       ];
 }
 
@@ -459,12 +541,15 @@ class ApplicationsBloc extends Bloc<ApplicationsEvent, ApplicationsState>
   ApplicationsBloc({
     required GetApplicationOverview getOverview,
     required CheckApplicationUpdate checkUpdate,
+    required RequestForcedPatchRuns forcePatchRuns,
     ApplicationFilters initialFilters = const ApplicationFilters(),
   })  : _getOverview = getOverview,
         _checkUpdate = checkUpdate,
+        _forcePatchRuns = forcePatchRuns,
         super(ApplicationsState(filters: initialFilters)) {
     on<ApplicationsRequested>(_onRequested);
     on<ApplicationUpdateCheckRequested>(_onUpdateCheckRequested);
+    on<ApplicationForcedPatchRunRequested>(_onForcedPatchRunRequested);
     on<ApplicationsFiltersChanged>((event, emit) => emit(state.copyWith(
           filters: event.filters,
           // A panel spliced under a row that a filter change may have hidden is stranded, so it
@@ -496,6 +581,7 @@ class ApplicationsBloc extends Bloc<ApplicationsEvent, ApplicationsState>
 
   final GetApplicationOverview _getOverview;
   final CheckApplicationUpdate _checkUpdate;
+  final RequestForcedPatchRuns _forcePatchRuns;
 
   static ApplicationFilters _normalizeHostFilter(
     ApplicationFilters filters,
@@ -582,5 +668,72 @@ class ApplicationsBloc extends Bloc<ApplicationsEvent, ApplicationsState>
     // The result carries no version. The row's Latest and Checked columns come from the overview,
     // so it is re-read now rather than left to the next 60-second poll.
     add(const ApplicationsRequested(showSpinner: false));
+  }
+
+  Future<void> _onForcedPatchRunRequested(
+    ApplicationForcedPatchRunRequested event,
+    Emitter<ApplicationsState> emit,
+  ) async {
+    final row = event.row;
+    if (state.forcingRowKeys.contains(row.key)) return;
+
+    final hostNames = state.forcedRunHostNamesFor(row);
+    final label = '${row.application.name} on ${row.platform}';
+
+    // The screen only offers the action when there is something to force, so this is the race
+    // rather than the ordinary case: a poll between the icon appearing and the press landing can
+    // take the last outdated host off the row. Answered rather than sent, because an empty list is
+    // a 400 from the validator and "Forcing a patch run needs at least one host" is not what
+    // happened.
+    if (hostNames.isEmpty) {
+      emit(state.copyWith(
+        forceNotice: ForcedPatchRunNotice(
+          message: '$label: no host matching the current filters is behind on this application.',
+          success: false,
+        ),
+      ));
+      return;
+    }
+
+    emit(state.copyWith(
+      forcingRowKeys: {...state.forcingRowKeys, row.key},
+      clearForceNotice: true,
+    ));
+
+    ForcedPatchRunNotice notice;
+    try {
+      final result = await _forcePatchRuns(
+        applicationName: row.application.name,
+        platform: row.platform,
+        hostNames: hostNames,
+      );
+
+      // Deliberately not phrased as "patching has started". Nothing has: each host collects the
+      // instruction on its own next poll and then gives its user five minutes' notice, so a message
+      // claiming the work is under way would be wrong for at least that long and, on a Linux server
+      // with nobody logged in, for up to an hour.
+      final buffer = StringBuffer(
+        '$label: ${result.requested} host(s) will run this upgrade at their next check '
+        '(within a minute on a host somebody is logged in to, at the next hourly check-in on a '
+        'server with nobody on it), after a five-minute warning that cannot be delayed.',
+      );
+      if (result.notRequested.isNotEmpty) {
+        buffer.write(' Not sent to ${result.notRequested.join(', ')} — no such host is registered.');
+      }
+
+      notice = ForcedPatchRunNotice(
+        message: buffer.toString(),
+        success: result.notRequested.isEmpty && result.requested > 0,
+      );
+    } on ApiException catch (error) {
+      notice = ForcedPatchRunNotice(message: '$label: ${error.message}', success: false);
+    }
+
+    // Read `state` afresh: a poll or another row's action may have emitted meanwhile, and this
+    // handler runs concurrently with both.
+    emit(state.copyWith(
+      forcingRowKeys: {...state.forcingRowKeys}..remove(row.key),
+      forceNotice: notice,
+    ));
   }
 }

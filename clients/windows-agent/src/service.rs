@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{self, Config};
+use crate::forced_patch_run::{self, ForcedPatchRun};
 use crate::identity::{self, AgentIdentity};
 use crate::logging;
 use crate::os_update;
@@ -282,6 +283,29 @@ impl RequestHandler for Agent {
         });
 
         Ok(Plan { apps, os_update_available })
+    }
+
+    /// Asks the server what an administrator has forced against this host, and consumes it in the
+    /// same call — see `forced_patch_run::collect`. The service is the half that can ask: the tray
+    /// holds no mutual-TLS identity, so it relays this through the queue exactly as it does a plan.
+    ///
+    /// Nothing is *run* here. The answer is a list of names, and the tray turns it into an ordinary
+    /// `AppPatch` request per application, which comes straight back to `patch_application` above —
+    /// where the work list is re-fetched from the server and every signature re-verified. That is
+    /// what keeps a forced run an urgency override rather than a trust override.
+    fn forced_patch_runs(&mut self) -> Result<Vec<ForcedPatchRun>> {
+        self.ensure_identity();
+
+        // Empty rather than an error, and that distinction is the difference between a quiet log
+        // and a line a minute. This is polled once per scheduler tick for the life of the tray
+        // process, so a host that has not enrolled yet — or has just been un-enrolled — would
+        // otherwise write a 403 into the log sixty times an hour saying nothing an administrator
+        // can act on. There is genuinely nothing forced against a host the server does not know.
+        if self.identity.is_none() {
+            return Ok(Vec::new());
+        }
+
+        forced_patch_run::collect(&self.client, &self.config, &self.serial_number)
     }
 
     /// Runs one application's upgrade.

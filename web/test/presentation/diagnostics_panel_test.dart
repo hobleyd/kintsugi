@@ -228,6 +228,7 @@ void main() {
     final upgradePaths = FakeUpgradePathRepository();
     locator
       ..registerSingleton(GetApplicationOverview(applications))
+      ..registerSingleton(RequestForcedPatchRuns(applications))
       ..registerSingleton(CheckApplicationUpdate(upgradePaths))
       ..registerSingleton(StartUpgradePathScan(upgradePaths))
       ..registerSingleton(GetUpgradePathScanStatus(upgradePaths))

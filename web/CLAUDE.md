@@ -397,6 +397,43 @@ to state rather than discover:
   with the sidebar there, deliberately — that screen asked for the window — so a panel open when a
   session goes full-screen vanishes and comes back on exit.
 
+## "Patch now": the Applications screen's emergency action
+
+**The only control on that screen that reaches out and changes managed machines**, and the only one
+whose target set is decided by filters set somewhere else on the page. The server's half is in
+`src/CLAUDE.md` and the agents' in `clients/CLAUDE.md`; four things belong here.
+
+**The browser decides which hosts, and it reads the *row's* host list.** `ApplicationsState.
+forcedRunHostNamesFor` takes `UpgradePathSummary.hostNamesNeedingUpdate`, narrowed to
+`filters.hostName` when the table is filtered to one host — the same distinction
+`ApplicationFilters.matches` makes and for the same reason: `ApplicationRow.hostNames` is keyed on
+the application's name alone, so an application installed from Homebrew on a Mac and from winget on
+a PC is two rows sharing one list, and reading that would have the Homebrew row instruct the Windows
+hosts. It takes the hosts *behind* rather than every host with the application installed, because an
+agent only patches a row its work list reports an update available for (`is_patchable` in all
+three) — instructing a host already current writes a row in the database that can never do anything.
+The fallback to the row's full list covers a server older than the field.
+
+**The button is disabled when there is nothing to force, and the tooltip says which reason.** An
+unsigned script is one no agent will run, and a row every matching host is current on has nothing to
+do; an enabled button that quietly instructed hosts to do nothing would be worse than one that says
+why it cannot.
+
+**The notice promises an instruction, not an outcome.** Nothing on the table moves when a run is
+forced — no column changes, and the hosts do not act for up to a minute (up to an hour on a Linux
+server with nobody on it) and then wait five more. So `ForcedPatchRunNotice` says when each kind of
+host will act and that the warning cannot be delayed, and it names any host the server could not
+find rather than reporting a bare count: a filter resolved in the browser can name a machine the
+server has since removed, and that is precisely the machine an operator was looking at.
+
+**The Upgrade column now holds three icons, and that moved the table's floor.** `minWidth` went from
+1100 to 1180 because a 34px icon in a `FlexColumnWidth(1.2)` of 5.7 costs about 160px of table, and
+at 1100 the three overflowed their cell by 16px. What catches that is
+`test/presentation/diagnostics_panel_test.dart`, which lays this table out beside the 320px
+diagnostics panel — the narrowest this table is ever asked to be. A fourth icon here means doing
+that arithmetic again.
+
+
 ## Applications is a menu, and Failed Updates is the second screen under it
 
 `/applications` is still the installed-applications view and **must stay there**: the Hosts screen's

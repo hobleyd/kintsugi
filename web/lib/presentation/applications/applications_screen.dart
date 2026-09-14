@@ -50,6 +50,7 @@ class ApplicationsScreen extends StatelessWidget {
             create: (_) => ApplicationsBloc(
               getOverview: locator<GetApplicationOverview>(),
               checkUpdate: locator<CheckApplicationUpdate>(),
+              forcePatchRuns: locator<RequestForcedPatchRuns>(),
               initialFilters: ApplicationFilters(
                 statusKey: statusOptions.containsKey(initialStatusKey) ? initialStatusKey! : 'all',
                 // Held as given and matched case-insensitively when filtering: a query parameter
@@ -138,6 +139,8 @@ class _ApplicationsView extends StatelessWidget {
             UpdateCheckNotice(skipped: true) => AlertBox.info(notice.message),
             _ => AlertBox.error(notice.message),
           },
+        if (state.forceNotice case final notice?)
+          notice.success ? AlertBox.success(notice.message) : AlertBox.error(notice.message),
         if (state.loading && state.overview.applications.isEmpty)
           const _LoadingPanel()
         else if (state.overview.applications.isEmpty)
@@ -251,17 +254,24 @@ class _ApplicationsTable extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         KintsugiTable(
-          // Eight columns, and the widest table in the product. 1100 rather than the 1400 this
+          // Eight columns, and the widest table in the product. 1180 rather than the 1400 this
           // started as, which was 226px wider than the panel on a 1512-point display — so the
           // last two columns were reachable only by finding the panel's own horizontal scrollbar,
           // which on web is not drawn until something scrolls. Two things paid for the
           // difference: the 12px cell gutter costs 96px less across eight columns, and the table
           // now takes the panel's full width rather than laying out at exactly this figure, so
           // every column is wider than this arithmetic whenever the window allows. What is left
-          // is a real floor — below 1100 the version and timestamp columns start wrapping their
+          // is a real floor — below this the version and timestamp columns start wrapping their
           // one value onto two lines. The expanded instructions panel does not bear on it: it is
           // spliced in at the table's full width, not laid out in a column.
-          minWidth: 1100,
+          //
+          // It was 1100 until the Upgrade column gained a third icon ("Patch now", see
+          // [_ForcePatchNowButton]). That column is FlexColumnWidth(1.2) of 5.7, so a 34px icon
+          // costs about 160px of table, and at 1100 the three icons overflowed their cell by 16px
+          // — `test/presentation/diagnostics_panel_test.dart` is what says so, since it lays this
+          // table out beside the 320px diagnostics panel, which is the narrowest this table is
+          // ever asked to be. Adding a fourth icon here means doing this arithmetic again.
+          minWidth: 1180,
           columns: columns,
           sort: state.sort == null
               ? null
@@ -433,6 +443,10 @@ class _UpgradeCell extends StatelessWidget {
       UpgradeMethod.script when path.script != null => Row(
           mainAxisSize: MainAxisSize.min,
           children: [
+            // The emergency action, first in the row because it is the one anybody comes to this
+            // column in a hurry for. See [_ForcePatchNowButton] for what it does and what it
+            // deliberately does not claim.
+            _ForcePatchNowButton(row: row),
             // The manager's shared script is shown on the manager's row alone; an application
             // under it keeps the version check, which is its own. See
             // [ApplicationTableRow.usesManagerScript].
@@ -477,6 +491,99 @@ class _UpgradeCell extends StatelessWidget {
         ),
       ],
     );
+  }
+}
+
+/// "Patch now": tells every host this row is currently filtered to to run this application's
+/// upgrade script at its next opportunity, instead of waiting for its own patching cycle.
+///
+/// Four things about it are deliberate.
+///
+/// **It is confirmed, and the dialog names the hosts.** This is the only control on this screen
+/// that reaches out and changes managed machines, and the set it changes is decided by filters set
+/// elsewhere on the page — so the confirmation states how many hosts and which ones, because
+/// "currently filtered to" is not something an operator can check by looking at the icon.
+///
+/// **It is disabled when there is nothing to force**, with the tooltip saying which of the two
+/// reasons applies. An agent only patches a row its work list reports an update available for
+/// (`upgrade::is_patchable` in all three), so an enabled button that quietly instructs hosts to do
+/// nothing would be worse than one that says why it cannot.
+///
+/// **It promises an instruction, not an outcome.** Nothing is pushed to a host — every agent polls
+/// — so the dialog says when each kind of host will act and that the five-minute warning it then
+/// shows cannot be delayed. That last clause is the feature: an ordinary cycle offers "Delay", and
+/// this one does not.
+///
+/// **It cannot run an unsigned script.** The instruction carries a name and nothing else; the agent
+/// re-fetches its work list and re-verifies the signature before running anything. Forcing is an
+/// urgency override, never a trust override.
+class _ForcePatchNowButton extends StatelessWidget {
+  const _ForcePatchNowButton({required this.row});
+
+  final ApplicationTableRow row;
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<ApplicationsBloc>().state;
+    final hostNames = state.forcedRunHostNamesFor(row);
+    final signed = row.upgradePath?.isSigned ?? false;
+
+    final reason = switch ((signed, hostNames.isEmpty)) {
+      (false, _) => 'This script is not signed yet, so no agent will run it.',
+      (_, true) => 'No host matching the current filters is behind on this application.',
+      _ => null,
+    };
+
+    return IconActionButton(
+      icon: Icons.bolt,
+      busy: state.forcingRowKeys.contains(row.key),
+      tooltip: reason ?? 'Patch now on ${_hostSummary(hostNames)}',
+      onPressed: reason != null ? null : () => _confirm(context, hostNames),
+    );
+  }
+
+  /// "3 host(s)" when the filter names none in particular, and the host's own name when it does —
+  /// which is the whole point of the tooltip on a screen where the target set is decided elsewhere.
+  static String _hostSummary(List<String> hostNames) =>
+      hostNames.length == 1 ? hostNames.single : '${hostNames.length} host(s)';
+
+  Future<void> _confirm(BuildContext context, List<String> hostNames) async {
+    final bloc = context.read<ApplicationsBloc>();
+
+    // Named in full up to a point, then counted. A dialog listing four hundred hostnames is one
+    // nobody reads, and the number is the part that matters once the list stops being checkable.
+    const listed = 12;
+    final names = hostNames.length <= listed
+        ? hostNames.join(', ')
+        : '${hostNames.take(listed).join(', ')} and ${hostNames.length - listed} more';
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: dialogContext.palette.backgroundAlt,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(6),
+          side: BorderSide(color: dialogContext.palette.border),
+        ),
+        title: Text(
+          'Patch ${row.application.name} now on ${_hostSummary(hostNames)}?',
+          style: Theme.of(dialogContext).textTheme.titleLarge,
+        ),
+        content: HintText(
+          'This is the emergency action. $names will run this upgrade at their next check — within '
+          'a minute on a host somebody is logged in to, at the next hourly check-in on a server '
+          'with nobody on it — rather than waiting for their own patching cycle.\n\n'
+          'Each host shows a five-minute warning first. Unlike a scheduled cycle, the person at the '
+          'keyboard cannot delay it.',
+        ),
+        actions: [
+          SecondaryButton(label: 'Cancel', onPressed: () => Navigator.of(dialogContext).pop(false)),
+          PrimaryButton(label: 'Patch Now', onPressed: () => Navigator.of(dialogContext).pop(true)),
+        ],
+      ),
+    );
+
+    if (confirmed == true) bloc.add(ApplicationForcedPatchRunRequested(row));
   }
 }
 

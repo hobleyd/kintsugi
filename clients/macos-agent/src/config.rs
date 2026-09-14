@@ -187,6 +187,15 @@ impl Config {
         format!("{}/api/patching-policy", self.api_base_url.trim_end_matches('/'))
     }
 
+    /// The "patch this application now" instructions an administrator has raised against this host
+    /// — see `forced_patch_run::collect` and
+    /// Kintsugi.WebApi/Controllers/ForcedPatchRunsController.cs. Base URL only, for the same reason
+    /// `upgrade_paths_url` is: the caller adds `?serialNumber=` through the client's own
+    /// query-building so it is percent-encoded.
+    pub fn forced_patch_runs_url(&self) -> String {
+        format!("{}/api/forced-patch-runs", self.api_base_url.trim_end_matches('/'))
+    }
+
     /// The latest published kintsugi-agent build for one platform — see
     /// Kintsugi.WebApi/Controllers/AgentPackagesController.cs and `self_update`.
     pub fn agent_package_latest_url(&self, platform: &str) -> String {

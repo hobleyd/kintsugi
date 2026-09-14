@@ -114,6 +114,7 @@ void _registerUseCases() {
     ..registerSingleton(EndRemoteControlSession(remoteControl))
     ..registerSingleton(OpenRemoteControlStream(remoteControl))
     ..registerSingleton(GetApplicationOverview(applications))
+    ..registerSingleton(RequestForcedPatchRuns(applications))
     ..registerSingleton(GetPatchFailures(patchFailures))
     ..registerSingleton(DismissPatchFailure(patchFailures))
     ..registerSingleton(StartUpgradePathScan(upgradePaths))

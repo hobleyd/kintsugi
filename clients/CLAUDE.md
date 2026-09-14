@@ -173,6 +173,60 @@ the progress window over it. Keep the three copies in step; the shape is identic
 arguments a cycle needs differ.
 
 
+**A forced patch run is a third entry point into `patch_cycle`, and it answers two questions
+differently from both the others.** An administrator can raise "patch this application now" against
+a host from the admin UI's Installed Applications screen; the server's half is in `src/CLAUDE.md`.
+`patch_cycle::run_forced` — kept in all three, like `run` and `run_now` — is what runs it:
+
+- **No confirm/delay dialog.** That dialog exists so the person at the desk can move an *automatic*
+  cycle out of the way. Somebody has already decided the emergency outranks the interruption, so
+  offering "Delay" would offer something the answer to has been given. This is the whole of what the
+  feature is for.
+- **The full five-minute warning all the same.** `run_now` skips it because the click came from the
+  very person the interruption falls on (see `Decision`); that reasoning does not hold when the
+  person deciding is somewhere else. The host gets the same notice a scheduled cycle gives, with
+  nothing to click.
+- **Narrowed to the named applications, and the OS update dropped with them.** "Force this
+  application" names one row on one screen; installing every other pending patch and a reboot-bearing
+  OS update would do enormously more than was asked, in the situation where the person asking can
+  least absorb the surprise. That is `narrowed_to`, on `PendingWork` on macOS and on `Plan` in the
+  other two, because that is where each agent's version of the type lives.
+- **`register_completed` is not called.** A forced run patches one application; the scheduled cycle
+  patches everything. Counting it as the cycle would push the real one a whole interval out, so an
+  emergency patch would silently cost the host its next ordinary one. `execute`'s `reschedule`
+  argument is what says so, and it is the only argument that differs between the three entry points.
+
+**How the instruction is collected differs by platform, and so does how often — which is the one
+place these three deliberately do not match.** The reason is the same one that decides everything
+else in the table above: which half of the agent holds an identity.
+
+| | macOS | Windows | Linux |
+|---|---|---|---|
+| Who asks the server | per-user process, directly | the service, asked over the queue | the root side, asked over the queue |
+| Where the poll runs | inline in the scheduler loop | its own thread (`spawn_poller`) | its own thread (`spawn_poller`) |
+| How often | every tick (60s) | every tick (60s) | every `forced_patch_run::POLL_INTERVAL` (5 min) |
+| Nobody logged in | never collected | never collected | collected at the hourly check-in, run unattended |
+
+macOS polls inline because it is one HTTP call, beside the policy fetch already there. The other two
+cannot: their per-user half holds no identity, so a poll is a queue round trip —
+`RequestKind::ForcedPatchRuns`, answered by the privileged side — and a queue round trip is slow
+enough that running it on the loop that also answers a tray click is the exact problem `spawn_cycle`
+exists to avoid. Linux polls a fifth as often because its queue is watched by a `.path` unit, so
+every poll *starts a systemd unit*: once a minute is 1440 unit activations a day on every desktop,
+which reads as a broken agent long before anybody reads the lines. Very little is lost — the cycle
+it starts then waits five minutes before patching anything.
+
+Because those two threads keep collecting while a cycle is in flight, and the server hands an
+instruction over exactly once, both buffer what they collect (`run_scheduler`'s `pending_forced`)
+rather than reading the channel only when the schedule state happens to be free.
+
+**A forced run cannot run an unsigned script**, on any platform. The instruction carries a name; the
+work list is re-fetched and `is_patchable` re-verifies the signature exactly as for a scheduled
+cycle. Do not add a script or a bypass to `ForcedPatchRun` — it is an urgency override, not a trust
+override, and the queue's own property (a request names a thing, the privileged side fetches and
+verifies it) is the same one.
+
+
 **Only the Linux agent patches with nobody logged in, and it has to.** Both other agents put the
 patching schedule in the per-user process, which costs nothing when every managed host is somebody's
 desktop. Most of a Linux fleet is servers with no graphical session at all, so the same design would
