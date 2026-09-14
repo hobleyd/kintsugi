@@ -31,7 +31,8 @@ class AppShell extends StatelessWidget {
   final String location;
   final Widget child;
 
-  /// The application-wide record of error and log output, and the panel that shows it.
+  /// The application-wide record of error and log output, and the panel that shows it — docked to
+  /// the window's right edge, opposite the sidebar.
   ///
   /// It belongs to the shell rather than to any screen because that is the whole point of it: the
   /// output of "Check for Updates" is read *while* navigating to the screens it names, and a
@@ -83,12 +84,13 @@ class AppShell extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               if (withSidebar) _Sidebar(location: location, diagnostics: diagnostics),
-              // Inside the sidebar rather than over it, because the panel's whole reason to exist
-              // is being read while navigating between the screens its output names — so it must
-              // not cover the navigation. Suppressed in full screen along with the sidebar: the
-              // remote viewer wants the window.
-              if (withSidebar && diagnostics != null) DiagnosticsPanel(log: diagnostics),
               Expanded(child: child),
+              // Last, so it docks against the window's right edge — the opposite end from the
+              // navigation it has to leave usable, since the panel's whole reason to exist is
+              // being read while moving between the screens its output names. A row child rather
+              // than an overlay: it takes width from the page instead of covering it. Suppressed
+              // in full screen along with the sidebar, because that screen asked for the window.
+              if (withSidebar && diagnostics != null) DiagnosticsPanel(log: diagnostics),
             ],
           ),
         ),

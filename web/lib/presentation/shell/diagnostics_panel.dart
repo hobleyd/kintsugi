@@ -5,19 +5,22 @@ import '../../core/diagnostics/diagnostics_log.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/theme/kintsugi_palette.dart';
 
-/// The error and log output of everything that has run, sliding in from the left of the page.
+/// The error and log output of everything that has run, sliding in from the right of the window.
 ///
-/// **Between the sidebar and the page, not over either.** That is forced by what the panel is
-/// for: it stays open across navigations, so it must not cover the navigation, and a strip that
-/// permanently hid a third of the page it was meant to be read alongside would be worse than the
-/// alerts it replaces. So it takes width from the page rather than floating above it, and the
-/// page reflows — which the Applications table, the widest in the product, answers by scrolling
-/// horizontally inside its own panel. See `applications_screen.dart`'s `minWidth`.
+/// **Beside the page, not over it.** That is forced by what the panel is for: it stays open across
+/// navigations, so a strip that permanently hid a third of the page it is meant to be read
+/// alongside would be worse than the alerts it replaces. So it takes width from the page rather
+/// than floating above it, and the page reflows — which the Applications table, the widest in the
+/// product, answers by scrolling horizontally inside its own panel. See
+/// `applications_screen.dart`'s `minWidth`.
 ///
-/// The slide is [Align] with a growing `widthFactor` over a fixed-width child pinned to its right
-/// edge: the box opens left-to-right while the content inside it travels right into place, which
-/// is what a drawer hinged on the left looks like. An overlay with a `SlideTransition` would look
-/// the same for 200ms and then sit on top of the page, which is the thing this must not do.
+/// The slide is [Align] with a growing `widthFactor` over a fixed-width child pinned to its
+/// **left** edge: the box opens right-to-left off the window's edge while the child's left edge
+/// travels left into place, so the content enters from off-screen rather than being wiped into
+/// view from a standing start. Pinning it to the right edge instead would hold the child still and
+/// open a shutter over it, which is a different and worse effect. An overlay with a
+/// `SlideTransition` would look the same for 200ms and then sit on top of the page, which is the
+/// thing this must not do.
 class DiagnosticsPanel extends StatelessWidget {
   const DiagnosticsPanel({super.key, required this.log});
 
@@ -42,9 +45,11 @@ class DiagnosticsPanel extends StatelessWidget {
               ? const SizedBox.shrink()
               : ClipRect(
                   child: Align(
-                    // Right, so the body travels rightward out from under the sidebar as the box
-                    // opens rather than being wiped into view from a standing start.
-                    alignment: Alignment.centerRight,
+                    // Left, so the child's left edge starts at the window's right edge and travels
+                    // leftward as the box opens — the body enters from off-screen. `centerRight`
+                    // here would pin the body in its final place and reveal it through a widening
+                    // gap instead, which reads as a shutter rather than a drawer.
+                    alignment: Alignment.centerLeft,
                     widthFactor: t,
                     child: child,
                   ),
@@ -69,8 +74,9 @@ class _Body extends StatelessWidget {
       decoration: BoxDecoration(
         color: palette.panel,
         // One side, like the sidebar's, rather than the rounded card `KintsugiPanel` draws: this
-        // is a region of the window, not something sitting on a page.
-        border: Border(right: BorderSide(color: palette.border)),
+        // is a region of the window, not something sitting on a page. Left, because the page is
+        // what this panel now sits beside — the sidebar's own border is on its right.
+        border: Border(left: BorderSide(color: palette.border)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,

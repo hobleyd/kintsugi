@@ -111,7 +111,7 @@ class RunProgressView<B extends BackgroundRunBloc> extends StatelessWidget {
                           // fifty lines on screen twice.
                           ? Text(
                               '${state.progress.notes.length} note(s) worth a look — listed in '
-                              'Diagnostics, beside the menu.',
+                              'Diagnostics, on the right.',
                             )
                           : Column(
                               crossAxisAlignment: CrossAxisAlignment.start,

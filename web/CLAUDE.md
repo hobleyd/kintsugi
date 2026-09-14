@@ -337,16 +337,23 @@ is a singleton registered in `injection.dart`, handed to `AppShell` from the rou
 is a child of the `ShellRoute`: navigating rebuilds the page beside it and nothing else. Nothing
 closes it but the person who opened it.
 
-**It sits between the sidebar and the page, and takes width from the page rather than covering
-it.** Both halves are forced rather than chosen. Over the left edge it would cover the navigation,
-which is the one thing a panel meant to be read across screens must not do; floating over the page
-it would permanently hide part of what it is being read alongside. The cost is real and worth
-knowing before you widen it: the Applications table floors at `minWidth: 1100`, the sidebar takes
-240 and the panel 320, so on a 1512-point display that table scrolls horizontally inside its own
-panel while the diagnostics panel is open — `KintsugiTable`'s `Scrollbar` is what makes that
-discoverable, and on web a scrollbar is not drawn until something scrolls. That is the same
-arithmetic the table's own `minWidth` comment describes; 320 rather than a roomier 380 is the whole
-of the mitigation.
+**It docks to the window's right edge — the last child of the shell's `Row` — and takes width from
+the page rather than covering it.** Right rather than left puts it at the opposite end from the
+navigation it has to leave usable, which matters because the panel's whole point is being read
+while moving between the screens its output names. Beside rather than over, because a strip that
+permanently hid part of the page it is read alongside would be worse than the alerts it replaces.
+The cost is real and worth knowing before you widen it: the Applications table floors at
+`minWidth: 1100`, the sidebar takes 240 and the panel 320, so on a 1512-point display that table
+scrolls horizontally inside its own panel while the diagnostics panel is open — `KintsugiTable`'s
+`Scrollbar` is what makes that discoverable, and on web a scrollbar is not drawn until something
+scrolls. That is the same arithmetic the table's own `minWidth` comment describes; 320 rather than
+a roomier 380 is the whole of the mitigation.
+
+**The slide is an `Align` with a growing `widthFactor` over a child pinned to its *left* edge**, so
+the body starts at the window's right edge and travels left into view. Pin it `centerRight` instead
+and the body holds still while a gap widens over it, which reads as a shutter rather than a drawer
+— the two are one word apart in the source and nothing but looking at it will tell you which you
+have.
 
 **A `ChangeNotifier` in `core/`, not a bloc**, for the same reason `UnauthorizedNotifier` and
 `FullScreenController` are plain classes there: this is not one screen's state machine, it is a

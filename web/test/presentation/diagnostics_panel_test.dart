@@ -203,17 +203,18 @@ void main() {
 
       final panel = tester.getRect(find.text('DIAGNOSTICS'));
       final page = tester.getRect(find.text('the page'));
+      final menu = tester.getRect(find.text('KINTSUGI'));
 
       expect(
         page.center.dx,
-        greaterThan(full.center.dx),
-        reason: 'the page moved over — it reflowed rather than being overlaid',
+        lessThan(full.center.dx),
+        reason: 'the page moved left — it reflowed rather than being overlaid',
       );
-      expect(panel.left, lessThan(page.left), reason: 'the panel is to the left of the page');
+      expect(panel.left, greaterThan(page.left), reason: 'the panel docks to the right edge');
       expect(
-        panel.left,
-        greaterThan(200),
-        reason: 'and to the right of the menu, which stays reachable',
+        menu.left,
+        lessThan(page.left),
+        reason: 'the navigation is at the other end and keeps its place',
       );
     });
   });
