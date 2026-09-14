@@ -368,11 +368,21 @@ appears once anything has been recorded — brings it back. A run that worked an
 has already said so above the table, and sliding a panel over that table to repeat it would make
 the feature something to be endured.
 
-**What is wired, and what is not.** Only `RunProgressView` records, which covers both Applications
-runs — "Find Upgrade Paths" and "Check for Updates". Every other screen still shows its own
-`AlertBox` and nothing else; the facility is one `record` call away for any of them, and the
-candidates are the Vulnerabilities assessment run, the per-row check notice, and the Clients
-refresh. Two limits to state rather than discover:
+**Record on a transition, never on a state, and this is the trap in wiring a new producer.** Every
+one of these screens polls. A listener gated on `lastRunSucceeded == false` fires once per poll for
+as long as that stays the last outcome, *and* fires on mount for a run that failed hours before the
+screen was opened — an entry timestamped now for something that did not just happen. Gate on the
+edge instead: `previous.run.running && !current.run.running`, which is the same shape
+`BackgroundRunBloc.finished` already has. A failure that is a *state* still belongs in the screen's
+own `AlertBox`, which is why `_RunPanel` keeps saying "The last assessment did not complete."
+whether or not anything was recorded.
+
+**What is wired, and what is not.** Two producers record: `RunProgressView`, which covers both
+Applications runs — "Find Upgrade Paths" and "Check for Updates" — and the Vulnerabilities
+assessment run in `vulnerabilities_screen.dart`'s `_RunPanel`. Every other screen still shows its
+own `AlertBox` and nothing else; the remaining candidates are the Applications per-row check
+notice and the Clients refresh, and the facility is one `record` call away for either. Three limits
+to state rather than discover:
 
 - **It shows entries, not a live tail.** The server exposes counts and a bounded note list over
   `GET`-polled status, not a line-by-line log, so the panel gains an entry when a run *finishes*.
@@ -380,8 +390,12 @@ refresh. Two limits to state rather than discover:
 - **A run abandoned mid-flight records nothing.** `BackgroundRunBloc` belongs to the
   `/applications` route, so navigating away stops its polling; if the run finishes while you are
   elsewhere, no entry appears. Coming back re-adopts a run still in progress —
-  `RunStatusRequested(adopt: true)` — and that one does record. Closing the gap properly means
-  hoisting the two run blocs above the `ShellRoute`, which changes who owns them.
+  `RunStatusRequested(adopt: true)` — and that one does record. The Vulnerabilities run has the
+  same shape for the same reason. Closing the gap properly means hoisting those blocs above the
+  `ShellRoute`, which changes who owns them.
+- **"Everywhere" excludes the remote-control viewer's full screen.** The panel is suppressed along
+  with the sidebar there, deliberately — that screen asked for the window — so a panel open when a
+  session goes full-screen vanishes and comes back on exit.
 
 ## Applications is a menu, and Failed Updates is the second screen under it
 

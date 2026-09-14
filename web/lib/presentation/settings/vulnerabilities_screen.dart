@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../core/di/locator.dart';
+import '../../core/diagnostics/diagnostics_log.dart';
 import '../../core/theme/kintsugi_palette.dart';
 import '../../core/widgets/alert_box.dart';
 import '../../core/widgets/buttons.dart';
@@ -333,11 +334,66 @@ class _RunPanel extends StatelessWidget {
 
   final VulnerabilitySettingsState state;
 
+  /// Sends the run's outcome to the diagnostics panel, which — unlike this panel — survives
+  /// navigating to the CVE Mapping or CVE Reporting screens the outcome usually sends somebody to.
+  /// See `core/diagnostics/diagnostics_log.dart`.
+  ///
+  /// The run carries a message rather than a list: the server reports a stage, a subject and one
+  /// sentence, not a line per assessment, so an entry here is a single summary.
+  static void _record(BuildContext context, VulnerabilitySettingsState state) {
+    final log = DiagnosticsLogScope.maybeOf(context);
+    if (log == null) return;
+
+    const title = 'Vulnerability assessment';
+    const source = 'Settings > Vulnerabilities';
+
+    if (state.runError case final error?) {
+      log.record(title: title, kind: DiagnosticsKind.error, summary: error, source: source);
+      return;
+    }
+
+    final run = state.run;
+    // Cancelled first, and for the reason the panel below reads it first: a cancelled run reports
+    // `lastRunSucceeded` as null and kept everything it had already committed, so red would say
+    // the opposite of what happened.
+    log.record(
+      title: title,
+      kind: run.lastRunCancelled
+          ? DiagnosticsKind.info
+          : run.lastRunSucceeded == false
+              ? DiagnosticsKind.error
+              : DiagnosticsKind.success,
+      summary: run.message ??
+          (run.lastRunCancelled
+              ? 'The assessment was stopped.'
+              : run.lastRunSucceeded == false
+                  ? 'The assessment did not complete.'
+                  : 'Checked ${run.assessmentsCompleted} installed version(s), '
+                      '${run.assessmentsRemaining} still to check.'),
+      source: source,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final run = state.run;
     final enabled = state.settings.value?.enabled ?? false;
 
+    return BlocListener<VulnerabilitySettingsBloc, VulnerabilitySettingsState>(
+      // **Transitions, not states.** This bloc polls, so a listener reading
+      // `lastRunSucceeded == false` would fire once every three seconds for as long as that
+      // remained the last outcome — and would fire on mount for a run that failed hours before
+      // this screen was opened, recording an entry timestamped now for something that did not
+      // just happen. A run *stopping* happens once.
+      listenWhen: (previous, current) =>
+          (previous.run.running && !current.run.running) ||
+          (current.runError != null && current.runError != previous.runError),
+      listener: _record,
+      child: _panel(context, run: run, enabled: enabled),
+    );
+  }
+
+  Widget _panel(BuildContext context, {required VulnerabilityRunStatus run, required bool enabled}) {
     return SettingsFormPanel(
       maxWidth: double.infinity,
       children: [
