@@ -514,7 +514,12 @@ its original count and first-failed date, if the next patch cycle still fails.
 **The default view is outstanding only.** Settled rows (patched since, or dismissed) are kept and
 reachable through the status filter rather than deleted, because "this used to fail and then patched"
 is the question somebody asks next. A row clears itself when the host reports that application
-patched successfully; "Dismiss" is for the ones that cannot recur.
+patched successfully; "Dismiss" is for the ones that cannot recur — and it is inside the expanded
+row, under the output and right-aligned, rather than in the Actions cell. Dismissing is
+irreversible from the default view, and a tick beside the expand chevron was one mis-aimed click
+from burying a live failure nobody had read; reaching it now means having opened the row.
+`test/presentation/failed_updates_dismiss_test.dart` pins both halves — the panel has it and the
+collapsed row does not.
 
 
 ## The remote-control viewer

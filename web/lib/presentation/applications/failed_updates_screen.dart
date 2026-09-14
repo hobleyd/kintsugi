@@ -72,7 +72,8 @@ class _FailedUpdatesView extends StatelessWidget {
             HintText(
               'A row clears itself when that host next reports the application patched successfully. '
               '"Dismiss" is for the ones that cannot recur — a rebuilt host, an application since '
-              'uninstalled.',
+              'uninstalled — and it sits inside the expanded row, under the output, so it takes '
+              'reading the failure before you can wave it away.',
             ),
           ],
           actions: [
@@ -162,17 +163,18 @@ class _FailuresTable extends StatelessWidget {
       // "Last Failed" over a timestamp, which is the date the whole screen sorts and reads on —
       // the API carries it as `lastFailedUtc`, rendered in the browser's own timezone.
       const TableColumnSpec(label: 'Last Failed', width: FlexColumnWidth(1.1)),
-      const TableColumnSpec(label: 'Actions', width: FixedColumnWidth(120)),
+      const TableColumnSpec(label: 'Actions', width: FixedColumnWidth(80)),
     ];
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         KintsugiTable(
-          // Seven columns. The Versions cell carries two version strings stacked, and the output
-          // preview in the Application cell is what wants the rest — below this the timestamp
-          // column starts wrapping one value onto two lines.
-          minWidth: 1050,
+          // Seven columns, though Actions is now a single expand button. The Versions cell carries
+          // two version strings stacked, and the output preview in the Application cell is what
+          // wants the rest — leave the other six columns any less than this between them and the
+          // timestamp column starts wrapping one value onto two lines.
+          minWidth: 1010,
           columns: columns,
           toolbar: Row(
             children: [
@@ -189,7 +191,13 @@ class _FailuresTable extends StatelessWidget {
             for (final failure in rows)
               KintsugiTableRow(
                 cells: _cells(context, failure),
-                expanded: state.expandedId == failure.id ? _FixPanel(failure: failure, onServerStateChanged: onServerStateChanged) : null,
+                expanded: state.expandedId == failure.id
+                    ? _FixPanel(
+                        failure: failure,
+                        dismissing: state.dismissingIds.contains(failure.id),
+                        onServerStateChanged: onServerStateChanged,
+                      )
+                    : null,
               ),
           ],
         ),
@@ -205,7 +213,6 @@ class _FailuresTable extends StatelessWidget {
   List<Widget> _cells(BuildContext context, PatchFailure failure) {
     final bloc = context.read<FailedUpdatesBloc>();
     final expanded = state.expandedId == failure.id;
-    final dismissing = state.dismissingIds.contains(failure.id);
 
     return [
       _ApplicationCell(failure: failure),
@@ -214,6 +221,8 @@ class _FailuresTable extends StatelessWidget {
       _VersionsCell(failure: failure),
       _StatusCell(failure: failure),
       LocalTimestamp(failure.lastFailedUtc),
+      // Expanding is the only thing a row offers from here. Dismiss lives inside the panel
+      // instead — see `_FailureDetails`.
       Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -224,12 +233,6 @@ class _FailuresTable extends StatelessWidget {
                 : 'Show the failure (no stored script to repair)',
             onPressed: () => bloc.add(FailedUpdateRowExpansionToggled(failure.id)),
           ),
-          if (failure.isOutstanding)
-            IconActionButton(
-              icon: Icons.check,
-              tooltip: dismissing ? 'Dismissing...' : 'Dismiss this failure',
-              onPressed: dismissing ? null : () => bloc.add(FailedUpdateDismissed(failure.id)),
-            ),
         ],
       ),
     ];
@@ -315,16 +318,21 @@ class _StatusCell extends StatelessWidget {
 /// What a row expands into: the failure in full, then the same panel the Applications screen uses
 /// to research, edit, save and sign a script.
 class _FixPanel extends StatelessWidget {
-  const _FixPanel({required this.failure, required this.onServerStateChanged});
+  const _FixPanel({
+    required this.failure,
+    required this.dismissing,
+    required this.onServerStateChanged,
+  });
 
   final PatchFailure failure;
+  final bool dismissing;
   final VoidCallback onServerStateChanged;
 
   @override
   Widget build(BuildContext context) => Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _FailureDetails(failure: failure),
+          _FailureDetails(failure: failure, dismissing: dismissing),
           const SizedBox(height: 20),
           if (failure.canFix && failure.isPackageManagerManaged)
             const Padding(
@@ -366,9 +374,13 @@ class _FixPanel extends StatelessWidget {
 }
 
 class _FailureDetails extends StatelessWidget {
-  const _FailureDetails({required this.failure});
+  const _FailureDetails({required this.failure, required this.dismissing});
 
   final PatchFailure failure;
+
+  /// Whether this failure's dismissal is in flight — the button spins rather than disappearing,
+  /// because dismissing is what closes the panel it is drawn in.
+  final bool dismissing;
 
   @override
   Widget build(BuildContext context) {
@@ -415,6 +427,21 @@ class _FailureDetails extends StatelessWidget {
             child: Text(failure.details, style: AppTheme.mono(color: palette.text, size: 12.5)),
           ),
         ),
+        // Dismiss sits here, under the output and at the far end of it, rather than in the row's
+        // Actions cell: it is irreversible from this screen, and a tick beside the expand chevron
+        // was one mis-aimed click away from burying a live failure nobody had read. Reaching it
+        // now means having opened the row and scrolled past what the run actually said.
+        if (failure.isOutstanding)
+          Align(
+            alignment: Alignment.centerRight,
+            child: IconActionButton(
+              icon: Icons.check,
+              tooltip: dismissing ? 'Dismissing...' : 'Dismiss this failure',
+              busy: dismissing,
+              onPressed: () =>
+                  context.read<FailedUpdatesBloc>().add(FailedUpdateDismissed(failure.id)),
+            ),
+          ),
       ],
     );
   }
