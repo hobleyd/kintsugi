@@ -40,15 +40,18 @@ impl fmt::Debug for InstallAuth {
     }
 }
 
-/// What a successful [`install`] actually achieved. macOS updates carry `Action: restart` in the
-/// listing, and `softwareupdate -i` *without* `-R` stages them and returns success — the host is
-/// not on the new version until it reboots. Reporting that as patched is what made the admin UI
-/// flicker: the flag cleared, and the next check-in's `softwareupdate -l` put it straight back.
+/// What a successful [`install`] actually achieved.
+///
+/// With `-R` the ordinary macOS case never reaches this type at all: the reboot happens *inside*
+/// `softwareupdate`, so the process is killed mid-call and nothing after it runs. This describes
+/// the case where the install came back — a Safari-only update, an Intel host, or an update that
+/// turned out not to need a restart — and something is nonetheless still pending.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallOutcome {
-    /// True when a macOS update is *still* listed after the install finished, which is how a
-    /// staged-pending-reboot update looks from here. Ground truth rather than a phrase matched out
-    /// of `softwareupdate`'s output, whose wording has changed across releases.
+    /// True when a macOS update is *still* listed after the install returned. Ground truth rather
+    /// than a phrase matched out of `softwareupdate`'s output, whose wording has changed across
+    /// releases. Reporting a host as patched in this state is what made the admin UI flicker: the
+    /// flag cleared, and the next check-in's `softwareupdate -l` put it straight back.
     pub restart_required: bool,
 }
 
@@ -315,9 +318,37 @@ fn condense_progress(text: &str) -> String {
     out
 }
 
-/// Installs every pending macOS update. Root only — this is the daemon's answer to an OS-update
-/// request (see `queue`), and it is always this same fixed `-i -a` whatever the request said, which
-/// is what makes a forged request harmless.
+/// Installs every pending macOS update and restarts the Mac to finish. Root only — this is the
+/// daemon's answer to an OS-update request (see `queue`), and it is always this same fixed
+/// `-i -a -R` whatever the request said, which is what makes a forged request harmless.
+///
+/// # `-R` reboots this machine, and usually without asking anyone
+///
+/// `softwareupdate -i` *without* `-R` only takes the update to `SUMAC_PHASE_PREPARED`: it is staged,
+/// `softwareupdate -l` still lists it, and the host stays on the old version until somebody
+/// restarts. `-R` is what actually completes it, and it is what this fleet wants — an update that
+/// waits indefinitely for a person to reboot is not an unattended patching system.
+///
+/// The cost is real and worth stating plainly. `man softwareupdate`: "If the user invoking this tool
+/// is logged in then macOS will attempt to quit all applications, logout, and restart. If the user
+/// is not logged in, macOS will trigger a forced reboot if necessary." The invoking user here is
+/// **root, in a LaunchDaemon** — not logged in — so the forced path is the likely one, and unsaved
+/// work goes with it. `--force` is deliberately *not* passed on top: it would remove even the chance
+/// that macOS treats the `--user` account as logged in and quits applications gracefully first.
+///
+/// Both dialogs the console user sees say the Mac will restart on its own — see
+/// `dialogs::install_password_message`, which is the last thing anyone is asked before this runs.
+/// The gap that remains, and which no wording closes, is *when*: the authorization is collected
+/// before a download that can take over an hour, so the reboot can arrive a long way after the
+/// person agreed to it. Splitting the download (`-d`, which needs no authorization) from the install
+/// would close it; see `clients/macos-agent/CLAUDE.md`.
+///
+/// **Nothing after the `softwareupdate` call is guaranteed to run.** The reboot happens inside it,
+/// so this function does not return, `report_patched` is never sent, and `process_queue` never gets
+/// to remove the request. All three are handled where they land: the server re-derives the host's
+/// pending state from `softwareupdate -l` at the next check-in, and `queue::is_stale`'s boot check
+/// discards the surviving request unrun. The credentials are already gone — `take_auth` unlinks the
+/// sidecar before the install starts, precisely so a reboot cannot strand a password on disk.
 ///
 /// **`auth` is not optional in practice on Apple silicon.** `softwareupdate -i` needs a *volume
 /// owner* to authorize a macOS install there — `man softwareupdate` calls `--user` "an owner user to
@@ -340,20 +371,17 @@ fn condense_progress(text: &str) -> String {
 /// `ps`), never a temporary file of this function's making.
 pub fn install(auth: Option<&InstallAuth>) -> Result<InstallOutcome> {
     let mut command = Command::new("softwareupdate");
-    command.args(["-i", "-a"]);
+    command.args(["-i", "-a", "-R"]);
     if let Some(auth) = auth {
         command.args(["--user", &auth.user, "--stdinpass"]);
     }
 
-    // Deliberately no `-R`. These updates carry `Action: restart`, and rebooting a Mac out from
-    // under the person who just typed their password into the authorization dialog is worse than
-    // leaving the update staged — `restart_required` below is how the caller finds out and says so.
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .context("failed to run softwareupdate -i -a")?;
+        .context("failed to run softwareupdate -i -a -R")?;
 
     {
         let mut stdin = child.stdin.take().context("softwareupdate gave us no stdin to authorize through")?;
@@ -370,7 +398,7 @@ pub fn install(auth: Option<&InstallAuth>) -> Result<InstallOutcome> {
         // sees EOF instead of a terminal it could prompt at.
     }
 
-    let output = child.wait_with_output().context("softwareupdate -i -a did not finish")?;
+    let output = child.wait_with_output().context("softwareupdate -i -a -R did not finish")?;
 
     let combined = condense_progress(&format!(
         "{}{}",
@@ -378,7 +406,7 @@ pub fn install(auth: Option<&InstallAuth>) -> Result<InstallOutcome> {
         String::from_utf8_lossy(&output.stderr)
     ));
     crate::logging::info(&format!(
-        "softwareupdate -i -a finished: success={} authorized_as={:?} output={}",
+        "softwareupdate -i -a -R finished without restarting: success={} authorized_as={:?} output={}",
         output.status.success(),
         auth.map(|auth| auth.user.as_str()),
         combined.trim()
@@ -393,7 +421,7 @@ pub fn install(auth: Option<&InstallAuth>) -> Result<InstallOutcome> {
                 combined.trim()
             );
         }
-        anyhow::bail!("softwareupdate -i -a exited with {}: {}", output.status, combined.trim());
+        anyhow::bail!("softwareupdate -i -a -R exited with {}: {}", output.status, combined.trim());
     }
 
     // Ground truth rather than a phrase matched out of the output: if macOS still offers a macOS

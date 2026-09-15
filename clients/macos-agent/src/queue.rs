@@ -430,6 +430,12 @@ pub fn process_queue(queue_dir: &Path, handler: &mut impl RequestHandler) {
 
         crate::logging::info(&format!("processing {kind:?} request: {}", request_path.display()));
 
+        // Note what an `OsUpdate` can do from here: `os_update::install` passes `-R`, so a
+        // successful macOS install reboots this Mac from inside the call and nothing below ever
+        // runs. The request file therefore survives the reboot — and is discarded unrun at the next
+        // boot by `is_stale`'s boot check, which is exactly the case that check exists for. The
+        // credentials do not survive it, because `take_auth` on the next line unlinks the sidecar
+        // before the install starts rather than after it finishes.
         let body = fs::read_to_string(&request_path).unwrap_or_default();
         // Taken before the handler runs, and gone from disk from here on — the install it
         // authorizes can last hours.

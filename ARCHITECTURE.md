@@ -202,7 +202,7 @@ sequenceDiagram
             opt OS update available
                 Note over Agent,Root: macOS only: the console user must be a volume owner and<br/>authorize it, or the request is never submitted. See clients/macos-agent/CLAUDE.md.
                 Agent->>Root: queue an OS-update request
-                Root->>Root: softwareupdate / Windows Update / apt, dnf, ...
+                Root->>Root: softwareupdate -i -a -R / Windows Update / apt, dnf, ...<br/>macOS: -R reboots from inside the call, so the branches below<br/>are only reached when it returns without restarting.
                 alt installed, nothing pending
                     Root->>Nginx: POST /api/os-patch-results
                 else failed

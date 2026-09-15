@@ -516,11 +516,14 @@ fn run_patches(
                     Ok(result) if result.success => {
                         succeeded += 1;
                         logging::info(&format!("macOS updates installed: {}", result.output.trim()));
-                        // The daemon says whether the host is actually on the new version or merely
-                        // staged for it; whoever authorized this is the person who has to reboot.
+                        // Reaching here at all means the daemon's `-R` did *not* reboot us — the
+                        // ordinary macOS case never returns, because the restart happens inside
+                        // `softwareupdate`. So this is the leftover: something is still pending and
+                        // nothing is going to restart on its own, which the person who authorized
+                        // it needs telling.
                         if result.output.contains(os_update::RESTART_REQUIRED_MARKER) {
                             let _ = dialogs::acknowledge(
-                                "The macOS update has been installed and will finish applying the next time this Mac restarts.",
+                                "The macOS update has been installed, but this Mac did not restart on its own.                                  Restart it when convenient to finish applying the update.",
                                 RESTART_NOTICE_TIMEOUT.as_secs(),
                             );
                         }

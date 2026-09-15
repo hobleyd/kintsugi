@@ -91,10 +91,22 @@ fn confirmation_message(
         (n, true) => format!("{n} application update{} and {the_os_update} are", if n == 1 { "" } else { "s" }),
     };
 
-    let mut message = format!(
-        "{what} ready to install. This may restart some applications, and could require a \
-         reboot.\n"
-    );
+    // The reboot sentence is conditional, and states a certainty rather than a possibility when
+    // the OS update is in the plan: `os_update::install` passes `-R`, so this Mac restarts on its
+    // own to finish. "Could require a reboot" was true when the update merely staged itself; saying
+    // it now would understate what clicking this button starts.
+    let consequence = match (os_update_available, app_names.is_empty()) {
+        (true, false) => {
+            "Some applications will be restarted, and this Mac will restart itself to finish the \
+             macOS update \u{2014} so save your work before continuing."
+        }
+        (true, true) => {
+            "This Mac will restart itself to finish the macOS update \u{2014} so save your work before \
+             continuing."
+        }
+        (false, _) => "This may restart some applications, and could require a reboot.",
+    };
+    let mut message = format!("{what} ready to install. {consequence}\n");
 
     if !app_names.is_empty() {
         message.push('\n');
@@ -328,6 +340,9 @@ fn install_password_message(username: &str, version: Option<&str>) -> String {
 
     format!(
         "Kintsugi is ready to install {what} on this Mac.\n\n\
+         \u{26a0}\u{fe0f} This Mac will restart by itself once the update is installed, and may not be \
+         able to close your applications first. Save your work now. The update is downloaded before \
+         it is installed, so the restart may not happen for some time after you authorize it.\n\n\
          macOS requires your password to authorize a system update on Apple silicon. It is used \
          once, to run this installation, and is not stored.\n\n\
          Enter the password for \u{201c}{username}\u{201d}, or Cancel to skip the macOS update this \
@@ -516,8 +531,9 @@ mod tests {
 
         assert_eq!(
             message,
-            "A macOS update is ready to install. This may restart some applications, and could \
-             require a reboot.\n\nYou can delay this up to 3 more time(s), 1 hour(s) at a time."
+            "A macOS update is ready to install. This Mac will restart itself to finish the macOS \
+             update \u{2014} so save your work before continuing.\n\nYou can delay this up to 3 more \
+             time(s), 1 hour(s) at a time."
         );
     }
 
@@ -632,6 +648,28 @@ mod tests {
     /// `-i -a` installs everything applicable, so "a macOS update" can mean a 2.9GB point release
     /// or an 11.7GB new major version. Somebody being asked for their password is owed the
     /// difference.
+    /// The one thing somebody must not be able to miss before authorizing: `-R` means this Mac
+    /// reboots on its own, possibly without closing anything first.
+    #[test]
+    fn install_password_message_warns_that_the_mac_restarts_itself() {
+        let message = install_password_message("david", Some("26.7"));
+
+        assert!(message.contains("restart by itself"), "{message}");
+        assert!(message.contains("Save your work"), "{message}");
+        // The gap no wording closes, said out loud rather than discovered.
+        assert!(message.contains("may not happen for some time"), "{message}");
+    }
+
+    #[test]
+    fn confirmation_message_promises_a_reboot_only_when_the_os_update_is_in_the_plan() {
+        let with_os = confirmation_message("1 hour(s)", 3, &names(&["Firefox"]), true, Some("26.7"));
+        assert!(with_os.contains("will restart itself"), "{with_os}");
+
+        let apps_only = confirmation_message("1 hour(s)", 3, &names(&["Firefox"]), false, None);
+        assert!(!apps_only.contains("will restart itself"), "no OS update, no promise of a reboot: {apps_only}");
+        assert!(apps_only.contains("could require a reboot"), "{apps_only}");
+    }
+
     #[test]
     fn install_password_message_names_the_version_and_the_account() {
         let message = install_password_message("david", Some("26.7"));

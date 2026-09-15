@@ -59,14 +59,36 @@ argument; the load-bearing parts are mode `0600` set atomically at creation (the
 `root:admin 0770`, so any other administrator could otherwise read it), `take_auth` unlinking it as
 it reads, and `remove_request` — not a bare unlink — on every path that discards a request.
 
-**No `-R`, and a staged update is not a patched one.** These updates carry `Action: restart`.
-`softwareupdate -i` without `-R` stages them and returns success, so reporting that to
-`/api/os-patch-results` cleared the host's pending flag only for the next check-in's `softwareupdate
--l` to set it straight back. `install` now re-runs the check and reports `restart_required`; the
-daemon reports patched only when nothing is pending, and says `RESTART_REQUIRED_MARKER` in its
-result otherwise so the per-user half can tell the person who just typed their password. `-R` was
-the alternative and was rejected: rebooting a Mac out from under someone who is sitting at it is
-worse than an update that waits.
+**`-R`, because a prepared update is not a patched one.** These updates carry `Action: restart`, and
+`softwareupdate -i` without `-R` only reaches `SUMAC_PHASE_PREPARED` — staged, still listed by
+`softwareupdate -l`, host still on the old version until somebody reboots. That was measured on a
+real run, not inferred. An update that waits indefinitely for a person is not unattended patching,
+so the daemon passes `-R`.
+
+**What `-R` costs, stated plainly.** `man softwareupdate`: "If the user invoking this tool is logged
+in then macOS will attempt to quit all applications, logout, and restart. If the user is not logged
+in, macOS will trigger a forced reboot if necessary." The invoking user here is **root in a
+LaunchDaemon**, which is not logged in — so the forced path is the likely one and unsaved work goes
+with it. `--force` is deliberately not passed on top: it would remove even the chance that macOS
+treats the `--user` account as logged in and closes applications gracefully. Both dialogs say the
+Mac will restart itself, and `install_password_message` says it immediately above the password box,
+because that is the last moment anyone can decline.
+
+**The gap no wording closes: *when* the reboot arrives.** Authorization is collected before a
+download that took 80 minutes on a real run, so the restart can land a long way after the person
+agreed to it. The fix, if it is wanted, is to split the phases — `softwareupdate -d` needs no
+authorization at all and can run unattended, and only then prompt and install with `-R`, which puts
+the reboot within minutes of the consent. Not done: it restructures the request into two round trips
+through the queue, and the current shape was what was asked for.
+
+**Nothing after the `softwareupdate` call is guaranteed to run**, because the reboot happens inside
+it. `report_patched` is never sent — the server re-derives the host's pending state from
+`softwareupdate -l` at the next check-in, so it is self-correcting. `process_queue` never removes the
+request — `is_stale`'s boot check discards it unrun at the next boot, which is the case that check
+was written for. The credentials are already gone, because `take_auth` unlinks the sidecar *before*
+the install starts rather than after it returns. `InstallOutcome::restart_required` now covers only
+the case where the install came back without rebooting (Intel, a Safari-only update, or a restart
+that turned out not to be needed); the daemon still reports patched only when nothing is pending.
 
 **Read `softwareupdate -l` by label, not by position.** `OsUpdateStatus::latest_version` took the
 first `Version:` in the output, which on a host offered Safari, macOS 26.7 and macOS 27 is *Safari's*
