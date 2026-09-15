@@ -1,4 +1,6 @@
-use std::process::Command;
+use std::fmt;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -11,6 +13,43 @@ use crate::config::Config;
 pub struct OsUpdateStatus {
     pub available: bool,
     pub latest_version: Option<String>,
+}
+
+/// A volume owner's credentials, which is what `softwareupdate -i` demands on Apple silicon before
+/// it will install a macOS update — see [`install`] for why root alone is not enough.
+///
+/// Carried from the per-user half (which asked for it) to the root daemon (which needs it) through
+/// `queue`, and deliberately **not** stored anywhere else: there is no on-disk copy that outlives
+/// one request, and `queue::take_auth` unlinks the file the moment it has been read.
+#[derive(Clone)]
+pub struct InstallAuth {
+    /// The account's short name, passed to `--user`. Must be a volume owner — see
+    /// [`is_volume_owner`], which is checked before anything is downloaded.
+    pub user: String,
+    /// Fed to `--stdinpass` over a pipe. Never logged, never put in an error, and redacted by this
+    /// type's own `Debug` so that an `{:?}` added later can't leak it either.
+    pub password: String,
+}
+
+impl fmt::Debug for InstallAuth {
+    /// Hand-written rather than derived **on purpose**. A derived `Debug` would print the password
+    /// in full, and this type travels through `queue`'s request handling where `{kind:?}`-style
+    /// logging is the house style — one careless format string is all it would take.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InstallAuth").field("user", &self.user).field("password", &"<redacted>").finish()
+    }
+}
+
+/// What a successful [`install`] actually achieved. macOS updates carry `Action: restart` in the
+/// listing, and `softwareupdate -i` *without* `-R` stages them and returns success — the host is
+/// not on the new version until it reboots. Reporting that as patched is what made the admin UI
+/// flicker: the flag cleared, and the next check-in's `softwareupdate -l` put it straight back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallOutcome {
+    /// True when a macOS update is *still* listed after the install finished, which is how a
+    /// staged-pending-reboot update looks from here. Ground truth rather than a phrase matched out
+    /// of `softwareupdate`'s output, whose wording has changed across releases.
+    pub restart_required: bool,
 }
 
 /// `softwareupdate -l` doesn't require elevation and is safe to run from the (non-root) `--agent`
@@ -42,10 +81,6 @@ pub fn check() -> Result<OsUpdateStatus> {
     Ok(status)
 }
 
-pub fn check_available() -> Result<bool> {
-    Ok(check()?.available)
-}
-
 /// The pure text-parsing half of [`check`], split out so it can be exercised directly against
 /// sample `softwareupdate -l` output rather than only via a real (macOS-only) subprocess call.
 fn parse_check_output(combined: &str) -> OsUpdateStatus {
@@ -58,20 +93,409 @@ fn parse_check_output(combined: &str) -> OsUpdateStatus {
     OsUpdateStatus { available, latest_version }
 }
 
-/// Pulls the version out of a `softwareupdate -l` listing's "Title: macOS Sequoia 15.1, Version:
-/// 15.1, ..." line — the version number `softwareupdate` itself considers the update to be,
-/// rather than trying to parse one back out of the free-text title.
+/// The version this host's pending **macOS** update would bring it to, out of a `softwareupdate -l`
+/// listing — the number `softwareupdate` itself states, rather than one parsed back out of the
+/// free-text title.
+///
+/// Two things make "the first `Version:` in the output" wrong, and that is how this shipped. A
+/// listing carries one `Title:` line per label, and the labels are not all macOS. The listing that
+/// exposed it was:
+///
+/// ```text
+/// * Label: Safari27.0TahoeAuto-27.0
+///     Title: Safari, Version: 27.0, Size: 249465KiB, Recommended: YES,
+/// * Label: macOS Tahoe 26.7-25G229
+///     Title: macOS Tahoe 26.7, Version: 26.7, Size: 2960352KiB, Recommended: YES, Action: restart,
+/// * Label: macOS 27-26A428
+///     Title: macOS 27, Version: 27, Size: 11727573KiB, Recommended: YES, Action: restart,
+/// ```
+///
+/// whose first `Version:` is *Safari's* — which is why the admin UI reported this Mac's pending
+/// macOS version as 27.0 while the update actually downloading was 26.7. So only a line whose title
+/// names macOS counts here.
+///
+/// Of those, the **highest** is reported rather than the first: `install` runs `softwareupdate -i
+/// -a`, so a host offered both 26.7 and 27 ends up on 27, and the number shown to the administrator
+/// has to be the one the host will actually be on.
 fn parse_latest_version(text: &str) -> Option<String> {
+    text.lines().filter_map(parse_macos_title_version).max_by(|a, b| compare_versions(a, b))
+}
+
+/// The `Version:` field of one listing line, but only if that line's `Title:` names macOS. Anything
+/// else in the listing — Safari, XProtect, a firmware update — is a real update, just not the one
+/// `OsUpdateStatus::latest_version` is describing.
+fn parse_macos_title_version(line: &str) -> Option<String> {
+    let after_title = line.split_once("Title:")?.1;
+    if !after_title.trim_start().starts_with("macOS") {
+        return None;
+    }
+
+    let after_version = after_title.split_once("Version:")?.1;
+    let version = after_version.split(',').next()?.trim();
+    (!version.is_empty()).then(|| version.to_string())
+}
+
+/// Orders two dotted version strings numerically, so "26.7" sorts below "27" — which a string
+/// comparison gets backwards, and which is exactly the pair this host is being offered. A component
+/// that isn't a number counts as zero rather than failing the whole comparison: the goal is to pick
+/// the larger of two versions macOS printed, not to validate them.
+fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
+    let components = |version: &str| version.split('.').map(|part| part.trim().parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
+
+    let (left, right) = (components(left), components(right));
+    for index in 0..left.len().max(right.len()) {
+        let ordering = left.get(index).copied().unwrap_or(0).cmp(&right.get(index).copied().unwrap_or(0));
+        if ordering != std::cmp::Ordering::Equal {
+            return ordering;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+/// The phrase the daemon puts in an `OsUpdate` result when the install is staged but the host is
+/// not on the new version yet, and which `patch_cycle` looks for to tell the user to reboot.
+///
+/// A substring of a human-readable message rather than a field, because `queue::RequestResult` is
+/// deliberately just `{success, output}` — a two-field protocol that both agents' queues share.
+/// Kept here, as one constant used by both ends, so the message and the test for it cannot drift.
+pub const RESTART_REQUIRED_MARKER: &str = "restart required";
+
+/// Whether this Mac is Apple silicon, and therefore whether `softwareupdate -i` will demand a
+/// volume owner's authorization at all.
+///
+/// `hw.optional.arm64` rather than `cfg!(target_arch = ...)`: a Rosetta-translated build of this
+/// agent reports `x86_64` for itself while running on hardware that very much does need the
+/// password, and the flags are hardware-conditional, not binary-conditional. `--user` and
+/// `--stdinpass` do not exist on Intel, where passing them is an error rather than a no-op.
+pub fn is_apple_silicon() -> bool {
+    let mut value: i32 = 0;
+    let mut length = std::mem::size_of::<i32>();
+    // SAFETY: `hw.optional.arm64` is an integer sysctl, `length` names the buffer's real size, and
+    // the NUL-terminated name outlives the call. Mirrors `queue::boot_epoch`.
+    let status = unsafe {
+        libc::sysctlbyname(
+            b"hw.optional.arm64\0".as_ptr().cast::<libc::c_char>(),
+            (&mut value as *mut i32).cast::<libc::c_void>(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+
+    // The sysctl is simply absent on Intel, where the call fails rather than returning zero.
+    status == 0 && value == 1
+}
+
+/// Whether `username` may authorize a macOS install on this Mac — i.e. whether APFS considers it a
+/// **volume owner** of the boot volume.
+///
+/// Checked in the per-user half *before* an OS-update request is ever submitted, and that ordering
+/// is the whole point. `softwareupdate --user` takes "an owner user"; naming an account that isn't
+/// one fails with `Failed to authenticate` — but only *after* the download, which for this fleet's
+/// current listing is between 2.9GB and 11.7GB. That is precisely the failure this module was
+/// changed to fix, and it would come straight back, an hour or more at a time, for any host whose
+/// console user is a standard account or a second administrator that never got a secure token.
+///
+/// Volume ownership is not the same thing as being an administrator, which is the trap: an account
+/// created by MDM, or one migrated onto an Apple silicon Mac, can be in `admin` and still not be an
+/// owner. `dscl` gives the account's `GeneratedUID`, `diskutil apfs listUsers /` gives the UUIDs
+/// APFS will accept, and this is their intersection.
+pub fn is_volume_owner(username: &str) -> Result<bool> {
+    let generated_uid_output = Command::new("dscl")
+        .args([".", "-read", &format!("/Users/{username}"), "GeneratedUID"])
+        .output()
+        .context("failed to run dscl to look up the console user's GeneratedUID")?;
+
+    let generated_uid = parse_generated_uid(&String::from_utf8_lossy(&generated_uid_output.stdout))
+        .with_context(|| format!("dscl did not report a GeneratedUID for '{username}'"))?;
+
+    let list_users_output = Command::new("diskutil")
+        .args(["apfs", "listUsers", "/"])
+        .output()
+        .context("failed to run diskutil apfs listUsers /")?;
+
+    let owners = parse_volume_owner_uuids(&String::from_utf8_lossy(&list_users_output.stdout));
+    Ok(owners.iter().any(|owner| owner.eq_ignore_ascii_case(&generated_uid)))
+}
+
+/// The UUID out of `dscl . -read /Users/<name> GeneratedUID`, whose output is the single line
+/// `GeneratedUID: 2DB09770-999B-43FB-99AF-2B878E4FE971`.
+fn parse_generated_uid(text: &str) -> Option<String> {
     text.lines().find_map(|line| {
-        let after = line.split_once("Version:")?.1;
-        let version = after.split(',').next()?.trim();
-        (!version.is_empty()).then(|| version.to_string())
+        let value = line.split_once("GeneratedUID:")?.1.trim();
+        (!value.is_empty()).then(|| value.to_string())
     })
+}
+
+/// Every cryptographic user `diskutil apfs listUsers /` marks as a volume owner. Its output is a
+/// little ASCII tree — each user is introduced by a `+-- <uuid>` line and described by the indented
+/// lines under it, so ownership is read from the block a UUID opens rather than from its own line:
+///
+/// ```text
+/// Cryptographic users for disk3s1s1 (2 found)
+/// |
+/// +-- 2DB09770-999B-43FB-99AF-2B878E4FE971
+/// |   Type: Local Open Directory User
+/// |   Volume Owner: Yes
+/// |
+/// +-- EBC6C064-0000-11AA-AA11-00306543ECAC
+///     Type: Personal Recovery User
+///     Volume Owner: Yes
+/// ```
+///
+/// Note the recovery key is an owner too, and is never an account anyone can be logged in as —
+/// which is why the caller intersects this with a specific user's UID rather than just counting
+/// owners.
+fn parse_volume_owner_uuids(text: &str) -> Vec<String> {
+    let mut owners = Vec::new();
+    let mut current: Option<String> = None;
+
+    for line in text.lines() {
+        if let Some((_, uuid)) = line.split_once("+-- ") {
+            current = Some(uuid.trim().to_string());
+        } else if line.contains("Volume Owner: Yes") {
+            if let Some(uuid) = current.take() {
+                owners.push(uuid);
+            }
+        }
+    }
+
+    owners
+}
+
+/// Collapses `softwareupdate`'s download progress into one line per download.
+///
+/// It writes `Downloading: 12.30%` with no line ending, hundreds of times, and repeats the same
+/// percentage while a large file is in flight — a single 2.9GB download produced **103KB** of it,
+/// which went verbatim into `daemon.log`, into the queue result file, and (had the report existed)
+/// would have been the only thing left after `upgrade::truncate_for_report` kept the tail. The
+/// failure that mattered was the last three lines; everything before them was this.
+///
+/// Kept as text rather than suppressed at the source because `softwareupdate` has no quiet flag,
+/// and the *count* is worth keeping: it distinguishes a download that stalled at 95% from one that
+/// never started.
+fn condense_progress(text: &str) -> String {
+    const MARKER: &str = "Downloading: ";
+
+    let mut out = String::with_capacity(text.len().min(4096));
+    let mut rest = text;
+
+    while let Some(index) = rest.find(MARKER) {
+        out.push_str(&rest[..index]);
+        rest = &rest[index..];
+
+        // Consume the whole run of adjacent progress readings, remembering only the last.
+        let mut last: Option<&str> = None;
+        let mut count = 0usize;
+        while let Some(after_marker) = rest.strip_prefix(MARKER) {
+            let Some(percent_end) = after_marker.find('%') else { break };
+            let value = &after_marker[..percent_end];
+            if value.is_empty() || !value.chars().all(|c| c.is_ascii_digit() || c == '.') {
+                break;
+            }
+            last = Some(value);
+            count += 1;
+            rest = &after_marker[percent_end + 1..];
+        }
+
+        match (count, last) {
+            // Not a reading after all ("Downloading: macOS Tahoe 26.7"): emit the marker literally
+            // and carry on past it, which also guarantees this loop makes progress.
+            (0, _) => {
+                out.push_str(MARKER);
+                rest = &rest[MARKER.len()..];
+            }
+            (1, Some(value)) => out.push_str(&format!("{MARKER}{value}%")),
+            (count, Some(value)) => out.push_str(&format!("{MARKER}{value}% [{count} readings collapsed]")),
+            (_, None) => unreachable!("a non-zero count always recorded a reading"),
+        }
+    }
+
+    out.push_str(rest);
+    out
+}
+
+/// Installs every pending macOS update. Root only — this is the daemon's answer to an OS-update
+/// request (see `queue`), and it is always this same fixed `-i -a` whatever the request said, which
+/// is what makes a forged request harmless.
+///
+/// **`auth` is not optional in practice on Apple silicon.** `softwareupdate -i` needs a *volume
+/// owner* to authorize a macOS install there — `man softwareupdate` calls `--user` "an owner user to
+/// authorize installation", and both it and `--stdinpass` are documented "Apple silicon only".
+/// Being root in a LaunchDaemon is not enough and never was: root is not an APFS cryptographic
+/// user, so the install downloads in full and then dies on
+///
+/// ```text
+/// Downloaded: macOS Tahoe 26.7
+/// Failed to authenticate
+/// Password:
+/// ```
+///
+/// — an interactive prompt, on a process with no terminal, after 80 minutes of downloading. That is
+/// the same masked-password wall root-requiring Homebrew casks hit (see `upgrade.rs`), and it is
+/// what the whole password handoff in `queue` exists to get past. `None` is still accepted so an
+/// Intel host, where neither flag exists, keeps working unchanged.
+///
+/// The password reaches `softwareupdate` over a pipe and nowhere else — never argv (visible in
+/// `ps`), never a temporary file of this function's making.
+pub fn install(auth: Option<&InstallAuth>) -> Result<InstallOutcome> {
+    let mut command = Command::new("softwareupdate");
+    command.args(["-i", "-a"]);
+    if let Some(auth) = auth {
+        command.args(["--user", &auth.user, "--stdinpass"]);
+    }
+
+    // Deliberately no `-R`. These updates carry `Action: restart`, and rebooting a Mac out from
+    // under the person who just typed their password into the authorization dialog is worse than
+    // leaving the update staged — `restart_required` below is how the caller finds out and says so.
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to run softwareupdate -i -a")?;
+
+    {
+        let mut stdin = child.stdin.take().context("softwareupdate gave us no stdin to authorize through")?;
+        if let Some(auth) = auth {
+            // Errors here are reported without the password in them, which is why this isn't
+            // written as one chained `context` over a closure that formats the request.
+            stdin
+                .write_all(auth.password.as_bytes())
+                .and_then(|()| stdin.write_all(b"\n"))
+                .context("could not hand the authorization password to softwareupdate")?;
+        }
+        // Dropped (and so closed) here rather than at the end of the function: without it
+        // `--stdinpass` waits on a read that never ends, and in the no-auth case softwareupdate
+        // sees EOF instead of a terminal it could prompt at.
+    }
+
+    let output = child.wait_with_output().context("softwareupdate -i -a did not finish")?;
+
+    let combined = condense_progress(&format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ));
+    crate::logging::info(&format!(
+        "softwareupdate -i -a finished: success={} authorized_as={:?} output={}",
+        output.status.success(),
+        auth.map(|auth| auth.user.as_str()),
+        combined.trim()
+    ));
+
+    if !output.status.success() {
+        if combined.contains("Failed to authenticate") {
+            anyhow::bail!(
+                "softwareupdate refused the authorization{}: macOS needs a volume owner's password to \
+                 install an update on Apple silicon, and the one supplied was not accepted. Output: {}",
+                auth.map(|auth| format!(" for '{}'", auth.user)).unwrap_or_else(|| " (none was supplied)".to_string()),
+                combined.trim()
+            );
+        }
+        anyhow::bail!("softwareupdate -i -a exited with {}: {}", output.status, combined.trim());
+    }
+
+    // Ground truth rather than a phrase matched out of the output: if macOS still offers a macOS
+    // update, this host is not on the new version yet, whatever softwareupdate just printed.
+    //
+    // `latest_version`, not `available` — `-a` also installs Safari and the like, and one of those
+    // still being listed says nothing about whether the *system* update landed. And a check that
+    // could not run at all resolves to "restart required", because the only consequence of being
+    // wrong that way is a pending flag the next check-in clears by itself, where the other way
+    // round is the dashboard flicker this exists to stop.
+    let restart_required = check().map(|status| status.latest_version.is_some()).unwrap_or(true);
+    Ok(InstallOutcome { restart_required })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReportOsPatchResultRequest<'a> {
+    serial_number: &'a str,
+}
+
+/// The name an OS-update failure is filed under on the admin UI's Failed Updates screen.
+///
+/// Reusing the application-failure route rather than adding an OS-specific one is deliberate:
+/// `/api/patch-failures` is already in nginx's agent-certificate regex and already carries
+/// `[RequireAgentIdentity]`, and `ReportPatchFailureCommandHandler` already copes with a name that
+/// resolves to no upgrade path — it files the failure with a null platform, which the screen shows
+/// as a failure it cannot offer a repair for. That is exactly right here: no AI-authored script
+/// exists to repair, and none should be offered.
+pub const OS_FAILURE_APPLICATION_NAME: &str = "macOS";
+
+/// Tells the server this host's pending macOS update was just successfully installed, so its
+/// pending-update flag and target version clear immediately rather than waiting on this host's
+/// next check-in to re-derive them from a fresh `softwareupdate -l` run. Best-effort, the same as
+/// `upgrade::report_patch_result`: the update already succeeded locally by the time this is
+/// called, so a failure here is only logged, never treated as undoing the install.
+///
+/// **Only called when no restart is outstanding** — see [`InstallOutcome::restart_required`]. An
+/// update that is merely staged has not changed this host's version, and reporting it as installed
+/// made the dashboard clear the flag and then set it again on the next check-in.
+pub fn report_patched(client: &reqwest::blocking::Client, config: &Config, serial_number: &str) {
+    let request = ReportOsPatchResultRequest { serial_number };
+
+    match client.post(config.os_patch_result_url()).json(&request).send() {
+        Ok(response) if response.status().is_success() => {
+            crate::logging::info("reported successful macOS update install to the server");
+        }
+        Ok(response) => {
+            crate::logging::warn(&format!("server rejected OS patch-result report (HTTP {})", response.status()));
+        }
+        Err(err) => {
+            crate::logging::warn(&format!("could not report the successful macOS update install to the server: {err:#}"));
+        }
+    }
+}
+
+/// Files a failed macOS install on the Failed Updates screen, under [`OS_FAILURE_APPLICATION_NAME`].
+///
+/// Before this existed an OS-update failure was logged on the host and nowhere else: `patch_cycle`
+/// called `logging::error` and moved on, `os_update_status.available` stayed true, and the admin UI
+/// showed a host that simply never updated with no indication why. The authorization wall that
+/// prompted all of this sat unreported on a Mac for a day for exactly that reason.
+///
+/// Called by the root daemon, which is the side that ran the install and holds its output — the
+/// same rule `upgrade::report_patch_failure` follows, and for the same reason: reporting from the
+/// per-user side as well would record every failure twice.
+pub fn report_failed(
+    client: &reqwest::blocking::Client,
+    config: &Config,
+    serial_number: &str,
+    attempted_version: Option<&str>,
+    error: &anyhow::Error,
+) {
+    let installed_version = crate::system_info::operating_system().unwrap_or_else(|_| "unknown".to_string());
+
+    crate::upgrade::report_failure(
+        client,
+        config,
+        serial_number,
+        OS_FAILURE_APPLICATION_NAME,
+        &installed_version,
+        attempted_version,
+        error,
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real `softwareupdate -l` listing from the Mac this module's authorization handling was
+    /// written for — three labels, only two of them macOS, and the non-macOS one listed first.
+    const REAL_LISTING: &str = concat!(
+        "Software Update Tool\n\n",
+        "Finding available software\n",
+        "Software Update found the following new or updated software:\n",
+        "* Label: Safari27.0TahoeAuto-27.0\n",
+        "\tTitle: Safari, Version: 27.0, Size: 249465KiB, Recommended: YES, \n",
+        "* Label: macOS Tahoe 26.7-25G229\n",
+        "\tTitle: macOS Tahoe 26.7, Version: 26.7, Size: 2960352KiB, Recommended: YES, Action: restart, \n",
+        "* Label: macOS 27-26A428\n",
+        "\tTitle: macOS 27, Version: 27, Size: 11727573KiB, Recommended: YES, Action: restart, \n",
+    );
 
     #[test]
     fn parse_check_output_no_updates_available() {
@@ -125,92 +549,176 @@ mod tests {
         assert_eq!(status.latest_version, None);
     }
 
+    /// The regression this module's version parsing was changed for: Safari's 27.0 is the first
+    /// `Version:` in the output, and reporting it made the admin UI show 27.0 as this host's
+    /// pending macOS version while the update downloading was 26.7.
     #[test]
-    fn parse_check_output_unrecognized_text_reports_not_available() {
-        // Neither sentinel phrase present at all (e.g. an unexpected error message) — treated as
-        // "nothing available" rather than a false positive.
-        let combined = "softwareupdate: command not found\n";
+    fn parse_latest_version_ignores_a_non_macos_label_listed_first() {
+        let status = parse_check_output(REAL_LISTING);
 
-        let status = parse_check_output(combined);
+        assert!(status.available);
+        assert_ne!(status.latest_version.as_deref(), Some("27.0"), "that is Safari's version, not macOS's");
+        assert_eq!(status.latest_version.as_deref(), Some("27"));
+    }
 
-        assert!(!status.available);
+    /// `-i -a` installs every applicable update, so a host offered both 26.7 and 27 ends up on 27 —
+    /// and a plain string comparison would have picked "26.7" as the larger.
+    #[test]
+    fn parse_latest_version_reports_the_highest_macos_offered() {
+        let text = "\tTitle: macOS 27, Version: 27,\n\tTitle: macOS Tahoe 26.7, Version: 26.7,\n";
+
+        assert_eq!(parse_latest_version(text).as_deref(), Some("27"));
     }
 
     #[test]
-    fn parse_latest_version_takes_the_first_version_field_only() {
-        let text = "Title: A, Version: 1.0, Size: 1\nTitle: B, Version: 2.0, Size: 2\n";
+    fn parse_latest_version_returns_none_when_nothing_macos_is_listed() {
+        let text = "\tTitle: Safari, Version: 27.0, Size: 1\n\tTitle: XProtectPlistConfigData, Version: 5300, Size: 2\n";
 
-        assert_eq!(parse_latest_version(text).as_deref(), Some("1.0"));
+        assert_eq!(parse_latest_version(text), None);
     }
 
     #[test]
     fn parse_latest_version_trims_whitespace_around_the_value() {
-        let text = "Title: A, Version:   15.1  , Size: 1\n";
+        let text = "Title: macOS Tahoe, Version:   15.1  , Size: 1\n";
 
         assert_eq!(parse_latest_version(text).as_deref(), Some("15.1"));
     }
 
     #[test]
     fn parse_latest_version_returns_none_when_the_field_is_empty() {
-        let text = "Title: A, Version: , Size: 1\n";
+        let text = "Title: macOS Tahoe, Version: , Size: 1\n";
 
         assert_eq!(parse_latest_version(text), None);
     }
 
     #[test]
     fn parse_latest_version_returns_none_when_no_version_field_exists() {
-        let text = "Title: A, Size: 1\n";
+        let text = "Title: macOS Tahoe, Size: 1\n";
 
         assert_eq!(parse_latest_version(text), None);
     }
-}
 
-/// Installs every pending macOS update. Root only — this is the daemon's answer to an OS-update
-/// request (see `queue`), and it is always this same fixed command whatever the request said,
-/// which is what makes a forged request harmless.
-pub fn install() -> Result<()> {
-    let output = Command::new("softwareupdate")
-        .args(["-i", "-a"])
-        .output()
-        .context("failed to run softwareupdate -i -a")?;
-
-    let combined = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-    crate::logging::info(&format!(
-        "softwareupdate -i -a finished: success={} output={}",
-        output.status.success(),
-        combined.trim()
-    ));
-
-    if !output.status.success() {
-        anyhow::bail!("softwareupdate -i -a exited with {}: {}", output.status, combined.trim());
+    #[test]
+    fn compare_versions_orders_numerically_not_lexicographically() {
+        assert_eq!(compare_versions("26.7", "27"), std::cmp::Ordering::Less);
+        assert_eq!(compare_versions("26.10", "26.7"), std::cmp::Ordering::Greater);
+        assert_eq!(compare_versions("15.1", "15.1.0"), std::cmp::Ordering::Equal);
+        assert_eq!(compare_versions("26.7", "26.7"), std::cmp::Ordering::Equal);
     }
 
-    Ok(())
-}
+    #[test]
+    fn compare_versions_treats_an_unparseable_component_as_zero() {
+        assert_eq!(compare_versions("26.beta", "26.0"), std::cmp::Ordering::Equal);
+        assert_eq!(compare_versions("26.beta", "26.1"), std::cmp::Ordering::Less);
+    }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ReportOsPatchResultRequest<'a> {
-    serial_number: &'a str,
-}
+    /// The shape that produced 103KB of queue result for one download.
+    #[test]
+    fn condense_progress_collapses_a_run_of_readings_to_the_last() {
+        let text = "Downloading macOS Tahoe 26.7\nDownloading: 0.10%Downloading: 1.00%Downloading: 100.00%\nDownloaded: macOS Tahoe 26.7\n";
 
-/// Tells the server this host's pending macOS update was just successfully installed, so its
-/// pending-update flag and target version clear immediately rather than waiting on this host's
-/// next check-in to re-derive them from a fresh `softwareupdate -l` run. Best-effort, the same as
-/// `upgrade::report_patch_result`: the update already succeeded locally by the time this is
-/// called, so a failure here is only logged, never treated as undoing the install.
-pub fn report_patched(client: &reqwest::blocking::Client, config: &Config, serial_number: &str) {
-    let request = ReportOsPatchResultRequest { serial_number };
+        let condensed = condense_progress(text);
 
-    match client.post(config.os_patch_result_url()).json(&request).send() {
-        Ok(response) if response.status().is_success() => {
-            crate::logging::info("reported successful macOS update install to the server");
-        }
-        Ok(response) => {
-            crate::logging::warn(&format!("server rejected OS patch-result report (HTTP {})", response.status()));
-        }
-        Err(err) => {
-            crate::logging::warn(&format!("could not report the successful macOS update install to the server: {err:#}"));
-        }
+        assert_eq!(
+            condensed,
+            "Downloading macOS Tahoe 26.7\nDownloading: 100.00% [3 readings collapsed]\nDownloaded: macOS Tahoe 26.7\n"
+        );
+    }
+
+    #[test]
+    fn condense_progress_leaves_a_single_reading_alone() {
+        assert_eq!(condense_progress("Downloading: 50.00%\ndone\n"), "Downloading: 50.00%\ndone\n");
+    }
+
+    /// "Downloading macOS Tahoe 26.7" has no colon and is not a reading; "Downloading: macOS" has a
+    /// colon but no percentage. Neither may be eaten, and neither may spin the loop.
+    #[test]
+    fn condense_progress_leaves_text_that_only_looks_like_a_reading() {
+        let text = "Downloading: macOS Tahoe 26.7\nDownloading macOS 27\n";
+
+        assert_eq!(condense_progress(text), text);
+    }
+
+    #[test]
+    fn condense_progress_keeps_the_failure_that_follows_the_download() {
+        let spam: String = (0..500).map(|_| "Downloading: 95.60%").collect();
+        let text = format!("{spam}\nDownloaded: macOS Tahoe 26.7\nFailed to authenticate\nPassword:\n");
+
+        let condensed = condense_progress(&text);
+
+        assert!(condensed.len() < 200, "the whole thing should now fit in a log line, was {}", condensed.len());
+        assert!(condensed.contains("[500 readings collapsed]"));
+        assert!(condensed.contains("Failed to authenticate"));
+    }
+
+    #[test]
+    fn parse_generated_uid_reads_dscls_single_line() {
+        let text = "GeneratedUID: 2DB09770-999B-43FB-99AF-2B878E4FE971\n";
+
+        assert_eq!(parse_generated_uid(text).as_deref(), Some("2DB09770-999B-43FB-99AF-2B878E4FE971"));
+    }
+
+    #[test]
+    fn parse_generated_uid_returns_none_when_dscl_found_no_such_user() {
+        let text = "<dscl_cmd> DS Error: -14136 (eDSRecordNotFound)\n";
+
+        assert_eq!(parse_generated_uid(text), None);
+    }
+
+    /// The real `diskutil apfs listUsers /` tree, including its `|` gutter and the recovery user
+    /// whose block is indented differently because it is last.
+    #[test]
+    fn parse_volume_owner_uuids_reads_the_diskutil_tree() {
+        let text = concat!(
+            "Cryptographic users for disk3s1s1 (2 found)\n",
+            "|\n",
+            "+-- 2DB09770-999B-43FB-99AF-2B878E4FE971\n",
+            "|   Type: Local Open Directory User\n",
+            "|   Volume Owner: Yes\n",
+            "|\n",
+            "+-- EBC6C064-0000-11AA-AA11-00306543ECAC\n",
+            "    Type: Personal Recovery User\n",
+            "    Volume Owner: Yes\n",
+        );
+
+        let owners = parse_volume_owner_uuids(text);
+
+        assert_eq!(
+            owners,
+            vec!["2DB09770-999B-43FB-99AF-2B878E4FE971".to_string(), "EBC6C064-0000-11AA-AA11-00306543ECAC".to_string()]
+        );
+    }
+
+    /// The case the whole check exists for: an admin account that is not a volume owner. Naming it
+    /// to `--user` costs a multi-gigabyte download and then fails to authenticate.
+    #[test]
+    fn parse_volume_owner_uuids_omits_a_user_that_is_not_an_owner() {
+        let text = concat!(
+            "Cryptographic users for disk1s1 (2 found)\n",
+            "|\n",
+            "+-- 11111111-1111-1111-1111-111111111111\n",
+            "|   Type: Local Open Directory User\n",
+            "|   Volume Owner: No\n",
+            "|\n",
+            "+-- 22222222-2222-2222-2222-222222222222\n",
+            "    Type: Local Open Directory User\n",
+            "    Volume Owner: Yes\n",
+        );
+
+        let owners = parse_volume_owner_uuids(text);
+
+        assert_eq!(owners, vec!["22222222-2222-2222-2222-222222222222".to_string()]);
+    }
+
+    /// The property `InstallAuth`'s hand-written `Debug` exists for — a derived one would print
+    /// the password, and `{:?}` is this codebase's habit in log lines.
+    #[test]
+    fn install_auth_debug_does_not_print_the_password() {
+        let auth = InstallAuth { user: "david".to_string(), password: "correct horse battery".to_string() };
+
+        let rendered = format!("{auth:?}");
+
+        assert!(!rendered.contains("correct horse battery"), "the password leaked: {rendered}");
+        assert!(rendered.contains("david"), "the account name is not a secret and is worth logging");
     }
 }

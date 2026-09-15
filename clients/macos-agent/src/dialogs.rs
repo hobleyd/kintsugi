@@ -28,6 +28,17 @@ fn escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// Upper-cases the first character so a phrase built for mid-sentence use ("a macOS 26.7 update")
+/// can also open one. ASCII-only by construction — the strings it is given are composed above out
+/// of literals and a `softwareupdate` version number.
+fn capitalize_first(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 fn run_osascript(script: &str) -> Result<String> {
     let output = Command::new("osascript")
         .arg("-e")
@@ -58,11 +69,26 @@ const MAX_LISTED_APPS: usize = 10;
 /// The application names are listed under the opening sentence rather than only counted: "3
 /// application updates are ready" doesn't tell someone deciding whether to delay whether the
 /// thing they have open right now is about to be restarted.
-fn confirmation_message(delay_label: &str, delays_remaining: u32, app_names: &[String], os_update_available: bool) -> String {
+fn confirmation_message(
+    delay_label: &str,
+    delays_remaining: u32,
+    app_names: &[String],
+    os_update_available: bool,
+    os_update_version: Option<&str>,
+) -> String {
+    // Named rather than counted, when macOS told us the version: `-i -a` installs everything
+    // applicable, so "a macOS update" can mean a point release or a whole new major version, and
+    // somebody deciding whether to delay is entitled to know which. See
+    // `install_password_message`, which names it for the same reason.
+    let the_os_update = match os_update_version {
+        Some(version) => format!("a macOS {version} update"),
+        None => "a macOS update".to_string(),
+    };
+
     let what = match (app_names.len(), os_update_available) {
-        (0, true) => "A macOS update is".to_string(),
+        (0, true) => format!("{} is", capitalize_first(&the_os_update)),
         (n, false) => format!("{n} application update{} {}", if n == 1 { "" } else { "s" }, if n == 1 { "is" } else { "are" }),
-        (n, true) => format!("{n} application update{} and a macOS update are", if n == 1 { "" } else { "s" }),
+        (n, true) => format!("{n} application update{} and {the_os_update} are", if n == 1 { "" } else { "s" }),
     };
 
     let mut message = format!(
@@ -102,10 +128,11 @@ pub fn confirm_patch(
     delays_remaining: u32,
     app_names: &[String],
     os_update_available: bool,
+    os_update_version: Option<&str>,
     timeout_seconds: u64,
 ) -> Result<ConfirmChoice> {
     let delay_button_label = format!("{DELAY_BUTTON} {delay_label} ({delays_remaining} left)");
-    let message = confirmation_message(delay_label, delays_remaining, app_names, os_update_available);
+    let message = confirmation_message(delay_label, delays_remaining, app_names, os_update_available, os_update_version);
 
     crate::logging::info(&format!("showing patch confirmation dialog ({delays_remaining} delay(s) available)"));
 
@@ -262,6 +289,144 @@ pub fn acknowledge(message: &str, timeout_seconds: u64) -> Result<()> {
     run_osascript(&script).map(|_| ())
 }
 
+/// What came back from the authorization prompt.
+///
+/// **A separate type from [`ConfirmChoice`], and the polarity of a timeout is the opposite** — the
+/// same reason [`RemoteControlChoice`] is its own enum. There, nobody answering means "they were
+/// not at the desk, count it as a delay, patch later": the update is going to happen regardless.
+/// Here, nobody answering means there is no password, and there is nothing useful to do with that
+/// but **skip the OS update entirely**. Falling through to an unauthorized install instead would
+/// download several gigabytes on an unattended Mac and fail at the end of it, every single cycle.
+/// Reusing `ConfirmChoice` would have put that behaviour one careless `match` arm away.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PasswordAnswer {
+    /// The user authorized. Never logged, never rendered — see `os_update::InstallAuth`.
+    Provided(String),
+    /// Cancel, or an empty box. Treated as a refusal.
+    Cancelled,
+    /// Nobody was there. Treated as a refusal, and kept distinct only so the log can tell an empty
+    /// desk from a deliberate "not now".
+    TimedOut,
+}
+
+const AUTHORIZE_BUTTON: &str = "Authorize";
+const CANCEL_BUTTON: &str = "Cancel";
+
+/// Composes the authorization prompt. Split out from the subprocess call for the same reason every
+/// other message in this file is — the wording is the part somebody has to make a decision from.
+///
+/// It names the version, and that is not decoration: `softwareupdate -i -a` installs everything
+/// applicable, which on a host offered both a point release and a major upgrade means the major
+/// one. "A macOS update is ready" would be a fair description of a 2.9GB point release and a
+/// misleading one of an 11.7GB new major version, and the difference is exactly what somebody being
+/// asked for their password should get to weigh.
+fn install_password_message(username: &str, version: Option<&str>) -> String {
+    let what = match version {
+        Some(version) => format!("macOS {version}"),
+        None => "a macOS update".to_string(),
+    };
+
+    format!(
+        "Kintsugi is ready to install {what} on this Mac.\n\n\
+         macOS requires your password to authorize a system update on Apple silicon. It is used \
+         once, to run this installation, and is not stored.\n\n\
+         Enter the password for \u{201c}{username}\u{201d}, or Cancel to skip the macOS update this \
+         time \u{2014} application updates will still be installed."
+    )
+}
+
+/// Asks the console user to authorize the macOS install, and returns what they said.
+///
+/// The password reaches this process on `osascript`'s stdout and goes straight into an
+/// `os_update::InstallAuth`; it is never logged here, and `run_osascript`'s `trim()` is
+/// deliberately *not* used on it (see [`run_osascript_untrimmed`]).
+pub fn request_install_password(username: &str, version: Option<&str>, timeout_seconds: u64) -> Result<PasswordAnswer> {
+    crate::logging::info(&format!("asking {username} to authorize the macOS install"));
+
+    let script = format!(
+        r#"display dialog "{}" with title "Kintsugi Patching" default answer "" with hidden answer buttons {{"{}", "{}"}} default button "{}" with icon caution giving up after {}"#,
+        escape(&install_password_message(username, version)),
+        CANCEL_BUTTON,
+        AUTHORIZE_BUTTON,
+        AUTHORIZE_BUTTON,
+        timeout_seconds
+    );
+
+    let answer = match run_osascript_untrimmed(&script) {
+        Ok(result) => parse_password_result(&result),
+        // osascript exits non-zero when the user presses Cancel ("User canceled. (-128)"), which is
+        // an answer rather than a failure — anything else really is one.
+        Err(err) if format!("{err:#}").contains("User canceled") => PasswordAnswer::Cancelled,
+        Err(err) => return Err(err),
+    };
+
+    crate::logging::info(&format!(
+        "{username} chose: {}",
+        match answer {
+            PasswordAnswer::Provided(_) => "authorize the macOS install",
+            PasswordAnswer::Cancelled => "skip the macOS update",
+            PasswordAnswer::TimedOut => "timed out (treated as a refusal, so the macOS update is skipped)",
+        }
+    ));
+
+    Ok(answer)
+}
+
+/// [`run_osascript`] without the `trim()`.
+///
+/// Every other caller wants the trim; this one must not have it. A password may legitimately begin
+/// or end with a space, and trimming the whole of osascript's output would silently hand
+/// `softwareupdate` a different password than the one that was typed — which arrives as "Failed to
+/// authenticate" after the download, indistinguishable from a wrong password.
+fn run_osascript_untrimmed(script: &str) -> Result<String> {
+    let output = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .output()
+        .context("failed to run osascript")?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "osascript exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+
+    // Only the single trailing newline osascript itself adds.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.strip_suffix('\n').unwrap_or(&stdout).to_string())
+}
+
+/// Interprets the authorization prompt's result: `button returned:Authorize, text returned:<typed>,
+/// gave up:false`.
+///
+/// `gave up:` is checked first for the reason the other two parsers check it first — a timeout
+/// reports `button returned:<default button>`, which here is Authorize. The password is taken as
+/// everything between `text returned:` and the *final* `, gave up:`, so one containing a comma
+/// survives; and an unparseable answer falls through to `Cancelled`, never to a `Provided` holding
+/// something that isn't the password.
+fn parse_password_result(result: &str) -> PasswordAnswer {
+    if result.contains("gave up:true") {
+        return PasswordAnswer::TimedOut;
+    }
+
+    let Some((_, after)) = result.split_once("text returned:") else {
+        return PasswordAnswer::Cancelled;
+    };
+
+    let password = match after.rsplit_once(", gave up:") {
+        Some((password, _)) => password,
+        None => after,
+    };
+
+    if password.is_empty() {
+        PasswordAnswer::Cancelled
+    } else {
+        PasswordAnswer::Provided(password.to_string())
+    }
+}
+
 /// Best-effort — a failed notification (e.g. Notification Center is unreachable, or this runs
 /// somehow outside a real user session) shouldn't ever be treated as a reason to abort patching.
 pub fn notify(title: &str, message: &str) {
@@ -325,7 +490,7 @@ mod tests {
 
     #[test]
     fn confirmation_message_lists_the_affected_applications() {
-        let message = confirmation_message("1 hour(s)", 3, &names(&["Firefox", "Slack"]), false);
+        let message = confirmation_message("1 hour(s)", 3, &names(&["Firefox", "Slack"]), false, None);
 
         assert!(message.contains("2 application updates are ready"), "{message}");
         assert!(message.contains("\n  \u{2022} Firefox\n  \u{2022} Slack\n"), "{message}");
@@ -336,7 +501,7 @@ mod tests {
     #[test]
     fn confirmation_message_summarises_the_tail_of_a_long_list() {
         let all: Vec<String> = (1..=14).map(|n| format!("App {n}")).collect();
-        let message = confirmation_message("1 hour(s)", 3, &all, false);
+        let message = confirmation_message("1 hour(s)", 3, &all, false, None);
 
         assert!(message.contains("  \u{2022} App 10\n"), "{message}");
         assert!(!message.contains("App 11"), "{message}");
@@ -347,7 +512,7 @@ mod tests {
     /// list existed — no bullet block, and no extra blank line where one would have gone.
     #[test]
     fn confirmation_message_for_an_os_update_alone_carries_no_list() {
-        let message = confirmation_message("1 hour(s)", 3, &[], true);
+        let message = confirmation_message("1 hour(s)", 3, &[], true, None);
 
         assert_eq!(
             message,
@@ -358,7 +523,7 @@ mod tests {
 
     #[test]
     fn confirmation_message_states_the_remaining_delay_budget() {
-        let message = confirmation_message("2 day(s)", 4, &names(&["Firefox"]), false);
+        let message = confirmation_message("2 day(s)", 4, &names(&["Firefox"]), false, None);
 
         assert!(message.contains("1 application update is ready"), "{message}");
         assert!(message.contains("up to 4 more time(s), 2 day(s) at a time"), "{message}");
@@ -366,7 +531,7 @@ mod tests {
 
     #[test]
     fn confirmation_message_describes_applications_and_an_os_update_together() {
-        let message = confirmation_message("1 hour(s)", 3, &names(&["Firefox", "Slack", "Zoom"]), true);
+        let message = confirmation_message("1 hour(s)", 3, &names(&["Firefox", "Slack", "Zoom"]), true, None);
 
         assert!(message.contains("3 application updates and a macOS update are ready"), "{message}");
         assert!(message.contains("  \u{2022} Zoom"), "{message}");
@@ -425,5 +590,71 @@ mod tests {
     #[test]
     fn escape_handles_quotes_and_backslashes() {
         assert_eq!(escape(r#"He said "hi" \ bye"#), r#"He said \"hi\" \\ bye"#);
+    }
+
+    #[test]
+    fn parse_password_result_returns_what_was_typed() {
+        let result = "button returned:Authorize, text returned:hunter2, gave up:false";
+        assert_eq!(parse_password_result(result), PasswordAnswer::Provided("hunter2".to_string()));
+    }
+
+    /// osascript separates the record's fields with ", " and a password may contain one — taking
+    /// everything up to the *last* ", gave up:" is what keeps it whole.
+    #[test]
+    fn parse_password_result_keeps_a_password_containing_a_comma() {
+        let result = "button returned:Authorize, text returned:one, two, three, gave up:false";
+        assert_eq!(parse_password_result(result), PasswordAnswer::Provided("one, two, three".to_string()));
+    }
+
+    #[test]
+    fn parse_password_result_keeps_leading_and_trailing_spaces() {
+        // The reason this dialog does not go through `run_osascript`: trimming would hand
+        // softwareupdate a different password and the failure would be indistinguishable from a
+        // wrong one, after the whole download.
+        let result = "button returned:Authorize, text returned: spaced , gave up:false";
+        assert_eq!(parse_password_result(result), PasswordAnswer::Provided(" spaced ".to_string()));
+    }
+
+    /// A timeout reports `button returned:<default button>`, which here is Authorize — so `gave up:`
+    /// has to be read first, exactly as in the other two parsers.
+    #[test]
+    fn parse_password_result_reads_an_unanswered_prompt_as_a_timeout_not_an_authorization() {
+        let result = "button returned:Authorize, text returned:, gave up:true";
+        assert_eq!(parse_password_result(result), PasswordAnswer::TimedOut);
+    }
+
+    #[test]
+    fn parse_password_result_treats_an_empty_or_unreadable_answer_as_cancelled() {
+        assert_eq!(parse_password_result("button returned:Authorize, text returned:, gave up:false"), PasswordAnswer::Cancelled);
+        assert_eq!(parse_password_result("something unexpected"), PasswordAnswer::Cancelled);
+    }
+
+    /// `-i -a` installs everything applicable, so "a macOS update" can mean a 2.9GB point release
+    /// or an 11.7GB new major version. Somebody being asked for their password is owed the
+    /// difference.
+    #[test]
+    fn install_password_message_names_the_version_and_the_account() {
+        let message = install_password_message("david", Some("26.7"));
+
+        assert!(message.contains("macOS 26.7"), "{message}");
+        assert!(message.contains("david"), "{message}");
+        assert!(message.contains("Cancel"), "declining has to be presented as an option: {message}");
+    }
+
+    #[test]
+    fn install_password_message_stays_readable_when_the_version_is_unknown() {
+        let message = install_password_message("david", None);
+
+        assert!(message.contains("a macOS update"), "{message}");
+        assert!(!message.contains("macOS  "), "no gap where the version would have been: {message}");
+    }
+
+    #[test]
+    fn confirmation_message_names_the_macos_version_when_it_is_known() {
+        let alone = confirmation_message("1 hour(s)", 3, &[], true, Some("26.7"));
+        assert!(alone.starts_with("A macOS 26.7 update is ready"), "{alone}");
+
+        let with_apps = confirmation_message("1 hour(s)", 3, &names(&["Firefox"]), true, Some("27"));
+        assert!(with_apps.contains("1 application update and a macOS 27 update are ready"), "{with_apps}");
     }
 }

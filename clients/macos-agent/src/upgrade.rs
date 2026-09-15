@@ -210,6 +210,35 @@ pub fn report_patch_failure(
     status: &UpgradeStatus,
     error: &anyhow::Error,
 ) {
+    report_failure(
+        client,
+        config,
+        serial_number,
+        &status.application_name,
+        &status.installed_version,
+        status.latest_version.as_deref(),
+        error,
+    );
+}
+
+/// The POST itself, with the application taken as three plain fields rather than an
+/// [`UpgradeStatus`].
+///
+/// Split out of `report_patch_failure` so `os_update::report_failed` can file a failed macOS
+/// install on the same screen, through the same route, with the same truncation rule — an OS update
+/// has no upgrade-path row and so no `UpgradeStatus` to describe it. `.claude/rules/hand-mirrored-dtos.md`
+/// is the reason this is a shared function rather than a second request struct alongside
+/// `ReportPatchFailureRequest`: one wire shape, hand-mirrored against `ReportPatchFailureCommand`
+/// in exactly one place, is the whole point of that rule.
+pub fn report_failure(
+    client: &reqwest::blocking::Client,
+    config: &Config,
+    serial_number: &str,
+    application_name: &str,
+    installed_version: &str,
+    attempted_version: Option<&str>,
+    error: &anyhow::Error,
+) {
     // The host's own clock, not the server's arrival time: a Mac that patched overnight and could
     // not reach the server until morning would otherwise report the failure as having happened
     // when the network came back.
@@ -223,29 +252,25 @@ pub fn report_patch_failure(
 
     let request = ReportPatchFailureRequest {
         serial_number,
-        application_name: &status.application_name,
-        installed_version: &status.installed_version,
-        attempted_version: status.latest_version.as_deref(),
+        application_name,
+        installed_version,
+        attempted_version,
         failed_utc,
         details: truncate_for_report(&format!("{error:#}")),
     };
 
     match client.post(config.patch_failure_url()).json(&request).send() {
         Ok(response) if response.status().is_success() => {
-            logging::info(&format!("reported the failed patch of {} to the server", status.application_name));
+            logging::info(&format!("reported the failed patch of {application_name} to the server"));
         }
         Ok(response) => {
             logging::warn(&format!(
-                "server rejected the patch-failure report for {} (HTTP {})",
-                status.application_name,
+                "server rejected the patch-failure report for {application_name} (HTTP {})",
                 response.status()
             ));
         }
         Err(err) => {
-            logging::warn(&format!(
-                "could not report the failed patch of {} to the server: {err:#}",
-                status.application_name
-            ));
+            logging::warn(&format!("could not report the failed patch of {application_name} to the server: {err:#}"));
         }
     }
 }

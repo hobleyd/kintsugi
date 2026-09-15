@@ -44,6 +44,10 @@ fn remaining_warning(stood_for: Duration) -> Duration {
 struct PendingWork {
     apps: Vec<UpgradeStatus>,
     os_update_available: bool,
+    /// The version the macOS update would bring this host to, when `softwareupdate -l` said. Named
+    /// in both dialogs rather than only counted — see `dialogs::confirmation_message` — and sent to
+    /// the server as the attempted version if the install fails.
+    os_update_version: Option<String>,
 }
 
 impl PendingWork {
@@ -70,7 +74,7 @@ impl PendingWork {
             .filter(|app| application_names.iter().any(|name| name.eq_ignore_ascii_case(&app.application_name)))
             .collect();
 
-        PendingWork { apps, os_update_available: false }
+        PendingWork { apps, os_update_available: false, os_update_version: None }
     }
 
     fn total(&self) -> usize {
@@ -90,12 +94,12 @@ fn plan(client: &reqwest::blocking::Client, config: &Config, serial_number: &str
     let statuses = upgrade::fetch_upgrade_statuses(client, config, serial_number)?;
     let apps: Vec<_> = statuses.into_iter().filter(|status| upgrade::is_patchable(status, identity)).collect();
 
-    let os_update_available = os_update::check_available().unwrap_or_else(|err| {
+    let os_update = os_update::check().unwrap_or_else(|err| {
         logging::warn(&format!("could not check for macOS updates: {err:#}"));
-        false
+        os_update::OsUpdateStatus::default()
     });
 
-    Ok(PendingWork { apps, os_update_available })
+    Ok(PendingWork { apps, os_update_available: os_update.available, os_update_version: os_update.latest_version })
 }
 
 /// Runs one full due patch cycle: check what's actually pending, confirm (or delay) only if
@@ -133,7 +137,14 @@ pub fn run(
         return;
     }
 
-    let warning = match confirm_or_delay(policy, state, &work.app_names(), work.os_update_available, report) {
+    let warning = match confirm_or_delay(
+        policy,
+        state,
+        &work.app_names(),
+        work.os_update_available,
+        work.os_update_version.as_deref(),
+        report,
+    ) {
         Ok(Decision::PatchNow) => Duration::ZERO,
         Ok(Decision::ProceedAfterWarning { remaining }) => remaining,
         // Both delaying answers stop here: `confirm_or_delay` has already moved the due time, and
@@ -337,6 +348,7 @@ fn confirm_or_delay(
     state: &mut ScheduleState,
     app_names: &[String],
     os_update_available: bool,
+    os_update_version: Option<&str>,
     report: &StatusReporter,
 ) -> anyhow::Result<Decision> {
     // Either dialog below stands there until it is answered, and the confirm one for a whole
@@ -369,6 +381,7 @@ fn confirm_or_delay(
         state.delays_remaining(policy),
         app_names,
         os_update_available,
+        os_update_version,
         policy.delay_seconds(),
     )?;
 
@@ -406,7 +419,7 @@ fn run_patches(
     identity: &AgentIdentity,
     report: &StatusReporter,
 ) -> (usize, usize) {
-    let PendingWork { apps, os_update_available } = work;
+    let PendingWork { apps, os_update_available, os_update_version } = work;
     let total = apps.len() + usize::from(os_update_available);
     let mut completed = 0;
     let mut succeeded = 0;
@@ -465,23 +478,43 @@ fn run_patches(
     }
 
     if os_update_available {
-        let current = "Installing macOS updates — this may take a while".to_string();
-        dialogs::notify("Kintsugi Patching", &format!("{current}\n{}", dialogs::progress_bar(completed, total)));
-        report(AgentStatus::Patching { current, completed, total });
+        match authorize_os_update(os_update_version.as_deref()) {
+            OsUpdateAuthorization::Authorized(auth) => {
+                let current = "Installing macOS updates — this may take a while".to_string();
+                dialogs::notify("Kintsugi Patching", &format!("{current}\n{}", dialogs::progress_bar(completed, total)));
+                report(AgentStatus::Patching { current, completed, total });
 
-        logging::info("attempting to install macOS updates via the root daemon");
-        match queue::submit(&config::queue_dir(), RequestKind::OsUpdate, "", queue::REQUEST_TIMEOUT) {
-            Ok(result) if result.success => {
-                succeeded += 1;
-                logging::info("macOS updates installed successfully");
+                logging::info("attempting to install macOS updates via the root daemon");
+                match queue::submit_with_auth(&config::queue_dir(), RequestKind::OsUpdate, "", auth.as_ref()) {
+                    Ok(result) if result.success => {
+                        succeeded += 1;
+                        logging::info(&format!("macOS updates installed: {}", result.output.trim()));
+                        // The daemon says whether the host is actually on the new version or merely
+                        // staged for it; whoever authorized this is the person who has to reboot.
+                        if result.output.contains(os_update::RESTART_REQUIRED_MARKER) {
+                            let _ = dialogs::acknowledge(
+                                "The macOS update has been installed and will finish applying the next time this Mac restarts.",
+                                RESTART_NOTICE_TIMEOUT.as_secs(),
+                            );
+                        }
+                    }
+                    Ok(result) => {
+                        failed += 1;
+                        // Logged only. The daemon ran it, so the daemon is the side that reports it
+                        // to the server — see `os_update::report_failed` and the same rule in
+                        // `upgrade::report_patch_failure`.
+                        logging::error(&format!("macOS update install failed: {}", result.output.trim()));
+                    }
+                    Err(err) => {
+                        failed += 1;
+                        logging::error(&format!("could not install macOS updates: {err:#}"));
+                    }
+                }
             }
-            Ok(result) => {
-                failed += 1;
-                logging::error(&format!("macOS update install failed: {}", result.output.trim()));
-            }
-            Err(err) => {
-                failed += 1;
-                logging::error(&format!("could not install macOS updates: {err:#}"));
+            // Not counted as a failure: nothing was attempted, and a Failed Updates row every cycle
+            // for a Mac whose owner keeps declining would bury the failures that can be fixed.
+            OsUpdateAuthorization::Skip(reason) => {
+                logging::info(&format!("skipping the macOS update this cycle: {reason}"));
             }
         }
     }
@@ -489,11 +522,80 @@ fn run_patches(
     (succeeded, failed)
 }
 
+/// How long the "you still need to restart" notice stands before dismissing itself. It is
+/// information, not a decision, so it must never block the rest of a cycle waiting to be clicked.
+const RESTART_NOTICE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Whether the macOS install may go ahead, and with whose authorization.
+enum OsUpdateAuthorization {
+    /// Submit the request. The credentials are `None` on Intel, where `softwareupdate` needs none
+    /// and would reject the flags that carry them.
+    Authorized(Option<os_update::InstallAuth>),
+    /// Do not submit at all, for the reason given.
+    Skip(String),
+}
+
+/// Obtains a volume owner's authorization for the macOS install, or decides not to attempt it.
+///
+/// Both checks happen **here, before the request is submitted**, and that is the entire point of
+/// the function. `softwareupdate -i` on Apple silicon downloads everything applicable *first* and
+/// only then asks to be authorized — so every way of getting this wrong costs gigabytes and hours
+/// before it fails, once per cycle, forever. The two ways are:
+///
+/// 1. **No password at all.** That is what used to happen on every host: the daemon is root, root
+///    is not an APFS cryptographic user, and the install died on an interactive `Password:` prompt
+///    after 80 minutes of downloading.
+/// 2. **A password from an account that is not a volume owner.** Being an administrator is not the
+///    same thing — an account created by MDM, or migrated onto Apple silicon, can be in `admin` and
+///    still have no secure token. `--user` names "an owner user"; anything else fails identically,
+///    and just as late.
+///
+/// Silence is refusal here, unlike `confirm_or_delay` — see `dialogs::PasswordAnswer` for why the
+/// polarity has to be the other way round for this question.
+fn authorize_os_update(version: Option<&str>) -> OsUpdateAuthorization {
+    if !os_update::is_apple_silicon() {
+        return OsUpdateAuthorization::Authorized(None);
+    }
+
+    let Some(username) = config::console_username() else {
+        return OsUpdateAuthorization::Skip("could not determine which account is logged in".to_string());
+    };
+
+    match os_update::is_volume_owner(&username) {
+        Ok(true) => {}
+        Ok(false) => {
+            return OsUpdateAuthorization::Skip(format!(
+                "'{username}' is not a volume owner of the boot volume, so macOS will not let it authorize a                  system update — an administrator who is one has to install this, or grant it a secure token"
+            ));
+        }
+        // Not treated as permission: a check that could not run is not a check that passed, and the
+        // cost of guessing wrong is the multi-gigabyte download this function exists to avoid.
+        Err(err) => return OsUpdateAuthorization::Skip(format!("could not tell whether '{username}' is a volume owner: {err:#}")),
+    }
+
+    match dialogs::request_install_password(&username, version, PASSWORD_PROMPT_TIMEOUT.as_secs()) {
+        Ok(dialogs::PasswordAnswer::Provided(password)) => {
+            OsUpdateAuthorization::Authorized(Some(os_update::InstallAuth { user: username, password }))
+        }
+        Ok(dialogs::PasswordAnswer::Cancelled) => OsUpdateAuthorization::Skip(format!("{username} declined to authorize it")),
+        Ok(dialogs::PasswordAnswer::TimedOut) => OsUpdateAuthorization::Skip("nobody answered the authorization prompt".to_string()),
+        Err(err) => OsUpdateAuthorization::Skip(format!("could not ask for authorization: {err:#}")),
+    }
+}
+
+/// How long the authorization prompt stands before giving up.
+///
+/// Shorter than the patch confirmation's delay period on purpose: by this point the user has
+/// already clicked "Patch Now" (or spent their delay budget) and the applications are being
+/// installed, so this prompt appears while they are watching. Ten minutes is generous for somebody
+/// who is there and short enough that an empty desk does not stall the rest of the cycle.
+const PASSWORD_PROMPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
 /// Asks the root daemon to run this application's upgrade — by name only; the daemon fetches and
 /// verifies the script itself, see `queue`. The daemon's own log has the script's full output; what
 /// comes back here is its verdict and last word.
 fn patch_via_daemon(app: &UpgradeStatus) -> anyhow::Result<()> {
-    let result = queue::submit(&config::queue_dir(), RequestKind::AppPatch, &app.application_name, queue::REQUEST_TIMEOUT)?;
+    let result = queue::submit(&config::queue_dir(), RequestKind::AppPatch, &app.application_name)?;
     if !result.success {
         anyhow::bail!("the root daemon reported: {}", result.output.trim());
     }
@@ -527,7 +629,7 @@ mod tests {
     /// stops a forced run rebooting a machine over one application. Pinned in all three agents.
     #[test]
     fn narrowing_keeps_only_the_named_applications_and_drops_the_os_update() {
-        let work = PendingWork { apps: vec![app("Firefox"), app("GIMP")], os_update_available: true };
+        let work = PendingWork { apps: vec![app("Firefox"), app("GIMP")], os_update_available: true, os_update_version: Some("26.7".to_string()) };
 
         let narrowed = work.narrowed_to(&["gimp".to_string()]);
 
@@ -538,7 +640,7 @@ mod tests {
 
     #[test]
     fn narrowing_to_something_this_host_cannot_patch_leaves_nothing_to_do() {
-        let work = PendingWork { apps: vec![app("Firefox")], os_update_available: true };
+        let work = PendingWork { apps: vec![app("Firefox")], os_update_available: true, os_update_version: Some("26.7".to_string()) };
 
         assert!(work.narrowed_to(&["LibreOffice".to_string()]).is_empty());
     }

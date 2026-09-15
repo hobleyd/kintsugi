@@ -18,6 +18,54 @@ its own key again. It fails half-visibly: the root daemon is fine, the host keep
 only the per-user half stops, presenting no certificate at all and drawing a 403.
 
 
+## macOS updates: root is not enough, and the download comes first
+
+**On Apple silicon `softwareupdate -i` will not install a macOS update for root.** It wants a
+*volume owner* — an APFS cryptographic user — to authorize it, via `--user <name> --stdinpass`, both
+of which `man softwareupdate` marks "Apple silicon only". The root LaunchDaemon is not one, so
+`os_update::install` used to download the whole update and then die on an interactive `Password:`
+prompt, on a process with no terminal. It is the same masked-password wall root-requiring Homebrew
+casks hit, and it is invisible in every way that matters: the exit status is a plain 1, and the
+"Failed to authenticate" line is the last of a hundred thousand `Downloading: 95.60%` fragments.
+
+**Everything about this failure is expensive because the authorization comes last.** A real run
+spent **80 minutes** fetching 2.9GB before finding out it could not install it, and `-i -a` means
+everything applicable — the same host was also offered macOS 27 at 11.7GB. So both ways of getting
+the credentials wrong are checked in `patch_cycle::authorize_os_update`, in the per-user half,
+*before* the request is submitted:
+
+- **Nobody to ask, or nobody answering.** No password means the request is not submitted at all.
+  Note the polarity is the opposite of `confirm_patch`, where an unanswered dialog counts as a delay
+  and patching proceeds — that is why `dialogs::PasswordAnswer` is its own enum rather than a reuse
+  of `ConfirmChoice`, the same reasoning `RemoteControlChoice` exists for.
+- **An account that is not a volume owner.** Being in `admin` is *not* the same thing: an account
+  created by MDM, or migrated onto Apple silicon, can be an administrator with no secure token.
+  `os_update::is_volume_owner` intersects the user's `GeneratedUID` (from `dscl`) with the UUIDs
+  `diskutil apfs listUsers /` marks `Volume Owner: Yes`. A check that could not run is treated as a
+  refusal, not as permission.
+
+**The password is the one thing in the queue protocol that is not just a name**, and it travels in a
+`<request>.auth` sidecar rather than the request body so that the sentence "a request never carries
+anything executable" stays literally true of requests. `queue.rs`'s module docs hold the full
+argument; the load-bearing parts are mode `0600` set atomically at creation (the queue directory is
+`root:admin 0770`, so any other administrator could otherwise read it), `take_auth` unlinking it as
+it reads, and `remove_request` — not a bare unlink — on every path that discards a request.
+
+**No `-R`, and a staged update is not a patched one.** These updates carry `Action: restart`.
+`softwareupdate -i` without `-R` stages them and returns success, so reporting that to
+`/api/os-patch-results` cleared the host's pending flag only for the next check-in's `softwareupdate
+-l` to set it straight back. `install` now re-runs the check and reports `restart_required`; the
+daemon reports patched only when nothing is pending, and says `RESTART_REQUIRED_MARKER` in its
+result otherwise so the per-user half can tell the person who just typed their password. `-R` was
+the alternative and was rejected: rebooting a Mac out from under someone who is sitting at it is
+worse than an update that waits.
+
+**Read `softwareupdate -l` by label, not by position.** `OsUpdateStatus::latest_version` took the
+first `Version:` in the output, which on a host offered Safari, macOS 26.7 and macOS 27 is *Safari's*
+— the admin UI showed 27.0 as the pending macOS version of a Mac downloading 26.7. Only a line whose
+`Title:` names macOS counts, and of those the highest, because `-a` installs all of them.
+
+
 ## Remote control and the remote shell
 
 **macOS needs a handoff for that, and it is a third root job.** Remote control lives in its per-user

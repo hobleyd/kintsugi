@@ -2,7 +2,7 @@ use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -11,12 +11,14 @@ use crate::dialogs;
 use crate::logging;
 use crate::queue::{self, RequestKind};
 
-/// How long the per-user process waits for the daemon to answer a "Check In Now" request. A
-/// check-in is `softwareupdate -l`, the Homebrew inventory, two POSTs and possibly an agent
-/// download (`self_update::DOWNLOAD_TIMEOUT`), so minutes rather than seconds — but well short of
-/// `queue::REQUEST_TIMEOUT`, because the menu bar reads "Checking in…" for the whole wait and an
-/// hour of that for a daemon that never answered would be worse than a reported timeout.
-pub const CHECK_IN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// How long the per-user process waits for the daemon to answer a "Check In Now" request.
+///
+/// It lives in `queue` now, alongside the other two kinds' bounds and the `is_stale` that has to
+/// agree with all three — the daemon discards a request older than its kind's timeout, so a value
+/// only one side could see is a value the two sides can disagree about. Re-exported here because
+/// this is the module that documents what a check-in costs.
+#[allow(unused_imports)]
+pub use crate::queue::CHECK_IN_TIMEOUT;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PersistedSchedule {
@@ -121,7 +123,7 @@ fn next_check_in_epoch_at(schedule_path: &Path, now_epoch_seconds: u64) -> Optio
 /// `tray_menu::report_check_in`.
 pub fn request_now(queue_dir: &Path) {
     logging::info("asking the root daemon to check in now");
-    match queue::submit(queue_dir, RequestKind::CheckIn, "", CHECK_IN_TIMEOUT) {
+    match queue::submit(queue_dir, RequestKind::CheckIn, "") {
         Ok(result) if result.success => {
             logging::info("the root daemon checked in with the server");
             dialogs::notify("Kintsugi Patching", "Checked in with the server.");

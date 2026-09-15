@@ -113,8 +113,19 @@ script's `rm` printed `Permission denied` for every file in `Ollama.app` and lef
 place, while the log called it a script failure. The queue keeps its one security property in both
 directions — an app-patch request carries a name, the daemon re-fetches the row, verifies the
 signature and re-asks `runs_as_root` itself, so a forged request can neither run arbitrary code nor
-get `brew` run as root — and a request older than `queue::REQUEST_TIMEOUT` or from before the
-current boot is discarded unrun, because the process that would have shown progress for it is gone.
+get `brew` run as root — and a request older than its kind's `RequestKind::timeout()` or from before
+the current boot is discarded unrun, because the process that would have shown progress for it is
+gone.
+
+**That timeout is per-kind because one number could not serve all three, and the shared one shipped
+too short.** Both sides read it from `RequestKind::timeout()` — `submit` blocks for that long,
+`is_stale` discards past it — and splitting them means the daemon throwing away requests their
+owners are still holding. An hour was right for an application and wrong for a macOS install: a real
+run spent 80 minutes merely *downloading*, the per-user half gave up at exactly 3600s with "timed out
+waiting for the root daemon to answer a OsUpdate request", and the daemon wrote an answer twenty
+minutes later that nobody was left to read. `OS_UPDATE_TIMEOUT` is six hours. The answer nobody read
+also stayed on disk forever, at 109KB — `submit` removes its *request* on timeout but cannot remove a
+result that had not been written yet, so `sweep_orphans` is what finally collects those.
 The prompt now describes that context (root, a LaunchDaemon, no GUI session — quit the application
 via `launchctl asuser`, never relaunch it), so a script is generated for the process that runs it.
 An App Store row (`PackageManager` "App Store") goes to the daemon too, for the reason under
@@ -291,8 +302,19 @@ failure twice.
 **Only a real execution failure is reported.** Everything reachable *before* `patch_one` — no
 enrolled identity, no signed patchable path, the daemon's `runs_as_root` refusal, an unreachable
 server — is a configuration problem rather than a bug in a script, and a screen full of those hides
-the ones a human or the AI can actually fix. OS updates are out for the same reason: there is no
-script to repair. Each call site says so in a comment; keep them saying it.
+the ones a human or the AI can actually fix. Each call site says so in a comment; keep them saying
+it.
+
+**An OS update that *ran* and failed is reported, under the application name `macOS`.** It used to be
+excluded on the reasoning that there is no script to repair — true, but it meant the failure was
+logged on the host and nowhere else, so the admin UI showed a Mac that simply never updated with no
+indication why. The authorization wall in `clients/macos-agent/CLAUDE.md` sat unreported for a day
+for exactly that reason. It goes through the existing `/api/patch-failures` route rather than a new
+one: that route is already in nginx's agent-certificate regex and already carries
+`[RequireAgentIdentity]`, and `ReportPatchFailureCommandHandler` already files a name that resolves
+to no upgrade path with a null platform — which the screen renders as a failure it cannot offer a
+repair for, which is precisely right here. The rule above still holds for everything that never ran:
+an unauthorized or declined OS update is logged, not reported.
 
 **`MAX_REPORTED_FAILURE_BYTES` has to stay below the server's own ceiling.** A failing script's
 stderr is unbounded and `run_script` bails with all of it. 4000 bytes here against

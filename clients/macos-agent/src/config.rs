@@ -310,6 +310,27 @@ pub fn user_state_dir() -> Result<PathBuf> {
     Ok(home.join("Library/Application Support/kintsugi-agent"))
 }
 
+/// The short name of the account this process is running as.
+///
+/// Only meaningful in the per-user `--agent` process, which launchd starts in the logged-in user's
+/// session — in the root daemon this is `root`, which is exactly the account that cannot authorize
+/// a macOS install (see `os_update::install`). Read from the passwd database rather than `$USER`
+/// for the reason `user_state_dir` prefers it: an environment variable is whatever the launching
+/// context happened to set.
+pub fn console_username() -> Option<String> {
+    // SAFETY: getuid() cannot fail; getpwuid() returns either a valid pointer into a thread-local
+    // static buffer (only read from here, immediately, before any other libc call in this thread
+    // could invalidate it) or null. Same shape as `home_dir_from_passwd` below.
+    unsafe {
+        let passwd = libc::getpwuid(libc::getuid());
+        if passwd.is_null() {
+            return None;
+        }
+        let name = CStr::from_ptr((*passwd).pw_name).to_str().ok()?;
+        (!name.is_empty()).then(|| name.to_string())
+    }
+}
+
 fn home_dir_from_passwd() -> Option<PathBuf> {
     // SAFETY: getuid() cannot fail; getpwuid() returns either a valid pointer into a
     // thread-local static buffer (which we only read from, immediately, before any other libc

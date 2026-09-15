@@ -376,12 +376,34 @@ impl queue::RequestHandler for DaemonRequestHandler<'_> {
         Ok(())
     }
 
-    fn install_os_updates(&mut self) -> Result<()> {
-        os_update::install()?;
+    fn install_os_updates(&mut self, auth: Option<os_update::InstallAuth>) -> Result<String> {
+        // Read before the install, because afterwards `softwareupdate -l` no longer lists it — this
+        // is the version the failure report says was attempted.
+        let attempted_version = os_update::check().ok().and_then(|status| status.latest_version);
+
+        let outcome = match os_update::install(auth.as_ref()) {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                // Reported from here rather than by the per-user process, the same rule the patch
+                // result and `upgrade::report_patch_failure` follow: this is the side that ran it
+                // and holds its output. Before this existed, an OS-update failure was logged on the
+                // host and nowhere else, so the admin UI showed a Mac that simply never updated.
+                os_update::report_failed(self.client, self.config, self.serial_number, attempted_version.as_deref(), &err);
+                return Err(err);
+            }
+        };
+
+        if outcome.restart_required {
+            // Deliberately *not* reported as patched: the update is staged, this host is still on
+            // the old version, and saying otherwise cleared the pending flag only for the next
+            // check-in's `softwareupdate -l` to set it again.
+            return Ok(format!("installed pending macOS updates — {} to finish", os_update::RESTART_REQUIRED_MARKER));
+        }
+
         // Reported from here rather than by the per-user process, the same as the patch result
         // above: this is the side that knows the install finished.
         os_update::report_patched(self.client, self.config, self.serial_number);
-        Ok(())
+        Ok("installed pending macOS updates".to_string())
     }
 
     /// Answers a [`queue::RequestKind::CheckIn`]. There is nothing left to do: this invocation of

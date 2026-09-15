@@ -200,9 +200,14 @@ sequenceDiagram
                 end
             end
             opt OS update available
+                Note over Agent,Root: macOS only: the console user must be a volume owner and<br/>authorize it, or the request is never submitted. See clients/macos-agent/CLAUDE.md.
                 Agent->>Root: queue an OS-update request
                 Root->>Root: softwareupdate / Windows Update / apt, dnf, ...
-                Root->>Nginx: POST /api/os-patch-results
+                alt installed, nothing pending
+                    Root->>Nginx: POST /api/os-patch-results
+                else failed
+                    Root->>Nginx: POST /api/patch-failures (application "macOS")
+                end
                 Nginx->>Api: forward
             end
             Agent->>Agent: register_completed, back to Idle
@@ -216,9 +221,10 @@ sequenceDiagram
 - **Only the process that ran the script reports the result.** `runs_as_root` is the branch;
   reporting from both sides would record every root-run failure twice.
 - **Only a real execution failure reaches `/api/patch-failures`.** No identity, no signed
-  patchable path, the daemon's `runs_as_root` refusal, an unreachable server, an OS update — those
-  are configuration problems or have no script to repair, and a queue full of them hides the ones
-  the AI can fix.
+  patchable path, the daemon's `runs_as_root` refusal, an unreachable server, an OS update that was
+  never authorized — those are configuration problems, and a queue full of them hides the ones the
+  AI can fix. An OS update that *ran* and failed is reported, under the application name `macOS`;
+  `clients/CLAUDE.md` has why it reuses this route.
 - A `PatchFailure` is **one row per (host, application)**, folded on repeat with a first-seen date
   and a count. `Platform` is resolved by the server, never sent by the agent.
 
