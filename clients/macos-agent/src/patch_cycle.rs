@@ -30,6 +30,17 @@ const MINIMUM_WARNING: Duration = Duration::from_secs(30);
 /// out on its own the leftover is a second or two of rounding, and a notification promising "1
 /// minute" that is really four seconds says less than saying nothing. Kept identical in the other
 /// two agents.
+/// Whether a person dismissed the "no delays left" acknowledgement, as against it giving up on its
+/// own after `WARNING_PERIOD`.
+///
+/// Split out and tested for the same reason `Decision::from_choice` is: the polarity is the whole
+/// value of it, and getting it backwards means a password dialog going up on an unattended Mac
+/// every cycle — or, worse, never going up on one somebody is sitting at. `acknowledge` returns
+/// `Ok(())` for both outcomes, so how long it stood there is the only signal there is.
+fn acknowledged_by_a_person(stood_for: Duration) -> bool {
+    stood_for < WARNING_PERIOD
+}
+
 fn remaining_warning(stood_for: Duration) -> Duration {
     let remaining = WARNING_PERIOD.saturating_sub(stood_for);
     if remaining < MINIMUM_WARNING {
@@ -137,7 +148,7 @@ pub fn run(
         return;
     }
 
-    let warning = match confirm_or_delay(
+    let (warning, user_present) = match confirm_or_delay(
         policy,
         state,
         &work.app_names(),
@@ -145,8 +156,8 @@ pub fn run(
         work.os_update_version.as_deref(),
         report,
     ) {
-        Ok(Decision::PatchNow) => Duration::ZERO,
-        Ok(Decision::ProceedAfterWarning { remaining }) => remaining,
+        Ok(Decision::PatchNow) => (Duration::ZERO, true),
+        Ok(Decision::ProceedAfterWarning { remaining, acknowledged }) => (remaining, acknowledged),
         // Both delaying answers stop here: `confirm_or_delay` has already moved the due time, and
         // the next tick picks the cycle back up — at once for an unanswered dialog, a delay period
         // later for an explicit "Delay".
@@ -157,7 +168,7 @@ pub fn run(
         }
     };
 
-    execute(client, config, serial_number, policy, state, work, identity, report, warning, true);
+    execute(client, config, serial_number, policy, state, work, identity, report, warning, true, user_present);
 }
 
 /// The menu bar's "Patch Now" button: skips the confirm/delay decision altogether, since asking
@@ -192,7 +203,8 @@ pub fn run_now(
         return;
     }
 
-    execute(client, config, serial_number, policy, state, work, identity, report, Duration::ZERO, true);
+    // The click came from the menu bar, so somebody is unambiguously at this Mac.
+    execute(client, config, serial_number, policy, state, work, identity, report, Duration::ZERO, true, true);
 }
 
 /// An administrator's "patch this now", collected from the server by the scheduler loop — see
@@ -252,7 +264,9 @@ pub fn run_forced(
         return;
     }
 
-    execute(client, config, serial_number, policy, state, work, identity, report, WARNING_PERIOD, false);
+    // `narrowed_to` has already dropped the OS update from a forced run, so the one step that
+    // would ask a human for anything cannot be reached here.
+    execute(client, config, serial_number, policy, state, work, identity, report, WARNING_PERIOD, false, false);
 }
 
 fn execute(
@@ -269,6 +283,9 @@ fn execute(
     // cycles; false for a forced run, which patches one named application and must not push the
     // real cycle an interval into the future — see `run_forced`.
     reschedule: bool,
+    // Whether a human answered the dialog that got us here, rather than it giving up on its own.
+    // Only the macOS authorization prompt reads it — see `run_patches`.
+    user_present: bool,
 ) {
     if !warning.is_zero() {
         let minutes = (warning.as_secs() + 59) / 60;
@@ -282,7 +299,7 @@ fn execute(
     dialogs::notify("Kintsugi Patching", "Patching has started — do not turn off your computer.");
     logging::info("patch cycle starting");
 
-    let (succeeded, failed) = run_patches(client, config, serial_number, work, identity, report);
+    let (succeeded, failed) = run_patches(client, config, serial_number, work, identity, report, user_present);
 
     let summary = if failed == 0 {
         format!("Patching complete — {succeeded} item(s) updated.")
@@ -316,7 +333,13 @@ enum Decision {
     /// There were no delays left to offer, so the acknowledgement has already been shown and
     /// patching proceeds. `remaining` is what is left of `WARNING_PERIOD` after however long that
     /// dialog stood there, which is what keeps the notice five minutes in total.
-    ProceedAfterWarning { remaining: Duration },
+    ///
+    /// `acknowledged` is whether somebody actually clicked OK, as against the dialog giving up on
+    /// its own — the difference between a person at the keyboard and an empty desk. Patching
+    /// proceeds either way (that is what spending the delay budget means), but a step that can only
+    /// be completed by a human, like authorizing a macOS install, has nothing to gain from asking
+    /// when nobody is there. See `run_patches`.
+    ProceedAfterWarning { remaining: Duration, acknowledged: bool },
     /// The user asked for more time. Nothing happens until the new due time arrives.
     Delayed,
     /// Nobody answered before the dialog gave up. Still a delay — the user was asked and said
@@ -370,7 +393,10 @@ fn confirm_or_delay(
             WARNING_PERIOD.as_secs(),
         )?;
         let stood_for = Duration::from_secs(schedule::now_epoch().saturating_sub(shown_at));
-        return Ok(Decision::ProceedAfterWarning { remaining: remaining_warning(stood_for) });
+        return Ok(Decision::ProceedAfterWarning {
+            remaining: remaining_warning(stood_for),
+            acknowledged: acknowledged_by_a_person(stood_for),
+        });
     }
 
     // Stamped before the dialog rather than after, because how long it stood there is what the
@@ -418,6 +444,7 @@ fn run_patches(
     work: PendingWork,
     identity: &AgentIdentity,
     report: &StatusReporter,
+    user_present: bool,
 ) -> (usize, usize) {
     let PendingWork { apps, os_update_available, os_update_version } = work;
     let total = apps.len() + usize::from(os_update_available);
@@ -478,7 +505,7 @@ fn run_patches(
     }
 
     if os_update_available {
-        match authorize_os_update(os_update_version.as_deref()) {
+        match authorize_os_update(os_update_version.as_deref(), user_present) {
             OsUpdateAuthorization::Authorized(auth) => {
                 let current = "Installing macOS updates — this may take a while".to_string();
                 dialogs::notify("Kintsugi Patching", &format!("{current}\n{}", dialogs::progress_bar(completed, total)));
@@ -552,9 +579,19 @@ enum OsUpdateAuthorization {
 ///
 /// Silence is refusal here, unlike `confirm_or_delay` — see `dialogs::PasswordAnswer` for why the
 /// polarity has to be the other way round for this question.
-fn authorize_os_update(version: Option<&str>) -> OsUpdateAuthorization {
+fn authorize_os_update(version: Option<&str>, user_present: bool) -> OsUpdateAuthorization {
     if !os_update::is_apple_silicon() {
         return OsUpdateAuthorization::Authorized(None);
+    }
+
+    // Asked before anything else, because the prompt itself is the cost. Patching reaches this
+    // point unattended whenever the delay budget ran out with nobody at the desk — that is what
+    // spending the budget is *for* — and putting up a password dialog there would stall the cycle
+    // for the whole of `PASSWORD_PROMPT_TIMEOUT`, every cycle, to end up exactly here anyway.
+    if !user_present {
+        return OsUpdateAuthorization::Skip(
+            "nobody answered the confirmation dialog, so there is nobody to authorize a macOS install".to_string(),
+        );
     }
 
     let Some(username) = config::console_username() else {
@@ -627,6 +664,16 @@ mod tests {
     /// what was named and nothing else, and it never installs an OS update. `execute` and
     /// `run_patches` both read `os_update_available` off the plan, so clearing it here is what
     /// stops a forced run rebooting a machine over one application. Pinned in all three agents.
+    /// The signal that decides whether a macOS authorization prompt is worth putting up at all.
+    #[test]
+    fn acknowledged_by_a_person_distinguishes_a_click_from_an_abandoned_dialog() {
+        assert!(acknowledged_by_a_person(Duration::from_secs(4)), "read and dismissed at once");
+        assert!(acknowledged_by_a_person(WARNING_PERIOD - Duration::from_secs(1)), "dismissed with a second to spare");
+        assert!(!acknowledged_by_a_person(WARNING_PERIOD), "AppleScript gave up: nobody is there");
+        // The machine slept with the dialog up, so it stood for longer than it was told to.
+        assert!(!acknowledged_by_a_person(WARNING_PERIOD * 3));
+    }
+
     #[test]
     fn narrowing_keeps_only_the_named_applications_and_drops_the_os_update() {
         let work = PendingWork { apps: vec![app("Firefox"), app("GIMP")], os_update_available: true, os_update_version: Some("26.7".to_string()) };

@@ -377,13 +377,13 @@ impl queue::RequestHandler for DaemonRequestHandler<'_> {
     }
 
     fn install_os_updates(&mut self, auth: Option<os_update::InstallAuth>) -> Result<String> {
-        // Read before the install, because afterwards `softwareupdate -l` no longer lists it — this
-        // is the version the failure report says was attempted.
-        let attempted_version = os_update::check().ok().and_then(|status| status.latest_version);
-
         let outcome = match os_update::install(auth.as_ref()) {
             Ok(outcome) => outcome,
             Err(err) => {
+                // Read here rather than before the install, so the success path does not pay for a
+                // `softwareupdate -l` it never uses. Still accurate: an install that failed left the
+                // update listed, which is the whole reason it is being reported.
+                let attempted_version = os_update::check().ok().and_then(|status| status.latest_version);
                 // Reported from here rather than by the per-user process, the same rule the patch
                 // result and `upgrade::report_patch_failure` follow: this is the side that ran it
                 // and holds its output. Before this existed, an OS-update failure was logged on the

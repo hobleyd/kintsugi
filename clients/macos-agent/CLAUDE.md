@@ -38,6 +38,14 @@ the credentials wrong are checked in `patch_cycle::authorize_os_update`, in the 
   Note the polarity is the opposite of `confirm_patch`, where an unanswered dialog counts as a delay
   and patching proceeds — that is why `dialogs::PasswordAnswer` is its own enum rather than a reuse
   of `ConfirmChoice`, the same reasoning `RemoteControlChoice` exists for.
+- **Nobody there to ask in the first place.** A cycle reaches the patching step unattended whenever
+  the delay budget ran out with nobody at the desk — that is what spending the budget is *for* — and
+  a password dialog there would stall the cycle for the whole prompt timeout, every cycle, to arrive
+  at the same skip. So `execute` carries a `user_present` flag: true when the menu bar's "Patch Now"
+  was clicked, and otherwise whatever `acknowledged_by_a_person` made of how long the "no delays
+  left" dialog stood there. `acknowledge` returns `Ok(())` for a click and a timeout alike, so its
+  duration is the only signal there is — which is why that predicate is split out and tested rather
+  than left inline.
 - **An account that is not a volume owner.** Being in `admin` is *not* the same thing: an account
   created by MDM, or migrated onto Apple silicon, can be an administrator with no secure token.
   `os_update::is_volume_owner` intersects the user's `GeneratedUID` (from `dscl`) with the UUIDs
