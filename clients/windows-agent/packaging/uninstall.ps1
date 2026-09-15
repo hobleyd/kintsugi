@@ -5,8 +5,8 @@
 .DESCRIPTION
     The counterpart to packaging/uninstall.sh on macOS, and deliberately just as conservative: it
     removes what this installer put in place but leaves the configuration and each user's own state
-    behind for a human to clean up. A *complete* removal — config, identity, per-user state, the lot
-    — is what the agent performs on itself when the server marks this host for removal (see
+    behind for a human to clean up. A *complete* removal - config, identity, per-user state, the lot
+    - is what the agent performs on itself when the server marks this host for removal (see
     src\self_removal.rs); this script is the local, manual equivalent and shouldn't silently discard
     an enrolled identity someone may want to keep.
 
@@ -15,6 +15,10 @@
 #>
 [CmdletBinding()]
 param()
+
+# Keep this file pure ASCII, for the reason install.ps1 spells out at this same point: Windows
+# PowerShell 5.1 reads a BOM-less .ps1 as cp1252, and a UTF-8 em dash becomes a smart quote it
+# treats as a string delimiter. Enforced by tests/packaging_scripts.rs.
 
 $ErrorActionPreference = 'Stop'
 
@@ -46,7 +50,7 @@ if (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue) {
 
 Write-Host 'Removing the binary...'
 Remove-Item -LiteralPath $BinaryPath -Force -ErrorAction SilentlyContinue
-# Left behind by a self-update that hasn't been through a service restart yet — see
+# Left behind by a self-update that hasn't been through a service restart yet - see
 # self_update.rs's replace_running_binary.
 Remove-Item -LiteralPath "$BinaryPath.old" -Force -ErrorAction SilentlyContinue
 
@@ -61,7 +65,7 @@ if (Test-Path -LiteralPath $InstallDir) {
 Write-Host ''
 Write-Host 'Removed the service, the logon task, and the binary.'
 Write-Host "Config, identity, queue, and logs left in place at: $ConfigDir"
-Write-Host '  (remove manually if no longer needed — note this includes the enrolled mutual-TLS'
+Write-Host '  (remove manually if no longer needed - note this includes the enrolled mutual-TLS'
 Write-Host '   identity, which the host would have to re-enroll without.)'
 Write-Host 'Per-user schedule state left in place under each user''s'
 Write-Host '  %LOCALAPPDATA%\Kintsugi (remove manually if no longer needed).'

@@ -7,20 +7,20 @@
     The counterpart to the macOS agent's packaging/publish-release.sh, and it does the same double
     duty: a human downloads the bundle from the Clients page for a fresh install, and an
     already-enrolled agent's own auto-update check downloads the very same file and just extracts
-    the "kintsugi-agent.exe" entry out of it, ignoring the rest (see self_update.rs's extraction) —
+    the "kintsugi-agent.exe" entry out of it, ignoring the rest (see self_update.rs's extraction) -
     so there's only ever one artifact to build and publish, not two.
 
     The archive is a .tar.gz rather than a .zip, and that is load-bearing in two places: the server
     rewrites the archive's config.toml entry on every download (see AgentPackageArchiveRewriter,
     which reads gzip-tar specifically), and tar.exe has shipped in Windows since 10 1803 so
-    extracting one needs nothing installed. Its top-level entry names matter too — self_update.rs
+    extracting one needs nothing installed. Its top-level entry names matter too - self_update.rs
     looks for "kintsugi-agent.exe" by name.
 
     The bundled config.toml's enrollment_token is left blank on purpose: the server substitutes
     whatever AGENT_ENROLLMENT_TOKEN currently is on every download request, not just once at publish
     time, so a token rotation never makes an already-published package stale.
 
-    The version published is always this crate's own Cargo.toml version — bump that first. Run from
+    The version published is always this crate's own Cargo.toml version - bump that first. Run from
     a plain (non-elevated) shell; unlike install.ps1 this never needs administrator rights, since
     it's talking to the server over the network rather than touching this machine.
 
@@ -37,7 +37,7 @@
     packages an already-built binary instead of running cargo, and -OutputDir writes the tarball to
     a directory and stops before publishing. The tar invocation below stays the single owner of the
     archive's top-level entry names either way, because those names are what self_update.rs
-    extracts by — reimplementing the tar call in a workflow file would let the two drift apart
+    extracts by - reimplementing the tar call in a workflow file would let the two drift apart
     silently. See .github/workflows/release-clients.yml.
 #>
 [CmdletBinding()]
@@ -47,6 +47,13 @@ param(
     [string] $Binary = '',
     [string] $OutputDir = ''
 )
+
+# Keep this file pure ASCII, for the reason install.ps1 spells out at this same point: Windows
+# PowerShell 5.1 reads a BOM-less .ps1 as cp1252, and a UTF-8 em dash becomes a smart quote it
+# treats as a string delimiter. CI runs this one under pwsh, which decodes UTF-8 correctly, so only
+# a local 5.1 run would hit it - but the two scripts it packages are run by 5.1 for real, and
+# holding all three to one rule is what keeps the rule visible. Enforced by
+# tests/packaging_scripts.rs.
 
 $ErrorActionPreference = 'Stop'
 
@@ -91,7 +98,7 @@ try {
     $ArchivePath = Join-Path $WorkDir $ArchiveName
 
     # -C plus bare filenames, not full source paths, so the archive's top-level entries are exactly
-    # "kintsugi-agent.exe", "config.toml", and so on — what both install.ps1's own instructions and
+    # "kintsugi-agent.exe", "config.toml", and so on - what both install.ps1's own instructions and
     # self_update.rs's extraction expect, rather than being nested under a temp-directory path.
     & tar.exe -czf $ArchivePath -C $WorkDir kintsugi-agent.exe config.toml install.ps1 uninstall.ps1
     if ($LASTEXITCODE -ne 0) { throw "tar failed with exit code $LASTEXITCODE" }
@@ -111,9 +118,9 @@ try {
     # curl.exe, not `Invoke-RestMethod -Form`: that parameter only exists in PowerShell 6.1 and
     # later, and this script has to run under the Windows PowerShell 5.1 that every Windows machine
     # actually ships with. curl.exe has shipped in Windows since 10 1803, so this needs nothing
-    # installed either — and it makes the invocation byte-for-byte the macOS publish script's.
+    # installed either - and it makes the invocation byte-for-byte the macOS publish script's.
     #
-    # The platform is "windows" — the agent-package namespace, which is deliberately separate from
+    # The platform is "windows" - the agent-package namespace, which is deliberately separate from
     # PlatformBucket's upgrade-path buckets on the server. self_update.rs asks for this same string.
     $body = & curl.exe --silent --show-error --write-out '\n%{http_code}' `
         -F 'platform=windows' `
