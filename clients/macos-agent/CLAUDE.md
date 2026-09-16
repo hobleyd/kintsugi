@@ -74,12 +74,22 @@ treats the `--user` account as logged in and closes applications gracefully. Bot
 Mac will restart itself, and `install_password_message` says it immediately above the password box,
 because that is the last moment anyone can decline.
 
-**The gap no wording closes: *when* the reboot arrives.** Authorization is collected before a
-download that took 80 minutes on a real run, so the restart can land a long way after the person
-agreed to it. The fix, if it is wanted, is to split the phases — `softwareupdate -d` needs no
-authorization at all and can run unattended, and only then prompt and install with `-R`, which puts
-the reboot within minutes of the consent. Not done: it restructures the request into two round trips
-through the queue, and the current shape was what was asked for.
+**The download is its own queued step, and that ordering is what makes `-R` humane.**
+`softwareupdate -d` needs root but *not* a volume owner, so `RequestKind::OsDownload` fetches
+everything first with nobody being asked for anything. Only then does the per-user half prompt for
+the password, and the `RequestKind::OsUpdate` that follows finds the assets on disk and finishes in
+minutes — so the forced restart lands minutes after the person agreed to it.
+
+Combined into one request, which is how this started, it was the other way round: authorize, wait
+out a download that took 80 minutes on a real run, then get rebooted long after the dialog was
+forgotten and unsaved work had accumulated since. `patch_cycle::run_os_update` submits the two in
+order and is the only place that ordering is expressed; `dialogs::install_password_message` says
+"already been downloaded … a few minutes later" on the strength of it, so the two have to move
+together. A prompt that goes unanswered after the download costs nothing extra — the assets stay
+staged, and the next cycle's download step returns in seconds.
+
+The split also keeps the password's life on disk to the length of an install rather than an install
+plus a download, and `OsDownload` carries no sidecar at all.
 
 **Nothing after the `softwareupdate` call is guaranteed to run**, because the reboot happens inside
 it. `report_patched` is never sent — the server re-derives the host's pending state from

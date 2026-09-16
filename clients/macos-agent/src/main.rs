@@ -376,6 +376,20 @@ impl queue::RequestHandler for DaemonRequestHandler<'_> {
         Ok(())
     }
 
+    /// Answers a [`queue::RequestKind::OsDownload`]: fetch the bits, install nothing, reboot
+    /// nothing. Reported to the server on failure the same way an install is — a host that can
+    /// never finish downloading its OS update is exactly as stuck as one that cannot install it,
+    /// and before any of this existed both were invisible outside this Mac's own log.
+    fn download_os_updates(&mut self) -> Result<String> {
+        if let Err(err) = os_update::download() {
+            let attempted_version = os_update::check().ok().and_then(|status| status.latest_version);
+            os_update::report_failed(self.client, self.config, self.serial_number, attempted_version.as_deref(), &err);
+            return Err(err);
+        }
+
+        Ok("downloaded pending macOS updates".to_string())
+    }
+
     fn install_os_updates(&mut self, auth: Option<os_update::InstallAuth>) -> Result<String> {
         let outcome = match os_update::install(auth.as_ref()) {
             Ok(outcome) => outcome,

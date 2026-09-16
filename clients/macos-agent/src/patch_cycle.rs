@@ -505,48 +505,10 @@ fn run_patches(
     }
 
     if os_update_available {
-        match authorize_os_update(os_update_version.as_deref(), user_present) {
-            OsUpdateAuthorization::Authorized(auth) => {
-                let current = "Installing macOS updates — this may take a while".to_string();
-                dialogs::notify("Kintsugi Patching", &format!("{current}\n{}", dialogs::progress_bar(completed, total)));
-                report(AgentStatus::Patching { current, completed, total });
-
-                logging::info("attempting to install macOS updates via the root daemon");
-                match queue::submit_with_auth(&config::queue_dir(), RequestKind::OsUpdate, "", auth.as_ref()) {
-                    Ok(result) if result.success => {
-                        succeeded += 1;
-                        logging::info(&format!("macOS updates installed: {}", result.output.trim()));
-                        // Reaching here at all means the daemon's `-R` did *not* reboot us — the
-                        // ordinary macOS case never returns, because the restart happens inside
-                        // `softwareupdate`. So this is the leftover: something is still pending and
-                        // nothing is going to restart on its own, which the person who authorized
-                        // it needs telling.
-                        if result.output.contains(os_update::RESTART_REQUIRED_MARKER) {
-                            let _ = dialogs::acknowledge(
-                                "The macOS update has been installed, but this Mac did not restart on its own.                                  Restart it when convenient to finish applying the update.",
-                                RESTART_NOTICE_TIMEOUT.as_secs(),
-                            );
-                        }
-                    }
-                    Ok(result) => {
-                        failed += 1;
-                        // Logged only. The daemon ran it, so the daemon is the side that reports it
-                        // to the server — see `os_update::report_failed` and the same rule in
-                        // `upgrade::report_patch_failure`.
-                        logging::error(&format!("macOS update install failed: {}", result.output.trim()));
-                    }
-                    Err(err) => {
-                        failed += 1;
-                        logging::error(&format!("could not install macOS updates: {err:#}"));
-                    }
-                }
-            }
-            // Not counted as a failure: nothing was attempted, and a Failed Updates row every cycle
-            // for a Mac whose owner keeps declining would bury the failures that can be fixed.
-            OsUpdateAuthorization::Skip(reason) => {
-                logging::info(&format!("skipping the macOS update this cycle: {reason}"));
-            }
-        }
+        let (os_succeeded, os_failed) =
+            run_os_update(os_update_version.as_deref(), user_present, completed, total, report);
+        succeeded += os_succeeded;
+        failed += os_failed;
     }
 
     (succeeded, failed)
@@ -556,70 +518,157 @@ fn run_patches(
 /// information, not a decision, so it must never block the rest of a cycle waiting to be clicked.
 const RESTART_NOTICE_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Whether the macOS install may go ahead, and with whose authorization.
-enum OsUpdateAuthorization {
-    /// Submit the request. The credentials are `None` on Intel, where `softwareupdate` needs none
-    /// and would reject the flags that carry them.
-    Authorized(Option<os_update::InstallAuth>),
-    /// Do not submit at all, for the reason given.
+/// Whether the macOS update may go ahead at all, and who would have to authorize the install.
+enum OsUpdateEligibility {
+    /// Proceed with no credentials. Intel, where `softwareupdate` needs none and would reject the
+    /// flags that carry them.
+    NoAuthorizationNeeded,
+    /// Proceed, but the install half needs this account's password.
+    NeedsAuthorizationFrom(String),
+    /// Do not attempt it at all, for the reason given.
     Skip(String),
 }
 
-/// Obtains a volume owner's authorization for the macOS install, or decides not to attempt it.
+/// Everything that can rule the macOS update out **before a single byte is downloaded**.
 ///
-/// Both checks happen **here, before the request is submitted**, and that is the entire point of
-/// the function. `softwareupdate -i` on Apple silicon downloads everything applicable *first* and
-/// only then asks to be authorized — so every way of getting this wrong costs gigabytes and hours
-/// before it fails, once per cycle, forever. The two ways are:
+/// All of it is cheap — a `sysctl`, a `dscl` read and a `diskutil` read — and all of it used to be
+/// discovered at the far end of a multi-gigabyte fetch instead:
 ///
-/// 1. **No password at all.** That is what used to happen on every host: the daemon is root, root
-///    is not an APFS cryptographic user, and the install died on an interactive `Password:` prompt
-///    after 80 minutes of downloading.
-/// 2. **A password from an account that is not a volume owner.** Being an administrator is not the
-///    same thing — an account created by MDM, or migrated onto Apple silicon, can be in `admin` and
-///    still have no secure token. `--user` names "an owner user"; anything else fails identically,
-///    and just as late.
-///
-/// Silence is refusal here, unlike `confirm_or_delay` — see `dialogs::PasswordAnswer` for why the
-/// polarity has to be the other way round for this question.
-fn authorize_os_update(version: Option<&str>, user_present: bool) -> OsUpdateAuthorization {
+/// - **Nobody there.** A cycle reaches the patching step unattended whenever the delay budget ran
+///   out with nobody at the desk; that is what spending the budget is *for*. Downloading gigabytes
+///   and then putting up a password dialog nobody will answer helps no one.
+/// - **An account that is not a volume owner.** Being in `admin` is *not* the same thing: an account
+///   created by MDM, or migrated onto Apple silicon, can be an administrator with no secure token.
+///   `--user` names "an owner user"; anything else fails with `Failed to authenticate`, and only
+///   after the download. A check that could not run is treated as a refusal, not as permission.
+fn os_update_eligibility(user_present: bool) -> OsUpdateEligibility {
     if !os_update::is_apple_silicon() {
-        return OsUpdateAuthorization::Authorized(None);
+        return OsUpdateEligibility::NoAuthorizationNeeded;
     }
 
-    // Asked before anything else, because the prompt itself is the cost. Patching reaches this
-    // point unattended whenever the delay budget ran out with nobody at the desk — that is what
-    // spending the budget is *for* — and putting up a password dialog there would stall the cycle
-    // for the whole of `PASSWORD_PROMPT_TIMEOUT`, every cycle, to end up exactly here anyway.
     if !user_present {
-        return OsUpdateAuthorization::Skip(
-            "nobody answered the confirmation dialog, so there is nobody to authorize a macOS install".to_string(),
+        return OsUpdateEligibility::Skip(
+            "nobody answered the confirmation dialog, so there would be nobody to authorize the install".to_string(),
         );
     }
 
     let Some(username) = config::console_username() else {
-        return OsUpdateAuthorization::Skip("could not determine which account is logged in".to_string());
+        return OsUpdateEligibility::Skip("could not determine which account is logged in".to_string());
     };
 
     match os_update::is_volume_owner(&username) {
-        Ok(true) => {}
-        Ok(false) => {
-            return OsUpdateAuthorization::Skip(format!(
-                "'{username}' is not a volume owner of the boot volume, so macOS will not let it authorize a                  system update — an administrator who is one has to install this, or grant it a secure token"
-            ));
+        Ok(true) => OsUpdateEligibility::NeedsAuthorizationFrom(username),
+        Ok(false) => OsUpdateEligibility::Skip(format!(
+            "'{username}' is not a volume owner of the boot volume, so macOS will not let it authorize a \
+             system update — an administrator who is one has to install this, or grant it a secure token"
+        )),
+        Err(err) => OsUpdateEligibility::Skip(format!("could not tell whether '{username}' is a volume owner: {err:#}")),
+    }
+}
+
+/// Runs the macOS update as two queued steps, and returns `(succeeded, failed)` for the cycle's
+/// tally.
+///
+/// **The order is the feature.** `softwareupdate -d` needs root but no volume owner, so the download
+/// — the hour-plus — happens first, with nobody being asked for anything. Only then is the password
+/// collected, and the install that follows finds the assets already on disk and finishes in minutes.
+/// Since `os_update::install` passes `-R`, that puts the forced restart minutes after the person
+/// agreed to it instead of an hour and a half.
+///
+/// Combining the two, which is how this started, meant the opposite: authorize, then wait out the
+/// download, then get rebooted long after the dialog was forgotten.
+///
+/// A prompt that goes unanswered after the download is not wasted work either — the assets stay
+/// staged, so the next cycle's download step returns in seconds and the prompt comes up almost at
+/// once.
+fn run_os_update(
+    version: Option<&str>,
+    user_present: bool,
+    completed: usize,
+    total: usize,
+    report: &StatusReporter,
+) -> (usize, usize) {
+    let username = match os_update_eligibility(user_present) {
+        OsUpdateEligibility::NoAuthorizationNeeded => None,
+        OsUpdateEligibility::NeedsAuthorizationFrom(username) => Some(username),
+        // Not counted as a failure: nothing was attempted, and a Failed Updates row every cycle for
+        // a Mac whose owner keeps declining would bury the failures that can be fixed.
+        OsUpdateEligibility::Skip(reason) => {
+            logging::info(&format!("skipping the macOS update this cycle: {reason}"));
+            return (0, 0);
         }
-        // Not treated as permission: a check that could not run is not a check that passed, and the
-        // cost of guessing wrong is the multi-gigabyte download this function exists to avoid.
-        Err(err) => return OsUpdateAuthorization::Skip(format!("could not tell whether '{username}' is a volume owner: {err:#}")),
+    };
+
+    // 1. Download. No credentials, no reboot, and nobody waiting on a dialog while it runs.
+    let current = "Downloading the macOS update — this may take a while".to_string();
+    dialogs::notify("Kintsugi Patching", &format!("{current}\n{}", dialogs::progress_bar(completed, total)));
+    report(AgentStatus::Patching { current, completed, total });
+
+    logging::info("asking the root daemon to download the pending macOS updates");
+    match queue::submit(&config::queue_dir(), RequestKind::OsDownload, "") {
+        Ok(result) if result.success => logging::info(&format!("macOS updates downloaded: {}", result.output.trim())),
+        // The daemon reports its own failures to the server — see `os_update::report_failed` and the
+        // same rule in `upgrade::report_patch_failure`.
+        Ok(result) => {
+            logging::error(&format!("macOS update download failed: {}", result.output.trim()));
+            return (0, 1);
+        }
+        Err(err) => {
+            logging::error(&format!("could not download the macOS updates: {err:#}"));
+            return (0, 1);
+        }
     }
 
-    match dialogs::request_install_password(&username, version, PASSWORD_PROMPT_TIMEOUT.as_secs()) {
-        Ok(dialogs::PasswordAnswer::Provided(password)) => {
-            OsUpdateAuthorization::Authorized(Some(os_update::InstallAuth { user: username, password }))
+    // 2. Authorize — now, with the bits already on disk, so the restart follows closely.
+    let auth = match username {
+        None => None,
+        Some(username) => match dialogs::request_install_password(&username, version, PASSWORD_PROMPT_TIMEOUT.as_secs()) {
+            Ok(dialogs::PasswordAnswer::Provided(password)) => Some(os_update::InstallAuth { user: username, password }),
+            Ok(dialogs::PasswordAnswer::Cancelled) => {
+                logging::info(&format!("skipping the macOS install this cycle: {username} declined to authorize it"));
+                return (0, 0);
+            }
+            Ok(dialogs::PasswordAnswer::TimedOut) => {
+                logging::info("skipping the macOS install this cycle: nobody answered the authorization prompt");
+                return (0, 0);
+            }
+            Err(err) => {
+                logging::info(&format!("skipping the macOS install this cycle: could not ask for authorization: {err:#}"));
+                return (0, 0);
+            }
+        },
+    };
+
+    // 3. Install, and restart. This is the step that does not come back.
+    let current = "Installing the macOS update — this Mac will restart".to_string();
+    dialogs::notify("Kintsugi Patching", &format!("{current}\n{}", dialogs::progress_bar(completed, total)));
+    report(AgentStatus::Patching { current, completed, total });
+
+    logging::info("asking the root daemon to install the macOS updates and restart");
+    match queue::submit_with_auth(&config::queue_dir(), RequestKind::OsUpdate, "", auth.as_ref()) {
+        Ok(result) if result.success => {
+            logging::info(&format!("macOS updates installed: {}", result.output.trim()));
+            // Reaching here at all means the daemon's `-R` did *not* reboot us — the ordinary macOS
+            // case never returns, because the restart happens inside `softwareupdate`. So this is
+            // the leftover: something is still pending and nothing will restart on its own, which
+            // the person who just authorized it needs telling.
+            if result.output.contains(os_update::RESTART_REQUIRED_MARKER) {
+                let _ = dialogs::acknowledge(
+                    "The macOS update has been installed, but this Mac did not restart on its own. \
+                     Restart it when convenient to finish applying the update.",
+                    RESTART_NOTICE_TIMEOUT.as_secs(),
+                );
+            }
+            (1, 0)
         }
-        Ok(dialogs::PasswordAnswer::Cancelled) => OsUpdateAuthorization::Skip(format!("{username} declined to authorize it")),
-        Ok(dialogs::PasswordAnswer::TimedOut) => OsUpdateAuthorization::Skip("nobody answered the authorization prompt".to_string()),
-        Err(err) => OsUpdateAuthorization::Skip(format!("could not ask for authorization: {err:#}")),
+        Ok(result) => {
+            logging::error(&format!("macOS update install failed: {}", result.output.trim()));
+            (0, 1)
+        }
+        Err(err) => {
+            logging::error(&format!("could not install the macOS updates: {err:#}"));
+            (0, 1)
+        }
     }
 }
 

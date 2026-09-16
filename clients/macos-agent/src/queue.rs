@@ -48,6 +48,11 @@ use crate::os_update::InstallAuth;
 /// by the console user's password, collected by the per-user half at patch time (see
 /// `dialogs::request_install_password`) and consumed by the daemon.
 ///
+/// Only [`RequestKind::OsUpdate`] ever carries one. The fetch is its own kind,
+/// [`RequestKind::OsDownload`], precisely because it needs no authorization — which is what lets the
+/// long wait happen before anybody is asked for anything, and keeps the password's life on disk to
+/// the length of an install rather than an install plus a download.
+///
 /// It is carried in a **separate sidecar file**, `<request>.auth`, never in the request body, and
 /// that separation is deliberate rather than tidiness: the sentence above — a request carries
 /// nothing but a name — stays literally true of requests, and anything reading or logging a request
@@ -80,10 +85,21 @@ pub enum RequestKind {
     /// "Run the (already server-signed) upgrade for this one application, as root." Body: the
     /// application name, exactly as reported in the inventory.
     AppPatch,
-    /// "Install pending macOS updates." No body — the daemon always runs the same fixed install,
-    /// so this can never carry instructions of its own. On Apple silicon it is accompanied by a
-    /// `<request>.auth` sidecar holding the volume owner's credentials, which is the only thing in
-    /// this protocol that is not just a name; see the module docs for why it is a separate file.
+    /// "Fetch the pending macOS updates, but do not install them." No body, no credentials, no
+    /// reboot — `softwareupdate -d` needs root but *not* a volume owner's authorization, which is
+    /// the entire reason this is a separate kind from [`Self::OsUpdate`].
+    ///
+    /// Splitting the download off moves the hour-plus of waiting to *before* anyone is asked for a
+    /// password. With one combined request the console user authorized an install and then waited
+    /// out the download, so the forced reboot could arrive 80 minutes after they agreed to it; now
+    /// the bits are already on disk when the prompt appears, and the restart follows the consent by
+    /// minutes. See `patch_cycle::run_os_update`, which submits the two in order.
+    OsDownload,
+    /// "Install the pending macOS updates, and restart to finish." No body — the daemon always runs
+    /// the same fixed `-i -a -R` whatever the request said, so this can never carry instructions of
+    /// its own. On Apple silicon it is accompanied by a `<request>.auth` sidecar holding the volume
+    /// owner's credentials, which is the only thing in this protocol that is not just a name; see
+    /// the module docs for why it is a separate file.
     OsUpdate,
     /// "Check in with the server now" — the menu bar's "Check In Now", see
     /// `checkin_schedule::request_now`. No body. On this platform the file is really a wake-up:
@@ -99,13 +115,14 @@ impl RequestKind {
     fn extension(self) -> &'static str {
         match self {
             RequestKind::AppPatch => "app-patch.request",
+            RequestKind::OsDownload => "os-download.request",
             RequestKind::OsUpdate => "os-update.request",
             RequestKind::CheckIn => "check-in.request",
         }
     }
 
     fn from_file_name(file_name: &str) -> Option<Self> {
-        [RequestKind::AppPatch, RequestKind::OsUpdate, RequestKind::CheckIn]
+        [RequestKind::AppPatch, RequestKind::OsDownload, RequestKind::OsUpdate, RequestKind::CheckIn]
             .into_iter()
             .find(|kind| file_name.ends_with(kind.extension()))
     }
@@ -118,12 +135,16 @@ impl RequestKind {
     /// requests their owners are still holding — an install that simply never happens, with a log
     /// line saying it was discarded because nobody was waiting.
     ///
-    /// It became per-kind because one bound genuinely could not serve all three: see
+    /// It became per-kind because one bound genuinely could not serve every kind: see
     /// [`OS_UPDATE_TIMEOUT`] for the hour that wasn't enough.
     pub fn timeout(self) -> Duration {
         match self {
             RequestKind::AppPatch => APP_PATCH_TIMEOUT,
-            RequestKind::OsUpdate => OS_UPDATE_TIMEOUT,
+            // Both halves of the macOS update get the full bound. The download is usually the long
+            // one, but the install's prepare phase writes better than 12GB (`msuPrepareSize` in the
+            // update descriptor) and is not reliably quick either — and being wrong in the short
+            // direction is precisely the bug this constant exists to record.
+            RequestKind::OsDownload | RequestKind::OsUpdate => OS_UPDATE_TIMEOUT,
             RequestKind::CheckIn => CHECK_IN_TIMEOUT,
         }
     }
@@ -326,6 +347,9 @@ fn submit_with_timeout(
 /// ordering and staleness logic can be tested without any of that.
 pub trait RequestHandler {
     fn patch_application(&mut self, application_name: &str) -> Result<()>;
+    /// Answers a [`RequestKind::OsDownload`]. Takes no credentials: fetching needs root but not a
+    /// volume owner, which is what lets it run before anybody is asked for a password.
+    fn download_os_updates(&mut self) -> Result<String>;
     /// Answers a [`RequestKind::OsUpdate`]. `auth` is whatever the request's sidecar carried, and
     /// is `None` on an Intel host or when the console user could not authorize (see
     /// `patch_cycle`, which then does not submit at all). Returns the message the per-user process
@@ -518,6 +542,10 @@ fn run_request(kind: RequestKind, body: &str, auth: Option<InstallAuth>, handler
                 Err(err) => RequestResult { success: false, output: format!("{err:#}") },
             }
         }
+        RequestKind::OsDownload => match handler.download_os_updates() {
+            Ok(output) => RequestResult { success: true, output },
+            Err(err) => RequestResult { success: false, output: format!("{err:#}") },
+        },
         RequestKind::OsUpdate => match handler.install_os_updates(auth) {
             Ok(output) => RequestResult { success: true, output },
             Err(err) => RequestResult { success: false, output: format!("{err:#}") },
@@ -538,6 +566,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingHandler {
         patched: Vec<String>,
+        os_updates_downloaded: usize,
         os_updates_installed: usize,
         /// What the daemon side was handed for the last OS-update request — the property the
         /// sidecar exists to deliver.
@@ -553,6 +582,11 @@ mod tests {
                 anyhow::bail!("the upgrade script exited non-zero");
             }
             Ok(())
+        }
+
+        fn download_os_updates(&mut self) -> Result<String> {
+            self.os_updates_downloaded += 1;
+            Ok("downloaded pending macOS updates".to_string())
         }
 
         fn install_os_updates(&mut self, auth: Option<InstallAuth>) -> Result<String> {
@@ -580,7 +614,7 @@ mod tests {
 
     #[test]
     fn request_kind_round_trips_through_its_file_name() {
-        for kind in [RequestKind::AppPatch, RequestKind::OsUpdate, RequestKind::CheckIn] {
+        for kind in [RequestKind::AppPatch, RequestKind::OsDownload, RequestKind::OsUpdate, RequestKind::CheckIn] {
             let name = format!("1700000000-42-0.{}", kind.extension());
             assert_eq!(RequestKind::from_file_name(&name), Some(kind));
         }
@@ -733,6 +767,46 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+    }
+
+    /// The two halves are distinct kinds, and their names must not be read as each other's — the
+    /// download carries no credentials and must never be dispatched to the install.
+    #[test]
+    fn an_os_download_is_never_mistaken_for_an_os_update() {
+        let dir = scratch_dir("os-download");
+        let request = write_request(&dir, RequestKind::OsDownload, "", None).unwrap();
+        let mut handler = RecordingHandler::default();
+
+        process_queue(&dir, &mut handler);
+
+        assert_eq!(handler.os_updates_downloaded, 1);
+        assert_eq!(handler.os_updates_installed, 0, "a download request must not install anything");
+        assert!(read_result(&request).success);
+
+        assert_eq!(
+            RequestKind::from_file_name("1700000000-42-0.os-download.request"),
+            Some(RequestKind::OsDownload)
+        );
+        assert_eq!(
+            RequestKind::from_file_name("1700000000-42-0.os-update.request"),
+            Some(RequestKind::OsUpdate)
+        );
+    }
+
+    /// The download is the half that has no business holding a password, and the split exists so
+    /// that it does not have to.
+    #[test]
+    fn an_os_download_never_takes_credentials_even_if_a_sidecar_is_there() {
+        let dir = scratch_dir("os-download-auth");
+        let request = write_request(&dir, RequestKind::OsDownload, "", None).unwrap();
+        write_auth(&request, &auth()).unwrap();
+        let mut handler = RecordingHandler::default();
+
+        process_queue(&dir, &mut handler);
+
+        assert_eq!(handler.os_updates_downloaded, 1);
+        assert!(handler.os_update_auth.is_none(), "nothing in the download path may read the sidecar");
+        assert!(!auth_path_for(&request).exists(), "and it is still cleaned up with its request");
     }
 
     fn auth() -> InstallAuth {

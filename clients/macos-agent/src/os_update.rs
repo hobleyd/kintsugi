@@ -318,6 +318,46 @@ fn condense_progress(text: &str) -> String {
     out
 }
 
+/// Fetches every pending macOS update without installing any of them.
+///
+/// Root only (`man softwareupdate`: everything but `--list` needs admin), but — and this is the
+/// whole point of it being a separate step — **no volume owner's authorization**. `--user` and
+/// `--stdinpass` belong to `-i`; `-d` just downloads. So this can run for the hour or more it takes
+/// while nobody is being asked for anything, and [`install`] afterwards finds the bits already on
+/// disk and completes in minutes.
+///
+/// That ordering is what makes `-R` humane. Combined into one step, the console user typed their
+/// password and then waited out the download, so the forced restart could land 80 minutes after
+/// they agreed to it — long enough to have forgotten, and long enough to have opened unsaved work
+/// since. Split, the consent and the reboot are minutes apart.
+///
+/// Re-running it once the assets are present is close to free: a real run of the install right after
+/// a completed download printed `Downloading macOS Tahoe 26.7` / `Downloaded: macOS Tahoe 26.7`
+/// within seconds and moved 518KB over the wire, because macOS reuses the staged asset.
+pub fn download() -> Result<()> {
+    let output = Command::new("softwareupdate")
+        .args(["-d", "-a"])
+        .output()
+        .context("failed to run softwareupdate -d -a")?;
+
+    let combined = condense_progress(&format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    ));
+    crate::logging::info(&format!(
+        "softwareupdate -d -a finished: success={} output={}",
+        output.status.success(),
+        combined.trim()
+    ));
+
+    if !output.status.success() {
+        anyhow::bail!("softwareupdate -d -a exited with {}: {}", output.status, combined.trim());
+    }
+
+    Ok(())
+}
+
 /// Installs every pending macOS update and restarts the Mac to finish. Root only — this is the
 /// daemon's answer to an OS-update request (see `queue`), and it is always this same fixed
 /// `-i -a -R` whatever the request said, which is what makes a forged request harmless.

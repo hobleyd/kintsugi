@@ -340,9 +340,9 @@ fn install_password_message(username: &str, version: Option<&str>) -> String {
 
     format!(
         "Kintsugi is ready to install {what} on this Mac.\n\n\
-         \u{26a0}\u{fe0f} This Mac will restart by itself once the update is installed, and may not be \
-         able to close your applications first. Save your work now. The update is downloaded before \
-         it is installed, so the restart may not happen for some time after you authorize it.\n\n\
+         \u{26a0}\u{fe0f} The update has already been downloaded, so installing it will begin as soon as \
+         you authorize it and this Mac will restart by itself a few minutes later. It may not be \
+         able to close your applications first \u{2014} save your work now.\n\n\
          macOS requires your password to authorize a system update on Apple silicon. It is used \
          once, to run this installation, and is not stored.\n\n\
          Enter the password for \u{201c}{username}\u{201d}, or Cancel to skip the macOS update this \
@@ -655,9 +655,20 @@ mod tests {
         let message = install_password_message("david", Some("26.7"));
 
         assert!(message.contains("restart by itself"), "{message}");
-        assert!(message.contains("Save your work"), "{message}");
-        // The gap no wording closes, said out loud rather than discovered.
-        assert!(message.contains("may not happen for some time"), "{message}");
+        assert!(message.contains("save your work"), "{message}");
+    }
+
+    /// This prompt is only ever shown *after* `RequestKind::OsDownload` has completed, which is what
+    /// makes "a few minutes later" true. It said the opposite when the download still followed the
+    /// authorization, and a stale promise here is the difference between an expected restart and an
+    /// ambush.
+    #[test]
+    fn install_password_message_says_the_restart_is_imminent_not_distant() {
+        let message = install_password_message("david", Some("26.7"));
+
+        assert!(message.contains("already been downloaded"), "{message}");
+        assert!(message.contains("a few minutes later"), "{message}");
+        assert!(!message.contains("some time after"), "the pre-split wording promised a long wait: {message}");
     }
 
     #[test]
