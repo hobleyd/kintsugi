@@ -23,6 +23,19 @@ static MENU_TX: OnceLock<Sender<MenuAction>> = OnceLock::new();
 /// area (see `run`), which every update below then silently skips.
 static TRAY: Mutex<Option<Handle<KintsugiTray>>> = Mutex::new(None);
 
+/// Status reported before `run` managed to register the tray, applied as soon as it has — see the
+/// drain in `run`. The scheduler thread starts reporting within microseconds of being spawned,
+/// comfortably before `spawn()` returns, so without this the first status is dropped and the menu
+/// sits on its placeholder "Loading patching status" text. For a host waiting on its very first
+/// policy that reads as a working agent that is merely slow, which is the exact misreading
+/// `AgentStatus::WaitingForPolicy` exists to prevent.
+///
+/// On a host with no StatusNotifierItem host the tray never registers at all and these simply stay
+/// where they are for the life of the process. That is deliberate: there is nothing to drain them
+/// into, and retrying or logging per tick would turn a supported configuration into noise.
+static PENDING_STATUS: Mutex<Option<AgentStatus>> = Mutex::new(None);
+static PENDING_CHECK_IN: Mutex<Option<CheckInStatus>> = Mutex::new(None);
+
 /// Who is currently controlling this host, if anybody.
 ///
 /// **The only thing on screen that says a session is happening, which makes it part of the security
@@ -49,11 +62,20 @@ struct KintsugiTray {
     progress_line: String,
     patching: bool,
     checking_in: bool,
+    /// Greys "Patch Now" alone, leaving "Check In Now" clickable — the only state where the two
+    /// diverge. See `AgentStatus::WaitingForPolicy`: there is no schedule to patch against, but a
+    /// check-in is precisely what fetches one, so that item has to stay live or the state has no
+    /// exit but waiting.
+    awaiting_policy: bool,
 }
 
 impl KintsugiTray {
     fn actions_enabled(&self) -> bool {
         !self.patching && !self.checking_in
+    }
+
+    fn patch_now_enabled(&self) -> bool {
+        self.actions_enabled() && !self.awaiting_policy
     }
 
     fn send(action: MenuAction) {
@@ -151,7 +173,7 @@ impl ksni::Tray for KintsugiTray {
             .into(),
             StandardItem {
                 label: "Patch Now".into(),
-                enabled: self.actions_enabled(),
+                enabled: self.patch_now_enabled(),
                 activate: Box::new(|_: &mut Self| {
                     logging::info("\"Patch Now\" clicked in the notification area");
                     Self::send(MenuAction::PatchNow);
@@ -197,12 +219,23 @@ pub fn run(menu_tx: Sender<MenuAction>) -> Result<()> {
         progress_line: String::new(),
         patching: false,
         checking_in: false,
+        awaiting_policy: false,
     };
 
     match tray.spawn() {
         Ok(handle) => {
             *TRAY.lock().expect("the tray handle mutex is never held across a panic") = Some(handle);
             logging::info("notification-area icon created");
+
+            // Only now that TRAY is set do the two reporters below have somewhere to push to — see
+            // PENDING_CHECK_IN/PENDING_STATUS. Check-in line first so the menu is never briefly
+            // self-contradictory.
+            if let Some(status) = PENDING_CHECK_IN.lock().ok().and_then(|mut pending| pending.take()) {
+                report_check_in(status);
+            }
+            if let Some(status) = PENDING_STATUS.lock().ok().and_then(|mut pending| pending.take()) {
+                report_status(status);
+            }
         }
         Err(err) => {
             logging::warn(&format!(
@@ -253,6 +286,13 @@ pub fn report_status(status: AgentStatus) {
         // Greyed like `Patching` (the third element), but with the progress window left closed
         // below: a prompt awaiting an answer is not progress, and a window claiming otherwise
         // would be sitting on top of the dialog it is describing.
+        // Not greyed via the third element: this state greys only "Patch Now", through
+        // `awaiting_policy` below, which the menu reads separately.
+        AgentStatus::WaitingForPolicy => (
+            "Next patch due: not scheduled yet".to_string(),
+            "Status: waiting for the service's first check-in".to_string(),
+            false,
+        ),
         AgentStatus::AwaitingAnswer => ("Waiting for your answer".to_string(), "Status: a prompt is on screen".to_string(), true),
         AgentStatus::Patching { current, completed, total } => (
             format!("Patching: {current}"),
@@ -265,13 +305,25 @@ pub fn report_status(status: AgentStatus) {
         ),
     };
 
-    if let Ok(guard) = TRAY.lock() {
-        if let Some(handle) = guard.as_ref() {
-            handle.update(move |tray: &mut KintsugiTray| {
+    let awaiting_policy = matches!(&status, AgentStatus::WaitingForPolicy);
+
+    match TRAY.lock().ok().and_then(|guard| guard.as_ref().cloned()) {
+        Some(handle) => {
+            // `update` answers `None` if the tray has since gone away, which is nothing this can
+            // act on — the next report will find TRAY empty and stash instead.
+            let _ = handle.update(move |tray: &mut KintsugiTray| {
                 tray.status_line = status_line;
                 tray.progress_line = progress_line;
                 tray.patching = patching;
+                tray.awaiting_policy = awaiting_policy;
             });
+        }
+        // Either the tray has not been registered yet — see PENDING_STATUS — or this host has no
+        // notification area at all, in which case nothing will ever drain this and that is fine.
+        None => {
+            if let Ok(mut pending) = PENDING_STATUS.lock() {
+                *pending = Some(status.clone());
+            }
         }
     }
 
@@ -280,7 +332,7 @@ pub fn report_status(status: AgentStatus) {
     // the tray check: a host with no notification area may still have a display, and this is the
     // only progress the user would otherwise see.
     match &status {
-        AgentStatus::Idle { .. } | AgentStatus::AwaitingAnswer => crate::progress_window::hide(),
+        AgentStatus::Idle { .. } | AgentStatus::AwaitingAnswer | AgentStatus::WaitingForPolicy => crate::progress_window::hide(),
         AgentStatus::Patching { current, completed, total } => crate::progress_window::show_and_update(current, *completed, *total),
     }
 }
@@ -297,12 +349,17 @@ pub fn report_check_in(status: CheckInStatus) {
         CheckInStatus::InProgress => ("Checking in with the server\u{2026}".to_string(), true),
     };
 
-    if let Ok(guard) = TRAY.lock() {
-        if let Some(handle) = guard.as_ref() {
-            handle.update(move |tray: &mut KintsugiTray| {
+    match TRAY.lock().ok().and_then(|guard| guard.as_ref().cloned()) {
+        Some(handle) => {
+            let _ = handle.update(move |tray: &mut KintsugiTray| {
                 tray.check_in_line = check_in_line;
                 tray.checking_in = checking_in;
             });
+        }
+        None => {
+            if let Ok(mut pending) = PENDING_CHECK_IN.lock() {
+                *pending = Some(status);
+            }
         }
     }
 }

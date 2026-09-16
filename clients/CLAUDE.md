@@ -146,21 +146,36 @@ process only ever `policy::load_cached`es it. Keep `fetch` private to the root s
 platforms, and don't reintroduce a per-user fetch of anything.
 
 
-**The three diverge on what the per-user process does while that policy has not arrived yet, and
-only Windows has been fixed.** All three block until `policy::load_cached` returns something —
-macOS at `main.rs`'s `run_ui_agent`, Linux at its own, Windows in `wait_for_policy`. macOS is the
-mild case: it calls `load_or_fetch`, so it has a second way out, and its comment correctly says this
-only happens at first-ever startup. Linux and Windows have no such escape, and the wait is not
-rare: a policy refresh is the **last** step of a check-in, so any earlier failure leaves no cache at
-all and the next attempt is an hour away. Windows used to spend that hour with the wait sitting
-*ahead* of `tray_menu::run`, i.e. with no notification-area icon at all — no error, no waiting
-state, nothing but a line in `agent.log`. On a host dropping about 40% of its connections that read
-as an agent that had not installed. As of 0.11.2 the Windows icon goes up first and the wait runs on
-the scheduler thread reporting `AgentStatus::WaitingForPolicy`, with "Check In Now" left clickable
-because it is the one action that ends the state; the service also retries a failed check-in at
-2/5/15 minutes (`service::retry_delay`) before falling back to the hour. **Linux still blocks ahead
-of its tray**, and its wait additionally calls `queue::record_heartbeat`, so mirroring this there is
-a real port rather than a copy.
+**All three block until a policy arrives, and what that costs differs by where the fetch sits in
+the check-in.** The per-user process cannot fetch one itself on Windows or Linux, so it waits on the
+cache the root half writes. Windows refreshes the policy **last**, after the heartbeat, the host
+registration and the inventory have all succeeded, so *any* earlier failure leaves no cache at all;
+Linux refreshes it **first**, before registration and unconditionally, precisely so a later failure
+cannot starve the per-user side (the comment in `register_and_report` says so). The residue on Linux
+is therefore only a first-ever check-in whose policy GET itself failed with nothing cached — narrow,
+where Windows' was wide. macOS is milder still: `load_or_fetch` gives its per-user process a second
+way out, so its "only at first-ever startup" comment is accurate.
+
+**Narrow or wide, the wait used to be invisible, and that is what was fixed.** Both waits sat
+*ahead* of `tray_menu::run`, so until a policy arrived there was no notification-area icon at all —
+no error, no waiting state, nothing but a line in `agent.log` — and the next check-in was an hour
+away. On a host dropping about 40% of its connections that reads as an agent that never installed.
+Windows 0.11.2 and Linux 0.12.1 both put the icon up first and run the wait on the scheduler thread
+reporting `AgentStatus::WaitingForPolicy`, with "Check In Now" left clickable — it is the one action
+that ends the state, so the wait services `menu_rx` rather than sleeping — and "Patch Now" greyed.
+Linux's wait keeps calling `queue::record_heartbeat` on every tick, which is not decoration: it is
+what stops the root service patching behind a per-user process that is present but not yet ready.
+
+**The matching retry could not be shared, because the root halves are shaped differently.** Windows
+is a resident service, so `service::retry_delay` just schedules its next wake at 2/5/15 minutes
+before falling back to the hour. Linux is a `Type=oneshot` on a timer and systemd refuses `Restart=`
+on a oneshot, so `main::retry_delay` runs the same schedule *inside* the invocation — releasing the
+privileged `flock` between attempts, or a queue-triggered patch would wait out the whole backoff —
+and gated on `policy::load_cached` still being empty rather than on the attempt having errored. That
+gate is load-bearing twice over: it states the purpose, and since `check_in` runs
+`patch_unattended_if_nobody_is_logged_in` (hours, potentially) and that cycle no-ops without a
+policy, it makes the retry provably unable to repeat a check-in that patched anything. The 22-minute
+total is bounded by the hour between timer firings, which a test pins. macOS is untouched.
 
 
 **"Next check-in" is a prediction the per-user process makes from a root-written file, and "Check

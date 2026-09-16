@@ -217,14 +217,71 @@ fn run_daemon() -> Result<()> {
         config::default_config_path().display()
     ));
 
-    // Held for the whole invocation — see `lock` for what it's held against. Nothing below this
-    // point may run concurrently with a queue-triggered patch.
-    let Some(_privileged) = lock::acquire(PRIVILEGED_LOCK_TIMEOUT) else {
-        logging::info("another kintsugi-agent invocation is already running; skipping this check-in");
-        return Ok(());
-    };
+    let policy_cache_path = config::policy_cache_path();
+    let mut retries_made = 0usize;
 
-    check_in(&config)
+    loop {
+        // The lock is scoped to this block rather than to the whole invocation as it used to be, so
+        // it is released before the sleep below. Holding it across a backoff would make a
+        // queue-triggered patch or a "Check In Now" wait the whole thing out on
+        // `kintsugi-agent-queue.service` — the opposite of the point, since the per-user agent's
+        // only way out of `wait_for_policy` is exactly that button. See `lock` for what it is held
+        // against; nothing inside may run concurrently with a queue-triggered patch.
+        let outcome = {
+            let Some(_privileged) = lock::acquire(PRIVILEGED_LOCK_TIMEOUT) else {
+                logging::info("another kintsugi-agent invocation is already running; skipping this check-in");
+                return Ok(());
+            };
+            check_in(&config)
+        };
+
+        // The condition is deliberately "a policy is now on disk", not "that attempt succeeded".
+        //
+        // It states the *purpose* of the retry rather than a proxy for it: the only thing this loop
+        // exists to shorten is a per-user agent left with no schedule at all (see
+        // `wait_for_policy`), and `register_and_report` writes the cache before anything that can
+        // fail, so a check-in that got far enough to matter has already left one behind. Every
+        // other failure waits for the timer, exactly as it always did.
+        //
+        // It is also what makes the retry safe. `check_in` runs
+        // `patch_unattended_if_nobody_is_logged_in`, which can run for hours; re-running it three
+        // more times because `self_update` failed afterwards would be a worse bug than the one
+        // being fixed. That cycle no-ops without a policy, so gating on a missing cache means this
+        // loop can only ever repeat a check-in that patched nothing.
+        if policy::load_cached(&policy_cache_path).is_some() {
+            return outcome;
+        }
+
+        let Some(delay) = retry_delay(retries_made) else {
+            logging::warn("this host still has no patching policy and the short retries are spent; waiting for the next scheduled check-in");
+            return outcome;
+        };
+        retries_made += 1;
+
+        logging::info(&format!(
+            "this host has no patching policy yet, so the per-user agent has no schedule; retrying the check-in in {}s",
+            delay.as_secs()
+        ));
+        std::thread::sleep(delay);
+    }
+}
+
+/// How long to wait before retrying a check-in that left this host with no patching policy, given
+/// how many retries have already been made, or `None` once they are spent.
+///
+/// The figures match the Windows service's `service::CHECK_IN_RETRY_BACKOFF` and mean the same
+/// thing, but the mechanism could not be shared: there the check-in is a resident loop that simply
+/// schedules its next wake, whereas `kintsugi-agent.service` is a `Type=oneshot` on a timer and
+/// systemd refuses `Restart=` on a oneshot outright. So the wait lives inside the invocation.
+///
+/// Which puts a ceiling on these. While this unit is still activating, `kintsugi-agent.timer` skips
+/// its firing rather than queueing it; summing to 22 minutes that is precisely what is wanted — no
+/// overlapping check-ins — but a total past the hour would quietly make the timer stop being the
+/// thing that schedules check-ins at all.
+fn retry_delay(retries_made: usize) -> Option<Duration> {
+    const BACKOFF_SECONDS: [u64; 3] = [2 * 60, 5 * 60, 15 * 60];
+
+    BACKOFF_SECONDS.get(retries_made).map(|&seconds| Duration::from_secs(seconds))
 }
 
 /// What a check-in leaves behind for the schedule step in `check_in`.
@@ -709,27 +766,6 @@ fn run_ui_agent() -> Result<()> {
     let policy_cache_path = config::policy_cache_path();
     let schedule_state_path = state_dir.join("schedule.json");
 
-    // Block (retrying) until a policy is available at all — nothing meaningful can be scheduled
-    // without one. This process cannot fetch one itself: it holds no mutual-TLS identity (see
-    // `config::identity_dir`) and `/api/patching-policy` is inside nginx's client-certificate
-    // regex, so the only thing an attempt from here can produce is a 403. The root service fetches
-    // it on every check-in and this side reads what landed — the Windows agent's arrangement
-    // exactly, and for the identical reason. So the wait covers first-ever startup *and* the
-    // ordinary case of logging in before the root service's first check-in has finished.
-    let current_policy = loop {
-        if let Some(policy) = policy::load_cached(&policy_cache_path) {
-            break policy;
-        }
-        logging::info("waiting for the kintsugi-agent service to publish the patching policy");
-        // Recorded even while waiting: a host whose per-user agent is up but hasn't yet seen its
-        // first policy is emphatically not a host the root service should start patching behind
-        // its back.
-        queue::record_heartbeat(&queue_dir);
-        std::thread::sleep(AGENT_POLL_INTERVAL);
-    };
-
-    let state = ScheduleState::load_or_default(&schedule_state_path, &current_policy);
-
     let (menu_tx, menu_rx) = mpsc::channel();
     let report: StatusReporterFn = tray_menu::report_status;
 
@@ -743,10 +779,101 @@ fn run_ui_agent() -> Result<()> {
     // black screen.
     std::thread::spawn(remote_session::run);
 
-    std::thread::spawn(move || run_scheduler(current_policy, state, schedule_state_path, queue_dir, policy_cache_path, menu_rx, report));
+    // The wait for a first policy happens on the scheduler's thread, not here, so the icon appears
+    // immediately — see `wait_for_policy` for what used to happen instead.
+    std::thread::spawn(move || {
+        let current_policy = wait_for_policy(&policy_cache_path, &queue_dir, &menu_rx, report);
+        let state = ScheduleState::load_or_default(&schedule_state_path, &current_policy);
+        run_scheduler(current_policy, state, schedule_state_path, queue_dir, policy_cache_path, menu_rx, report);
+    });
 
     // Blocks for the rest of the process's life — this call never returns normally.
     tray_menu::run(menu_tx)
+}
+
+/// Blocks until the root service has published a patching policy, which is the first thing the
+/// scheduler needs and the one thing this process cannot fetch for itself: it holds no mutual-TLS
+/// identity (see `config::identity_dir`) and `/api/patching-policy` is inside nginx's
+/// client-certificate regex, so the only thing an attempt from here could produce is a 403.
+///
+/// Ordinarily this returns on the first look. `register_and_report` fetches the policy *before*
+/// registration and unconditionally, precisely so that a later failure cannot starve this process —
+/// so on Linux the wait is narrower than the Windows agent's identically-named function, where the
+/// refresh is the last step of a check-in and any earlier failure leaves no cache at all. What is
+/// left here is the first-ever check-in on a host whose policy GET itself failed with nothing
+/// cached to fall back on.
+///
+/// Narrow, but it used to be silent. This ran in `run_ui_agent` ahead of `tray_menu::run`, so until
+/// a policy arrived there was **no notification-area icon at all** — no error, no waiting state,
+/// nothing but a line in `agent.log` — and the next root check-in was an hour away. The Windows
+/// agent shipped the same shape and it cost an afternoon on a host dropping about 40% of its
+/// connections: correct behaviour at every layer that looked, to the person in front of it, like an
+/// agent that had not installed. The icon now goes up first and this reports `WaitingForPolicy`
+/// behind it.
+///
+/// Servicing `menu_rx` here rather than sleeping is the other half. "Check In Now" is what asks the
+/// root service to try again, so it is the one action that can end this state from the outside;
+/// leaving it unanswered would be a live-looking item that did nothing until the wait was already
+/// over. "Patch Now" is greyed by `AgentStatus::WaitingForPolicy`.
+fn wait_for_policy(
+    policy_cache_path: &std::path::Path,
+    queue_dir: &std::path::Path,
+    menu_rx: &mpsc::Receiver<MenuAction>,
+    report: StatusReporterFn,
+) -> policy::PatchingPolicy {
+    if let Some(policy) = policy::load_cached(policy_cache_path) {
+        return policy;
+    }
+
+    logging::info("waiting for the kintsugi-agent service to publish the patching policy");
+    report(AgentStatus::WaitingForPolicy);
+    show_scheduled_check_in();
+
+    loop {
+        // Recorded even while waiting, exactly as it was before this wait moved off the main
+        // thread: a host whose per-user agent is up but hasn't yet seen its first policy is
+        // emphatically not a host the root service should start patching behind its back. See
+        // `patch_unattended_if_nobody_is_logged_in`.
+        queue::record_heartbeat(queue_dir);
+
+        match menu_rx.recv_timeout(AGENT_POLL_INTERVAL) {
+            Ok(MenuAction::CheckInNow) => {
+                logging::info("Check In Now clicked while waiting for a policy");
+                tray_menu::report_check_in(CheckInStatus::InProgress);
+                checkin_schedule::request_now(queue_dir);
+                show_scheduled_check_in();
+            }
+            // Greyed while this state is showing, so this only happens for a click already on its
+            // way. Saying so beats silence for an action the user just took — the same reasoning
+            // `run_scheduler` applies to a Patch Now that arrives mid-cycle.
+            Ok(MenuAction::PatchNow) => {
+                logging::info("Patch Now ignored: no patching policy has reached this host yet");
+                dialogs::notify("Kintsugi Patching", "Waiting for the first check-in to fetch this fleet's patching policy.");
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // As in `run_scheduler`: the sender lives in tray_menu for the life of the process,
+                // so this should never happen, but polling beats spinning on an instant error.
+                logging::error("menu action channel disconnected unexpectedly");
+                std::thread::sleep(AGENT_POLL_INTERVAL);
+            }
+        }
+
+        if let Some(policy) = policy::load_cached(policy_cache_path) {
+            logging::info("the root service published a patching policy; scheduling resumes");
+            return policy;
+        }
+        logging::info("waiting for the kintsugi-agent service to publish the patching policy");
+    }
+}
+
+/// Puts the root service's hourly minute back on the menu's "Next check-in" line, which also
+/// un-greys both actions after a `CheckInStatus::InProgress`. `run_scheduler` gets this for free by
+/// clearing `shown_check_in` and letting its next tick recompute; the wait above has no such tick.
+fn show_scheduled_check_in() {
+    tray_menu::report_check_in(CheckInStatus::Scheduled {
+        next_epoch: checkin_schedule::next_check_in_epoch(&config::checkin_schedule_path()),
+    });
 }
 
 
@@ -1091,5 +1218,25 @@ mod tests {
         let unique: HashSet<_> = apps.iter().cloned().collect();
 
         assert_eq!(apps.len(), unique.len());
+    }
+
+    #[test]
+    fn the_check_in_retry_backs_off_and_then_gives_the_timer_back() {
+        assert_eq!(retry_delay(0), Some(Duration::from_secs(2 * 60)));
+        assert_eq!(retry_delay(1), Some(Duration::from_secs(5 * 60)));
+        assert_eq!(retry_delay(2), Some(Duration::from_secs(15 * 60)));
+        // Bounded on purpose, and the bound is what `run_daemon` breaks on - without it the loop
+        // would never end on a host that cannot reach the server at all.
+        assert_eq!(retry_delay(3), None);
+        assert_eq!(retry_delay(300), None);
+    }
+
+    #[test]
+    fn the_check_in_retries_stay_well_inside_the_hour_between_check_ins() {
+        // kintsugi-agent.timer skips a firing while this unit is still activating, so a backoff
+        // total past the hour would silently make the timer stop scheduling check-ins at all.
+        let total: u64 = (0..).map_while(retry_delay).map(|delay| delay.as_secs()).sum();
+
+        assert!(total < 3600, "the check-in retries total {total}s, which is not inside the hour");
     }
 }
