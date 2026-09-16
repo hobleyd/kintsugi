@@ -8,6 +8,16 @@ pub enum AgentStatus {
     Idle {
         next_due_epoch: u64,
     },
+    /// No patching policy has reached this host yet, so nothing can be scheduled — see
+    /// `main::wait_for_policy`. Its own state rather than an absence of one because the alternative
+    /// is what this agent used to do: hold the tray icon back until a policy arrived, which turned
+    /// a service that had merely lost a check-in into a per-user agent that appeared not to be
+    /// installed. Reported for as long as the wait lasts, and replaced by `Idle` the moment the
+    /// service publishes a policy.
+    ///
+    /// Greys "Patch Now" — there is no schedule to patch against — but deliberately *not* "Check In
+    /// Now", which is the one action that can end this state and is handled inside the wait itself.
+    WaitingForPolicy,
     /// A dialog is on screen and the cycle is waiting for the person at the keyboard to answer it
     /// — the confirm-or-delay prompt, or the "no delays left" notice. Its own state rather than a
     /// flavour of `Patching`, because nothing is being patched yet and the progress window would

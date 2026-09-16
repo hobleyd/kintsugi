@@ -276,27 +276,95 @@ fn run_ui_agent() -> Result<()> {
     let policy_cache_path = config::policy_cache_path();
     let schedule_state_path = state_dir.join("schedule.json");
 
-    // Block (retrying) until a policy is available at all — nothing meaningful can be scheduled
-    // without one. On macOS this only happens at first-ever startup with no cache and no network;
-    // here it also covers the ordinary case of this process starting at logon before the service has
-    // completed its first check-in, which is what writes the cache.
-    let current_policy = loop {
-        if let Some(policy) = policy::load_cached(&policy_cache_path) {
-            break policy;
-        }
-        logging::info("waiting for the agent service to publish the patching policy");
-        std::thread::sleep(AGENT_POLL_INTERVAL);
-    };
-
-    let state = ScheduleState::load_or_default(&schedule_state_path, &current_policy);
-
     let (menu_tx, menu_rx) = mpsc::channel();
     let report: StatusReporterFn = tray_menu::report_status;
 
-    std::thread::spawn(move || run_scheduler(current_policy, state, schedule_state_path, policy_cache_path, menu_rx, report));
+    // The wait for a first policy happens on the scheduler's thread, not here, so the icon appears
+    // immediately — see `wait_for_policy` for what used to happen instead.
+    std::thread::spawn(move || {
+        let current_policy = wait_for_policy(&policy_cache_path, &menu_rx, report);
+        let state = ScheduleState::load_or_default(&schedule_state_path, &current_policy);
+        run_scheduler(current_policy, state, schedule_state_path, policy_cache_path, menu_rx, report);
+    });
 
     // Blocks for the rest of the process's life — this call never returns normally.
     tray_menu::run(menu_tx)
+}
+
+/// Blocks until the service has published a patching policy, which is the first thing the scheduler
+/// needs and the one thing this process cannot fetch for itself: it holds no mutual-TLS identity,
+/// and `/api/patching-policy` is inside nginx's client-certificate regex, so the service writes the
+/// cache and this side reads it (see `service::check_in` and `queue`).
+///
+/// Ordinarily this returns on the first look — the service checks in at startup, well before anyone
+/// logs in. It matters when that check-in fails. A policy refresh is the *last* step of a check-in,
+/// after the heartbeat, the host registration and the inventory have all succeeded, so a single bad
+/// network moment leaves no cache and the next attempt is an hour away.
+///
+/// This used to run in `run_ui_agent` itself, ahead of `tray_menu::run`, which meant that hour was
+/// spent with **no notification-area icon at all** — not an error, not a "waiting" state, nothing —
+/// and the only way to find out why was to read `agent.log`. That shipped, and cost an afternoon on
+/// a host whose network dropped about 40% of connections: the agent was behaving correctly at every
+/// layer and looked, to the person in front of it, uninstalled. So the icon now goes up first and
+/// this reports `WaitingForPolicy` behind it.
+///
+/// Servicing `menu_rx` here rather than sleeping is the other half of that. "Check In Now" is what
+/// asks the service to try again, so it is the one action that can end this state from the outside —
+/// leaving it unanswered would have been a live-looking button that did nothing until the wait was
+/// already over. "Patch Now" is greyed by `AgentStatus::WaitingForPolicy` and ignored if a click was
+/// already in flight when the greying took effect.
+fn wait_for_policy(
+    policy_cache_path: &std::path::Path,
+    menu_rx: &mpsc::Receiver<MenuAction>,
+    report: StatusReporterFn,
+) -> policy::PatchingPolicy {
+    if let Some(policy) = policy::load_cached(policy_cache_path) {
+        return policy;
+    }
+
+    logging::info("waiting for the agent service to publish the patching policy");
+    report(AgentStatus::WaitingForPolicy);
+    show_scheduled_check_in();
+
+    loop {
+        match menu_rx.recv_timeout(AGENT_POLL_INTERVAL) {
+            Ok(MenuAction::CheckInNow) => {
+                logging::info("Check In Now clicked while waiting for a policy");
+                tray_menu::report_check_in(CheckInStatus::InProgress);
+                checkin_schedule::request_now(&config::queue_dir());
+                show_scheduled_check_in();
+            }
+            // Greyed while this state is showing, so this only happens for a click already on its
+            // way. Saying so beats silence for an action the user just took — the same reasoning
+            // `run_scheduler` applies to a Patch Now that arrives mid-cycle.
+            Ok(MenuAction::PatchNow) => {
+                logging::info("Patch Now ignored: no patching policy has reached this host yet");
+                dialogs::notify("Kintsugi Patching", "Waiting for the first check-in to fetch this fleet's patching policy.");
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // As in `run_scheduler`: the sender lives in tray_menu for the life of the process,
+                // so this should never happen, but polling beats spinning on an instant error.
+                logging::error("menu action channel disconnected unexpectedly");
+                std::thread::sleep(AGENT_POLL_INTERVAL);
+            }
+        }
+
+        if let Some(policy) = policy::load_cached(policy_cache_path) {
+            logging::info("the agent service published a patching policy; scheduling resumes");
+            return policy;
+        }
+        logging::info("waiting for the agent service to publish the patching policy");
+    }
+}
+
+/// Puts the service's hourly minute back on the menu's "Next check-in" line, which also un-greys
+/// both actions after a `CheckInStatus::InProgress`. `run_scheduler` gets this for free by clearing
+/// `shown_check_in` and letting its next tick recompute; the wait above has no such tick.
+fn show_scheduled_check_in() {
+    tray_menu::report_check_in(CheckInStatus::Scheduled {
+        next_epoch: checkin_schedule::next_check_in_epoch(&config::checkin_schedule_path()),
+    });
 }
 
 /// Hides the console window this process was given, so the tray agent doesn't flash a black box in

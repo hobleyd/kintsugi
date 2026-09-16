@@ -40,6 +40,32 @@ pub const STOP_WAIT_HINT: Duration = Duration::from_secs(5 * 60);
 /// policy changes rarely, so there's no need to hit the server on every check-in.
 const POLICY_REFRESH_INTERVAL: u64 = 60 * 60;
 
+/// How long `run_loop` waits before retrying a check-in that failed, per consecutive failure. Once
+/// these are spent it falls back to this host's hourly minute.
+///
+/// A check-in already retries internally (`MAX_ATTEMPTS` with `INITIAL_BACKOFF`), so this is
+/// retrying a retry, and the intervals are sized accordingly: long enough that a host with a real
+/// problem is not hammering a dead endpoint, short enough that a transient one recovers in minutes
+/// rather than within the hour. The hour is the part that hurt. A policy refresh is the last step of
+/// a check-in, so *any* earlier failure leaves the per-user tray process with no policy — and it
+/// cannot fetch one itself (see `main::wait_for_policy`). A single bad network moment therefore used
+/// to cost a full hour of a tray agent that looked uninstalled. That happened on a host dropping
+/// about 40% of its connections: five internal attempts spread over two minutes all landed badly,
+/// and nothing tried again until the next hour.
+///
+/// Bounded rather than open-ended deliberately. A host that cannot reach the server at all should
+/// settle into the hourly rhythm and leave a log that can be read, not one line every few minutes
+/// forever.
+const CHECK_IN_RETRY_BACKOFF: [u64; 3] = [2 * 60, 5 * 60, 15 * 60];
+
+/// How long to wait before the next check-in attempt given how many have failed in a row, or `None`
+/// to fall back to this host's hourly minute. Its own function so the `wrapping_sub` is testable:
+/// zero consecutive failures means the last one succeeded, and `0usize - 1` has to land outside the
+/// array rather than at its end.
+fn retry_delay(consecutive_failures: usize) -> Option<u64> {
+    CHECK_IN_RETRY_BACKOFF.get(consecutive_failures.wrapping_sub(1)).copied()
+}
+
 #[derive(Debug, Serialize)]
 struct RegisterHostRequest {
     hostname: String,
@@ -536,14 +562,33 @@ pub fn run_loop(shutdown: Arc<AtomicBool>) {
     // Runs immediately at startup — the counterpart to the macOS LaunchDaemon's RunAtLoad, and what
     // makes a freshly installed agent appear in the fleet within seconds rather than within an hour.
     let mut next_check_in_at = now_epoch();
+    let mut failures: usize = 0;
 
     while !shutdown.load(Ordering::SeqCst) {
         if now_epoch() >= next_check_in_at {
-            if let Err(err) = agent.check_in() {
-                logging::warn(&format!("check-in failed, will retry at the next scheduled time: {err:#}"));
+            match agent.check_in() {
+                Ok(()) => failures = 0,
+                Err(err) => {
+                    failures += 1;
+                    logging::warn(&format!("check-in failed ({failures}): {err:#}"));
+                }
             }
 
-            next_check_in_at = now_epoch() + checkin_schedule::seconds_until(now_epoch(), agent.check_in_minute());
+            next_check_in_at = now_epoch()
+                + match retry_delay(failures) {
+                    // The tray's "Next check-in" line does not move for these: it is computed from
+                    // the persisted hourly minute (see checkin_schedule::next_check_in_epoch), which
+                    // stays true — a retry is an extra attempt, not a rescheduling. Writing retry
+                    // times into that file would make the line flap and would give a file documented
+                    // as carrying nothing but a minute a second meaning.
+                    Some(backoff) => {
+                        logging::info(&format!("retrying the check-in in {backoff}s rather than waiting for the next scheduled time"));
+                        backoff
+                    }
+                    // Either it succeeded, or the short retries are spent and something is wrong
+                    // that retrying every few minutes will not fix.
+                    None => checkin_schedule::seconds_until(now_epoch(), agent.check_in_minute()),
+                };
         }
 
         queue::process_queue(&config::queue_dir(), &mut agent);
@@ -560,4 +605,27 @@ pub fn run_loop(shutdown: Arc<AtomicBool>) {
     }
 
     logging::info("kintsugi-agent service stopping");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_successful_check_in_waits_for_the_hourly_minute() {
+        // Not the first backoff: `0 - 1` must fall outside the array rather than wrap onto its last
+        // entry, or every success would schedule the next check-in 15 minutes out.
+        assert_eq!(retry_delay(0), None);
+    }
+
+    #[test]
+    fn consecutive_failures_back_off_and_then_stop_retrying() {
+        assert_eq!(retry_delay(1), Some(2 * 60));
+        assert_eq!(retry_delay(2), Some(5 * 60));
+        assert_eq!(retry_delay(3), Some(15 * 60));
+        // Bounded on purpose - see CHECK_IN_RETRY_BACKOFF. A host that cannot reach the server at
+        // all settles into the hourly rhythm rather than logging every few minutes forever.
+        assert_eq!(retry_delay(4), None);
+        assert_eq!(retry_delay(400), None);
+    }
 }

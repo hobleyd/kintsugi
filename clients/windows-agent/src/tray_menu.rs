@@ -84,6 +84,11 @@ static MENU_TX: OnceLock<Sender<MenuAction>> = OnceLock::new();
 /// check-in because the scheduler thread serves both actions: a click then would sit in the channel
 /// and run the moment the check-in finished, which from the menu looks like an item that did nothing
 /// and then, minutes later, did something unasked.
+/// Greys "Patch Now" on its own, leaving "Check In Now" clickable — the only state where the two
+/// actions diverge. Set while no patching policy has reached this host (see
+/// `AgentStatus::WaitingForPolicy`): there is no schedule to patch against, but a check-in is
+/// precisely what fetches one, so that button has to stay live or the state has no exit but waiting.
+static AWAITING_POLICY: AtomicBool = AtomicBool::new(false);
 static PATCHING: AtomicBool = AtomicBool::new(false);
 static CHECKING_IN: AtomicBool = AtomicBool::new(false);
 
@@ -145,6 +150,17 @@ pub fn run(menu_tx: Sender<MenuAction>) -> Result<()> {
 
     add_icon(hwnd).context("could not add the notification-area icon")?;
     logging::info("notification-area icon created");
+
+    // Applied here rather than left to WM_STATUS_CHANGED: `post_to_ui_thread` is a no-op until
+    // TRAY_HWND is set just above, and the scheduler thread reports its first status within
+    // microseconds of being spawned — comfortably before this point. Without this drain that first
+    // report is silently dropped and the menu falls back to "Loading patching status", which for a
+    // host waiting on its first policy reads as a working agent that is merely slow. That is the
+    // exact misreading this whole state exists to prevent.
+    let pending = PENDING_STATUS.lock().ok().and_then(|mut pending| pending.take());
+    if let Some(status) = pending {
+        apply_status(status);
+    }
 
     // SAFETY: runs on the thread that owns the window, which is what a message loop requires.
     unsafe {
@@ -419,6 +435,13 @@ fn apply_status(status: AgentStatus) {
         // Greyed like `Patching` (the third element), but with the progress window left closed
         // below: a prompt awaiting an answer is not progress, and a window claiming otherwise
         // would be sitting on top of the dialog it is describing.
+        // Not greyed via the third element: this state greys only "Patch Now", through
+        // AWAITING_POLICY below, which show_menu reads separately.
+        AgentStatus::WaitingForPolicy => (
+            "Next patch due: not scheduled yet".to_string(),
+            "Status: waiting for the service's first check-in".to_string(),
+            false,
+        ),
         AgentStatus::AwaitingAnswer => ("Waiting for your answer".to_string(), "Status: a prompt is on screen".to_string(), true),
         AgentStatus::Patching { current, completed, total } => (
             format!("Patching: {current}"),
@@ -436,11 +459,12 @@ fn apply_status(status: AgentStatus) {
         text.progress = progress_line;
     }
     PATCHING.store(patching, Ordering::SeqCst);
+    AWAITING_POLICY.store(matches!(&status, AgentStatus::WaitingForPolicy), Ordering::SeqCst);
 
     // A window, unlike the menu, is visible without the user having to think to go looking for it —
     // opened the moment there's something to show, closed again once idle.
     match &status {
-        AgentStatus::Idle { .. } | AgentStatus::AwaitingAnswer => crate::progress_window::hide(),
+        AgentStatus::Idle { .. } | AgentStatus::AwaitingAnswer | AgentStatus::WaitingForPolicy => crate::progress_window::hide(),
         AgentStatus::Patching { current, completed, total } => crate::progress_window::show_and_update(current, *completed, *total),
     }
 }
@@ -453,8 +477,11 @@ fn apply_status(status: AgentStatus) {
 /// keep in step.
 fn show_menu(hwnd: HWND) {
     let text = MENU_TEXT.lock().map(|text| text.clone()).unwrap_or(MenuText::EMPTY);
+    // Two flags rather than one: "Check In Now" stays clickable while this host is waiting for its
+    // first policy, because it is the action that ends the wait. Everything else greys both.
     let actions_enabled = !PATCHING.load(Ordering::SeqCst) && !CHECKING_IN.load(Ordering::SeqCst);
-    let action_flags = if actions_enabled { MF_STRING } else { MF_STRING | MF_GRAYED };
+    let check_in_flags = if actions_enabled { MF_STRING } else { MF_STRING | MF_GRAYED };
+    let patch_flags = if actions_enabled && !AWAITING_POLICY.load(Ordering::SeqCst) { MF_STRING } else { MF_STRING | MF_GRAYED };
 
     // SAFETY: every handle below is created and destroyed within this function, on the UI thread
     // that owns the window; every string outlives the call that reads it.
@@ -477,9 +504,9 @@ fn show_menu(hwnd: HWND) {
         // user-level malware cannot click or close. Two indicators would be two sources of truth
         // that could disagree about whether a session is running.
         let check_in_now_text = wide("Check In Now");
-        AppendMenuW(menu, action_flags, MENU_ID_CHECK_IN_NOW, check_in_now_text.as_ptr());
+        AppendMenuW(menu, check_in_flags, MENU_ID_CHECK_IN_NOW, check_in_now_text.as_ptr());
         let patch_now_text = wide("Patch Now");
-        AppendMenuW(menu, action_flags, MENU_ID_PATCH_NOW, patch_now_text.as_ptr());
+        AppendMenuW(menu, patch_flags, MENU_ID_PATCH_NOW, patch_now_text.as_ptr());
         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
 
         // Static for the life of the process — this binary's own version never changes underneath
