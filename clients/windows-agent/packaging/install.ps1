@@ -126,7 +126,13 @@ if ($EnrollmentToken) {
     # character. TOML's own escaping only needs backslashes and double quotes handled for a basic
     # string.
     $escaped = $EnrollmentToken.Replace('\', '\\').Replace('"', '\"')
-    $kept = Get-Content -LiteralPath $ConfigPath | Where-Object { $_ -notmatch '^\s*enrollment_token' }
+    # -Encoding UTF8 on the *read*, not just the write below. Get-Content with no -Encoding is
+    # cp1252 in Windows PowerShell 5.1, so reading a UTF-8 config.toml and writing it back as UTF-8
+    # re-encodes every non-ASCII character into its own mojibake - once per install, compounding.
+    # config.toml is kept ASCII (enforced by tests/packaging_scripts.rs) so today this changes
+    # nothing, but the values that pass through here are a server-set URL and a token whose content
+    # this script does not control, and neither is guaranteed ASCII forever.
+    $kept = Get-Content -LiteralPath $ConfigPath -Encoding UTF8 | Where-Object { $_ -notmatch '^\s*enrollment_token' }
     $lines = @($kept) + "enrollment_token = `"$escaped`""
 
     # Written via .NET with an explicitly BOM-less UTF-8 encoder rather than `Set-Content -Encoding

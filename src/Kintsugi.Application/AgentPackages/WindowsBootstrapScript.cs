@@ -359,9 +359,17 @@ public static class WindowsBootstrapScript
             # `toml` crate, which rejects a leading U+FEFF, and Config::load_from then falls back to
             # built-in defaults, so the symptom would be an agent quietly ignoring the address just
             # set for it.
+            #
+            # -Encoding UTF8 on the read matters for the mirror-image reason, and was missing here
+            # and in install.ps1 until a deployed config.toml was found carrying triply-mangled em
+            # dashes: Get-Content with no -Encoding is cp1252 in Windows PowerShell 5.1, so each
+            # read-modify-write pass re-encodes every non-ASCII character into its own mojibake, and
+            # this file goes through two such passes per install. config.toml is kept ASCII for the
+            # same reason (clients/windows-agent/tests/packaging_scripts.rs enforces it), which makes
+            # this belt and braces rather than the only guard.
             Write-Log "Pointing the packaged config.toml at $ApiBaseUrl..."
             $escapedUrl = $ApiBaseUrl.Replace('\', '\\').Replace('"', '\"')
-            $kept = Get-Content -LiteralPath $configPath | Where-Object { $_ -notmatch '^\s*api_base_url' }
+            $kept = Get-Content -LiteralPath $configPath -Encoding UTF8 | Where-Object { $_ -notmatch '^\s*api_base_url' }
             $lines = @($kept) + ('api_base_url = "' + $escapedUrl + '"')
             [System.IO.File]::WriteAllLines($configPath, $lines, (New-Object System.Text.UTF8Encoding($false)))
 

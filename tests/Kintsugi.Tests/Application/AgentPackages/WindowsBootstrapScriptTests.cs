@@ -171,6 +171,21 @@ public class WindowsBootstrapScriptTests
     }
 
     [Fact]
+    public void Build_ReadsConfigTomlAsUtf8_NotTheAnsiCodePage()
+    {
+        // Get-Content with no -Encoding is cp1252 in Windows PowerShell 5.1, so reading config.toml
+        // and writing it back with the UTF8Encoding just below re-encodes every non-ASCII character
+        // into its own mojibake - once here and once again in install.ps1's token rewrite, so twice
+        // per install and compounding across reinstalls. That shipped: a deployed config.toml was
+        // found with its em dashes mangled three deep. Asserted because the omission is invisible
+        // (the file still parses, the values are still right) and the write encoding beside it,
+        // which was reasoned about carefully, reads as though the whole question had been settled.
+        var script = WindowsBootstrapScript.Build(Package(), ApiBaseUrl, "token");
+
+        Assert.Contains("Get-Content -LiteralPath $configPath -Encoding UTF8", script);
+    }
+
+    [Fact]
     public void Build_WithoutUpstreamProvenance_Throws()
     {
         // Callers report NoUpstreamProvenanceReason instead. Rendering a script with an empty pin
