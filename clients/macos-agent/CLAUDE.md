@@ -115,7 +115,18 @@ softwareupdate -d "definitely-not-an-update-9.9"     ->  No such update         
 ```
 
 There is no `--label` flag (`softwareupdate`'s own usage: `<label> ...  specific updates`), and the
-run that did nothing exits **zero** while the run that fetched everything exits **one**. So
+run that did nothing exits **zero** while the run that fetched everything exits **one**.
+
+Confirmed under the daemon's own conditions — root, **no controlling tty** — rather than only from a
+shell, because the two differ: given a terminal `softwareupdate` blocks on a real `Password:` prompt
+*before* printing `Downloaded:`, and given none it fails straight past to the classifiable output
+above. Reproduce it with the redirect **inside** the sudo'd shell, since sudo allocates a pty by
+default and one placed outside would hand `softwareupdate` a terminal again:
+
+```bash
+sudo sh -c 'softwareupdate -d "macOS Tahoe 26.7-25G229" </dev/null >/tmp/su-probe.log 2>&1'
+```
+ So
 `classify_download` ignores the status and reads the text, the same rule `check` follows for `-l`:
 `Downloaded:` is the whole of the positive evidence, because it is the one line that appears only
 when an asset reached the disk. Had `--label` shipped, every label would have returned a usage
