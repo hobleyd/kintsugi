@@ -456,10 +456,33 @@ fn list_labels() -> Result<Vec<String>> {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    Ok(parse_labels(&combined))
+    parse_label_listing(&combined).with_context(|| format!("softwareupdate -l exited with {}", output.status))
 }
 
-/// The pure text half of [`list_labels`]. A listing line reads
+/// Reads a `softwareupdate -l` listing as one of three answers, not two: some labels, *none because
+/// macOS said so*, or a listing this cannot make sense of.
+///
+/// The third case has to be an error, and getting that wrong would undo the whole download step.
+/// Like [`check`], this cannot use the exit status — `-l` exits non-zero when nothing is available —
+/// so an unreadable listing is indistinguishable from an empty one except by its text. Read as
+/// empty, a `-l` that failed transiently (a laptop that just woke with no network, a wedged
+/// softwareupdate daemon) would make [`download`] report success having fetched nothing at all, and
+/// the install that follows would then download every gigabyte of it *after* the console user typed
+/// their password. That is exactly the hour-late forced reboot the separate download step exists to
+/// prevent, so "I could not tell" fails loudly instead.
+fn parse_label_listing(combined: &str) -> Result<Vec<String>> {
+    if combined.contains("No new software available") {
+        return Ok(Vec::new());
+    }
+
+    let labels = parse_labels(combined);
+    if labels.is_empty() {
+        anyhow::bail!("softwareupdate -l listed no labels and did not say there were none: {}", combined.trim());
+    }
+    Ok(labels)
+}
+
+/// The pure text half of [`parse_label_listing`]. A listing line reads
 /// `* Label: macOS Tahoe 26.7-25G229`, and the label runs to the end of the line — it is not
 /// comma-delimited the way the `Title:` line's fields are, so nothing may be split off it.
 fn parse_labels(text: &str) -> Vec<String> {
@@ -849,6 +872,26 @@ mod tests {
     #[test]
     fn parse_labels_keeps_a_label_that_contains_spaces_whole() {
         assert_eq!(parse_labels("* Label: macOS Tahoe 26.7-25G229\n"), vec!["macOS Tahoe 26.7-25G229"]);
+    }
+
+    #[test]
+    fn parse_label_listing_reads_macoss_own_word_for_an_empty_listing() {
+        let listing = "Software Update Tool\n\nFinding available software\nNo new software available.\n";
+        assert_eq!(parse_label_listing(listing).unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn parse_label_listing_returns_the_labels_it_found() {
+        assert_eq!(parse_label_listing(SAMPLE_LISTING).unwrap().len(), 3);
+    }
+
+    /// The case that must not be read as "nothing to download": a `-l` that failed rather than one
+    /// that found nothing. Reported as empty it would make the download step succeed having fetched
+    /// nothing, leaving every gigabyte to the install that runs after the password is collected.
+    #[test]
+    fn parse_label_listing_refuses_a_listing_it_cannot_read() {
+        let err = parse_label_listing("Software Update Tool\n\nFinding available software\n").unwrap_err();
+        assert!(err.to_string().contains("did not say there were none"), "{err}");
     }
 
     #[test]
