@@ -99,14 +99,28 @@ asset had been staged by an earlier run. Two things follow, and `os_update::down
   preparation that is outstanding, and `os_update::install` does it with the password in hand. As a
   failure it filed a Failed Updates row every cycle for work that had succeeded — and worse, ended
   the cycle before the install it exists to precede, so the Mac never updated at all.
-- **The fetch runs one `-d --label` per label, not one `-d -a`.** `-a` stops at the first update it
+- **The fetch runs one `-d <label>` per label, not one `-d -a`.** `-a` stops at the first update it
   cannot prepare, so everything behind it in the listing went unfetched — on that host, Safari and
   the 11.7GB macOS 27 — and `-i -a` would have downloaded them *after* the password was typed,
   which is the hour-late reboot this split exists to prevent. Labels come from `softwareupdate -l`
   and run to the end of their line, spaces and build suffix included (`macOS Tahoe 26.7-25G229`).
 
-A download that genuinely failed prints no `Downloaded:` line, so it still fails — both halves of
-the signature are required, which is what keeps the Failed Updates screen honest.
+**The label is positional and the exit status is worthless**, both measured on that host after
+being guessed wrong:
+
+```text
+softwareupdate -d --label "macOS Tahoe 26.7-25G229"  ->  unrecognized option `--label'   exit 0
+softwareupdate -d "macOS Tahoe 26.7-25G229"          ->  Downloaded: ... Failed to auth   exit 1
+softwareupdate -d "definitely-not-an-update-9.9"     ->  No such update                   exit 0
+```
+
+There is no `--label` flag (`softwareupdate`'s own usage: `<label> ...  specific updates`), and the
+run that did nothing exits **zero** while the run that fetched everything exits **one**. So
+`classify_download` ignores the status and reads the text, the same rule `check` follows for `-l`:
+`Downloaded:` is the whole of the positive evidence, because it is the one line that appears only
+when an asset reached the disk. Had `--label` shipped, every label would have returned a usage
+error that exits zero and the download step would have reported a fully fetched host having moved
+no bytes at all.
 
 Combined into one request, which is how this started, it was the other way round: authorize, wait
 out a download that took 80 minutes on a real run, then get rebooted long after the dialog was

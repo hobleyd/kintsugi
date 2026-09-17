@@ -345,7 +345,7 @@ fn condense_progress(text: &str) -> String {
 /// 2. **`-a` stops at the first update it cannot prepare.** Everything behind it in the listing —
 ///    on the host above, Safari and the 11.7GB macOS 27 — was never fetched, so `install`'s `-i -a`
 ///    would have downloaded them *after* the console user typed their password: exactly the
-///    hour-late forced reboot this separate step exists to prevent. Hence one `-d --label` per
+///    hour-late forced reboot this separate step exists to prevent. Hence one `-d <label>` per
 ///    label rather than one `-d -a`. A label that cannot be prepared no longer stops the fetch of
 ///    the ones behind it.
 ///
@@ -400,14 +400,27 @@ enum DownloadOutcome {
 
 /// Downloads exactly one label's assets.
 ///
-/// `--label` rather than `-a` so one unpreparable update does not strand the rest — see
-/// [`download`]. The label is whatever `softwareupdate -l` printed, passed as a single argument
-/// because macOS's labels contain spaces (`macOS Tahoe 26.7-25G229`).
+/// **The label is positional, and the exit status is not to be trusted.** Both were got wrong first
+/// time, and each was measured on `htw-m5pro-hobleyd` rather than reasoned about:
+///
+/// ```text
+/// softwareupdate -d --label "macOS Tahoe 26.7-25G229"  ->  unrecognized option `--label'   exit 0
+/// softwareupdate -d "macOS Tahoe 26.7-25G229"          ->  Downloaded: ... Failed to auth   exit 1
+/// softwareupdate -d "definitely-not-an-update-9.9"     ->  No such update                   exit 0
+/// ```
+///
+/// There is no `--label` flag — `softwareupdate -d` takes labels as bare arguments (its own usage
+/// text: `<label> ...  specific updates`) — and a run that did nothing at all exits **zero** while
+/// the run that fetched everything asked of it exits **one**. So the status is ignored entirely and
+/// the text decides, the same rule [`check`] follows for `-l` and for the same reason.
+///
+/// The label goes in as a single argument because macOS's labels contain spaces
+/// (`macOS Tahoe 26.7-25G229`), and it is whatever `softwareupdate -l` printed.
 fn download_one(label: &str) -> Result<DownloadOutcome> {
     let output = Command::new("softwareupdate")
-        .args(["-d", "--label", label])
+        .args(["-d", label])
         .output()
-        .with_context(|| format!("failed to run softwareupdate -d --label '{label}'"))?;
+        .with_context(|| format!("failed to run softwareupdate -d '{label}'"))?;
 
     let combined = condense_progress(&format!(
         "{}{}",
@@ -415,31 +428,34 @@ fn download_one(label: &str) -> Result<DownloadOutcome> {
         String::from_utf8_lossy(&output.stderr)
     ));
     crate::logging::info(&format!(
-        "softwareupdate -d --label '{label}' finished: success={} output={}",
+        "softwareupdate -d '{label}' finished: success={} output={}",
         output.status.success(),
         combined.trim()
     ));
 
-    if output.status.success() {
-        return Ok(DownloadOutcome::Downloaded);
-    }
-    if is_preparation_authorization_wall(&combined) {
-        return Ok(DownloadOutcome::DownloadedUnprepared);
-    }
-
-    anyhow::bail!("softwareupdate -d --label '{label}' exited with {}: {}", output.status, combined.trim())
+    classify_download(&combined)
+        .with_context(|| format!("softwareupdate -d '{label}' fetched nothing: {}", combined.trim()))
 }
 
-/// Whether a non-zero `-d` is the Apple-silicon *preparation* wall rather than a download that did
-/// not happen.
+/// What a `-d` run's output says it achieved, or `None` if it does not say it downloaded anything.
 ///
-/// Both halves are required, and that is the point of the check. `Downloaded:` on its own says the
-/// asset reached the disk; `Failed to authenticate` on its own could be any refusal, including one
-/// raised before a byte moved. Only together do they mean what [`download`] then acts on — fetched,
-/// unprepared, and safe to leave to [`install`]. A download that genuinely failed prints no
-/// `Downloaded:` line and so still fails, which is what keeps the Failed Updates screen honest.
-fn is_preparation_authorization_wall(combined: &str) -> bool {
-    combined.contains("Downloaded:") && combined.contains("Failed to authenticate")
+/// `Downloaded:` is the whole of the positive evidence, deliberately: it is the one line that only
+/// appears when an asset reached the disk. Everything that goes wrong here — a label no update
+/// answers to, a flag that does not exist, a network that is not there — is a run that prints no
+/// such line, and several of those exit zero, so an exit status cannot stand in for it.
+///
+/// `Failed to authenticate` after it is then the Apple-silicon *preparation* wall rather than a
+/// failed download: the bits are staged and only the preparation is outstanding, which [`install`]
+/// does with a volume owner's password in hand. See [`download`].
+fn classify_download(combined: &str) -> Option<DownloadOutcome> {
+    if !combined.contains("Downloaded:") {
+        return None;
+    }
+    Some(if combined.contains("Failed to authenticate") {
+        DownloadOutcome::DownloadedUnprepared
+    } else {
+        DownloadOutcome::Downloaded
+    })
 }
 
 /// Every label in a `softwareupdate -l` listing, in the order macOS printed them.
@@ -868,7 +884,8 @@ mod tests {
 
     /// A label is the rest of its line — spaces, dots and the build suffix included. Splitting one
     /// on whitespace or on a comma the way the `Title:` line's fields are split would hand
-    /// `softwareupdate --label` a name no update has.
+    /// `softwareupdate -d` a name no update answers to — which it reports as `No such update` and
+    /// an exit status of zero.
     #[test]
     fn parse_labels_keeps_a_label_that_contains_spaces_whole() {
         assert_eq!(parse_labels("* Label: macOS Tahoe 26.7-25G229\n"), vec!["macOS Tahoe 26.7-25G229"]);
@@ -901,24 +918,43 @@ mod tests {
 
     /// The exact output of the run this whole per-label shape exists for: the asset was already
     /// staged, so the download finished in seconds and everything after it was the preparation
-    /// asking for a volume owner.
+    /// asking for a volume owner. Note that this run exits **1**.
     #[test]
-    fn is_preparation_authorization_wall_recognises_a_fetch_that_only_failed_to_prepare() {
+    fn classify_download_reads_a_fetch_that_only_failed_to_prepare() {
         let combined = "Software Update Tool\n\nFinding available software\nDownloading macOS Tahoe 26.7\n\nDownloaded: macOS Tahoe 26.7\nFailed to authenticate\nPassword:";
-        assert!(is_preparation_authorization_wall(combined));
-    }
-
-    /// Half the signature is not the signature. A refusal raised before anything was fetched is a
-    /// real failure of the download step and has to stay one, or the Failed Updates screen goes
-    /// quiet about a host that never gets its bits.
-    #[test]
-    fn is_preparation_authorization_wall_rejects_an_authorization_failure_with_no_download() {
-        assert!(!is_preparation_authorization_wall("Failed to authenticate\nPassword:"));
+        assert_eq!(classify_download(combined), Some(DownloadOutcome::DownloadedUnprepared));
     }
 
     #[test]
-    fn is_preparation_authorization_wall_rejects_a_download_that_failed_some_other_way() {
-        assert!(!is_preparation_authorization_wall("Downloaded: Safari\nThe operation couldn\u{2019}t be completed. (NSURLErrorDomain error -1009.)"));
+    fn classify_download_reads_a_clean_fetch() {
+        let combined = "Software Update Tool\n\nFinding available software\nDownloading Safari\n\nDownloaded: Safari\n";
+        assert_eq!(classify_download(combined), Some(DownloadOutcome::Downloaded));
+    }
+
+    /// A refusal raised before anything was fetched is a real failure of the download step and has
+    /// to stay one, or the Failed Updates screen goes quiet about a host that never gets its bits.
+    #[test]
+    fn classify_download_rejects_an_authorization_failure_with_no_download() {
+        assert_eq!(classify_download("Failed to authenticate\nPassword:"), None);
+    }
+
+    /// Both of the ways `softwareupdate` does nothing and **exits zero** while doing it, measured
+    /// rather than assumed. If either were read as success the download step would report a host
+    /// fully fetched having moved no bytes at all, and the install would then download every
+    /// gigabyte after the console user had typed their password.
+    #[test]
+    fn classify_download_rejects_a_label_no_update_answers_to() {
+        assert_eq!(classify_download("definitely-not-an-update-9.9: No such update\nNo updates are available."), None);
+    }
+
+    #[test]
+    fn classify_download_rejects_a_usage_error() {
+        assert_eq!(classify_download("softwareupdate: unrecognized option `--label'\nusage: softwareupdate <cmd> [<args> ...]"), None);
+    }
+
+    #[test]
+    fn classify_download_rejects_a_download_that_failed_some_other_way() {
+        assert_eq!(classify_download("Downloading Safari\nThe operation couldn\u{2019}t be completed. (NSURLErrorDomain error -1009.)"), None);
     }
 
     #[test]
