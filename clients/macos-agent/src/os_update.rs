@@ -933,6 +933,30 @@ mod tests {
 
     /// A refusal raised before anything was fetched is a real failure of the download step and has
     /// to stay one, or the Failed Updates screen goes quiet about a host that never gets its bits.
+    /// The two halves in the order the daemon actually runs them, against a *cold* download rather
+    /// than the eight-second cached one every other transcript here is.
+    ///
+    /// `classify_download` reads text that `condense_progress` has already been through, and
+    /// condensing exists precisely to swallow runs of `Downloading: nn%`. `Downloaded:` is a
+    /// different line and survives — but nothing except this test says so, and if condensing ever
+    /// took it, a host that had fetched every byte would report a hard failure and the cycle would
+    /// stop before the install. That is the bug this whole change removed, arriving from the other
+    /// side.
+    #[test]
+    fn a_condensed_cold_download_is_still_read_as_fetched_but_unprepared() {
+        // No line endings between the readings: that is how softwareupdate writes them, and being
+        // adjacent is what makes them one collapsible run.
+        let mut raw = String::from("Software Update Tool\n\nFinding available software\nDownloading macOS Tahoe 26.7\n");
+        for percent in 0..=100 {
+            raw.push_str(&format!("Downloading: {percent}.00%"));
+        }
+        raw.push_str("\nDownloaded: macOS Tahoe 26.7\nFailed to authenticate\nPassword:");
+
+        let condensed = condense_progress(&raw);
+        assert!(condensed.len() < raw.len(), "the readings should have been collapsed: {condensed}");
+        assert_eq!(classify_download(&condensed), Some(DownloadOutcome::DownloadedUnprepared));
+    }
+
     #[test]
     fn classify_download_rejects_an_authorization_failure_with_no_download() {
         assert_eq!(classify_download("Failed to authenticate\nPassword:"), None);
