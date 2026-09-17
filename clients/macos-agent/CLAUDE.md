@@ -75,10 +75,38 @@ Mac will restart itself, and `install_password_message` says it immediately abov
 because that is the last moment anyone can decline.
 
 **The download is its own queued step, and that ordering is what makes `-R` humane.**
-`softwareupdate -d` needs root but *not* a volume owner, so `RequestKind::OsDownload` fetches
-everything first with nobody being asked for anything. Only then does the per-user half prompt for
-the password, and the `RequestKind::OsUpdate` that follows finds the assets on disk and finishes in
-minutes — so the forced restart lands minutes after the person agreed to it.
+`RequestKind::OsDownload` fetches everything first with nobody being asked for anything. Only then
+does the per-user half prompt for the password, and the `RequestKind::OsUpdate` that follows finds
+the assets on disk and finishes in minutes — so the forced restart lands minutes after the person
+agreed to it.
+
+**`softwareupdate -d` is not the authorization-free step this section used to claim.** On Apple
+silicon it downloads *and prepares*, and preparing wants the same volume owner installing does, so
+the download step ends:
+
+```text
+Downloading macOS Tahoe 26.7
+Downloaded: macOS Tahoe 26.7
+Failed to authenticate
+Password:
+```
+
+— exit 1, with everything it was asked to fetch already on disk. Measured on
+`htw-m5pro-hobleyd`, twice: **eight seconds end to end**, the whole of it preparation, because the
+asset had been staged by an earlier run. Two things follow, and `os_update::download` is both:
+
+- **That exit 1 is reported as success**, naming in the log what was staged unprepared. It is the
+  preparation that is outstanding, and `os_update::install` does it with the password in hand. As a
+  failure it filed a Failed Updates row every cycle for work that had succeeded — and worse, ended
+  the cycle before the install it exists to precede, so the Mac never updated at all.
+- **The fetch runs one `-d --label` per label, not one `-d -a`.** `-a` stops at the first update it
+  cannot prepare, so everything behind it in the listing went unfetched — on that host, Safari and
+  the 11.7GB macOS 27 — and `-i -a` would have downloaded them *after* the password was typed,
+  which is the hour-late reboot this split exists to prevent. Labels come from `softwareupdate -l`
+  and run to the end of their line, spaces and build suffix included (`macOS Tahoe 26.7-25G229`).
+
+A download that genuinely failed prints no `Downloaded:` line, so it still fails — both halves of
+the signature are required, which is what keeps the Failed Updates screen honest.
 
 Combined into one request, which is how this started, it was the other way round: authorize, wait
 out a download that took 80 minutes on a real run, then get rebooted long after the dialog was

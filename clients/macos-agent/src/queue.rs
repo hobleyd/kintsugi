@@ -49,9 +49,12 @@ use crate::os_update::InstallAuth;
 /// `dialogs::request_install_password`) and consumed by the daemon.
 ///
 /// Only [`RequestKind::OsUpdate`] ever carries one. The fetch is its own kind,
-/// [`RequestKind::OsDownload`], precisely because it needs no authorization — which is what lets the
-/// long wait happen before anybody is asked for anything, and keeps the password's life on disk to
-/// the length of an install rather than an install plus a download.
+/// [`RequestKind::OsDownload`], so the long wait happens before anybody is asked for anything and
+/// the password's life on disk is the length of an install rather than an install plus a download.
+/// Note what that split does *not* buy, having been written as though it did: `-d` on Apple silicon
+/// still wants a volume owner, for the preparation it runs after the download. `OsDownload` carries
+/// no sidecar anyway and does not ask for one — it fetches what it can, leaves the preparation to
+/// the authorized install, and `os_update::download` says why.
 ///
 /// It is carried in a **separate sidecar file**, `<request>.auth`, never in the request body, and
 /// that separation is deliberate rather than tidiness: the sentence above — a request carries
@@ -347,8 +350,10 @@ fn submit_with_timeout(
 /// ordering and staleness logic can be tested without any of that.
 pub trait RequestHandler {
     fn patch_application(&mut self, application_name: &str) -> Result<()>;
-    /// Answers a [`RequestKind::OsDownload`]. Takes no credentials: fetching needs root but not a
-    /// volume owner, which is what lets it run before anybody is asked for a password.
+    /// Answers a [`RequestKind::OsDownload`]. Takes no credentials — not because none would be
+    /// useful (Apple silicon wants a volume owner to *prepare* what it downloads) but because the
+    /// point of this kind is to run before anybody is asked for a password. It fetches the assets
+    /// and leaves any preparation to the install; see `os_update::download`.
     fn download_os_updates(&mut self) -> Result<String>;
     /// Answers a [`RequestKind::OsUpdate`]. `auth` is whatever the request's sidecar carried, and
     /// is `None` on an Intel host or when the console user could not authorize (see

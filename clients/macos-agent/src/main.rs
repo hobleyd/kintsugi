@@ -380,6 +380,12 @@ impl queue::RequestHandler for DaemonRequestHandler<'_> {
     /// nothing. Reported to the server on failure the same way an install is — a host that can
     /// never finish downloading its OS update is exactly as stuck as one that cannot install it,
     /// and before any of this existed both were invisible outside this Mac's own log.
+    ///
+    /// An asset that downloaded but could not be *prepared* is not such a host, and does not come
+    /// through here as an error: `os_update::download` returns it as success, because the bits are
+    /// on disk and the preparation is the authorized install's to do. It used to file a Failed
+    /// Updates row every cycle for exactly that, on this machine, while the download itself had
+    /// been finishing in eight seconds.
     fn download_os_updates(&mut self) -> Result<String> {
         if let Err(err) = os_update::download() {
             let attempted_version = os_update::check().ok().and_then(|status| status.latest_version);

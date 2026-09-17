@@ -318,27 +318,96 @@ fn condense_progress(text: &str) -> String {
     out
 }
 
-/// Fetches every pending macOS update without installing any of them.
+/// Fetches every pending update's bits without installing any of them, one label at a time.
 ///
-/// Root only (`man softwareupdate`: everything but `--list` needs admin), but — and this is the
-/// whole point of it being a separate step — **no volume owner's authorization**. `--user` and
-/// `--stdinpass` belong to `-i`; `-d` just downloads. So this can run for the hour or more it takes
-/// while nobody is being asked for anything, and [`install`] afterwards finds the bits already on
-/// disk and completes in minutes.
+/// Root only (`man softwareupdate`: everything but `--list` needs admin). This was written as a
+/// single `-d -a` on the belief that `-d` "just downloads" and so, unlike `-i`, needs no volume
+/// owner. **That belief was wrong**, and this fleet's own Mac disproved it twice. On Apple silicon
+/// `-d` downloads *and prepares*, and the preparation wants the same volume owner the install does,
+/// so a run whose asset was already staged ended:
 ///
-/// That ordering is what makes `-R` humane. Combined into one step, the console user typed their
-/// password and then waited out the download, so the forced restart could land 80 minutes after
-/// they agreed to it — long enough to have forgotten, and long enough to have opened unsaved work
-/// since. Split, the consent and the reboot are minutes apart.
+/// ```text
+/// Downloading macOS Tahoe 26.7
+/// Downloaded: macOS Tahoe 26.7
+/// Failed to authenticate
+/// Password:
+/// ```
 ///
-/// Re-running it once the assets are present is close to free: a real run of the install right after
-/// a completed download printed `Downloading macOS Tahoe 26.7` / `Downloaded: macOS Tahoe 26.7`
-/// within seconds and moved 518KB over the wire, because macOS reuses the staged asset.
+/// in eight seconds — the whole of it preparation, nothing of it download. See
+/// `clients/macos-agent/CLAUDE.md`.
+///
+/// Two consequences, and this function's shape is both of them:
+///
+/// 1. **That exit 1 is not a failed download.** The bits are on disk and only the preparation is
+///    outstanding, which [`install`] performs with the password in hand. Treating it as a failure
+///    filed a Failed Updates row every cycle for a step whose work had succeeded, and stopped the
+///    cycle before the install it was the preamble to.
+/// 2. **`-a` stops at the first update it cannot prepare.** Everything behind it in the listing —
+///    on the host above, Safari and the 11.7GB macOS 27 — was never fetched, so `install`'s `-i -a`
+///    would have downloaded them *after* the console user typed their password: exactly the
+///    hour-late forced reboot this separate step exists to prevent. Hence one `-d --label` per
+///    label rather than one `-d -a`. A label that cannot be prepared no longer stops the fetch of
+///    the ones behind it.
+///
+/// The download is still the hour-plus, and still runs with nobody being asked for anything.
+/// Re-running it once the assets are present is close to free — the eight seconds above — so a
+/// cycle whose password prompt went unanswered brings the next one's prompt up almost at once.
 pub fn download() -> Result<()> {
+    let labels = list_labels()?;
+    if labels.is_empty() {
+        crate::logging::info("softwareupdate -l lists nothing to download");
+        return Ok(());
+    }
+
+    // Collected rather than returned at the first one: a Safari label that will not download is no
+    // reason to leave the macOS asset unfetched, and the caller is owed all of it in one message.
+    let mut failures = Vec::new();
+    for label in &labels {
+        match download_one(label) {
+            Ok(DownloadOutcome::Downloaded) => crate::logging::info(&format!("downloaded '{label}'")),
+            Ok(DownloadOutcome::DownloadedUnprepared) => crate::logging::info(&format!(
+                "downloaded '{label}', but preparing it needs a volume owner — left to the authorized install"
+            )),
+            Err(err) => {
+                crate::logging::error(&format!("could not download '{label}': {err:#}"));
+                failures.push(format!("{label}: {err:#}"));
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "softwareupdate could not download {} of the {} pending update(s): {}",
+            failures.len(),
+            labels.len(),
+            failures.join("; ")
+        );
+    }
+
+    Ok(())
+}
+
+/// What one label's download achieved. Neither variant installs anything or restarts anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadOutcome {
+    /// `softwareupdate -d` returned cleanly: fetched, and prepared if it needed preparing.
+    Downloaded,
+    /// The asset is on disk but unprepared, because preparation asked for a volume owner this
+    /// daemon is not — see [`download`]. Not an error: [`install`] prepares and installs it in the
+    /// same call, with the password the console user supplies between the two steps.
+    DownloadedUnprepared,
+}
+
+/// Downloads exactly one label's assets.
+///
+/// `--label` rather than `-a` so one unpreparable update does not strand the rest — see
+/// [`download`]. The label is whatever `softwareupdate -l` printed, passed as a single argument
+/// because macOS's labels contain spaces (`macOS Tahoe 26.7-25G229`).
+fn download_one(label: &str) -> Result<DownloadOutcome> {
     let output = Command::new("softwareupdate")
-        .args(["-d", "-a"])
+        .args(["-d", "--label", label])
         .output()
-        .context("failed to run softwareupdate -d -a")?;
+        .with_context(|| format!("failed to run softwareupdate -d --label '{label}'"))?;
 
     let combined = condense_progress(&format!(
         "{}{}",
@@ -346,16 +415,59 @@ pub fn download() -> Result<()> {
         String::from_utf8_lossy(&output.stderr)
     ));
     crate::logging::info(&format!(
-        "softwareupdate -d -a finished: success={} output={}",
+        "softwareupdate -d --label '{label}' finished: success={} output={}",
         output.status.success(),
         combined.trim()
     ));
 
-    if !output.status.success() {
-        anyhow::bail!("softwareupdate -d -a exited with {}: {}", output.status, combined.trim());
+    if output.status.success() {
+        return Ok(DownloadOutcome::Downloaded);
+    }
+    if is_preparation_authorization_wall(&combined) {
+        return Ok(DownloadOutcome::DownloadedUnprepared);
     }
 
-    Ok(())
+    anyhow::bail!("softwareupdate -d --label '{label}' exited with {}: {}", output.status, combined.trim())
+}
+
+/// Whether a non-zero `-d` is the Apple-silicon *preparation* wall rather than a download that did
+/// not happen.
+///
+/// Both halves are required, and that is the point of the check. `Downloaded:` on its own says the
+/// asset reached the disk; `Failed to authenticate` on its own could be any refusal, including one
+/// raised before a byte moved. Only together do they mean what [`download`] then acts on — fetched,
+/// unprepared, and safe to leave to [`install`]. A download that genuinely failed prints no
+/// `Downloaded:` line and so still fails, which is what keeps the Failed Updates screen honest.
+fn is_preparation_authorization_wall(combined: &str) -> bool {
+    combined.contains("Downloaded:") && combined.contains("Failed to authenticate")
+}
+
+/// Every label in a `softwareupdate -l` listing, in the order macOS printed them.
+///
+/// Root is not needed for the listing itself (see [`check`]), but this is deliberately its own call
+/// rather than a field grown onto [`OsUpdateStatus`]: that type answers the admin UI's question
+/// ("is an OS update pending, and to what version"), and the daemon's download step asks a
+/// different one — *which* labels to fetch, macOS and Safari and firmware alike.
+fn list_labels() -> Result<Vec<String>> {
+    let output = Command::new("softwareupdate").arg("-l").output().context("failed to run softwareupdate -l")?;
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(parse_labels(&combined))
+}
+
+/// The pure text half of [`list_labels`]. A listing line reads
+/// `* Label: macOS Tahoe 26.7-25G229`, and the label runs to the end of the line — it is not
+/// comma-delimited the way the `Title:` line's fields are, so nothing may be split off it.
+fn parse_labels(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| line.trim_start().strip_prefix("* Label:"))
+        .map(|label| label.trim().to_string())
+        .filter(|label| !label.is_empty())
+        .collect()
 }
 
 /// Installs every pending macOS update and restarts the Mac to finish. Root only — this is the
@@ -378,10 +490,11 @@ pub fn download() -> Result<()> {
 ///
 /// Both dialogs the console user sees say the Mac will restart on its own — see
 /// `dialogs::install_password_message`, which is the last thing anyone is asked before this runs.
-/// The gap that remains, and which no wording closes, is *when*: the authorization is collected
-/// before a download that can take over an hour, so the reboot can arrive a long way after the
-/// person agreed to it. Splitting the download (`-d`, which needs no authorization) from the install
-/// would close it; see `clients/macos-agent/CLAUDE.md`.
+/// How long they then wait for it is [`download`]'s doing: run first, it leaves this call with the
+/// assets already staged, so the restart follows the password by minutes rather than by the hour or
+/// more the fetch takes. What it cannot leave staged is the *preparation* — that needs the very
+/// volume owner being asked for here — so an update whose download step reported
+/// `DownloadedUnprepared` is prepared and installed in this one call.
 ///
 /// **Nothing after the `softwareupdate` call is guaranteed to run.** The reboot happens inside it,
 /// so this function does not return, `report_patched` is never sent, and `process_queue` never gets
@@ -717,6 +830,52 @@ mod tests {
         assert!(condensed.len() < 200, "the whole thing should now fit in a log line, was {}", condensed.len());
         assert!(condensed.contains("[500 readings collapsed]"));
         assert!(condensed.contains("Failed to authenticate"));
+    }
+
+    /// The listing that is on the host this was written for, labels and all.
+    const SAMPLE_LISTING: &str = "Software Update Tool\n\nFinding available software\nSoftware Update found the following new or updated software:\n* Label: Safari27.0TahoeAuto-27.0\n\tTitle: Safari, Version: 27.0, Size: 249465KiB, Recommended: YES, \n* Label: macOS Tahoe 26.7-25G229\n\tTitle: macOS Tahoe 26.7, Version: 26.7, Size: 2960352KiB, Recommended: YES, Action: restart, \n* Label: macOS 27-26A428\n\tTitle: macOS 27, Version: 27, Size: 11727573KiB, Recommended: YES, Action: restart, \n";
+
+    #[test]
+    fn parse_labels_reads_every_label_in_order() {
+        assert_eq!(
+            parse_labels(SAMPLE_LISTING),
+            vec!["Safari27.0TahoeAuto-27.0", "macOS Tahoe 26.7-25G229", "macOS 27-26A428"]
+        );
+    }
+
+    /// A label is the rest of its line — spaces, dots and the build suffix included. Splitting one
+    /// on whitespace or on a comma the way the `Title:` line's fields are split would hand
+    /// `softwareupdate --label` a name no update has.
+    #[test]
+    fn parse_labels_keeps_a_label_that_contains_spaces_whole() {
+        assert_eq!(parse_labels("* Label: macOS Tahoe 26.7-25G229\n"), vec!["macOS Tahoe 26.7-25G229"]);
+    }
+
+    #[test]
+    fn parse_labels_finds_nothing_in_a_listing_with_no_updates() {
+        assert!(parse_labels("Software Update Tool\n\nFinding available software\nNo new software available.\n").is_empty());
+    }
+
+    /// The exact output of the run this whole per-label shape exists for: the asset was already
+    /// staged, so the download finished in seconds and everything after it was the preparation
+    /// asking for a volume owner.
+    #[test]
+    fn is_preparation_authorization_wall_recognises_a_fetch_that_only_failed_to_prepare() {
+        let combined = "Software Update Tool\n\nFinding available software\nDownloading macOS Tahoe 26.7\n\nDownloaded: macOS Tahoe 26.7\nFailed to authenticate\nPassword:";
+        assert!(is_preparation_authorization_wall(combined));
+    }
+
+    /// Half the signature is not the signature. A refusal raised before anything was fetched is a
+    /// real failure of the download step and has to stay one, or the Failed Updates screen goes
+    /// quiet about a host that never gets its bits.
+    #[test]
+    fn is_preparation_authorization_wall_rejects_an_authorization_failure_with_no_download() {
+        assert!(!is_preparation_authorization_wall("Failed to authenticate\nPassword:"));
+    }
+
+    #[test]
+    fn is_preparation_authorization_wall_rejects_a_download_that_failed_some_other_way() {
+        assert!(!is_preparation_authorization_wall("Downloaded: Safari\nThe operation couldn\u{2019}t be completed. (NSURLErrorDomain error -1009.)"));
     }
 
     #[test]

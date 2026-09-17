@@ -569,11 +569,16 @@ fn os_update_eligibility(user_present: bool) -> OsUpdateEligibility {
 /// Runs the macOS update as two queued steps, and returns `(succeeded, failed)` for the cycle's
 /// tally.
 ///
-/// **The order is the feature.** `softwareupdate -d` needs root but no volume owner, so the download
-/// — the hour-plus — happens first, with nobody being asked for anything. Only then is the password
-/// collected, and the install that follows finds the assets already on disk and finishes in minutes.
-/// Since `os_update::install` passes `-R`, that puts the forced restart minutes after the person
-/// agreed to it instead of an hour and a half.
+/// **The order is the feature.** The download — the hour-plus — happens first, with nobody being
+/// asked for anything. Only then is the password collected, and the install that follows finds the
+/// assets already on disk and finishes in minutes. Since `os_update::install` passes `-R`, that puts
+/// the forced restart minutes after the person agreed to it instead of an hour and a half.
+///
+/// The step is not *authorization*-free, which is how it was first written and described here.
+/// `softwareupdate -d` on Apple silicon downloads and then prepares, and preparing wants the same
+/// volume owner installing does — so the download step ends at a password prompt it cannot answer,
+/// having fetched everything it was asked for. `os_update::download` treats that as the success it
+/// is and leaves the preparation to step 3, which has the password.
 ///
 /// Combining the two, which is how this started, meant the opposite: authorize, then wait out the
 /// download, then get rebooted long after the dialog was forgotten.
