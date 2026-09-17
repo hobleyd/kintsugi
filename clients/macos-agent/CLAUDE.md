@@ -105,6 +105,11 @@ asset had been staged by an earlier run. Two things follow, and `os_update::down
   which is the hour-late reboot this split exists to prevent. Labels come from `softwareupdate -l`
   and run to the end of their line, spaces and build suffix included (`macOS Tahoe 26.7-25G229`).
 
+**Only a macOS label's failure stops the cycle.** A Safari label that will not download costs the
+install a few minutes fetching 250MB; a macOS label that will not download costs it the 11.7GB this
+whole ordering exists to move out from behind the password prompt. `is_macos_label` is the `macOS`
+prefix of the label, which the listing's `Title:` line agrees with.
+
 **The label is positional and the exit status is worthless**, both measured on that host after
 being guessed wrong:
 
@@ -128,8 +133,11 @@ sudo sh -c 'softwareupdate -d "macOS Tahoe 26.7-25G229" </dev/null >/tmp/su-prob
 ```
  So
 `classify_download` ignores the status and reads the text, the same rule `check` follows for `-l`:
-`Downloaded:` is the whole of the positive evidence, because it is the one line that appears only
-when an asset reached the disk. Had `--label` shipped, every label would have returned a usage
+a line beginning `Downloaded` is the whole of the positive evidence, because it is the one line that
+appears only when an asset reached the disk. **A line, not the string `Downloaded:`** — macOS prints
+`Downloaded: macOS Tahoe 26.7` for a system update and `Downloaded Safari` for everything else, and
+looking for the colon logged a completed 255MB Safari download as "fetched nothing" on the first
+fleet run of this code. Had `--label` shipped, every label would have returned a usage
 error that exits zero and the download step would have reported a fully fetched host having moved
 no bytes at all.
 

@@ -370,21 +370,36 @@ pub fn download() -> Result<()> {
             )),
             Err(err) => {
                 crate::logging::error(&format!("could not download '{label}': {err:#}"));
-                failures.push(format!("{label}: {err:#}"));
+                failures.push((label.clone(), format!("{err:#}")));
             }
         }
     }
 
-    if !failures.is_empty() {
+    // Only a *macOS* label's failure stops the cycle, and the asymmetry is the point. This step
+    // exists so the console user's password is collected over assets already on disk; a Safari
+    // label that would not download costs the install a few minutes fetching 250MB, while a macOS
+    // label that would not download costs it the 11.7GB the whole ordering exists to move out from
+    // behind the prompt. The rest is logged and reported to nobody, having already been logged
+    // above.
+    let blocking = failures.iter().filter(|(label, _)| is_macos_label(label)).collect::<Vec<_>>();
+    if !blocking.is_empty() {
         anyhow::bail!(
             "softwareupdate could not download {} of the {} pending update(s): {}",
-            failures.len(),
+            blocking.len(),
             labels.len(),
-            failures.join("; ")
+            blocking.iter().map(|(label, err)| format!("{label}: {err}")).collect::<Vec<_>>().join("; ")
         );
     }
 
     Ok(())
+}
+
+/// Whether a label names a macOS system update rather than one of the other things
+/// `softwareupdate` offers. macOS prints them as `macOS Tahoe 26.7-25G229` and `macOS 27-26A428`
+/// beside `Safari27.0TahoeAuto-27.0`, so the prefix is what separates them — and the title line of
+/// the same listing agrees, which is what `parse_macos_title_version` reads.
+fn is_macos_label(label: &str) -> bool {
+    label.starts_with("macOS")
 }
 
 /// What one label's download achieved. Neither variant installs anything or restarts anything.
@@ -439,16 +454,28 @@ fn download_one(label: &str) -> Result<DownloadOutcome> {
 
 /// What a `-d` run's output says it achieved, or `None` if it does not say it downloaded anything.
 ///
-/// `Downloaded:` is the whole of the positive evidence, deliberately: it is the one line that only
-/// appears when an asset reached the disk. Everything that goes wrong here — a label no update
-/// answers to, a flag that does not exist, a network that is not there — is a run that prints no
-/// such line, and several of those exit zero, so an exit status cannot stand in for it.
+/// A line beginning `Downloaded` is the whole of the positive evidence, deliberately: it is the one
+/// line that appears only when an asset reached the disk. Everything that goes wrong here — a label
+/// no update answers to, a flag that does not exist, a network that is not there — is a run that
+/// prints no such line, and several of those exit zero, so an exit status cannot stand in for it.
+///
+/// **A line, not the string `Downloaded:`.** macOS prints two shapes in one listing, which cost a
+/// completed 255MB Safari download being logged as "fetched nothing":
+///
+/// ```text
+/// Downloaded: macOS Tahoe 26.7     <- a system update, with a colon
+/// Downloaded Safari                <- everything else, without one
+/// Done.
+/// ```
+///
+/// Matching at the start of a line keeps `Downloading` — which condensing leaves behind as
+/// `Downloading: 100.00% [n readings collapsed]` — from counting as a download that finished.
 ///
 /// `Failed to authenticate` after it is then the Apple-silicon *preparation* wall rather than a
 /// failed download: the bits are staged and only the preparation is outstanding, which [`install`]
 /// does with a volume owner's password in hand. See [`download`].
 fn classify_download(combined: &str) -> Option<DownloadOutcome> {
-    if !combined.contains("Downloaded:") {
+    if !combined.lines().any(|line| line.trim_start().starts_with("Downloaded")) {
         return None;
     }
     Some(if combined.contains("Failed to authenticate") {
@@ -955,6 +982,31 @@ mod tests {
         let condensed = condense_progress(&raw);
         assert!(condensed.len() < raw.len(), "the readings should have been collapsed: {condensed}");
         assert_eq!(classify_download(&condensed), Some(DownloadOutcome::DownloadedUnprepared));
+    }
+
+    /// The shape everything that is not a system update prints — measured on a 255MB Safari
+    /// download that this classifier's first version logged as "fetched nothing", because it looked
+    /// for the colon the macOS line has and this one does not.
+    #[test]
+    fn classify_download_reads_the_colonless_line_other_updates_print() {
+        let combined = "Software Update Tool\n\nFinding available software\nDownloading Safari\nDownloaded Safari\nDone.\n";
+        assert_eq!(classify_download(combined), Some(DownloadOutcome::Downloaded));
+    }
+
+    /// `Downloading` must not be mistaken for `Downloaded`, including the form condensing leaves
+    /// behind — which is what makes this a line-start match rather than a substring one.
+    #[test]
+    fn classify_download_rejects_a_download_that_only_started() {
+        let combined = "Downloading Safari\nDownloading: 100.00% [412 readings collapsed]\n";
+        assert_eq!(classify_download(combined), None);
+    }
+
+    /// The listing's own two labels, which is all this distinction has to carry.
+    #[test]
+    fn is_macos_label_tells_a_system_update_from_the_rest_of_the_listing() {
+        assert!(is_macos_label("macOS Tahoe 26.7-25G229"));
+        assert!(is_macos_label("macOS 27-26A428"));
+        assert!(!is_macos_label("Safari27.0TahoeAuto-27.0"));
     }
 
     #[test]
