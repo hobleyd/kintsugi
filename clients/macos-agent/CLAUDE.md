@@ -110,6 +110,14 @@ install a few minutes fetching 250MB; a macOS label that will not download costs
 whole ordering exists to move out from behind the password prompt. `is_macos_label` is the `macOS`
 prefix of the label, which the listing's `Title:` line agrees with.
 
+**`softwareupdate` separates its progress readings with a carriage return**, because it is
+overwriting one line on a terminal rather than writing many. `condense_progress` looked for the next
+`Downloading: ` immediately after a reading, met the `\r`, ended the run at one, and so emitted every
+reading individually — it never condensed anything in production while its tests passed, because
+every transcript in them was hand-written without a `\r`. macOS 27's download put **160KB and 7,992
+readings** into `daemon.log` through the one function whose purpose is to stop that. Its tests now
+carry the bytes `od -c` prints from that log line.
+
 **The label is positional and the exit status is worthless**, both measured on that host after
 being guessed wrong:
 

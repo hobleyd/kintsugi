@@ -288,9 +288,17 @@ fn condense_progress(text: &str) -> String {
         rest = &rest[index..];
 
         // Consume the whole run of adjacent progress readings, remembering only the last.
+        //
+        // `trim_start_matches` is the whole of why this works on real output: `softwareupdate`
+        // separates its readings with a **carriage return**, because it is overwriting one line on
+        // a terminal rather than writing many. Without it the run ended at the first `\r`, every
+        // reading was emitted as a run of one, and nothing was ever condensed — 157KB of
+        // `Downloading: nn%` went into `daemon.log` verbatim on macOS 27's download while this
+        // function sat in the path doing nothing. The test that was supposed to cover it used a
+        // hand-written transcript with no `\r` in it.
         let mut last: Option<&str> = None;
         let mut count = 0usize;
-        while let Some(after_marker) = rest.strip_prefix(MARKER) {
+        while let Some(after_marker) = rest.trim_start_matches(['\r', '\n']).strip_prefix(MARKER) {
             let Some(percent_end) = after_marker.find('%') else { break };
             let value = &after_marker[..percent_end];
             if value.is_empty() || !value.chars().all(|c| c.is_ascii_digit() || c == '.') {
@@ -870,6 +878,42 @@ mod tests {
             condensed,
             "Downloading macOS Tahoe 26.7\nDownloading: 100.00% [3 readings collapsed]\nDownloaded: macOS Tahoe 26.7\n"
         );
+    }
+
+    /// The separator real `softwareupdate` uses, which is a **carriage return** and not nothing:
+    /// it overwrites one line on a terminal rather than writing many. Every other transcript in
+    /// this module was written by hand without one, so condensing was dead in production while its
+    /// tests passed — macOS 27's download put 157KB of readings in `daemon.log` through a function
+    /// whose entire purpose is to stop exactly that.
+    ///
+    /// The bytes are `od -c`'d from that log line.
+    #[test]
+    fn condense_progress_collapses_readings_separated_by_carriage_returns() {
+        let text = "Downloading macOS 27\n\rDownloading: 0.10%\rDownloading: 0.90%\rDownloading: 100.00%\nDownloaded: macOS 27\n";
+
+        let condensed = condense_progress(text);
+
+        assert_eq!(
+            condensed,
+            "Downloading macOS 27\n\rDownloading: 100.00% [3 readings collapsed]\nDownloaded: macOS 27\n"
+        );
+    }
+
+    /// The size of the thing, on the real shape: a download's worth of readings has to come out as
+    /// one line, not as one line each.
+    #[test]
+    fn condense_progress_turns_a_real_downloads_worth_of_readings_into_one_line() {
+        let mut text = String::from("Downloading macOS 27\n");
+        for reading in 0..4000 {
+            text.push_str(&format!("\rDownloading: {}.00%", reading % 101));
+        }
+        text.push_str("\nDownloaded: macOS 27\nFailed to authenticate\n");
+
+        let condensed = condense_progress(&text);
+
+        assert!(condensed.len() < 200, "should be one line, was {} bytes: {condensed}", condensed.len());
+        assert!(condensed.contains("[4000 readings collapsed]"), "{condensed}");
+        assert_eq!(classify_download(&condensed), Some(DownloadOutcome::DownloadedUnprepared));
     }
 
     #[test]
