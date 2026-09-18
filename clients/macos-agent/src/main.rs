@@ -287,7 +287,7 @@ fn register_and_report(config: &Config, checkin_minute: u8) -> Result<CheckInOut
     // invocation — normally a no-op, since `WatchPaths` (see the LaunchDaemon plist) is what
     // actually wakes this daemon promptly when a request is dropped, rather than this being polled
     // on a schedule.
-    queue::process_queue(
+    let served = queue::process_queue(
         &config::queue_dir(),
         &mut DaemonRequestHandler {
             client: &client,
@@ -301,7 +301,31 @@ fn register_and_report(config: &Config, checkin_minute: u8) -> Result<CheckInOut
     // this agent itself has been published, and install it in place if so — see `self_update`.
     // Runs on every check-in (RunAtLoad + hourly + on-demand), the same cadence as registration
     // itself, since there's no separate patching policy governing the agent's own updates.
-    self_update::check_and_apply(&client, config, agent_identity.as_ref(), env!("CARGO_PKG_VERSION"));
+    //
+    // **Not while a patch cycle is mid-flight.** Applying an update restarts both launchd jobs, and
+    // the per-user one is the half running the cycle — so the restart kills it wherever it had got
+    // to. On `htw-m5pro-hobleyd` that was one second after the password prompt it had spent nine
+    // hours of downloading to earn:
+    //
+    // ```text
+    // 19:29:26  OsDownload request finished: success=true
+    // 19:29:26  self-update available: 0.14.1 -> 0.14.2
+    // 19:29:27  asking david.hobley to authorize the macOS install
+    // 19:29:28  restarting gui/501/au.com.sharpblue.kintsugiagent-ui to pick up the new binary
+    // ```
+    //
+    // Serving anything but a `CheckIn` means the per-user process is in the middle of something and
+    // waiting on us: an `AppPatch` has more applications behind it, an `OsDownload` is followed by
+    // the authorization prompt, and an `OsUpdate` reboots the Mac from inside the call anyway. The
+    // update is not lost — this daemon is re-invoked hourly, and the next check-in with a quiet
+    // queue applies it.
+    if let Some(kind) = served.iter().find(|kind| **kind != queue::RequestKind::CheckIn) {
+        logging::info(&format!(
+            "deferring the agent's own update check: a patch cycle is mid-flight (just served a {kind:?} request)"
+        ));
+    } else {
+        self_update::check_and_apply(&client, config, agent_identity.as_ref(), env!("CARGO_PKG_VERSION"));
+    }
 
     Ok(CheckInOutcome::Completed {
         suggested_check_in_minute: host_response.suggested_check_in_minute,

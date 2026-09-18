@@ -418,9 +418,14 @@ fn boot_epoch() -> Option<u64> {
 /// Runs to completion for each request before moving on, deliberately: two installers at once
 /// would fight over `/Applications` and the per-user process asks for one application at a time
 /// anyway.
-pub fn process_queue(queue_dir: &Path, handler: &mut impl RequestHandler) {
+/// Returns the kinds it actually ran, in the order it ran them, which is how the daemon knows
+/// whether a patch cycle is mid-flight — see `main::run_daemon`, where anything but a
+/// [`RequestKind::CheckIn`] defers this invocation's self-update. A request that was discarded as
+/// stale is not in it: nobody was waiting on that one, which is the whole reason it was discarded.
+pub fn process_queue(queue_dir: &Path, handler: &mut impl RequestHandler) -> Vec<RequestKind> {
+    let mut served = Vec::new();
     let Ok(entries) = fs::read_dir(queue_dir) else {
-        return;
+        return served;
     };
 
     let mut requests: Vec<PathBuf> = entries
@@ -470,6 +475,7 @@ pub fn process_queue(queue_dir: &Path, handler: &mut impl RequestHandler) {
         // authorizes can last hours.
         let auth = (kind == RequestKind::OsUpdate).then(|| take_auth(&request_path)).flatten();
         let result = run_request(kind, body.trim(), auth, handler);
+        served.push(kind);
 
         crate::logging::info(&format!(
             "{kind:?} request finished: success={} {}",
@@ -489,6 +495,7 @@ pub fn process_queue(queue_dir: &Path, handler: &mut impl RequestHandler) {
     }
 
     sweep_orphans(queue_dir, now, boot);
+    served
 }
 
 /// Deletes what the ordinary paths could not.
@@ -667,6 +674,57 @@ mod tests {
         process_queue(&dir, &mut handler);
 
         assert!(!read_result(&request).success);
+        assert!(handler.patched.is_empty());
+    }
+
+    /// What `main::run_daemon` keys the self-update deferral on. A cycle that has just had a
+    /// request served is a cycle still running, and applying an agent update restarts the per-user
+    /// job out from under it — which cost a real host its password prompt one second after the
+    /// prompt appeared.
+    #[test]
+    fn process_queue_reports_the_kinds_it_served_in_order() {
+        let dir = scratch_dir("served");
+        write_request(&dir, RequestKind::AppPatch, "Ollama", None).unwrap();
+        write_request(&dir, RequestKind::OsDownload, "", None).unwrap();
+        let mut handler = RecordingHandler::default();
+
+        let served = process_queue(&dir, &mut handler);
+
+        assert_eq!(served, vec![RequestKind::AppPatch, RequestKind::OsDownload]);
+        assert!(
+            served.iter().any(|kind| *kind != RequestKind::CheckIn),
+            "so the daemon defers its own update this pass"
+        );
+    }
+
+    /// A check-in on its own is not a cycle: it is what the daemon does anyway, on a schedule, with
+    /// nobody waiting on a dialog. Deferring the agent's own update for one of those would mean
+    /// never applying it at all, since every invocation serves one.
+    #[test]
+    fn process_queue_reporting_only_a_check_in_leaves_the_self_update_free_to_run() {
+        let dir = scratch_dir("served-check-in");
+        write_request(&dir, RequestKind::CheckIn, "", None).unwrap();
+        let mut handler = RecordingHandler::default();
+
+        let served = process_queue(&dir, &mut handler);
+
+        assert_eq!(served, vec![RequestKind::CheckIn]);
+        assert!(!served.iter().any(|kind| *kind != RequestKind::CheckIn));
+    }
+
+    /// A request discarded as stale had nobody waiting on it, which is the whole reason it was
+    /// discarded — so it must not hold off the agent's own update as a live cycle would.
+    #[test]
+    fn process_queue_does_not_report_a_request_it_discarded_as_stale() {
+        let dir = scratch_dir("served-stale");
+        let request = write_request(&dir, RequestKind::AppPatch, "Ollama", None).unwrap();
+        let stale = dir.join(format!("1-1-0.{}", RequestKind::AppPatch.extension()));
+        std::fs::rename(&request, &stale).unwrap();
+        let mut handler = RecordingHandler::default();
+
+        let served = process_queue(&dir, &mut handler);
+
+        assert!(served.is_empty(), "served {served:?}");
         assert!(handler.patched.is_empty());
     }
 
