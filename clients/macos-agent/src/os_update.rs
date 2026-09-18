@@ -1,9 +1,10 @@
 use std::fmt;
 use std::io::Write;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 
@@ -13,6 +14,15 @@ use crate::config::Config;
 pub struct OsUpdateStatus {
     pub available: bool,
     pub latest_version: Option<String>,
+    /// Every label the listing offered, macOS and otherwise, in the order it printed them.
+    ///
+    /// Carried on the same `softwareupdate -l` that answered the other two rather than fetched by a
+    /// second run of it: `patch_cycle` needs the labels to ask whether the pre-fetch has staged
+    /// them (see [`StagedDownloads::covers_the_macos_updates`]), and a second scan is both slower
+    /// and one more thing that can blip — a listing that momentarily comes back empty would have
+    /// the cycle decline to prompt for an update that is sitting ready on disk. The 19:46 run in
+    /// this host's log is exactly that blip, on the download side.
+    pub labels: Vec<String>,
 }
 
 /// A volume owner's credentials, which is what `softwareupdate -i` demands on Apple silicon before
@@ -93,7 +103,7 @@ fn parse_check_output(combined: &str) -> OsUpdateStatus {
 
     let available = combined.contains("Software Update found") || combined.contains("* Label:");
     let latest_version = if available { parse_latest_version(combined) } else { None };
-    OsUpdateStatus { available, latest_version }
+    OsUpdateStatus { available, latest_version, labels: parse_labels(combined) }
 }
 
 /// The version this host's pending **macOS** update would bring it to, out of a `softwareupdate -l`
@@ -360,22 +370,30 @@ fn condense_progress(text: &str) -> String {
 /// The download is still the hour-plus, and still runs with nobody being asked for anything.
 /// Re-running it once the assets are present is close to free — the eight seconds above — so a
 /// cycle whose password prompt went unanswered brings the next one's prompt up almost at once.
-pub fn download() -> Result<()> {
+pub fn download() -> Result<Vec<String>> {
     let labels = list_labels()?;
     if labels.is_empty() {
         crate::logging::info("softwareupdate -l lists nothing to download");
-        return Ok(());
+        return Ok(Vec::new());
     }
+
+    let mut staged = Vec::new();
 
     // Collected rather than returned at the first one: a Safari label that will not download is no
     // reason to leave the macOS asset unfetched, and the caller is owed all of it in one message.
     let mut failures = Vec::new();
     for label in &labels {
         match download_one(label) {
-            Ok(DownloadOutcome::Downloaded) => crate::logging::info(&format!("downloaded '{label}'")),
-            Ok(DownloadOutcome::DownloadedUnprepared) => crate::logging::info(&format!(
-                "downloaded '{label}', but preparing it needs a volume owner — left to the authorized install"
-            )),
+            Ok(DownloadOutcome::Downloaded) => {
+                crate::logging::info(&format!("downloaded '{label}'"));
+                staged.push(label.clone());
+            }
+            Ok(DownloadOutcome::DownloadedUnprepared) => {
+                crate::logging::info(&format!(
+                    "downloaded '{label}', but preparing it needs a volume owner — left to the authorized install"
+                ));
+                staged.push(label.clone());
+            }
             Err(err) => {
                 crate::logging::error(&format!("could not download '{label}': {err:#}"));
                 failures.push((label.clone(), format!("{err:#}")));
@@ -399,7 +417,7 @@ pub fn download() -> Result<()> {
         );
     }
 
-    Ok(())
+    Ok(staged)
 }
 
 /// Whether a label names a macOS system update rather than one of the other things
@@ -499,7 +517,7 @@ fn classify_download(combined: &str) -> Option<DownloadOutcome> {
 /// rather than a field grown onto [`OsUpdateStatus`]: that type answers the admin UI's question
 /// ("is an OS update pending, and to what version"), and the daemon's download step asks a
 /// different one — *which* labels to fetch, macOS and Safari and firmware alike.
-fn list_labels() -> Result<Vec<String>> {
+pub fn list_labels() -> Result<Vec<String>> {
     let output = Command::new("softwareupdate").arg("-l").output().context("failed to run softwareupdate -l")?;
 
     let combined = format!(
@@ -531,6 +549,85 @@ fn parse_label_listing(combined: &str) -> Result<Vec<String>> {
         anyhow::bail!("softwareupdate -l listed no labels and did not say there were none: {}", combined.trim());
     }
     Ok(labels)
+}
+
+/// What the daemon's last pre-fetch left on disk, as the agent's own record of it.
+///
+/// **macOS will not answer this question.** `softwareupdate -l` lists an update until it is
+/// *installed*, staged or not — the run that proved it is in this host's log, where 26.7 appears as
+/// offered immediately after being downloaded — and `/var/db/softwareupdate/journal.plist` records
+/// only what has already installed. So there is no way to ask "are the bits here?", and the agent
+/// remembers instead.
+///
+/// It is a belief, not a fact, and the code treats it as one: being wrong costs an install that
+/// downloads what it thought was staged, which is exactly what used to happen every time, never
+/// something worse.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StagedDownloads {
+    /// The labels [`download`] reported staging, in the order it fetched them.
+    pub labels: Vec<String>,
+    /// When that finished, as a Unix epoch. Read by [`needs_prefetch`] only as a backstop — the
+    /// offered labels changing is the signal that actually matters.
+    pub staged_epoch: u64,
+}
+
+impl StagedDownloads {
+    /// Whether every **macOS** label currently offered is one this record says was staged.
+    ///
+    /// The macOS ones only: `patch_cycle` asks this to decide whether the authorization prompt can
+    /// go up, and a Safari label that has not been fetched costs that install a couple of minutes,
+    /// where an unfetched system update costs it the hour the whole ordering exists to move out
+    /// from behind the prompt.
+    pub fn covers_the_macos_updates(&self, offered: &[String]) -> bool {
+        offered
+            .iter()
+            .filter(|label| is_macos_label(label))
+            .all(|label| self.labels.iter().any(|staged| staged == label))
+    }
+}
+
+/// How long a [`StagedDownloads`] record is believed at all, however little has changed.
+///
+/// A backstop rather than the main control: what normally triggers a fresh pre-fetch is macOS
+/// offering a label the record does not mention. This bounds how long a record can be wrong in the
+/// other direction — assets macOS has since discarded — without anything noticing.
+const STAGED_RECORD_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Whether the daemon should spend the bandwidth to pre-fetch now.
+///
+/// **The cost of getting this wrong is measured in gigabytes**, which is why it is not simply "run
+/// it every check-in". This host is offered macOS 26.7 (2.9GB) and macOS 27 (11.7GB) at once; a
+/// pre-fetch on every hourly invocation would be 15GB an hour if macOS turns out to discard a
+/// staged system update when the next one is staged — which this host's timings hint at and nothing
+/// has yet proved either way. Re-fetching only when the *offered set* has changed costs one
+/// download per update regardless of which way that turns out.
+pub fn needs_prefetch(offered: &[String], staged: Option<&StagedDownloads>, now_epoch: u64) -> bool {
+    let Some(staged) = staged else {
+        return !offered.is_empty();
+    };
+
+    if offered.iter().any(|label| !staged.labels.iter().any(|known| known == label)) {
+        return true;
+    }
+    now_epoch.saturating_sub(staged.staged_epoch) > STAGED_RECORD_MAX_AGE_SECS
+}
+
+/// Reads the daemon's record of what it last staged. A missing or unreadable file is `None` — the
+/// caller then pre-fetches, which is the safe direction: the worst case is one download that macOS
+/// answers from its own cache in seconds.
+pub fn read_staged(path: &Path) -> Option<StagedDownloads> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+/// Records what the pre-fetch just staged, for `patch_cycle` to read before it puts up a password
+/// prompt. Best-effort: a record that cannot be written means the next cycle declines to prompt and
+/// the next check-in pre-fetches again, which is a wasted download rather than a wrong install.
+pub fn write_staged(path: &Path, staged: &StagedDownloads) {
+    let Ok(json) = serde_json::to_string(staged) else { return };
+    if let Err(err) = std::fs::write(path, json) {
+        crate::logging::warn(&format!("could not record what was staged: {err}"));
+    }
 }
 
 /// The pure text half of [`parse_label_listing`]. A listing line reads
@@ -807,6 +904,23 @@ mod tests {
     /// The regression this module's version parsing was changed for: Safari's 27.0 is the first
     /// `Version:` in the output, and reporting it made the admin UI show 27.0 as this host's
     /// pending macOS version while the update downloading was 26.7.
+    /// The labels ride on the same listing that answered `available` and `latest_version`, so that
+    /// `patch_cycle` can ask whether they are staged without a second `softwareupdate -l` — one
+    /// more scan being one more thing that can momentarily come back empty and have the cycle
+    /// decline to prompt for an update sitting ready on disk.
+    #[test]
+    fn parse_check_output_carries_the_labels_the_listing_offered() {
+        let status = parse_check_output(SAMPLE_LISTING);
+
+        assert_eq!(status.labels, vec!["Safari27.0TahoeAuto-27.0", "macOS Tahoe 26.7-25G229", "macOS 27-26A428"]);
+        assert_eq!(status.latest_version.as_deref(), Some("27"));
+    }
+
+    #[test]
+    fn parse_check_output_carries_no_labels_when_nothing_is_offered() {
+        assert!(parse_check_output("Software Update Tool\n\nNo new software available.\n").labels.is_empty());
+    }
+
     #[test]
     fn parse_latest_version_ignores_a_non_macos_label_listed_first() {
         let status = parse_check_output(REAL_LISTING);
@@ -1075,6 +1189,88 @@ mod tests {
     #[test]
     fn classify_download_rejects_a_download_that_failed_some_other_way() {
         assert_eq!(classify_download("Downloading Safari\nThe operation couldn\u{2019}t be completed. (NSURLErrorDomain error -1009.)"), None);
+    }
+
+    fn staged(labels: &[&str], epoch: u64) -> StagedDownloads {
+        StagedDownloads { labels: labels.iter().map(|label| label.to_string()).collect(), staged_epoch: epoch }
+    }
+
+    const OFFERED: [&str; 3] = ["Safari27.0TahoeAuto-27.0", "macOS Tahoe 26.7-25G229", "macOS 27-26A428"];
+
+    #[test]
+    fn needs_prefetch_with_no_record_at_all() {
+        let offered = OFFERED.map(String::from).to_vec();
+        assert!(needs_prefetch(&offered, None, 1_000));
+    }
+
+    /// Nothing offered is nothing to fetch, however absent the record is — a host with no pending
+    /// updates must not spend an invocation on `softwareupdate -d`.
+    #[test]
+    fn needs_prefetch_is_false_when_nothing_is_offered() {
+        assert!(!needs_prefetch(&[], None, 1_000));
+    }
+
+    #[test]
+    fn needs_prefetch_when_macos_starts_offering_something_new() {
+        let offered = OFFERED.map(String::from).to_vec();
+        let record = staged(&["Safari27.0TahoeAuto-27.0", "macOS Tahoe 26.7-25G229"], 1_000);
+        assert!(needs_prefetch(&offered, Some(&record), 1_100), "macOS 27 appeared since");
+    }
+
+    /// The case that costs gigabytes if it goes the wrong way: everything offered is already
+    /// staged, so a check-in an hour later must not re-fetch 15GB on the chance macOS discarded it.
+    #[test]
+    fn needs_prefetch_is_false_when_the_record_already_covers_everything_offered() {
+        let offered = OFFERED.map(String::from).to_vec();
+        let record = staged(&OFFERED, 1_000);
+        assert!(!needs_prefetch(&offered, Some(&record), 1_000 + 60 * 60));
+    }
+
+    #[test]
+    fn needs_prefetch_once_the_record_is_older_than_the_backstop() {
+        let offered = OFFERED.map(String::from).to_vec();
+        let record = staged(&OFFERED, 1_000);
+        assert!(needs_prefetch(&offered, Some(&record), 1_000 + STAGED_RECORD_MAX_AGE_SECS + 1));
+    }
+
+    /// What `patch_cycle` asks before it puts a password prompt on screen.
+    #[test]
+    fn covers_the_macos_updates_wants_every_system_update_staged() {
+        let offered = OFFERED.map(String::from).to_vec();
+        assert!(staged(&OFFERED, 0).covers_the_macos_updates(&offered));
+        assert!(
+            !staged(&["Safari27.0TahoeAuto-27.0", "macOS Tahoe 26.7-25G229"], 0).covers_the_macos_updates(&offered),
+            "macOS 27 is offered and not staged, and -i -a would install it"
+        );
+    }
+
+    /// Safari is not a system update: an unfetched one costs the install a couple of minutes, where
+    /// an unfetched macOS update costs it the hour this whole ordering exists to move out from
+    /// behind the prompt. So it must not hold the prompt back.
+    #[test]
+    fn covers_the_macos_updates_ignores_a_label_that_is_not_macos() {
+        let offered = OFFERED.map(String::from).to_vec();
+        assert!(staged(&["macOS Tahoe 26.7-25G229", "macOS 27-26A428"], 0).covers_the_macos_updates(&offered));
+    }
+
+    #[test]
+    fn staged_downloads_round_trip_through_the_file_the_daemon_writes() {
+        let dir = std::env::temp_dir().join(format!("kintsugi-staged-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("os-download-state.json");
+        let record = staged(&OFFERED, 1_759_000_000);
+
+        write_staged(&path, &record);
+
+        assert_eq!(read_staged(&path), Some(record));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A missing record reads as "nothing staged" rather than failing, because the caller's safe
+    /// direction is to pre-fetch (one cheap download) or to decline to prompt (one skipped cycle).
+    #[test]
+    fn read_staged_answers_none_for_a_file_that_is_not_there() {
+        assert_eq!(read_staged(Path::new("/nonexistent/kintsugi/os-download-state.json")), None);
     }
 
     #[test]

@@ -315,8 +315,9 @@ fn register_and_report(config: &Config, checkin_minute: u8) -> Result<CheckInOut
     // ```
     //
     // Serving anything but a `CheckIn` means the per-user process is in the middle of something and
-    // waiting on us: an `AppPatch` has more applications behind it, an `OsDownload` is followed by
-    // the authorization prompt, and an `OsUpdate` reboots the Mac from inside the call anyway. The
+    // waiting on us: an `AppPatch` has more applications behind it, an `OsUpdate` reboots the Mac
+    // from inside the call anyway, and an `OsDownload` — which only an agent older than 0.14.3 now
+    // sends — is followed by the authorization prompt. The
     // update is not lost — this daemon is re-invoked hourly, and the next check-in with a quiet
     // queue applies it.
     if let Some(kind) = served.iter().find(|kind| **kind != queue::RequestKind::CheckIn) {
@@ -327,9 +328,76 @@ fn register_and_report(config: &Config, checkin_minute: u8) -> Result<CheckInOut
         self_update::check_and_apply(&client, config, agent_identity.as_ref(), env!("CARGO_PKG_VERSION"));
     }
 
+    prefetch_os_updates();
+
     Ok(CheckInOutcome::Completed {
         suggested_check_in_minute: host_response.suggested_check_in_minute,
     })
+}
+
+/// Fetches the bits of any pending macOS update, so that the patch cycle — when it eventually runs
+/// — has nothing left to do but ask for a password and install.
+///
+/// **This is the download, moved out of the patch cycle.** It used to be step one of
+/// `patch_cycle::run_os_update`, submitted as a queue request the per-user process then blocked on.
+/// That blocked the wrong thing: `MenuState::refresh_actions` disables "Check In Now" and "Patch
+/// Now" for as long as a cycle is running, so a fetch of this host's 15GB of pending updates left
+/// the menu bar dead for hours with "Downloading the macOS update" behind it and no way to so much
+/// as check in. Nothing about the fetch needs a user — it is root-only work requiring no
+/// authorization to *start* — so it does not belong behind a dialog.
+///
+/// Three things keep it from becoming its own nuisance:
+///
+/// - **It runs last.** Registration, the inventory, the queue drain and the self-update have all
+///   finished by now, so an invocation that spends an hour here has already done everything a
+///   check-in is for.
+/// - **It stands aside for anybody waiting.** launchd will not run two copies of this job, so a
+///   request arriving mid-fetch waits for it. Skipping the fetch whenever the queue is non-empty
+///   means a person who clicked "Patch Now" is never behind an hour of downloading that could just
+///   as well happen on the next invocation.
+/// - **It does not re-fetch what it believes it already has.** See `os_update::needs_prefetch`: on
+///   this fleet's own Mac the pending set is 15GB, and running it every hour on the chance macOS
+///   discarded something would be 15GB an hour.
+fn prefetch_os_updates() {
+    let offered = match os_update::list_labels() {
+        Ok(offered) => offered,
+        // Not an error worth reporting: no listing means no pre-fetch, and the next invocation is
+        // an hour away. `check`'s own call answers the server's question about this host separately.
+        Err(err) => {
+            logging::warn(&format!("could not list the pending updates to pre-fetch: {err:#}"));
+            return;
+        }
+    };
+
+    let state_path = config::os_download_state_path();
+    let staged = os_update::read_staged(&state_path);
+    if !os_update::needs_prefetch(&offered, staged.as_ref(), now_epoch()) {
+        return;
+    }
+
+    if queue::has_pending_request(&config::queue_dir()) {
+        logging::info("not pre-fetching the macOS updates this invocation: somebody is waiting on a queued request");
+        return;
+    }
+
+    logging::info(&format!("pre-fetching {} pending update(s) so the install has nothing to download", offered.len()));
+    match os_update::download() {
+        Ok(labels) => {
+            os_update::write_staged(&state_path, &os_update::StagedDownloads { labels, staged_epoch: now_epoch() });
+            logging::info("pre-fetch finished; the patch cycle can now ask for authorization and install");
+        }
+        // Deliberately not reported to the server as a patch failure. Nobody asked for this and
+        // nobody is waiting on it; the update is still pending, the host still says so at its next
+        // check-in, and the Failed Updates screen is for work somebody requested.
+        Err(err) => logging::warn(&format!("could not pre-fetch the pending macOS updates: {err:#}")),
+    }
+}
+
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or_default()
 }
 
 /// The daemon's answers to the per-user process's requests — see `queue`. Holds what the requests
@@ -401,9 +469,18 @@ impl queue::RequestHandler for DaemonRequestHandler<'_> {
     }
 
     /// Answers a [`queue::RequestKind::OsDownload`]: fetch the bits, install nothing, reboot
-    /// nothing. Reported to the server on failure the same way an install is — a host that can
-    /// never finish downloading its OS update is exactly as stuck as one that cannot install it,
-    /// and before any of this existed both were invisible outside this Mac's own log.
+    /// nothing.
+    ///
+    /// **Nothing submits one any more** — the fetch is the daemon's own work now, see
+    /// [`prefetch_os_updates`]. This is kept, rather than the kind deleted, for the window a
+    /// self-update opens: the restart replaces both jobs, and a per-user process from before that
+    /// release can already have a request in the queue. A daemon that did not recognise it would
+    /// leave that process blocked for the full six-hour bound with a dialog on screen, where
+    /// answering it costs nothing. Delete both once no fleet runs an agent older than 0.14.3.
+    ///
+    /// Reported to the server on failure the same way an install is — a host that can never finish
+    /// downloading its OS update is exactly as stuck as one that cannot install it, and before any
+    /// of this existed both were invisible outside this Mac's own log.
     ///
     /// An asset that downloaded but could not be *prepared* is not such a host, and does not come
     /// through here as an error: `os_update::download` returns it as success, because the bits are

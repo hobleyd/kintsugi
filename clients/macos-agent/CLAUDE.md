@@ -74,11 +74,62 @@ treats the `--user` account as logged in and closes applications gracefully. Bot
 Mac will restart itself, and `install_password_message` says it immediately above the password box,
 because that is the last moment anyone can decline.
 
-**The download is its own queued step, and that ordering is what makes `-R` humane.**
-`RequestKind::OsDownload` fetches everything first with nobody being asked for anything. Only then
-does the per-user half prompt for the password, and the `RequestKind::OsUpdate` that follows finds
-the assets on disk and finishes in minutes — so the forced restart lands minutes after the person
-agreed to it.
+**The download happens before the prompt, and that ordering is what makes `-R` humane.** Everything
+is fetched first with nobody being asked for anything. Only then does the per-user half prompt for
+the password, and the `RequestKind::OsUpdate` that follows finds the assets on disk and finishes in
+minutes — so the forced restart lands minutes after the person agreed to it.
+
+**The fetch is the daemon's own work, not a step of the patch cycle** — `main::prefetch_os_updates`,
+run at the end of each check-in. It was `RequestKind::OsDownload`, submitted by the cycle and waited
+on, and that blocked the wrong thing: `MenuState::refresh_actions` disables "Check In Now" and
+"Patch Now" for as long as a cycle runs, so fetching this host's 15GB left the menu bar dead for
+**nine hours** showing "Downloading the macOS update", with no way to check in and no sign it was
+not simply hung. Nothing about the fetch needs a user, so it does not belong behind a dialog.
+
+Three things keep the pre-fetch from becoming its own nuisance, and each is load-bearing:
+
+- **It runs last**, after registration, the inventory, the queue drain and the self-update.
+- **It stands aside whenever the queue is non-empty** (`queue::has_pending_request`). launchd will
+  not run two copies of the check-in job, so a request arriving mid-fetch waits for it — and nobody
+  who just clicked "Patch Now" should be behind an hour of downloading.
+- **It does not re-fetch what it believes it already has** (`os_update::needs_prefetch`). The
+  trigger is macOS offering a label the record does not mention, with a seven-day backstop. Running
+  it every hour on the chance macOS discarded something would be 15GB an hour on this host.
+
+**macOS will not tell you what is staged, so the agent remembers** — `os_update::StagedDownloads`,
+written to `os-download-state.json` by root at 0644 and read by the per-user process.
+`softwareupdate -l` lists an update until it is *installed*, staged or not, and
+`/var/db/softwareupdate/journal.plist` records only what already installed. The record is a belief,
+not a fact: being wrong costs an install that downloads what it thought was staged, which is where
+this started rather than anywhere worse. `run_os_update` **declines to prompt at all** until the
+record covers every macOS label offered — prompting first and downloading afterwards is the thing
+this ordering exists to prevent. The labels it compares against ride on `OsUpdateStatus`, from the
+same `softwareupdate -l` the cycle already ran: a second scan would be one more thing that can
+momentarily come back empty, and an empty listing would have the cycle decline to prompt for an
+update sitting ready on disk. That blip is not hypothetical — it is what failed the 19:46 download
+in this host's log.
+
+`RequestKind::OsDownload` still exists and the daemon still answers it, though nothing submits one.
+It is the self-update window: the restart replaces both jobs, and a per-user process from before
+0.14.3 can already have a request queued. A daemon that did not recognise it would leave that
+process blocked for the full six-hour bound with a dialog on screen. Delete both once no fleet runs
+an agent older than 0.14.3.
+
+**An agent self-update is held back while a patch cycle is mid-flight.** Applying one restarts both
+launchd jobs, and the per-user one is the half running the cycle. On `htw-m5pro-hobleyd` that
+restart killed the password prompt one second after it appeared, having cost nine hours of
+downloading to earn it:
+
+```text
+19:29:26  OsDownload request finished: success=true
+19:29:26  self-update available: 0.14.1 -> 0.14.2
+19:29:27  asking david.hobley to authorize the macOS install
+19:29:28  restarting gui/501/au.com.sharpblue.kintsugiagent-ui to pick up the new binary
+```
+
+`queue::process_queue` returns the kinds it served, and serving anything but a `CheckIn` defers that
+invocation's self-update — a `CheckIn` alone is not a cycle, and deferring for one would mean never
+applying an agent update at all.
 
 **`softwareupdate -d` is not the authorization-free step this section used to claim.** On Apple
 silicon it downloads *and prepares*, and preparing wants the same volume owner installing does, so

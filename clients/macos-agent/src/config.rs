@@ -35,6 +35,15 @@ const QUEUE_DIR: &str = "/Library/Application Support/kintsugi-agent/queue";
 /// (`REMOTE_SHELL_LAUNCHD_LABEL`), is what keeps the two independent.
 const REMOTE_SHELL_QUEUE_DIR: &str = "/Library/Application Support/kintsugi-agent/remote-shell";
 
+/// What the daemon's last pre-fetch of the pending macOS updates left staged, and when.
+///
+/// Written by root and read by the per-user process — hence this directory rather than the
+/// `root:admin 0770` queue beside it, and hence 0644. There is no OS-level way to ask macOS which
+/// updates are staged (`softwareupdate -l` lists one until it is *installed*, and
+/// `/var/db/softwareupdate/journal.plist` records only what already installed), so the agent has to
+/// remember what it fetched. See `os_update::StagedDownloads`.
+const OS_DOWNLOAD_STATE_PATH: &str = "/Library/Application Support/kintsugi-agent/os-download-state.json";
+
 /// The root daemon's own durable action log — a guaranteed location regardless of how the
 /// process was invoked (launchd's `StandardOutPath` redirect on top of this is redundant but
 /// harmless). See `logging`.
@@ -251,6 +260,10 @@ pub fn identity_dir() -> PathBuf {
 
 pub fn daemon_log_path() -> PathBuf {
     PathBuf::from(DAEMON_LOG_PATH)
+}
+
+pub fn os_download_state_path() -> PathBuf {
+    PathBuf::from(OS_DOWNLOAD_STATE_PATH)
 }
 
 pub fn checkin_schedule_path() -> PathBuf {

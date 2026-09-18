@@ -418,6 +418,24 @@ fn boot_epoch() -> Option<u64> {
 /// Runs to completion for each request before moving on, deliberately: two installers at once
 /// would fight over `/Applications` and the per-user process asks for one application at a time
 /// anyway.
+/// Whether anybody has a request outstanding here.
+///
+/// Asked by the daemon's OS-update pre-fetch, which stands aside when the answer is yes: launchd
+/// will not run two copies of the check-in job, so a fetch that can take an hour would hold up a
+/// person who just clicked "Patch Now" for that hour. Counts requests only — a result file left
+/// behind is litter for `sweep_orphans`, not somebody waiting.
+pub fn has_pending_request(queue_dir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(queue_dir) else {
+        return false;
+    };
+    entries.filter_map(|entry| entry.ok()).any(|entry| {
+        entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| RequestKind::from_file_name(name).is_some())
+    })
+}
+
 /// Returns the kinds it actually ran, in the order it ran them, which is how the daemon knows
 /// whether a patch cycle is mid-flight — see `main::run_daemon`, where anything but a
 /// [`RequestKind::CheckIn`] defers this invocation's self-update. A request that was discarded as
@@ -681,6 +699,33 @@ mod tests {
     /// request served is a cycle still running, and applying an agent update restarts the per-user
     /// job out from under it — which cost a real host its password prompt one second after the
     /// prompt appeared.
+    /// What the daemon's OS-update pre-fetch stands aside for. A person who clicked "Patch Now"
+    /// must not wait an hour behind a download that could just as well happen next invocation.
+    #[test]
+    fn has_pending_request_sees_somebody_waiting() {
+        let dir = scratch_dir("pending-yes");
+        write_request(&dir, RequestKind::CheckIn, "", None).unwrap();
+
+        assert!(has_pending_request(&dir));
+    }
+
+    #[test]
+    fn has_pending_request_is_false_for_an_empty_queue() {
+        assert!(!has_pending_request(&scratch_dir("pending-no")));
+    }
+
+    /// A result nobody collected is litter for `sweep_orphans`, not somebody waiting — counting it
+    /// would stop this host ever pre-fetching again.
+    #[test]
+    fn has_pending_request_ignores_a_leftover_result_file() {
+        let dir = scratch_dir("pending-result");
+        let request = write_request(&dir, RequestKind::CheckIn, "", None).unwrap();
+        std::fs::write(result_path_for(&request), "{}").unwrap();
+        std::fs::remove_file(&request).unwrap();
+
+        assert!(!has_pending_request(&dir));
+    }
+
     #[test]
     fn process_queue_reports_the_kinds_it_served_in_order() {
         let dir = scratch_dir("served");

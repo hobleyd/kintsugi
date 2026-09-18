@@ -658,7 +658,8 @@ mod tests {
         assert!(message.contains("save your work"), "{message}");
     }
 
-    /// This prompt is only ever shown *after* `RequestKind::OsDownload` has completed, which is what
+    /// This prompt is only ever shown *after* the daemon's pre-fetch has staged the update (see
+    /// `main::prefetch_os_updates`, and `patch_cycle::os_update_is_staged` for the check), which is what
     /// makes "a few minutes later" true. It said the opposite when the download still followed the
     /// authorization, and a stale promise here is the difference between an expected restart and an
     /// ambush.

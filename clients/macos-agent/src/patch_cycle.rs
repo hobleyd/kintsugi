@@ -59,6 +59,9 @@ struct PendingWork {
     /// in both dialogs rather than only counted — see `dialogs::confirmation_message` — and sent to
     /// the server as the attempted version if the install fails.
     os_update_version: Option<String>,
+    /// The labels that same `softwareupdate -l` offered, carried so `run_os_update` can ask whether
+    /// the daemon's pre-fetch has staged them without running a second scan of its own.
+    os_update_labels: Vec<String>,
 }
 
 impl PendingWork {
@@ -85,7 +88,7 @@ impl PendingWork {
             .filter(|app| application_names.iter().any(|name| name.eq_ignore_ascii_case(&app.application_name)))
             .collect();
 
-        PendingWork { apps, os_update_available: false, os_update_version: None }
+        PendingWork { apps, os_update_available: false, os_update_version: None, os_update_labels: Vec::new() }
     }
 
     fn total(&self) -> usize {
@@ -110,7 +113,12 @@ fn plan(client: &reqwest::blocking::Client, config: &Config, serial_number: &str
         os_update::OsUpdateStatus::default()
     });
 
-    Ok(PendingWork { apps, os_update_available: os_update.available, os_update_version: os_update.latest_version })
+    Ok(PendingWork {
+        apps,
+        os_update_available: os_update.available,
+        os_update_version: os_update.latest_version,
+        os_update_labels: os_update.labels,
+    })
 }
 
 /// Runs one full due patch cycle: check what's actually pending, confirm (or delay) only if
@@ -446,7 +454,7 @@ fn run_patches(
     report: &StatusReporter,
     user_present: bool,
 ) -> (usize, usize) {
-    let PendingWork { apps, os_update_available, os_update_version } = work;
+    let PendingWork { apps, os_update_available, os_update_version, os_update_labels } = work;
     let total = apps.len() + usize::from(os_update_available);
     let mut completed = 0;
     let mut succeeded = 0;
@@ -506,7 +514,7 @@ fn run_patches(
 
     if os_update_available {
         let (os_succeeded, os_failed) =
-            run_os_update(os_update_version.as_deref(), user_present, completed, total, report);
+            run_os_update(os_update_version.as_deref(), &os_update_labels, user_present, completed, total, report);
         succeeded += os_succeeded;
         failed += os_failed;
     }
@@ -566,28 +574,30 @@ fn os_update_eligibility(user_present: bool) -> OsUpdateEligibility {
     }
 }
 
-/// Runs the macOS update as two queued steps, and returns `(succeeded, failed)` for the cycle's
-/// tally.
+/// Asks for authorization and installs, and returns `(succeeded, failed)` for the cycle's tally.
 ///
-/// **The order is the feature.** The download — the hour-plus — happens first, with nobody being
-/// asked for anything. Only then is the password collected, and the install that follows finds the
-/// assets already on disk and finishes in minutes. Since `os_update::install` passes `-R`, that puts
-/// the forced restart minutes after the person agreed to it instead of an hour and a half.
+/// **The download is not here any more.** It used to be step one: a `RequestKind::OsDownload`
+/// submitted to the daemon and waited on, so that the install that followed found the assets on
+/// disk and the forced restart landed minutes after the person agreed to it rather than an hour and
+/// a half. The ordering was right and still is — what was wrong was doing it *inside the cycle*.
+/// `MenuState::refresh_actions` disables "Check In Now" and "Patch Now" for as long as a cycle
+/// runs, so fetching this host's 15GB of pending updates left the menu bar dead for hours, showing
+/// "Downloading the macOS update", with no way to check in and no sign it was not simply hung. It
+/// is root-only work that needs no authorization to start and has no user waiting on it, so it now
+/// happens on the daemon's own check-in — `main::prefetch_os_updates`.
 ///
-/// The step is not *authorization*-free, which is how it was first written and described here.
-/// `softwareupdate -d` on Apple silicon downloads and then prepares, and preparing wants the same
-/// volume owner installing does — so the download step ends at a password prompt it cannot answer,
-/// having fetched everything it was asked for. `os_update::download` treats that as the success it
-/// is and leaves the preparation to step 3, which has the password.
+/// What arrives here instead is the consequence: **this step declines to run at all until the bits
+/// are staged.** Prompting first and downloading afterwards is the thing the split exists to
+/// prevent, so a cycle that finds nothing staged says so and leaves it for the pre-fetch, which the
+/// daemon runs hourly. The record it reads is the agent's own — macOS has no answer to "are the
+/// bits here?" (see `os_update::StagedDownloads`) — and being wrong about it costs an install that
+/// downloads, which is where this started rather than anywhere worse.
 ///
-/// Combining the two, which is how this started, meant the opposite: authorize, then wait out the
-/// download, then get rebooted long after the dialog was forgotten.
-///
-/// A prompt that goes unanswered after the download is not wasted work either — the assets stay
-/// staged, so the next cycle's download step returns in seconds and the prompt comes up almost at
-/// once.
+/// A prompt that goes unanswered is not wasted work either: the assets stay staged, so the next
+/// cycle comes straight back here.
 fn run_os_update(
     version: Option<&str>,
+    offered: &[String],
     user_present: bool,
     completed: usize,
     total: usize,
@@ -604,27 +614,18 @@ fn run_os_update(
         }
     };
 
-    // 1. Download. No credentials, no reboot, and nobody waiting on a dialog while it runs.
-    let current = "Downloading the macOS update — this may take a while".to_string();
-    dialogs::notify("Kintsugi Patching", &format!("{current}\n{}", dialogs::progress_bar(completed, total)));
-    report(AgentStatus::Patching { current, completed, total });
-
-    logging::info("asking the root daemon to download the pending macOS updates");
-    match queue::submit(&config::queue_dir(), RequestKind::OsDownload, "") {
-        Ok(result) if result.success => logging::info(&format!("macOS updates downloaded: {}", result.output.trim())),
-        // The daemon reports its own failures to the server — see `os_update::report_failed` and the
-        // same rule in `upgrade::report_patch_failure`.
-        Ok(result) => {
-            logging::error(&format!("macOS update download failed: {}", result.output.trim()));
-            return (0, 1);
-        }
-        Err(err) => {
-            logging::error(&format!("could not download the macOS updates: {err:#}"));
-            return (0, 1);
-        }
+    // 1. Are the bits here? Not counted as a failure — nothing was attempted, the daemon's
+    // pre-fetch is what fetches them, and a Failed Updates row every hour for a host that is simply
+    // still downloading would bury the failures somebody can act on.
+    if !os_update_is_staged(offered) {
+        logging::info(
+            "skipping the macOS install this cycle: the update has not been pre-fetched yet — \
+             the daemon fetches it on its own check-in, and the next cycle will find it staged",
+        );
+        return (0, 0);
     }
 
-    // 2. Authorize — now, with the bits already on disk, so the restart follows closely.
+    // 2. Authorize — with the bits already on disk, so the restart follows closely.
     let auth = match username {
         None => None,
         Some(username) => match dialogs::request_install_password(&username, version, PASSWORD_PROMPT_TIMEOUT.as_secs()) {
@@ -675,6 +676,17 @@ fn run_os_update(
             (0, 1)
         }
     }
+}
+
+/// Whether the daemon's pre-fetch has left every pending macOS update on disk.
+///
+/// Reads the daemon's own record rather than asking macOS, which has no answer — see
+/// `os_update::StagedDownloads`. Anything unreadable counts as "not staged": declining to prompt
+/// costs a cycle, and prompting wrongly costs the console user an hour between their password and
+/// the reboot it authorizes.
+fn os_update_is_staged(offered: &[String]) -> bool {
+    os_update::read_staged(&config::os_download_state_path())
+        .is_some_and(|staged| staged.covers_the_macos_updates(offered))
 }
 
 /// How long the authorization prompt stands before giving up.
@@ -733,7 +745,7 @@ mod tests {
 
     #[test]
     fn narrowing_keeps_only_the_named_applications_and_drops_the_os_update() {
-        let work = PendingWork { apps: vec![app("Firefox"), app("GIMP")], os_update_available: true, os_update_version: Some("26.7".to_string()) };
+        let work = PendingWork { apps: vec![app("Firefox"), app("GIMP")], os_update_available: true, os_update_version: Some("26.7".to_string()), os_update_labels: vec!["macOS Tahoe 26.7-25G229".to_string()] };
 
         let narrowed = work.narrowed_to(&["gimp".to_string()]);
 
@@ -744,7 +756,7 @@ mod tests {
 
     #[test]
     fn narrowing_to_something_this_host_cannot_patch_leaves_nothing_to_do() {
-        let work = PendingWork { apps: vec![app("Firefox")], os_update_available: true, os_update_version: Some("26.7".to_string()) };
+        let work = PendingWork { apps: vec![app("Firefox")], os_update_available: true, os_update_version: Some("26.7".to_string()), os_update_labels: vec!["macOS Tahoe 26.7-25G229".to_string()] };
 
         assert!(work.narrowed_to(&["LibreOffice".to_string()]).is_empty());
     }
