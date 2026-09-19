@@ -95,6 +95,14 @@ Three things keep the pre-fetch from becoming its own nuisance, and each is load
 - **It does not re-fetch what it believes it already has** (`os_update::needs_prefetch`). The
   trigger is macOS offering a label the record does not mention, with a seven-day backstop. Running
   it every hour on the chance macOS discarded something would be 15GB an hour on this host.
+- **A failed attempt is recorded too, and backed off.** This is the same runaway from the other
+  side: writing a record only on success left a failure with nothing behind it, and "nothing behind
+  it" reads exactly like "nothing staged" — so the next hourly invocation retried all 15GB, and the
+  one after that, for as long as the failure lasted. The record now carries `failed`,
+  `failure_count` and `attempted_epoch`, and a failed label is left alone for an hour, then two,
+  doubling to a day. The first retry is soon because the likeliest cause is momentary — the 19:46
+  failure on this host was a `softwareupdate -l` blip — and a host that gave up for good on one of
+  those would simply never update.
 
 **The pre-fetch draws a progress bar in the menu bar, and does not grey it.** The download happens
 in the *root* process and the menu bar lives in the per-user one, so the daemon publishes

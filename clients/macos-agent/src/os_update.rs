@@ -370,11 +370,11 @@ fn condense_progress(text: &str) -> String {
 /// The download is still the hour-plus, and still runs with nobody being asked for anything.
 /// Re-running it once the assets are present is close to free — the eight seconds above — so a
 /// cycle whose password prompt went unanswered brings the next one's prompt up almost at once.
-pub fn download(on_progress: &(dyn Fn(DownloadProgress) + Sync)) -> Result<Vec<String>> {
+pub fn download(on_progress: &(dyn Fn(DownloadProgress) + Sync)) -> Result<PrefetchOutcome> {
     let labels = list_labels()?;
     if labels.is_empty() {
         crate::logging::info("softwareupdate -l lists nothing to download");
-        return Ok(Vec::new());
+        return Ok(PrefetchOutcome::default());
     }
 
     let mut staged = Vec::new();
@@ -410,23 +410,29 @@ pub fn download(on_progress: &(dyn Fn(DownloadProgress) + Sync)) -> Result<Vec<S
         }
     }
 
-    // Only a *macOS* label's failure stops the cycle, and the asymmetry is the point. This step
-    // exists so the console user's password is collected over assets already on disk; a Safari
-    // label that would not download costs the install a few minutes fetching 250MB, while a macOS
-    // label that would not download costs it the 11.7GB the whole ordering exists to move out from
-    // behind the prompt. The rest is logged and reported to nobody, having already been logged
-    // above.
-    let blocking = failures.iter().filter(|(label, _)| is_macos_label(label)).collect::<Vec<_>>();
-    if !blocking.is_empty() {
-        anyhow::bail!(
-            "softwareupdate could not download {} of the {} pending update(s): {}",
-            blocking.len(),
-            labels.len(),
-            blocking.iter().map(|(label, err)| format!("{label}: {err}")).collect::<Vec<_>>().join("; ")
-        );
-    }
+    // Both halves come back, and the caller writes both down. Returning an `Err` here — which is
+    // what this did — threw away the record of everything that *had* been fetched, so the next
+    // invocation saw no record, could not tell that from nothing-staged, and re-fetched the lot. An
+    // hourly job doing that with 15GB is the failure this shape exists to prevent.
+    //
+    // Only a *macOS* label's failure is worth the caller's attention, and the asymmetry is the
+    // point: a Safari label that would not download costs the install a few minutes fetching
+    // 250MB, while a macOS label that would not download costs it the 11.7GB the whole ordering
+    // exists to move out from behind the password prompt.
+    Ok(PrefetchOutcome {
+        staged,
+        failed: failures.into_iter().map(|(label, _)| label).filter(|label| is_macos_label(label)).collect(),
+    })
+}
 
-    Ok(staged)
+/// What one pre-fetch managed, both halves of it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrefetchOutcome {
+    /// Labels now believed to be on disk.
+    pub staged: Vec<String>,
+    /// **macOS** labels this attempt could not fetch — the ones that will hold the authorization
+    /// prompt back, and the ones [`needs_prefetch`] backs off on.
+    pub failed: Vec<String>,
 }
 
 /// Whether a label names a macOS system update rather than one of the other things
@@ -726,6 +732,23 @@ pub struct StagedDownloads {
     /// When that finished, as a Unix epoch. Read by [`needs_prefetch`] only as a backstop — the
     /// offered labels changing is the signal that actually matters.
     pub staged_epoch: u64,
+    /// The labels that attempt could *not* fetch.
+    ///
+    /// Recorded rather than thrown away, and this is what stops a failing pre-fetch running away
+    /// with the network. A failed attempt used to write no record at all, and "no record" is
+    /// indistinguishable from "nothing staged" — so the next hourly invocation retried the whole
+    /// set, and the one after that, for as long as the failure lasted. On this fleet's own Mac
+    /// that is 15GB an attempt, on a host whose only symptom is a log line.
+    #[serde(default)]
+    pub failed: Vec<String>,
+    /// How many attempts in a row have failed, which sets how long before the next one — see
+    /// [`retry_delay_secs`]. Zeroed by an attempt that fetched everything.
+    #[serde(default)]
+    pub failure_count: u32,
+    /// When the last attempt finished, successful or not. Distinct from `staged_epoch`, which does
+    /// not move when nothing new was staged.
+    #[serde(default)]
+    pub attempted_epoch: u64,
 }
 
 impl StagedDownloads {
@@ -763,10 +786,38 @@ pub fn needs_prefetch(offered: &[String], staged: Option<&StagedDownloads>, now_
         return !offered.is_empty();
     };
 
-    if offered.iter().any(|label| !staged.labels.iter().any(|known| known == label)) {
+    let known = |label: &String| staged.labels.contains(label) || staged.failed.contains(label);
+    // Something macOS has started offering since the last attempt. Always worth fetching: it is new
+    // work rather than work that went wrong, so no backoff applies to it.
+    if offered.iter().any(|label| !known(label)) {
         return true;
     }
+
+    // Something the last attempt could not fetch. Worth another go — the 19:46 failure on this
+    // fleet's Mac was a momentary `softwareupdate -l` blip, and a host that gave up for good on one
+    // of those would simply never update — but not every hour, because the attempt costs gigabytes
+    // and a failure that is *not* momentary would otherwise repeat for as long as it lasted.
+    if offered.iter().any(|label| staged.failed.contains(label)) {
+        return now_epoch.saturating_sub(staged.attempted_epoch) >= retry_delay_secs(staged.failure_count);
+    }
+
     now_epoch.saturating_sub(staged.staged_epoch) > STAGED_RECORD_MAX_AGE_SECS
+}
+
+/// How long to leave a failing pre-fetch alone, doubling per consecutive failure from an hour up to
+/// a day.
+///
+/// The first retry is soon because the likeliest cause is momentary — a laptop that just woke, a
+/// listing that came back empty — and those clear by themselves. The ceiling is what bounds a
+/// failure that does not clear: without it, an hourly invocation re-fetching 15GB is 360GB a day on
+/// a host whose only symptom is a log line nobody is reading.
+pub fn retry_delay_secs_for(failure_count: u32) -> u64 {
+    retry_delay_secs(failure_count)
+}
+
+fn retry_delay_secs(failure_count: u32) -> u64 {
+    const HOUR: u64 = 60 * 60;
+    HOUR.saturating_mul(1 << failure_count.saturating_sub(1).min(5)).min(24 * HOUR)
 }
 
 /// Reads the daemon's record of what it last staged. A missing or unreadable file is `None` — the
@@ -1461,7 +1512,21 @@ mod tests {
     }
 
     fn staged(labels: &[&str], epoch: u64) -> StagedDownloads {
-        StagedDownloads { labels: labels.iter().map(|label| label.to_string()).collect(), staged_epoch: epoch }
+        StagedDownloads {
+            labels: labels.iter().map(|label| label.to_string()).collect(),
+            staged_epoch: epoch,
+            ..Default::default()
+        }
+    }
+
+    fn staged_with_failure(labels: &[&str], failed: &[&str], failure_count: u32, attempted_epoch: u64) -> StagedDownloads {
+        StagedDownloads {
+            labels: labels.iter().map(|label| label.to_string()).collect(),
+            staged_epoch: attempted_epoch,
+            failed: failed.iter().map(|label| label.to_string()).collect(),
+            failure_count,
+            attempted_epoch,
+        }
     }
 
     const OFFERED: [&str; 3] = ["Safari27.0TahoeAuto-27.0", "macOS Tahoe 26.7-25G229", "macOS 27-26A428"];
@@ -1500,6 +1565,58 @@ mod tests {
         let offered = OFFERED.map(String::from).to_vec();
         let record = staged(&OFFERED, 1_000);
         assert!(needs_prefetch(&offered, Some(&record), 1_000 + STAGED_RECORD_MAX_AGE_SECS + 1));
+    }
+
+    /// The runaway this backoff exists to stop: a failed attempt used to write no record, "no
+    /// record" reads the same as "nothing staged", and the next hourly invocation re-fetched all
+    /// 15GB — for as long as the failure lasted.
+    #[test]
+    fn needs_prefetch_holds_off_a_label_that_just_failed() {
+        let offered = OFFERED.map(String::from).to_vec();
+        let record = staged_with_failure(
+            &["Safari27.0TahoeAuto-27.0", "macOS Tahoe 26.7-25G229"],
+            &["macOS 27-26A428"],
+            1,
+            1_000,
+        );
+
+        assert!(!needs_prefetch(&offered, Some(&record), 1_000 + 60 * 60 - 1), "an hour has not passed");
+        assert!(needs_prefetch(&offered, Some(&record), 1_000 + 60 * 60), "and now it has");
+    }
+
+    /// A failure that does not clear must not retry at the same rate forever. Four consecutive ones
+    /// put the next attempt eight hours out rather than one.
+    #[test]
+    fn needs_prefetch_backs_further_off_the_longer_a_failure_lasts() {
+        let offered = OFFERED.map(String::from).to_vec();
+        let record = staged_with_failure(
+            &["Safari27.0TahoeAuto-27.0", "macOS Tahoe 26.7-25G229"],
+            &["macOS 27-26A428"],
+            4,
+            1_000,
+        );
+
+        assert!(!needs_prefetch(&offered, Some(&record), 1_000 + 8 * 60 * 60 - 1));
+        assert!(needs_prefetch(&offered, Some(&record), 1_000 + 8 * 60 * 60));
+    }
+
+    #[test]
+    fn retry_delay_doubles_per_failure_up_to_a_day() {
+        assert_eq!(retry_delay_secs(1), 60 * 60);
+        assert_eq!(retry_delay_secs(2), 2 * 60 * 60);
+        assert_eq!(retry_delay_secs(4), 8 * 60 * 60);
+        assert_eq!(retry_delay_secs(9), 24 * 60 * 60, "and never longer than a day");
+        assert_eq!(retry_delay_secs(0), 60 * 60, "a count of zero is still one attempt's worth");
+    }
+
+    /// New work is not failed work: a label macOS has only just started offering is fetched at
+    /// once, whatever happened to a different label last time.
+    #[test]
+    fn needs_prefetch_does_not_hold_off_a_label_it_has_never_tried() {
+        let offered = OFFERED.map(String::from).to_vec();
+        let record = staged_with_failure(&["Safari27.0TahoeAuto-27.0"], &["macOS Tahoe 26.7-25G229"], 3, 1_000);
+
+        assert!(needs_prefetch(&offered, Some(&record), 1_001), "macOS 27 has never been attempted");
     }
 
     /// What `patch_cycle` asks before it puts a password prompt on screen.

@@ -390,13 +390,43 @@ fn prefetch_os_updates() {
     let outcome = os_update::download(&publish);
     os_update::clear_progress(&progress_path);
     match outcome {
-        Ok(labels) => {
-            os_update::write_staged(&state_path, &os_update::StagedDownloads { labels, staged_epoch: now_epoch() });
-            logging::info("pre-fetch finished; the patch cycle can now ask for authorization and install");
+        Ok(result) => {
+            let now = now_epoch();
+            // A record is written whichever way it went, and the failures go in it. Writing one
+            // only on success meant a failed attempt left nothing behind — and nothing behind is
+            // indistinguishable from nothing staged, so the next hourly invocation re-fetched all
+            // 15GB, and the one after that, for as long as the failure lasted. See
+            // `os_update::needs_prefetch`, which is what then holds the retries apart.
+            let failure_count = if result.failed.is_empty() {
+                0
+            } else {
+                staged.as_ref().map_or(0, |staged| staged.failure_count).saturating_add(1)
+            };
+            let complete = result.failed.is_empty();
+            os_update::write_staged(
+                &state_path,
+                &os_update::StagedDownloads {
+                    labels: result.staged,
+                    staged_epoch: now,
+                    failed: result.failed,
+                    failure_count,
+                    attempted_epoch: now,
+                },
+            );
+
+            if complete {
+                logging::info("pre-fetch finished; the patch cycle can now ask for authorization and install");
+            } else {
+                // Logged, not reported to the server as a patch failure: nobody asked for this and
+                // nobody is waiting on it. The update is still pending and the host still says so at
+                // its next check-in, which is how this stays visible without the Failed Updates
+                // screen filling up with work nobody requested.
+                logging::warn(&format!(
+                    "pre-fetch did not finish; retrying no sooner than {}s from now (failure {failure_count})",
+                    os_update::retry_delay_secs_for(failure_count)
+                ));
+            }
         }
-        // Deliberately not reported to the server as a patch failure. Nobody asked for this and
-        // nobody is waiting on it; the update is still pending, the host still says so at its next
-        // check-in, and the Failed Updates screen is for work somebody requested.
         Err(err) => logging::warn(&format!("could not pre-fetch the pending macOS updates: {err:#}")),
     }
 }
