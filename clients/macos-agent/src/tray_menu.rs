@@ -145,6 +145,14 @@ pub fn report_status(status: AgentStatus) {
                     });
                     state.patching = true;
                 }
+                // Note what is missing: `state.patching = true`. The daemon fetching an update in
+                // the background is not a reason to stop somebody checking in — see
+                // `AgentStatus::PreFetching`.
+                AgentStatus::PreFetching { current, percent } => {
+                    state.status_item.set_text(format!("Downloading: {current}"));
+                    state.progress_item
+                        .set_text(format!("Progress: {}", crate::dialogs::progress_bar(usize::from(*percent), 100)));
+                }
             }
             state.refresh_actions();
         });
@@ -153,7 +161,14 @@ pub fn report_status(status: AgentStatus) {
         // for it — opened the moment there's something to show, closed again once idle.
         let Some(mtm) = MainThreadMarker::new() else { return };
         match &status {
-            AgentStatus::Idle { .. } | AgentStatus::AwaitingAnswer => crate::progress_window::hide(),
+            // `PreFetching` keeps the window closed on purpose. The window exists to hold somebody's
+            // attention through a patch run they agreed to; a background download they never asked
+            // about has no claim on the screen, and one that floated up for an hour would be a
+            // worse nuisance than the greyed menu this replaced. The menu bar line is where it
+            // belongs, for whoever goes looking.
+            AgentStatus::Idle { .. } | AgentStatus::AwaitingAnswer | AgentStatus::PreFetching { .. } => {
+                crate::progress_window::hide()
+            }
             AgentStatus::Patching { current, completed, total } => {
                 crate::progress_window::show_and_update(mtm, current, *completed, *total)
             }

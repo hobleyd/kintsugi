@@ -44,6 +44,11 @@ const REMOTE_SHELL_QUEUE_DIR: &str = "/Library/Application Support/kintsugi-agen
 /// remember what it fetched. See `os_update::StagedDownloads`.
 const OS_DOWNLOAD_STATE_PATH: &str = "/Library/Application Support/kintsugi-agent/os-download-state.json";
 
+/// Where the daemon publishes how far its OS-update pre-fetch has got, for the per-user process to
+/// draw the menu bar's progress bar from. Root writes, the user reads, so 0644 like the state file
+/// beside it — see `os_update::DownloadProgress`.
+const OS_DOWNLOAD_PROGRESS_PATH: &str = "/Library/Application Support/kintsugi-agent/os-download-progress.json";
+
 /// The root daemon's own durable action log — a guaranteed location regardless of how the
 /// process was invoked (launchd's `StandardOutPath` redirect on top of this is redundant but
 /// harmless). See `logging`.
@@ -264,6 +269,10 @@ pub fn daemon_log_path() -> PathBuf {
 
 pub fn os_download_state_path() -> PathBuf {
     PathBuf::from(OS_DOWNLOAD_STATE_PATH)
+}
+
+pub fn os_download_progress_path() -> PathBuf {
+    PathBuf::from(OS_DOWNLOAD_PROGRESS_PATH)
 }
 
 pub fn checkin_schedule_path() -> PathBuf {

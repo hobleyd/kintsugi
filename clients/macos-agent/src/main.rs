@@ -381,7 +381,15 @@ fn prefetch_os_updates() {
     }
 
     logging::info(&format!("pre-fetching {} pending update(s) so the install has nothing to download", offered.len()));
-    match os_update::download() {
+    // Published for the menu bar, which is in the other process — see `os_update::DownloadProgress`
+    // and the tick in `run_scheduler` that reads it. Cleared below whichever way this ends, so a
+    // finished download does not leave a bar on screen; the reader's staleness check covers a
+    // daemon that is killed before it gets there.
+    let progress_path = config::os_download_progress_path();
+    let publish = |progress| os_update::write_progress(&progress_path, &progress);
+    let outcome = os_update::download(&publish);
+    os_update::clear_progress(&progress_path);
+    match outcome {
         Ok(labels) => {
             os_update::write_staged(&state_path, &os_update::StagedDownloads { labels, staged_epoch: now_epoch() });
             logging::info("pre-fetch finished; the patch cycle can now ask for authorization and install");
@@ -488,7 +496,9 @@ impl queue::RequestHandler for DaemonRequestHandler<'_> {
     /// Updates row every cycle for exactly that, on this machine, while the download itself had
     /// been finishing in eight seconds.
     fn download_os_updates(&mut self) -> Result<String> {
-        if let Err(err) = os_update::download() {
+        // The pre-fetch's own progress file is not touched here: this path only exists for an agent
+        // older than 0.14.3 still submitting the request, and two writers would fight over it.
+        if let Err(err) = os_update::download(&|_progress| {}) {
             let attempted_version = os_update::check().ok().and_then(|status| status.latest_version);
             os_update::report_failed(self.client, self.config, self.serial_number, attempted_version.as_deref(), &err);
             return Err(err);
@@ -735,6 +745,9 @@ fn run_scheduler(
     let checkin_schedule_path = config::checkin_schedule_path();
     let mut shown_check_in: Option<CheckInStatus> = None;
 
+    let os_download_progress_path = config::os_download_progress_path();
+    let mut shown_prefetch: Option<AgentStatus> = None;
+
     loop {
         // Takes the schedule state back from a cycle that has finished, and says so. Reporting
         // here rather than trusting the cycle to is what covers its early returns — an
@@ -781,6 +794,33 @@ fn run_scheduler(
         if shown_check_in != Some(next_check_in) {
             tray_menu::report_check_in(next_check_in);
             shown_check_in = Some(next_check_in);
+        }
+
+        // The daemon's background pre-fetch, surfaced in the menu bar. It runs in the *other*
+        // process, so a file is the only way this one hears about it at all — and without this the
+        // menu would say "next patch due" while 15GB came down behind it, which is how a user ends
+        // up asking whether the thing is working.
+        //
+        // Only while this process has nothing of its own to report: a running cycle owns the status
+        // line, and the daemon's pre-fetch stands aside for queued requests anyway, so the two
+        // should not overlap for long. `report_prefetch` keeps the last value it pushed so an
+        // unchanged percentage does not redraw the menu on every tick.
+        if in_flight.is_none() {
+            let progress = os_update::read_progress(&os_download_progress_path, schedule::now_epoch());
+            let reported = progress.as_ref().map(|progress| AgentStatus::PreFetching {
+                current: progress.describe(),
+                percent: progress.overall_percent(),
+            });
+            if reported != shown_prefetch {
+                // Coming *out* of a pre-fetch hands the line back to the idle state rather than
+                // leaving the last percentage sitting there.
+                match (&reported, state.as_ref()) {
+                    (Some(status), _) => report(status.clone()),
+                    (None, Some(current)) => report(AgentStatus::Idle { next_due_epoch: current.next_due_epoch() }),
+                    (None, None) => {}
+                }
+                shown_prefetch = reported;
+            }
         }
 
         // Waits on the channel rather than sleeping and polling it once per iteration — a click

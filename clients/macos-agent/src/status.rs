@@ -3,7 +3,10 @@
 /// menu text by `tray_menu`, which is the only module that knows about `tray-icon`/`winit`.
 /// Structured (rather than a pre-formatted string) so the menu can render its own compact
 /// progress line, independent of whatever a notification banner's text happens to look like.
-#[derive(Debug, Clone)]
+/// `PartialEq` so the scheduler can tell whether the pre-fetch line it is about to push differs
+/// from the one already on screen — redrawing an unchanged menu on every tick is churn the user
+/// sees as a flicker.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentStatus {
     Idle {
         next_due_epoch: u64,
@@ -20,6 +23,22 @@ pub enum AgentStatus {
         current: String,
         completed: usize,
         total: usize,
+    },
+    /// The root daemon is fetching a pending macOS update in the background — see
+    /// `main::prefetch_os_updates`. Reported by the scheduler tick from the progress record the
+    /// daemon writes (`os_update::DownloadProgress`), because the download happens in the *other*
+    /// process and the menu bar cannot see it otherwise.
+    ///
+    /// **This one does not grey the menu**, which is the entire difference between it and
+    /// `Patching` and the reason the download was moved out of the cycle at all. Nothing is being
+    /// installed, nobody has been asked anything, and a person who wants to check in or start a
+    /// patch cycle while 15GB comes down must be able to. It used to be a `Patching` state, and a
+    /// real host sat with both actions greyed for nine hours because of it.
+    PreFetching {
+        /// The update being fetched, and which of how many — `DownloadProgress::describe`.
+        current: String,
+        /// How far through the whole pre-fetch, 0-100 — `DownloadProgress::overall_percent`.
+        percent: u8,
     },
 }
 

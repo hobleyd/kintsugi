@@ -370,7 +370,7 @@ fn condense_progress(text: &str) -> String {
 /// The download is still the hour-plus, and still runs with nobody being asked for anything.
 /// Re-running it once the assets are present is close to free — the eight seconds above — so a
 /// cycle whose password prompt went unanswered brings the next one's prompt up almost at once.
-pub fn download() -> Result<Vec<String>> {
+pub fn download(on_progress: &(dyn Fn(DownloadProgress) + Sync)) -> Result<Vec<String>> {
     let labels = list_labels()?;
     if labels.is_empty() {
         crate::logging::info("softwareupdate -l lists nothing to download");
@@ -382,8 +382,17 @@ pub fn download() -> Result<Vec<String>> {
     // Collected rather than returned at the first one: a Safari label that will not download is no
     // reason to leave the macOS asset unfetched, and the caller is owed all of it in one message.
     let mut failures = Vec::new();
-    for label in &labels {
-        match download_one(label) {
+    for (index, label) in labels.iter().enumerate() {
+        let report = |percent| {
+            on_progress(DownloadProgress {
+                label: label.clone(),
+                index,
+                total: labels.len(),
+                percent,
+                epoch: now_epoch(),
+            })
+        };
+        match download_one(label, &report) {
             Ok(DownloadOutcome::Downloaded) => {
                 crate::logging::info(&format!("downloaded '{label}'"));
                 staged.push(label.clone());
@@ -439,7 +448,7 @@ enum DownloadOutcome {
     DownloadedUnprepared,
 }
 
-/// Downloads exactly one label's assets.
+/// Downloads exactly one label's assets, reporting how far along it is as it goes.
 ///
 /// **The label is positional, and the exit status is not to be trusted.** Both were got wrong first
 /// time, and each was measured on `htw-m5pro-hobleyd` rather than reasoned about:
@@ -457,25 +466,88 @@ enum DownloadOutcome {
 ///
 /// The label goes in as a single argument because macOS's labels contain spaces
 /// (`macOS Tahoe 26.7-25G229`), and it is whatever `softwareupdate -l` printed.
-fn download_one(label: &str) -> Result<DownloadOutcome> {
-    let output = Command::new("softwareupdate")
+///
+/// # Why this streams instead of using `Command::output`
+///
+/// `on_percent` is what puts a progress bar in the menu bar while the daemon pre-fetches, and
+/// `output()` cannot feed one: it returns when the child exits, which for macOS 27 is an hour after
+/// anybody wanted to know. So both pipes are read as they fill. Both, not just one — `softwareupdate`
+/// splits its output across them, and reading one while the other's pipe buffer fills is the
+/// classic way to deadlock a child that is only trying to talk to you.
+fn download_one(label: &str, on_percent: &(dyn Fn(u8) + Sync)) -> Result<DownloadOutcome> {
+    let mut child = Command::new("softwareupdate")
         .args(["-d", label])
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| format!("failed to run softwareupdate -d '{label}'"))?;
 
-    let combined = condense_progress(&format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    ));
+    let stdout = child.stdout.take().context("softwareupdate gave us no stdout to follow")?;
+    let stderr = child.stderr.take().context("softwareupdate gave us no stderr to follow")?;
+    let (out_text, err_text) = std::thread::scope(|scope| {
+        let out = scope.spawn(|| pump(stdout, on_percent));
+        let err = scope.spawn(|| pump(stderr, on_percent));
+        (out.join().unwrap_or_default(), err.join().unwrap_or_default())
+    });
+
+    // Waited on only once both pipes have hit EOF, which they do when the child exits — so this
+    // does not block on a child that is blocked writing to us.
+    let status = child.wait().with_context(|| format!("softwareupdate -d '{label}' did not finish"))?;
+
+    let combined = condense_progress(&format!("{out_text}{err_text}"));
     crate::logging::info(&format!(
         "softwareupdate -d '{label}' finished: success={} output={}",
-        output.status.success(),
+        status.success(),
         combined.trim()
     ));
 
     classify_download(&combined)
         .with_context(|| format!("softwareupdate -d '{label}' fetched nothing: {}", combined.trim()))
+}
+
+/// Drains one of the child's pipes to EOF, returning everything it said and calling `on_percent`
+/// each time the whole-number percentage changes.
+///
+/// Whole numbers, not every reading: a single download emitted **7,992** of them (see
+/// `condense_progress`), and a menu-bar line redrawn that many times is all cost and no
+/// information. At most 101 calls per label reach the caller.
+fn pump<R: std::io::Read>(mut reader: R, on_percent: &(dyn Fn(u8) + Sync)) -> String {
+    let mut collected = String::new();
+    let mut buf = [0u8; 8192];
+    let mut last_reported = None;
+
+    loop {
+        let read = match reader.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        collected.push_str(&String::from_utf8_lossy(&buf[..read]));
+
+        // Parsed out of everything so far rather than out of this chunk, because a reading can be
+        // split across two reads — and `Downloading: 4` followed by `1.00%` would otherwise report
+        // 1% for what is really 41%.
+        if let Some(percent) = last_percent(&collected) {
+            if last_reported != Some(percent) {
+                last_reported = Some(percent);
+                on_percent(percent);
+            }
+        }
+    }
+
+    collected
+}
+
+/// The most recent complete progress reading in `text`, as a whole number of percent.
+///
+/// A trailing *incomplete* reading — the marker with no `%` yet, which is exactly what a read that
+/// lands mid-reading leaves behind — reports nothing rather than guessing, and the next read
+/// carries a complete one along.
+fn last_percent(text: &str) -> Option<u8> {
+    const MARKER: &str = "Downloading: ";
+    let after_marker = &text[text.rfind(MARKER)? + MARKER.len()..];
+    let percent_end = after_marker.find('%')?;
+    let value: f32 = after_marker[..percent_end].parse().ok()?;
+    (value.is_finite()).then(|| value.clamp(0.0, 100.0) as u8)
 }
 
 /// What a `-d` run's output says it achieved, or `None` if it does not say it downloaded anything.
@@ -549,6 +621,90 @@ fn parse_label_listing(combined: &str) -> Result<Vec<String>> {
         anyhow::bail!("softwareupdate -l listed no labels and did not say there were none: {}", combined.trim());
     }
     Ok(labels)
+}
+
+/// How far the daemon's pre-fetch has got, for the menu bar to draw a bar from.
+///
+/// Written by root as the download runs and read by the per-user process on its scheduler tick —
+/// the two are separate processes, so a file is the only channel between them, the same shape the
+/// staged record below uses. Deliberately *not* the queue: nothing is being requested and nobody is
+/// waiting on an answer, which is the whole difference between this and the old `OsDownload`.
+///
+/// Stale-checked on the reading side rather than cleaned up perfectly on the writing side. A daemon
+/// killed mid-download cannot tidy up after itself, and a menu bar left claiming 41% forever would
+/// be worse than one that goes quiet — see `PROGRESS_FRESH_FOR_SECS`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadProgress {
+    /// The label being fetched, as `softwareupdate -l` printed it.
+    pub label: String,
+    /// Its position in this pre-fetch, counting from zero.
+    pub index: usize,
+    /// How many labels the pre-fetch is working through.
+    pub total: usize,
+    /// How far through this label, 0-100.
+    pub percent: u8,
+    /// When this was written. The reader treats anything older than
+    /// [`PROGRESS_FRESH_FOR_SECS`] as nothing at all.
+    pub epoch: u64,
+}
+
+impl DownloadProgress {
+    /// What the menu bar's status line says — the label's own title, and which of how many it is
+    /// when there is more than one.
+    pub fn describe(&self) -> String {
+        let title = self.label.rsplit_once('-').map_or(self.label.as_str(), |(title, _build)| title);
+        if self.total > 1 {
+            format!("{title} ({} of {})", self.index + 1, self.total)
+        } else {
+            title.to_string()
+        }
+    }
+
+    /// How far through the *whole* pre-fetch, so the bar crosses the menu once rather than
+    /// restarting at each label. A bar that only moved three times in an hour would tell the person
+    /// watching it almost nothing, which is the complaint this whole feature answers.
+    pub fn overall_percent(&self) -> u8 {
+        if self.total == 0 {
+            return 0;
+        }
+        let done = self.index as f32 + f32::from(self.percent) / 100.0;
+        ((done / self.total as f32) * 100.0).clamp(0.0, 100.0) as u8
+    }
+}
+
+/// How long a [`DownloadProgress`] record is believed.
+///
+/// `softwareupdate` reports often enough that a record this old means the writer is gone rather
+/// than slow — the 2.9GB fetch emitted 7,992 readings — so the menu bar stops showing a bar rather
+/// than showing one frozen at whatever it last said.
+pub const PROGRESS_FRESH_FOR_SECS: u64 = 120;
+
+/// Reads the daemon's progress record, or `None` when there is none or it has gone stale.
+pub fn read_progress(path: &Path, now_epoch: u64) -> Option<DownloadProgress> {
+    let progress: DownloadProgress = serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    (now_epoch.saturating_sub(progress.epoch) <= PROGRESS_FRESH_FOR_SECS).then_some(progress)
+}
+
+/// Publishes where the pre-fetch has got to. Best-effort in both directions: a write that fails
+/// costs a progress bar, and the download carries on regardless.
+pub fn write_progress(path: &Path, progress: &DownloadProgress) {
+    if let Ok(json) = serde_json::to_string(progress) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+/// Takes the progress record away once there is no download to describe. The reader's staleness
+/// check is what covers the case where this never runs.
+pub fn clear_progress(path: &Path) {
+    let _ = std::fs::remove_file(path);
+}
+
+fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or_default()
 }
 
 /// What the daemon's last pre-fetch left on disk, as the agent's own record of it.
@@ -1189,6 +1345,119 @@ mod tests {
     #[test]
     fn classify_download_rejects_a_download_that_failed_some_other_way() {
         assert_eq!(classify_download("Downloading Safari\nThe operation couldn\u{2019}t be completed. (NSURLErrorDomain error -1009.)"), None);
+    }
+
+    /// Exercises the real pipe-reading path against a child that writes the way `softwareupdate`
+    /// does — carriage returns, no newlines, readings running together — because the whole point of
+    /// streaming rather than `Command::output` is feeding a bar while the child is still alive, and
+    /// a version of this that only reported at exit would pass every other test here.
+    ///
+    /// What it asserts is deliberately not "every reading arrived". How many reach the callback
+    /// depends on how the kernel happens to split the pipe, and a chunk holding three readings
+    /// rightly reports only the newest — a progress bar wants the current state, not the history.
+    /// An earlier version of this test asserted the exact sequence and failed the moment the whole
+    /// output arrived in one read. What must hold regardless is that nothing bogus is ever reported
+    /// (the split-reading bug would show up here as a 1 or a 4), that the same value is never
+    /// pushed twice in a row, and that the last word is 100.
+    #[test]
+    fn pump_reports_whole_percentages_as_the_child_writes_them() {
+        use std::sync::Mutex;
+
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(
+                r"printf 'Downloading macOS 27\n'; printf '\rDownloading: 0.10%%'; sleep 0.1;                   printf '\rDownloading: 0.90%%'; sleep 0.1; printf '\rDownloading: 41.25%%'; sleep 0.1;                   printf '\rDownloading: 100.00%%\nDownloaded: macOS 27\n'",
+            )
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("sh is on every macOS host");
+        let stdout = child.stdout.take().expect("just asked for a pipe");
+
+        let seen = Mutex::new(Vec::new());
+        let text = pump(stdout, &|percent| seen.lock().expect("no panic holds this").push(percent));
+        child.wait().expect("sh exits");
+
+        let seen = seen.into_inner().expect("no panic holds this");
+        assert!(!seen.is_empty(), "the callback was never called at all");
+        assert!(
+            seen.iter().all(|percent| [0, 41, 100].contains(percent)),
+            "a percentage nothing printed means a reading was parsed across a chunk boundary: {seen:?}"
+        );
+        assert!(seen.windows(2).all(|pair| pair[0] != pair[1]), "the same value twice running: {seen:?}");
+        assert_eq!(seen.last(), Some(&100), "{seen:?}");
+        assert!(text.contains("Downloaded: macOS 27"), "the full text still comes back for classification");
+    }
+
+    fn progress(label: &str, index: usize, total: usize, percent: u8) -> DownloadProgress {
+        DownloadProgress { label: label.to_string(), index, total, percent, epoch: 1_000 }
+    }
+
+    /// The reading shapes `softwareupdate` actually emits, `\r`-separated and run together.
+    #[test]
+    fn last_percent_reads_the_most_recent_complete_reading() {
+        assert_eq!(last_percent("\rDownloading: 0.10%\rDownloading: 41.25%"), Some(41));
+    }
+
+    /// A read that lands mid-reading leaves the marker with no `%` yet. Guessing here is what
+    /// would turn a split `Downloading: 4` + `1.00%` into a menu bar that says 1%.
+    #[test]
+    fn last_percent_reports_nothing_for_a_reading_that_is_still_arriving() {
+        assert_eq!(last_percent("\rDownloading: 41.25%\rDownloading: 4"), None);
+    }
+
+    #[test]
+    fn last_percent_reports_nothing_when_no_reading_has_arrived() {
+        assert_eq!(last_percent("Software Update Tool\n\nFinding available software\n"), None);
+    }
+
+    /// `Downloading macOS 27` is a title, not a reading — it has no colon and no percentage.
+    #[test]
+    fn last_percent_is_not_fooled_by_the_title_line() {
+        assert_eq!(last_percent("Downloading macOS 27\n"), None);
+    }
+
+    /// The bar crosses the menu once across the whole pre-fetch rather than restarting per label:
+    /// halfway through the second of two updates is 75%, not 50%.
+    #[test]
+    fn overall_percent_spans_every_label_rather_than_the_current_one() {
+        assert_eq!(progress("macOS 27-26A428", 1, 2, 50).overall_percent(), 75);
+        assert_eq!(progress("macOS Tahoe 26.7-25G229", 0, 2, 0).overall_percent(), 0);
+        assert_eq!(progress("macOS 27-26A428", 2, 3, 100).overall_percent(), 100);
+    }
+
+    #[test]
+    fn overall_percent_of_an_empty_prefetch_is_zero_rather_than_a_division_by_zero() {
+        assert_eq!(progress("macOS 27-26A428", 0, 0, 50).overall_percent(), 0);
+    }
+
+    /// The build suffix is noise in a menu bar; the title is what the person recognises.
+    #[test]
+    fn describe_names_the_update_and_its_place_in_the_queue() {
+        assert_eq!(progress("macOS 27-26A428", 1, 3, 40).describe(), "macOS 27 (2 of 3)");
+    }
+
+    #[test]
+    fn describe_leaves_the_count_off_when_there_is_only_one() {
+        assert_eq!(progress("macOS Tahoe 26.7-25G229", 0, 1, 40).describe(), "macOS Tahoe 26.7");
+    }
+
+    /// A daemon killed mid-download cannot tidy up, and a menu bar frozen at 41% forever would be
+    /// worse than one that goes quiet.
+    #[test]
+    fn read_progress_ignores_a_record_nothing_has_touched_in_a_while() {
+        let dir = std::env::temp_dir().join(format!("kintsugi-progress-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("os-download-progress.json");
+        let record = progress("macOS 27-26A428", 1, 3, 40);
+
+        write_progress(&path, &record);
+
+        assert_eq!(read_progress(&path, 1_000 + PROGRESS_FRESH_FOR_SECS), Some(record));
+        assert_eq!(read_progress(&path, 1_000 + PROGRESS_FRESH_FOR_SECS + 1), None, "stale");
+
+        clear_progress(&path);
+        assert_eq!(read_progress(&path, 1_000), None, "and gone once cleared");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn staged(labels: &[&str], epoch: u64) -> StagedDownloads {

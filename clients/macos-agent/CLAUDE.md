@@ -96,6 +96,30 @@ Three things keep the pre-fetch from becoming its own nuisance, and each is load
   trigger is macOS offering a label the record does not mention, with a seven-day backstop. Running
   it every hour on the chance macOS discarded something would be 15GB an hour on this host.
 
+**The pre-fetch draws a progress bar in the menu bar, and does not grey it.** The download happens
+in the *root* process and the menu bar lives in the per-user one, so the daemon publishes
+`os_update::DownloadProgress` to `os-download-progress.json` (0644, root writes and the user reads,
+like the staged record) and the scheduler tick turns it into `AgentStatus::PreFetching`. Three
+things about that state are deliberate:
+
+- **It does not set `patching`**, so "Check In Now" and "Patch Now" stay live. That is the whole
+  difference between it and `Patching`, and the reason the download moved off the cycle at all.
+- **It leaves the progress window closed.** The window is for holding somebody's attention through a
+  patch run they agreed to; a background download they never asked about has no claim on the screen.
+- **The bar spans the whole pre-fetch**, not the current label — `overall_percent`, so halfway
+  through the second of two updates reads 75%. A bar that moved three times in an hour would say
+  almost nothing.
+
+Getting the percentages out means **streaming both of `softwareupdate`'s pipes** rather than
+`Command::output`, which only returns at exit — an hour too late to draw anything. Both pipes,
+because it splits its output across them and reading one while the other's buffer fills deadlocks
+the child. `pump` parses the last *complete* reading out of everything received so far rather than
+out of the latest chunk: a read landing mid-reading would otherwise turn `Downloading: 4` +
+`1.00%` into a bar showing 1%. It reports whole percentages only — one download emitted 7,992
+readings, and the menu bar wants at most 101 of them. A stale record (nothing written for two
+minutes) reads as no download at all, because a daemon killed mid-fetch cannot tidy up after itself
+and a bar frozen at 41% forever is worse than none.
+
 **macOS will not tell you what is staged, so the agent remembers** — `os_update::StagedDownloads`,
 written to `os-download-state.json` by root at 0644 and read by the per-user process.
 `softwareupdate -l` lists an update until it is *installed*, staged or not, and
