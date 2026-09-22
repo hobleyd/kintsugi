@@ -49,6 +49,12 @@ const OS_DOWNLOAD_STATE_PATH: &str = "/Library/Application Support/kintsugi-agen
 /// beside it — see `os_update::DownloadProgress`.
 const OS_DOWNLOAD_PROGRESS_PATH: &str = "/Library/Application Support/kintsugi-agent/os-download-progress.json";
 
+/// The daemon's note that a macOS install is under way whose reboot it will not survive — written
+/// before `softwareupdate -i -a -R` runs and judged on the next invocation. Root writes and root
+/// reads; it sits beside the two files above for no better reason than being about the same update.
+/// See `os_update::PendingInstall`.
+const OS_INSTALL_PENDING_PATH: &str = "/Library/Application Support/kintsugi-agent/os-install-pending.json";
+
 /// The root daemon's own durable action log — a guaranteed location regardless of how the
 /// process was invoked (launchd's `StandardOutPath` redirect on top of this is redundant but
 /// harmless). See `logging`.
@@ -269,6 +275,10 @@ pub fn daemon_log_path() -> PathBuf {
 
 pub fn os_download_state_path() -> PathBuf {
     PathBuf::from(OS_DOWNLOAD_STATE_PATH)
+}
+
+pub fn os_install_pending_path() -> PathBuf {
+    PathBuf::from(OS_INSTALL_PENDING_PATH)
 }
 
 pub fn os_download_progress_path() -> PathBuf {

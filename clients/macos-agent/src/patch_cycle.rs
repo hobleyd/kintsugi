@@ -543,8 +543,9 @@ enum OsUpdateEligibility {
 /// discovered at the far end of a multi-gigabyte fetch instead:
 ///
 /// - **Nobody there.** A cycle reaches the patching step unattended whenever the delay budget ran
-///   out with nobody at the desk; that is what spending the budget is *for*. Downloading gigabytes
-///   and then putting up a password dialog nobody will answer helps no one.
+///   out with nobody at the desk; that is what spending the budget is *for*. The password prompt
+///   has no timeout (see `dialogs::request_install_password`), so putting it up for an empty desk
+///   would hold the cycle — and the menu bar's "Patch Now" with it — until whoever comes back.
 /// - **An account that is not a volume owner.** Being in `admin` is *not* the same thing: an account
 ///   created by MDM, or migrated onto Apple silicon, can be an administrator with no secure token.
 ///   `--user` names "an owner user"; anything else fails with `Failed to authenticate`, and only
@@ -593,8 +594,10 @@ fn os_update_eligibility(user_present: bool) -> OsUpdateEligibility {
 /// bits here?" (see `os_update::StagedDownloads`) — and being wrong about it costs an install that
 /// downloads, which is where this started rather than anywhere worse.
 ///
-/// A prompt that goes unanswered is not wasted work either: the assets stay staged, so the next
-/// cycle comes straight back here.
+/// The prompt, once up, stays up until it is answered — no Cancel, no timeout — so the cycle does
+/// not move past this step without a password or an error. That is deliberate (see
+/// `dialogs::request_install_password`) and it is why `os_update_eligibility` checks that somebody
+/// is there *before* the prompt goes up rather than after.
 fn run_os_update(
     version: Option<&str>,
     offered: &[String],
@@ -625,19 +628,16 @@ fn run_os_update(
         return (0, 0);
     }
 
-    // 2. Authorize — with the bits already on disk, so the restart follows closely.
+    // 2. Authorize — with the bits already on disk, so the restart follows closely. The prompt has
+    // no Cancel and no timeout (see `dialogs::request_install_password`), so this blocks the cycle
+    // for as long as it takes somebody to type — which is why `os_update_eligibility` refused to
+    // get this far with nobody at the desk.
     let auth = match username {
         None => None,
-        Some(username) => match dialogs::request_install_password(&username, version, PASSWORD_PROMPT_TIMEOUT.as_secs()) {
-            Ok(dialogs::PasswordAnswer::Provided(password)) => Some(os_update::InstallAuth { user: username, password }),
-            Ok(dialogs::PasswordAnswer::Cancelled) => {
-                logging::info(&format!("skipping the macOS install this cycle: {username} declined to authorize it"));
-                return (0, 0);
-            }
-            Ok(dialogs::PasswordAnswer::TimedOut) => {
-                logging::info("skipping the macOS install this cycle: nobody answered the authorization prompt");
-                return (0, 0);
-            }
+        Some(username) => match dialogs::request_install_password(&username, version) {
+            Ok(password) => Some(os_update::InstallAuth { user: username, password }),
+            // Not "declined" — there is no way to decline — but "could not ask": osascript would
+            // not run, or there was no window server to draw the alert on.
             Err(err) => {
                 logging::info(&format!("skipping the macOS install this cycle: could not ask for authorization: {err:#}"));
                 return (0, 0);
@@ -689,13 +689,6 @@ fn os_update_is_staged(offered: &[String]) -> bool {
         .is_some_and(|staged| staged.covers_the_macos_updates(offered))
 }
 
-/// How long the authorization prompt stands before giving up.
-///
-/// Shorter than the patch confirmation's delay period on purpose: by this point the user has
-/// already clicked "Patch Now" (or spent their delay budget) and the applications are being
-/// installed, so this prompt appears while they are watching. Ten minutes is generous for somebody
-/// who is there and short enough that an empty desk does not stall the rest of the cycle.
-const PASSWORD_PROMPT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 
 /// Asks the root daemon to run this application's upgrade — by name only; the daemon fetches and
 /// verifies the script itself, see `queue`. The daemon's own log has the script's full output; what

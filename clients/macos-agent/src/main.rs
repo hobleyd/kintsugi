@@ -252,6 +252,9 @@ fn register_and_report(config: &Config, checkin_minute: u8) -> Result<CheckInOut
     let client = identity::build_client(Duration::from_secs(15), agent_identity.as_ref())
         .context("failed to build HTTP client")?;
 
+    // Before the registration POST, deliberately — see `settle_pending_install` for the ordering.
+    settle_pending_install(&client, config, &serial_number, operating_system.as_deref());
+
     let host_request = RegisterHostRequest {
         hostname,
         serial_number: serial_number.clone(),
@@ -355,9 +358,11 @@ fn register_and_report(config: &Config, checkin_minute: u8) -> Result<CheckInOut
 ///   request arriving mid-fetch waits for it. Skipping the fetch whenever the queue is non-empty
 ///   means a person who clicked "Patch Now" is never behind an hour of downloading that could just
 ///   as well happen on the next invocation.
-/// - **It does not re-fetch what it believes it already has.** See `os_update::needs_prefetch`: on
-///   this fleet's own Mac the pending set is 15GB, and running it every hour on the chance macOS
-///   discarded something would be 15GB an hour.
+/// - **It re-confirms what it believes it already has, every check-in.** See
+///   `os_update::needs_prefetch`: `softwareupdate -d` on an asset that is still there comes back in
+///   seconds, and macOS discards staged assets on its own schedule — 26.7 went missing from this
+///   fleet's Mac within three days of being confirmed, and the install downloaded it again after
+///   the password had been typed. The gigabytes are spent only when they are needed.
 fn prefetch_os_updates() {
     let offered = match os_update::list_labels() {
         Ok(offered) => offered,
@@ -380,7 +385,10 @@ fn prefetch_os_updates() {
         return;
     }
 
-    logging::info(&format!("pre-fetching {} pending update(s) so the install has nothing to download", offered.len()));
+    logging::info(&format!(
+        "pre-fetching {} pending update(s), or confirming they are still on disk, so the install has nothing to download",
+        offered.len()
+    ));
     // Published for the menu bar, which is in the other process — see `os_update::DownloadProgress`
     // and the tick in `run_scheduler` that reads it. Cleared below whichever way this ends, so a
     // finished download does not leave a bar on screen; the reader's staleness check covers a
@@ -391,43 +399,84 @@ fn prefetch_os_updates() {
     os_update::clear_progress(&progress_path);
     match outcome {
         Ok(result) => {
-            let now = now_epoch();
             // A record is written whichever way it went, and the failures go in it. Writing one
             // only on success meant a failed attempt left nothing behind — and nothing behind is
             // indistinguishable from nothing staged, so the next hourly invocation re-fetched all
             // 15GB, and the one after that, for as long as the failure lasted. See
-            // `os_update::needs_prefetch`, which is what then holds the retries apart.
-            let failure_count = if result.failed.is_empty() {
-                0
-            } else {
-                staged.as_ref().map_or(0, |staged| staged.failure_count).saturating_add(1)
-            };
+            // `os_update::StagedDownloads::refreshed` for what is carried over from the previous
+            // record, and `os_update::needs_prefetch`, which is what then holds the retries apart.
+            let record = os_update::StagedDownloads::refreshed(staged.as_ref(), &offered, &result, now_epoch());
             let complete = result.failed.is_empty();
-            os_update::write_staged(
-                &state_path,
-                &os_update::StagedDownloads {
-                    labels: result.staged,
-                    staged_epoch: now,
-                    failed: result.failed,
-                    failure_count,
-                    attempted_epoch: now,
-                },
-            );
+            os_update::write_staged(&state_path, &record);
 
             if complete {
-                logging::info("pre-fetch finished; the patch cycle can now ask for authorization and install");
+                logging::info(&format!(
+                    "pre-fetch finished: {} update(s) on disk; the patch cycle can now ask for authorization and install",
+                    record.labels.len()
+                ));
             } else {
                 // Logged, not reported to the server as a patch failure: nobody asked for this and
                 // nobody is waiting on it. The update is still pending and the host still says so at
                 // its next check-in, which is how this stays visible without the Failed Updates
                 // screen filling up with work nobody requested.
                 logging::warn(&format!(
-                    "pre-fetch did not finish; retrying no sooner than {}s from now (failure {failure_count})",
-                    os_update::retry_delay_secs_for(failure_count)
+                    "pre-fetch did not finish; retrying no sooner than {}s from now (failure {})",
+                    os_update::retry_delay_secs_for(record.failure_count),
+                    record.failure_count
                 ));
             }
         }
         Err(err) => logging::warn(&format!("could not pre-fetch the pending macOS updates: {err:#}")),
+    }
+}
+
+/// Sends the success report that an install which rebooted this Mac could not send for itself.
+///
+/// `install_os_updates` writes an `os_update::PendingInstall` before running `softwareupdate`,
+/// because the ordinary macOS outcome is a reboot from inside that call and nothing after it runs.
+/// This is the other half: on the next invocation — the `RunAtLoad` one straight after the reboot —
+/// read the note back and judge it against the version this host is on now. A host that moved
+/// finished its install, and that is reported; a host that booted and did not move did not, and
+/// the note is dropped without a word; anything else is still in progress and left alone. See
+/// `os_update::judge_pending_install` for those three, with tests.
+///
+/// **It runs before the registration POST, and the order matters.** The server's
+/// `RecordOperatingSystemPatched` clears the host's pending flag and target version; registration
+/// then sets both from *this* boot's `softwareupdate -l`, which on a host that was offered 26.7 and
+/// 27 together correctly says 27 is still pending. Reported the other way round, the success would
+/// wipe the fresh answer and the dashboard would show nothing pending until the next check-in.
+///
+/// Why report at all, when the next check-in re-derives the pending state anyway: the server only
+/// closes a Failed Updates row filed under `macOS` when it hears that an install *succeeded*
+/// (`ReportOperatingSystemPatchedCommandHandler`), and a reboot inside `softwareupdate` meant it
+/// never heard. On this fleet's Mac a download failure from 17 September outlived the successful
+/// install on the 22nd for exactly that reason.
+fn settle_pending_install(client: &reqwest::blocking::Client, config: &Config, serial_number: &str, current_version: Option<&str>) {
+    let path = config::os_install_pending_path();
+    let Some(pending) = os_update::read_pending_install(&path) else {
+        return;
+    };
+    let Some(current_version) = current_version else {
+        // Cannot judge it this time; the note keeps until an invocation that can.
+        return;
+    };
+
+    match os_update::judge_pending_install(&pending, current_version, queue::boot_epoch()) {
+        os_update::PendingInstallVerdict::Installed => {
+            logging::info(&format!(
+                "the macOS install that began on {} finished: this host is now on {current_version} — reporting it",
+                pending.from_version
+            ));
+            os_update::report_patched(client, config, serial_number);
+            os_update::clear_pending_install(&path);
+        }
+        os_update::PendingInstallVerdict::DidNotTake => {
+            logging::warn(&format!(
+                "this Mac has rebooted since the macOS install began and is still on {current_version}: the update did not take, and nothing is reported"
+            ));
+            os_update::clear_pending_install(&path);
+        }
+        os_update::PendingInstallVerdict::StillPending => {}
     }
 }
 
@@ -538,9 +587,29 @@ impl queue::RequestHandler for DaemonRequestHandler<'_> {
     }
 
     fn install_os_updates(&mut self, auth: Option<os_update::InstallAuth>) -> Result<String> {
+        // Written *before* the install, because the ordinary macOS outcome is a reboot from inside
+        // `softwareupdate` after which nothing here runs. The next invocation reads it back — see
+        // `settle_pending_install` — and that is the only way a success ever reaches the server for
+        // an install that rebooted, and so the only way an earlier attempt's Failed Updates row
+        // ever closes.
+        let pending_path = config::os_install_pending_path();
+        match system_info::operating_system() {
+            Ok(from_version) => os_update::write_pending_install(
+                &pending_path,
+                &os_update::PendingInstall {
+                    from_version,
+                    epoch: now_epoch(),
+                },
+            ),
+            Err(err) => logging::warn(&format!(
+                "could not read this Mac's version before installing, so a reboot inside the install will go unreported: {err:#}"
+            )),
+        }
+
         let outcome = match os_update::install(auth.as_ref()) {
             Ok(outcome) => outcome,
             Err(err) => {
+                os_update::clear_pending_install(&pending_path);
                 // Read here rather than before the install, so the success path does not pay for a
                 // `softwareupdate -l` it never uses. Still accurate: an install that failed left the
                 // update listed, which is the whole reason it is being reported.
@@ -557,12 +626,14 @@ impl queue::RequestHandler for DaemonRequestHandler<'_> {
         if outcome.restart_required {
             // Deliberately *not* reported as patched: the update is staged, this host is still on
             // the old version, and saying otherwise cleared the pending flag only for the next
-            // check-in's `softwareupdate -l` to set it again.
+            // check-in's `softwareupdate -l` to set it again. The pending-install note is kept for
+            // the same reason: `settle_pending_install` reports once the version has moved.
             return Ok(format!("installed pending macOS updates — {} to finish", os_update::RESTART_REQUIRED_MARKER));
         }
 
         // Reported from here rather than by the per-user process, the same as the patch result
         // above: this is the side that knows the install finished.
+        os_update::clear_pending_install(&pending_path);
         os_update::report_patched(self.client, self.config, self.serial_number);
         Ok("installed pending macOS updates".to_string())
     }

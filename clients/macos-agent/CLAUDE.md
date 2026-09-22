@@ -34,14 +34,26 @@ everything applicable — the same host was also offered macOS 27 at 11.7GB. So 
 the credentials wrong are checked in `patch_cycle::authorize_os_update`, in the per-user half,
 *before* the request is submitted:
 
-- **Nobody to ask, or nobody answering.** No password means the request is not submitted at all.
-  Note the polarity is the opposite of `confirm_patch`, where an unanswered dialog counts as a delay
-  and patching proceeds — that is why `dialogs::PasswordAnswer` is its own enum rather than a reuse
-  of `ConfirmChoice`, the same reasoning `RemoteControlChoice` exists for.
+- **The prompt cannot be dismissed, so it is only ever put up for somebody who is there.**
+  `dialogs::request_install_password` has no Cancel button and no timeout: Escape does nothing to an
+  alert with no button named Cancel, an empty box is re-shown, and it returns only with a password
+  (or an error, when there is no window server to draw on). It used to offer both, and both read as
+  "skip the macOS update this time" — so a person who walked away for ten minutes, or reached for
+  Cancel out of habit, left a Mac that had already downloaded everything sitting unpatched until the
+  next cycle asked again. It is a Cocoa `NSAlert` run through `osascript -l JavaScript` rather than a
+  `display dialog` like every other prompt in `dialogs.rs`, for two reasons that matter: it sits at
+  `NSModalPanelWindowLevel` and joins every space, so it stays in front of whatever the person
+  switches to rather than being buried the first time another window takes focus; and it is this
+  process's *own* window. The AppleScript way to a front-most dialog — `tell application "System
+  Events"` then `activate` — sends Apple events to another process, which TCC gates behind an
+  Automation prompt per Mac (`Not authorised to send Apple events to System Events`, -1743, measured
+  here). Text reaches the script as `argv`, never interpolated, so nothing in the message is escaped
+  for JavaScript, and the password is the script's return value on stdout with only osascript's own
+  trailing newline stripped — a password ending in a space has to reach `softwareupdate` intact.
 - **Nobody there to ask in the first place.** A cycle reaches the patching step unattended whenever
   the delay budget ran out with nobody at the desk — that is what spending the budget is *for* — and
-  a password dialog there would stall the cycle for the whole prompt timeout, every cycle, to arrive
-  at the same skip. So `execute` carries a `user_present` flag: true when the menu bar's "Patch Now"
+  a prompt that never times out would hold the cycle, and the menu bar's "Patch Now" with it, until
+  whoever comes back. So `execute` carries a `user_present` flag: true when the menu bar's "Patch Now"
   was clicked, and otherwise whatever `acknowledged_by_a_person` made of how long the "no delays
   left" dialog stood there. `acknowledge` returns `Ok(())` for a click and a timeout alike, so its
   duration is the only signal there is — which is why that predicate is split out and tested rather
@@ -92,9 +104,18 @@ Three things keep the pre-fetch from becoming its own nuisance, and each is load
 - **It stands aside whenever the queue is non-empty** (`queue::has_pending_request`). launchd will
   not run two copies of the check-in job, so a request arriving mid-fetch waits for it — and nobody
   who just clicked "Patch Now" should be behind an hour of downloading.
-- **It does not re-fetch what it believes it already has** (`os_update::needs_prefetch`). The
-  trigger is macOS offering a label the record does not mention, with a seven-day backstop. Running
-  it every hour on the chance macOS discarded something would be 15GB an hour on this host.
+- **It re-confirms what it believes it already has, every check-in** (`os_update::needs_prefetch`).
+  This used to run only when macOS offered a label the record did not mention, with a seven-day
+  backstop, on the reasoning that a pre-fetch costs gigabytes. It does not, when the asset is still
+  there: `softwareupdate -d` on a staged label comes back `Downloaded:` in four to nine seconds,
+  measured on this host for 26.7 and for Safari. And macOS discards staged assets on a schedule of
+  its own — 26.7 was confirmed on disk on 19 September and gone by the 22nd, when the authorized
+  install spent **two hours** downloading it again *after* the password was typed, which is the
+  hour-late reboot this whole ordering exists to prevent. So the gigabytes are only spent when the
+  asset is gone, and then spending them is the job. `StagedDownloads::refreshed` folds each attempt
+  into the record: a label that was confirmed before and that `-d` printed nothing for this time (the
+  `softwareupdate` blip below) stays believed, so one blip does not stop the cycle prompting for an
+  update that is sitting ready; a label macOS no longer offers is dropped.
 - **A failed attempt is recorded too, and backed off.** This is the same runaway from the other
   side: writing a record only on success left a failure with nothing behind it, and "nothing behind
   it" reads exactly like "nothing staged" — so the next hourly invocation retried all 15GB, and the
@@ -244,13 +265,28 @@ The split also keeps the password's life on disk to the length of an install rat
 plus a download, and `OsDownload` carries no sidecar at all.
 
 **Nothing after the `softwareupdate` call is guaranteed to run**, because the reboot happens inside
-it. `report_patched` is never sent — the server re-derives the host's pending state from
-`softwareupdate -l` at the next check-in, so it is self-correcting. `process_queue` never removes the
-request — `is_stale`'s boot check discards it unrun at the next boot, which is the case that check
-was written for. The credentials are already gone, because `take_auth` unlinks the sidecar *before*
-the install starts rather than after it returns. `InstallOutcome::restart_required` now covers only
-the case where the install came back without rebooting (Intel, a Safari-only update, or a restart
-that turned out not to be needed); the daemon still reports patched only when nothing is pending.
+it. The server re-derives the host's pending state from `softwareupdate -l` at the next check-in,
+so that much is self-correcting. `process_queue` never removes the request — `is_stale`'s boot check
+discards it unrun at the next boot, which is the case that check was written for. The credentials
+are already gone, because `take_auth` unlinks the sidecar *before* the install starts rather than
+after it returns. `InstallOutcome::restart_required` now covers only the case where the install came
+back without rebooting (Intel, a Safari-only update, or a restart that turned out not to be needed);
+the daemon still reports patched only when nothing is pending.
+
+**The success report survives the reboot by being written down first.** Re-deriving the pending
+flag is not the same as hearing that an install *succeeded*, and only the latter closes a Failed
+Updates row: `ReportOperatingSystemPatchedCommandHandler` resolves the host's `macOS` rows on a
+success report, and nothing else ever does. With `report_patched` never sent for an install that
+rebooted, a download failure filed from this host on 17 September was still on the screen after the
+successful install on the 22nd. So `main::install_os_updates` writes an `os_update::PendingInstall`
+(`os-install-pending.json`: the version before, and when) *before* calling `softwareupdate`, and
+`main::settle_pending_install` reads it on the next invocation — the `RunAtLoad` one after the
+reboot. A host on a different version finished its install and reports it; a host that has booted
+(`queue::boot_epoch`) and is on the same version did not, and the note is dropped silently; the same
+version on the same boot is still pending and left alone. It runs **before** the registration POST,
+because the server's `RecordOperatingSystemPatched` clears the pending flag and the registration
+then sets it from this boot's own `-l` — which, on a host that was offered 26.7 and 27 together,
+correctly says 27 is still pending. Reported after, it would wipe that answer for an hour.
 
 **Read `softwareupdate -l` by label, not by position.** `OsUpdateStatus::latest_version` took the
 first `Version:` in the output, which on a host offered Safari, macOS 26.7 and macOS 27 is *Safari's*

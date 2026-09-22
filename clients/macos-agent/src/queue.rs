@@ -391,8 +391,9 @@ fn is_stale(file_name: &str, kind: RequestKind, now: u64, boot_epoch: Option<u64
 }
 
 /// When this Mac last booted, from the kernel. `None` if the kernel will not say, in which case the
-/// age check alone decides staleness.
-fn boot_epoch() -> Option<u64> {
+/// age check alone decides staleness. Also what `main::settle_pending_install` reads to tell an
+/// install whose reboot has happened from one whose reboot is still to come.
+pub(crate) fn boot_epoch() -> Option<u64> {
     let mut boot_time = libc::timeval { tv_sec: 0, tv_usec: 0 };
     let mut length = std::mem::size_of::<libc::timeval>();
     // SAFETY: `kern.boottime` is a struct timeval, `length` names the buffer's real size, and the

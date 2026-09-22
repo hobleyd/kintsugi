@@ -713,7 +713,7 @@ fn now_epoch() -> u64 {
         .unwrap_or_default()
 }
 
-/// What the daemon's last pre-fetch left on disk, as the agent's own record of it.
+/// What the daemon's pre-fetch believes is on disk, as the agent's own record of it.
 ///
 /// **macOS will not answer this question.** `softwareupdate -l` lists an update until it is
 /// *installed*, staged or not — the run that proved it is in this host's log, where 26.7 appears as
@@ -723,14 +723,22 @@ fn now_epoch() -> u64 {
 ///
 /// It is a belief, not a fact, and the code treats it as one: being wrong costs an install that
 /// downloads what it thought was staged, which is exactly what used to happen every time, never
-/// something worse.
+/// something worse. **And it goes stale by itself**, which is why [`needs_prefetch`] re-confirms it
+/// every check-in rather than trusting it until the offered set changes: macOS discards staged
+/// assets on a schedule of its own. On this fleet's Mac, 26.7 was confirmed on disk on 19 September
+/// (`softwareupdate -d` came back `Downloaded:` in four seconds) and was gone by the 22nd, when the
+/// authorized install spent two hours fetching it again *after* the password had been typed —
+/// the hour-late reboot the whole pre-fetch exists to prevent. See [`StagedDownloads::refreshed`]
+/// for how a re-confirmation folds into the record.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct StagedDownloads {
-    /// The labels [`download`] reported staging, in the order it fetched them.
+    /// The labels believed to be on disk: what the last attempt confirmed, plus anything an earlier
+    /// one confirmed that macOS still offers and the last attempt could not re-check (see
+    /// [`StagedDownloads::refreshed`]).
     pub labels: Vec<String>,
-    /// When that finished, as a Unix epoch. Read by [`needs_prefetch`] only as a backstop — the
-    /// offered labels changing is the signal that actually matters.
+    /// When something was last confirmed on disk, as a Unix epoch. Informational: the retry
+    /// spacing reads `attempted_epoch`, and the per-user process reads `labels`.
     pub staged_epoch: u64,
     /// The labels that attempt could *not* fetch.
     ///
@@ -764,44 +772,91 @@ impl StagedDownloads {
             .filter(|label| is_macos_label(label))
             .all(|label| self.labels.iter().any(|staged| staged == label))
     }
+
+    /// The record to write after an attempt: what it confirmed, folded into what was believed
+    /// before.
+    ///
+    /// **A label an earlier attempt staged stays believed staged when this attempt could not
+    /// re-check it.** The failure [`download_one`] reports is "`softwareupdate -d` printed no
+    /// `Downloaded` line", and the one cause of that seen on this fleet is `softwareupdate` coming
+    /// back with nothing at all for a moment — a blip that says nothing about the disk. Dropping
+    /// the label on a blip would have the per-user process decline to prompt for an update that is
+    /// sitting ready, every hour until the retry lands. So `labels` is the union, and `failed`
+    /// still records the blip so [`needs_prefetch`] spaces the retries. A label macOS no longer
+    /// offers is dropped: it has been installed, and there is nothing left to believe about it.
+    ///
+    /// The cost of believing wrongly is bounded by the retry spacing — an install that downloads —
+    /// and is only paid when an asset was evicted *and* `-d` blipped in the same hour.
+    pub fn refreshed(previous: Option<&Self>, offered: &[String], outcome: &PrefetchOutcome, now_epoch: u64) -> Self {
+        let mut labels = outcome.staged.clone();
+        if let Some(previous) = previous {
+            for label in &previous.labels {
+                if offered.contains(label) && !labels.contains(label) {
+                    labels.push(label.clone());
+                }
+            }
+        }
+
+        // Zeroed by an attempt that fetched everything, which is what makes the spacing a
+        // *consecutive* count.
+        let failure_count = if outcome.failed.is_empty() {
+            0
+        } else {
+            previous.map_or(0, |previous| previous.failure_count).saturating_add(1)
+        };
+
+        Self {
+            labels,
+            staged_epoch: if outcome.staged.is_empty() {
+                previous.map_or(0, |previous| previous.staged_epoch)
+            } else {
+                now_epoch
+            },
+            failed: outcome.failed.clone(),
+            failure_count,
+            attempted_epoch: now_epoch,
+        }
+    }
 }
 
-/// How long a [`StagedDownloads`] record is believed at all, however little has changed.
+/// Whether the daemon should run the pre-fetch on this invocation.
 ///
-/// A backstop rather than the main control: what normally triggers a fresh pre-fetch is macOS
-/// offering a label the record does not mention. This bounds how long a record can be wrong in the
-/// other direction — assets macOS has since discarded — without anything noticing.
-const STAGED_RECORD_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
-
-/// Whether the daemon should spend the bandwidth to pre-fetch now.
+/// **Yes, whenever anything is offered and nothing is being backed off** — every hourly check-in.
+/// This used to be "only when the offered set changes, with a seven-day backstop", reasoned from
+/// the cost of a pre-fetch being measured in gigabytes. It is not, when the assets are present:
+/// `softwareupdate -d` on a staged label comes back `Downloaded:` in four to nine seconds, measured
+/// on this fleet's Mac for both 26.7 and Safari, because macOS answers from what it already holds.
+/// The gigabytes are only spent when the asset is *gone*, and then spending them is exactly the
+/// job: macOS discarded 26.7 within three days of it being confirmed on disk, and the authorized
+/// install that followed downloaded for two hours after the password was typed. A record that was
+/// believed for a week could not have noticed.
 ///
-/// **The cost of getting this wrong is measured in gigabytes**, which is why it is not simply "run
-/// it every check-in". This host is offered macOS 26.7 (2.9GB) and macOS 27 (11.7GB) at once; a
-/// pre-fetch on every hourly invocation would be 15GB an hour if macOS turns out to discard a
-/// staged system update when the next one is staged — which this host's timings hint at and nothing
-/// has yet proved either way. Re-fetching only when the *offered set* has changed costs one
-/// download per update regardless of which way that turns out.
+/// What still holds an attempt back is a *failed* label — the one case where re-running costs
+/// something (an hour of a failing download, or a blip that repeats) — and that is spaced by
+/// [`retry_delay_secs`] rather than run hourly. A label macOS has only just started offering
+/// overrides even that: it is new work, not failed work.
 pub fn needs_prefetch(offered: &[String], staged: Option<&StagedDownloads>, now_epoch: u64) -> bool {
+    if offered.is_empty() {
+        return false;
+    }
     let Some(staged) = staged else {
-        return !offered.is_empty();
+        return true;
     };
 
     let known = |label: &String| staged.labels.contains(label) || staged.failed.contains(label);
-    // Something macOS has started offering since the last attempt. Always worth fetching: it is new
-    // work rather than work that went wrong, so no backoff applies to it.
     if offered.iter().any(|label| !known(label)) {
         return true;
     }
 
     // Something the last attempt could not fetch. Worth another go — the 19:46 failure on this
     // fleet's Mac was a momentary `softwareupdate -l` blip, and a host that gave up for good on one
-    // of those would simply never update — but not every hour, because the attempt costs gigabytes
-    // and a failure that is *not* momentary would otherwise repeat for as long as it lasted.
+    // of those would simply never update — but not every hour, because a failure that is *not*
+    // momentary would otherwise repeat for as long as it lasted.
     if offered.iter().any(|label| staged.failed.contains(label)) {
         return now_epoch.saturating_sub(staged.attempted_epoch) >= retry_delay_secs(staged.failure_count);
     }
 
-    now_epoch.saturating_sub(staged.staged_epoch) > STAGED_RECORD_MAX_AGE_SECS
+    true
 }
 
 /// How long to leave a failing pre-fetch alone, doubling per consecutive failure from an hour up to
@@ -835,6 +890,79 @@ pub fn write_staged(path: &Path, staged: &StagedDownloads) {
     if let Err(err) = std::fs::write(path, json) {
         crate::logging::warn(&format!("could not record what was staged: {err}"));
     }
+}
+
+/// The daemon's note to itself that an install is under way whose end it will not see.
+///
+/// `softwareupdate -i -a -R` reboots the Mac from *inside* the call, so nothing after it runs:
+/// [`install`] never returns, `report_patched` is never sent, and the server learns that the host
+/// moved on only by inference from the next check-in's `softwareupdate -l`. That left one thing
+/// nobody ever told it — that the install *succeeded* — and so nothing ever closed the Failed
+/// Updates row an earlier attempt had opened. On this fleet's Mac a download failure filed on
+/// 17 September stayed on the screen through a successful install on the 22nd.
+///
+/// So `main::install_os_updates` writes this **before** running the install, and the next daemon
+/// invocation — the `RunAtLoad` one straight after the reboot, ordinarily — reads it back and asks
+/// [`judge_pending_install`] what happened. The version it records is the one to compare against:
+/// a host that has moved off it finished the install, whatever else `softwareupdate -l` may now be
+/// offering.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingInstall {
+    /// `system_info::operating_system()` as it read before the install began.
+    pub from_version: String,
+    /// When the install began, as a Unix epoch.
+    pub epoch: u64,
+}
+
+/// What became of a [`PendingInstall`], read on a later daemon invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingInstallVerdict {
+    /// The host is on a different version than it was: the install finished. Report it.
+    Installed,
+    /// The Mac has booted since the install began and is on the same version: the update did not
+    /// take (or the record was written for a Safari-only install that changed no version). Forget
+    /// it, and say nothing — a success report for an install that did not happen would clear the
+    /// pending flag the next check-in then has to set again.
+    DidNotTake,
+    /// Same version, same boot: `softwareupdate` has not rebooted yet, or somebody is still waiting
+    /// on the restart it asked for. Keep the record and look again next time.
+    StillPending,
+}
+
+/// Decides what a [`PendingInstall`] record means now. Pure, for the sake of the tests: the callers
+/// supply the current version and the kernel's boot time.
+///
+/// The version comparison comes first and settles it on its own: a version that moved is an install
+/// that finished, whether or not a boot is on record. A kernel that will not say when it booted
+/// (`None`) then leaves a same-version record pending rather than discarding it — the record costs
+/// nothing to keep and is dropped the moment the version moves.
+pub fn judge_pending_install(pending: &PendingInstall, current_version: &str, boot_epoch: Option<u64>) -> PendingInstallVerdict {
+    if current_version != pending.from_version {
+        return PendingInstallVerdict::Installed;
+    }
+    match boot_epoch {
+        Some(boot) if boot > pending.epoch => PendingInstallVerdict::DidNotTake,
+        _ => PendingInstallVerdict::StillPending,
+    }
+}
+
+/// Reads the daemon's note of an install under way, or `None` when there is none or it is
+/// unreadable — in which case nothing is reported, which is the failure mode that already existed.
+pub fn read_pending_install(path: &Path) -> Option<PendingInstall> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+/// Writes the note. Best-effort: failing to write it costs a success report, never the install.
+pub fn write_pending_install(path: &Path, pending: &PendingInstall) {
+    let Ok(json) = serde_json::to_string(pending) else { return };
+    if let Err(err) = std::fs::write(path, json) {
+        crate::logging::warn(&format!("could not record that a macOS install is under way: {err}"));
+    }
+}
+
+pub fn clear_pending_install(path: &Path) {
+    let _ = std::fs::remove_file(path);
 }
 
 /// The pure text half of [`parse_label_listing`]. A listing line reads
@@ -875,11 +1003,13 @@ fn parse_labels(text: &str) -> Vec<String> {
 /// `DownloadedUnprepared` is prepared and installed in this one call.
 ///
 /// **Nothing after the `softwareupdate` call is guaranteed to run.** The reboot happens inside it,
-/// so this function does not return, `report_patched` is never sent, and `process_queue` never gets
-/// to remove the request. All three are handled where they land: the server re-derives the host's
-/// pending state from `softwareupdate -l` at the next check-in, and `queue::is_stale`'s boot check
-/// discards the surviving request unrun. The credentials are already gone — `take_auth` unlinks the
-/// sidecar before the install starts, precisely so a reboot cannot strand a password on disk.
+/// so this function does not return, `report_patched` is not sent from here, and `process_queue`
+/// never gets to remove the request. All three are handled where they land: the server re-derives
+/// the host's pending state from `softwareupdate -l` at the next check-in, `queue::is_stale`'s boot
+/// check discards the surviving request unrun, and the success report is sent by the *next*
+/// invocation, off the [`PendingInstall`] note `main::install_os_updates` writes before calling
+/// this. The credentials are already gone — `take_auth` unlinks the sidecar before the install
+/// starts, precisely so a reboot cannot strand a password on disk.
 ///
 /// **`auth` is not optional in practice on Apple silicon.** `softwareupdate -i` needs a *volume
 /// owner* to authorize a macOS install there — `man softwareupdate` calls `--user` "an owner user to
@@ -989,9 +1119,15 @@ pub const OS_FAILURE_APPLICATION_NAME: &str = "macOS";
 /// `upgrade::report_patch_result`: the update already succeeded locally by the time this is
 /// called, so a failure here is only logged, never treated as undoing the install.
 ///
-/// **Only called when no restart is outstanding** — see [`InstallOutcome::restart_required`]. An
-/// update that is merely staged has not changed this host's version, and reporting it as installed
-/// made the dashboard clear the flag and then set it again on the next check-in.
+/// **Only called when no restart is outstanding** — see [`InstallOutcome::restart_required`] — or
+/// once the restart has happened, which `main::settle_pending_install` establishes from a
+/// [`PendingInstall`] on the invocation after the reboot. An update that is merely staged has not
+/// changed this host's version, and reporting it as installed made the dashboard clear the flag and
+/// then set it again on the next check-in.
+///
+/// The server end, `ReportOperatingSystemPatchedCommandHandler`, also closes any Failed Updates row
+/// filed under [`OS_FAILURE_APPLICATION_NAME`] for this host — so a success has to be *sent* for
+/// an earlier failure to stop showing, which is what the post-reboot call is for.
 pub fn report_patched(client: &reqwest::blocking::Client, config: &Config, serial_number: &str) {
     let request = ReportOsPatchResultRequest { serial_number };
 
@@ -1551,20 +1687,137 @@ mod tests {
         assert!(needs_prefetch(&offered, Some(&record), 1_100), "macOS 27 appeared since");
     }
 
-    /// The case that costs gigabytes if it goes the wrong way: everything offered is already
-    /// staged, so a check-in an hour later must not re-fetch 15GB on the chance macOS discarded it.
+    /// The record is re-confirmed every check-in, however complete it looks: macOS discarded a
+    /// staged 26.7 within three days on this fleet's Mac, and re-running `-d` on an asset that is
+    /// still there costs seconds, not gigabytes.
     #[test]
-    fn needs_prefetch_is_false_when_the_record_already_covers_everything_offered() {
+    fn needs_prefetch_re_confirms_a_record_that_covers_everything_offered() {
         let offered = OFFERED.map(String::from).to_vec();
         let record = staged(&OFFERED, 1_000);
-        assert!(!needs_prefetch(&offered, Some(&record), 1_000 + 60 * 60));
+        assert!(needs_prefetch(&offered, Some(&record), 1_000 + 60 * 60));
+        assert!(needs_prefetch(&offered, Some(&record), 1_000), "even straight away");
+    }
+
+    fn outcome(staged: &[&str], failed: &[&str]) -> PrefetchOutcome {
+        PrefetchOutcome {
+            staged: staged.iter().map(|label| label.to_string()).collect(),
+            failed: failed.iter().map(|label| label.to_string()).collect(),
+        }
     }
 
     #[test]
-    fn needs_prefetch_once_the_record_is_older_than_the_backstop() {
+    fn refreshed_with_no_previous_record_is_just_the_outcome() {
         let offered = OFFERED.map(String::from).to_vec();
-        let record = staged(&OFFERED, 1_000);
-        assert!(needs_prefetch(&offered, Some(&record), 1_000 + STAGED_RECORD_MAX_AGE_SECS + 1));
+        let record = StagedDownloads::refreshed(None, &offered, &outcome(&OFFERED, &[]), 2_000);
+
+        assert_eq!(record.labels, offered);
+        assert_eq!(record.staged_epoch, 2_000);
+        assert_eq!(record.attempted_epoch, 2_000);
+        assert!(record.failed.is_empty());
+        assert_eq!(record.failure_count, 0);
+    }
+
+    /// The blip case: 26.7 was confirmed last hour, `-d` printed nothing this hour. The per-user
+    /// process must still be allowed to prompt for it, and the retry must still be spaced.
+    #[test]
+    fn refreshed_keeps_believing_a_label_the_attempt_could_not_re_check() {
+        let offered = OFFERED.map(String::from).to_vec();
+        let previous = staged(&OFFERED, 1_000);
+        let record = StagedDownloads::refreshed(
+            Some(&previous),
+            &offered,
+            &outcome(&["Safari27.0TahoeAuto-27.0", "macOS 27-26A428"], &["macOS Tahoe 26.7-25G229"]),
+            2_000,
+        );
+
+        assert!(record.covers_the_macos_updates(&offered), "{record:?}");
+        assert_eq!(record.failed, vec!["macOS Tahoe 26.7-25G229".to_string()]);
+        assert_eq!(record.failure_count, 1);
+        assert_eq!(record.attempted_epoch, 2_000);
+    }
+
+    /// Installed is gone: a label macOS no longer offers is not carried forward, so the record
+    /// does not grow a history of every update this host ever staged.
+    #[test]
+    fn refreshed_drops_a_label_that_is_no_longer_offered() {
+        let previous = staged(&OFFERED, 1_000);
+        let offered = vec!["macOS 27-26A428".to_string()];
+        let record = StagedDownloads::refreshed(Some(&previous), &offered, &outcome(&["macOS 27-26A428"], &[]), 2_000);
+
+        assert_eq!(record.labels, offered);
+    }
+
+    #[test]
+    fn refreshed_counts_consecutive_failures_and_zeroes_them_on_a_clean_attempt() {
+        let offered = OFFERED.map(String::from).to_vec();
+        let previous = staged_with_failure(&["Safari27.0TahoeAuto-27.0"], &["macOS 27-26A428"], 3, 1_000);
+
+        let failed_again = StagedDownloads::refreshed(Some(&previous), &offered, &outcome(&[], &["macOS 27-26A428"]), 2_000);
+        assert_eq!(failed_again.failure_count, 4);
+        assert_eq!(failed_again.staged_epoch, 1_000, "nothing new was staged, so that date does not move");
+
+        let clean = StagedDownloads::refreshed(Some(&previous), &offered, &outcome(&OFFERED, &[]), 3_000);
+        assert_eq!(clean.failure_count, 0);
+        assert!(clean.failed.is_empty());
+        assert_eq!(clean.staged_epoch, 3_000);
+    }
+
+    fn pending(from_version: &str, epoch: u64) -> PendingInstall {
+        PendingInstall {
+            from_version: from_version.to_string(),
+            epoch,
+        }
+    }
+
+    /// The case this record exists for: the Mac rebooted inside `softwareupdate`, came back on the
+    /// new version, and nobody had told the server.
+    #[test]
+    fn judge_pending_install_reports_a_host_that_moved_version() {
+        let verdict = judge_pending_install(&pending("macOS 26.6.2", 1_000), "macOS 26.7", Some(2_000));
+        assert_eq!(verdict, PendingInstallVerdict::Installed);
+    }
+
+    /// The version settles it on its own — a kernel that will not say when it booted does not
+    /// stop a finished install being reported.
+    #[test]
+    fn judge_pending_install_needs_no_boot_time_to_see_a_version_change() {
+        let verdict = judge_pending_install(&pending("macOS 26.6.2", 1_000), "macOS 26.7", None);
+        assert_eq!(verdict, PendingInstallVerdict::Installed);
+    }
+
+    #[test]
+    fn judge_pending_install_forgets_an_install_the_reboot_did_not_apply() {
+        let verdict = judge_pending_install(&pending("macOS 26.7", 1_000), "macOS 26.7", Some(2_000));
+        assert_eq!(verdict, PendingInstallVerdict::DidNotTake);
+    }
+
+    /// Same version, same boot: the restart has not happened yet. Nothing to say, nothing to drop.
+    #[test]
+    fn judge_pending_install_waits_while_the_restart_is_still_to_come() {
+        assert_eq!(
+            judge_pending_install(&pending("macOS 26.7", 1_000), "macOS 26.7", Some(500)),
+            PendingInstallVerdict::StillPending
+        );
+        assert_eq!(
+            judge_pending_install(&pending("macOS 26.7", 1_000), "macOS 26.7", None),
+            PendingInstallVerdict::StillPending,
+            "and an unknown boot time keeps waiting rather than discarding"
+        );
+    }
+
+    #[test]
+    fn pending_install_round_trips_through_its_file() {
+        let dir = std::env::temp_dir().join(format!("kintsugi-pending-install-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("os-install-pending.json");
+
+        assert_eq!(read_pending_install(&path), None);
+        write_pending_install(&path, &pending("macOS 26.6.2", 1_000));
+        assert_eq!(read_pending_install(&path), Some(pending("macOS 26.6.2", 1_000)));
+        clear_pending_install(&path);
+        assert_eq!(read_pending_install(&path), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The runaway this backoff exists to stop: a failed attempt used to write no record, "no

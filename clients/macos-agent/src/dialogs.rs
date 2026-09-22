@@ -301,28 +301,67 @@ pub fn acknowledge(message: &str, timeout_seconds: u64) -> Result<()> {
     run_osascript(&script).map(|_| ())
 }
 
-/// What came back from the authorization prompt.
-///
-/// **A separate type from [`ConfirmChoice`], and the polarity of a timeout is the opposite** — the
-/// same reason [`RemoteControlChoice`] is its own enum. There, nobody answering means "they were
-/// not at the desk, count it as a delay, patch later": the update is going to happen regardless.
-/// Here, nobody answering means there is no password, and there is nothing useful to do with that
-/// but **skip the OS update entirely**. Falling through to an unauthorized install instead would
-/// download several gigabytes on an unattended Mac and fail at the end of it, every single cycle.
-/// Reusing `ConfirmChoice` would have put that behaviour one careless `match` arm away.
-#[derive(Debug, PartialEq, Eq)]
-pub enum PasswordAnswer {
-    /// The user authorized. Never logged, never rendered — see `os_update::InstallAuth`.
-    Provided(String),
-    /// Cancel, or an empty box. Treated as a refusal.
-    Cancelled,
-    /// Nobody was there. Treated as a refusal, and kept distinct only so the log can tell an empty
-    /// desk from a deliberate "not now".
-    TimedOut,
-}
-
 const AUTHORIZE_BUTTON: &str = "Authorize";
-const CANCEL_BUTTON: &str = "Cancel";
+
+/// The headline of the authorization alert — the bold line, where the other dialogs' `with title`
+/// text goes, since a Cocoa alert has no title bar.
+const INSTALL_PASSWORD_HEADLINE: &str = "Kintsugi Patching";
+
+/// The authorization prompt itself: a Cocoa `NSAlert` with a secure text field, driven through
+/// `osascript`'s JavaScript-for-Automation bridge. Every other dialog in this file is an AppleScript
+/// `display dialog`; this one is not, because it has to do three things `display dialog` cannot:
+///
+/// - **It cannot be dismissed.** There is no Cancel button and no `giving up after`. Escape and
+///   Cmd-. do nothing to an alert with no button named Cancel, an empty box is re-shown rather than
+///   returned, and the script only exits when it holds a non-empty password. The person clicked
+///   "Patch Now" (or spent their delay budget with somebody at the desk — see
+///   `patch_cycle::os_update_eligibility`), the applications are already patched, and the macOS
+///   update is downloaded and waiting: leaving the prompt up until it is answered is what makes the
+///   cycle finish. Before this, a Cancel and a ten-minute timeout both read as "skip the macOS
+///   update", and a Mac whose owner walked away at the wrong moment simply never updated.
+/// - **It stays in front.** `activateIgnoringOtherApps` brings it up over whatever is running, and
+///   the window sits at `NSModalPanelWindowLevel` (8) with `CanJoinAllSpaces |
+///   FullScreenAuxiliary` (1 | 256), so it is drawn above other applications' windows and follows
+///   the person across spaces and full-screen apps rather than being buried behind them the moment
+///   they click elsewhere. A `display dialog` from a background process appears wherever the window
+///   server puts it and is lost the first time another window takes focus.
+/// - **It asks nothing of any other application.** The obvious AppleScript route to a front-most
+///   dialog — `tell application "System Events"` + `activate` — sends Apple events to another
+///   process, which TCC gates behind an Automation prompt per Mac ("Not authorised to send Apple
+///   events to System Events", -1743, measured on this fleet's own Mac). The alert below is this
+///   process's own window, so no permission is involved.
+///
+/// Its arguments arrive as `argv` rather than being interpolated into the source, so nothing in the
+/// message has to be escaped for JavaScript: `argv[0]` is the headline, `argv[1]` the body,
+/// `argv[2]` the button. The password is the script's return value, which `osascript` prints to
+/// stdout exactly as typed plus one trailing newline — see [`request_install_password`] for why
+/// only that newline is stripped.
+const INSTALL_PASSWORD_ALERT_SCRIPT: &str = r#"
+ObjC.import('Cocoa');
+function run(argv) {
+  var app = $.NSApplication.sharedApplication;
+  app.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
+  var alert = $.NSAlert.alloc.init;
+  alert.messageText = argv[0];
+  alert.informativeText = argv[1];
+  alert.icon = $.NSImage.imageNamed('NSCaution');
+  alert.addButtonWithTitle(argv[2]);
+  var field = $.NSSecureTextField.alloc.initWithFrame($.NSMakeRect(0, 0, 320, 24));
+  alert.accessoryView = field;
+  alert.layout;
+  var win = alert.window;
+  win.level = 8;
+  win.collectionBehavior = 257;
+  win.initialFirstResponder = field;
+  var answer = '';
+  while (answer === '') {
+    app.activateIgnoringOtherApps(true);
+    alert.runModal;
+    answer = field.stringValue.js;
+  }
+  return answer;
+}
+"#;
 
 /// Composes the authorization prompt. Split out from the subprocess call for the same reason every
 /// other message in this file is — the wording is the part somebody has to make a decision from.
@@ -332,6 +371,9 @@ const CANCEL_BUTTON: &str = "Cancel";
 /// one. "A macOS update is ready" would be a fair description of a 2.9GB point release and a
 /// misleading one of an 11.7GB new major version, and the difference is exactly what somebody being
 /// asked for their password should get to weigh.
+///
+/// It offers no way out, because there is none: see [`INSTALL_PASSWORD_ALERT_SCRIPT`]. Saying so
+/// is kinder than leaving somebody to look for the Cancel button.
 fn install_password_message(username: &str, version: Option<&str>) -> String {
     let what = match version {
         Some(version) => format!("macOS {version}"),
@@ -345,58 +387,34 @@ fn install_password_message(username: &str, version: Option<&str>) -> String {
          able to close your applications first \u{2014} save your work now.\n\n\
          macOS requires your password to authorize a system update on Apple silicon. It is used \
          once, to run this installation, and is not stored.\n\n\
-         Enter the password for \u{201c}{username}\u{201d}, or Cancel to skip the macOS update this \
-         time \u{2014} application updates will still be installed."
+         Enter the password for \u{201c}{username}\u{201d} and press {AUTHORIZE_BUTTON}. This prompt \
+         stays open until you do \u{2014} the application updates have already been installed, and \
+         the macOS update is the one thing left."
     )
 }
 
-/// Asks the console user to authorize the macOS install, and returns what they said.
+/// Asks the console user to authorize the macOS install, and returns their password.
+///
+/// It returns only when it has one: the prompt cannot be cancelled or left to time out (see
+/// [`INSTALL_PASSWORD_ALERT_SCRIPT`]), so the only other way out is an `Err` — `osascript` could
+/// not be run, or the alert could not be shown at all (no window server, say). There is no
+/// "declined" and no "nobody answered" any more, which is why this returns a `String` rather than
+/// the three-way `PasswordAnswer` it used to.
 ///
 /// The password reaches this process on `osascript`'s stdout and goes straight into an
-/// `os_update::InstallAuth`; it is never logged here, and `run_osascript`'s `trim()` is
-/// deliberately *not* used on it (see [`run_osascript_untrimmed`]).
-pub fn request_install_password(username: &str, version: Option<&str>, timeout_seconds: u64) -> Result<PasswordAnswer> {
+/// `os_update::InstallAuth`; it is never logged here, and `run_osascript`'s `trim()` is deliberately
+/// *not* used on it. A password may legitimately begin or end with a space, and trimming the whole
+/// of osascript's output would silently hand `softwareupdate` a different password than the one
+/// that was typed — which arrives as "Failed to authenticate", indistinguishable from a wrong
+/// password. Only the single trailing newline osascript itself adds comes off.
+pub fn request_install_password(username: &str, version: Option<&str>) -> Result<String> {
     crate::logging::info(&format!("asking {username} to authorize the macOS install"));
 
-    let script = format!(
-        r#"display dialog "{}" with title "Kintsugi Patching" default answer "" with hidden answer buttons {{"{}", "{}"}} default button "{}" with icon caution giving up after {}"#,
-        escape(&install_password_message(username, version)),
-        CANCEL_BUTTON,
-        AUTHORIZE_BUTTON,
-        AUTHORIZE_BUTTON,
-        timeout_seconds
-    );
-
-    let answer = match run_osascript_untrimmed(&script) {
-        Ok(result) => parse_password_result(&result),
-        // osascript exits non-zero when the user presses Cancel ("User canceled. (-128)"), which is
-        // an answer rather than a failure — anything else really is one.
-        Err(err) if format!("{err:#}").contains("User canceled") => PasswordAnswer::Cancelled,
-        Err(err) => return Err(err),
-    };
-
-    crate::logging::info(&format!(
-        "{username} chose: {}",
-        match answer {
-            PasswordAnswer::Provided(_) => "authorize the macOS install",
-            PasswordAnswer::Cancelled => "skip the macOS update",
-            PasswordAnswer::TimedOut => "timed out (treated as a refusal, so the macOS update is skipped)",
-        }
-    ));
-
-    Ok(answer)
-}
-
-/// [`run_osascript`] without the `trim()`.
-///
-/// Every other caller wants the trim; this one must not have it. A password may legitimately begin
-/// or end with a space, and trimming the whole of osascript's output would silently hand
-/// `softwareupdate` a different password than the one that was typed — which arrives as "Failed to
-/// authenticate" after the download, indistinguishable from a wrong password.
-fn run_osascript_untrimmed(script: &str) -> Result<String> {
     let output = Command::new("osascript")
-        .arg("-e")
-        .arg(script)
+        .args(["-l", "JavaScript", "-e", INSTALL_PASSWORD_ALERT_SCRIPT])
+        .arg(INSTALL_PASSWORD_HEADLINE)
+        .arg(install_password_message(username, version))
+        .arg(AUTHORIZE_BUTTON)
         .output()
         .context("failed to run osascript")?;
 
@@ -408,38 +426,22 @@ fn run_osascript_untrimmed(script: &str) -> Result<String> {
         );
     }
 
-    // Only the single trailing newline osascript itself adds.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.strip_suffix('\n').unwrap_or(&stdout).to_string())
+    let password = strip_result_newline(&stdout);
+    if password.is_empty() {
+        // The script does not return until it holds a non-empty answer, so this is osascript
+        // printing nothing at all — never something to hand softwareupdate as a password.
+        anyhow::bail!("the authorization prompt closed without a password");
+    }
+
+    crate::logging::info(&format!("{username} authorized the macOS install"));
+    Ok(password.to_string())
 }
 
-/// Interprets the authorization prompt's result: `button returned:Authorize, text returned:<typed>,
-/// gave up:false`.
-///
-/// `gave up:` is checked first for the reason the other two parsers check it first — a timeout
-/// reports `button returned:<default button>`, which here is Authorize. The password is taken as
-/// everything between `text returned:` and the *final* `, gave up:`, so one containing a comma
-/// survives; and an unparseable answer falls through to `Cancelled`, never to a `Provided` holding
-/// something that isn't the password.
-fn parse_password_result(result: &str) -> PasswordAnswer {
-    if result.contains("gave up:true") {
-        return PasswordAnswer::TimedOut;
-    }
-
-    let Some((_, after)) = result.split_once("text returned:") else {
-        return PasswordAnswer::Cancelled;
-    };
-
-    let password = match after.rsplit_once(", gave up:") {
-        Some((password, _)) => password,
-        None => after,
-    };
-
-    if password.is_empty() {
-        PasswordAnswer::Cancelled
-    } else {
-        PasswordAnswer::Provided(password.to_string())
-    }
+/// Removes the one trailing newline `osascript` prints after a script's result, and nothing else —
+/// a password that ends in a space, or that is *only* spaces, has to reach `softwareupdate` intact.
+fn strip_result_newline(stdout: &str) -> &str {
+    stdout.strip_suffix('\n').unwrap_or(stdout)
 }
 
 /// Best-effort — a failed notification (e.g. Notification Center is unreachable, or this runs
@@ -608,41 +610,42 @@ mod tests {
         assert_eq!(escape(r#"He said "hi" \ bye"#), r#"He said \"hi\" \\ bye"#);
     }
 
+    /// The password is the script's return value, which osascript prints followed by one newline.
+    /// That newline is the only thing that may come off it.
     #[test]
-    fn parse_password_result_returns_what_was_typed() {
-        let result = "button returned:Authorize, text returned:hunter2, gave up:false";
-        assert_eq!(parse_password_result(result), PasswordAnswer::Provided("hunter2".to_string()));
+    fn strip_result_newline_removes_only_the_newline_osascript_adds() {
+        assert_eq!(strip_result_newline("hunter2\n"), "hunter2");
+        assert_eq!(strip_result_newline("one, two, three\n"), "one, two, three");
     }
 
-    /// osascript separates the record's fields with ", " and a password may contain one — taking
-    /// everything up to the *last* ", gave up:" is what keeps it whole.
+    /// The reason this dialog does not go through `run_osascript`: trimming would hand
+    /// softwareupdate a different password and the failure would be indistinguishable from a wrong
+    /// one.
     #[test]
-    fn parse_password_result_keeps_a_password_containing_a_comma() {
-        let result = "button returned:Authorize, text returned:one, two, three, gave up:false";
-        assert_eq!(parse_password_result(result), PasswordAnswer::Provided("one, two, three".to_string()));
-    }
-
-    #[test]
-    fn parse_password_result_keeps_leading_and_trailing_spaces() {
-        // The reason this dialog does not go through `run_osascript`: trimming would hand
-        // softwareupdate a different password and the failure would be indistinguishable from a
-        // wrong one, after the whole download.
-        let result = "button returned:Authorize, text returned: spaced , gave up:false";
-        assert_eq!(parse_password_result(result), PasswordAnswer::Provided(" spaced ".to_string()));
-    }
-
-    /// A timeout reports `button returned:<default button>`, which here is Authorize — so `gave up:`
-    /// has to be read first, exactly as in the other two parsers.
-    #[test]
-    fn parse_password_result_reads_an_unanswered_prompt_as_a_timeout_not_an_authorization() {
-        let result = "button returned:Authorize, text returned:, gave up:true";
-        assert_eq!(parse_password_result(result), PasswordAnswer::TimedOut);
+    fn strip_result_newline_keeps_leading_and_trailing_spaces() {
+        assert_eq!(strip_result_newline(" spaced \n"), " spaced ");
+        assert_eq!(strip_result_newline("   \n"), "   ", "a password that is only spaces is still a password");
     }
 
     #[test]
-    fn parse_password_result_treats_an_empty_or_unreadable_answer_as_cancelled() {
-        assert_eq!(parse_password_result("button returned:Authorize, text returned:, gave up:false"), PasswordAnswer::Cancelled);
-        assert_eq!(parse_password_result("something unexpected"), PasswordAnswer::Cancelled);
+    fn strip_result_newline_leaves_output_without_one_alone() {
+        assert_eq!(strip_result_newline("hunter2"), "hunter2");
+        assert_eq!(strip_result_newline(""), "");
+    }
+
+    /// The alert has no Cancel button and no timeout, so the script has nothing to escape and the
+    /// message has to be safe to hand over as a plain argument. Nothing in the source is
+    /// interpolated: the three `argv` reads are the only way text gets in.
+    #[test]
+    fn install_password_alert_script_takes_its_text_as_arguments_and_cannot_be_dismissed() {
+        assert!(INSTALL_PASSWORD_ALERT_SCRIPT.contains("argv[0]"), "headline");
+        assert!(INSTALL_PASSWORD_ALERT_SCRIPT.contains("argv[1]"), "body");
+        assert!(INSTALL_PASSWORD_ALERT_SCRIPT.contains("argv[2]"), "button");
+        assert_eq!(INSTALL_PASSWORD_ALERT_SCRIPT.matches("addButtonWithTitle").count(), 1, "one button, so Escape has nothing to press");
+        assert!(!INSTALL_PASSWORD_ALERT_SCRIPT.contains("Cancel"), "{INSTALL_PASSWORD_ALERT_SCRIPT}");
+        assert!(INSTALL_PASSWORD_ALERT_SCRIPT.contains("while (answer === '')"), "an empty box is re-shown, not returned");
+        assert!(INSTALL_PASSWORD_ALERT_SCRIPT.contains("activateIgnoringOtherApps(true)"), "it comes to the front");
+        assert!(INSTALL_PASSWORD_ALERT_SCRIPT.contains("win.level = 8"), "and stays above other windows");
     }
 
     /// `-i -a` installs everything applicable, so "a macOS update" can mean a 2.9GB point release
@@ -688,7 +691,8 @@ mod tests {
 
         assert!(message.contains("macOS 26.7"), "{message}");
         assert!(message.contains("david"), "{message}");
-        assert!(message.contains("Cancel"), "declining has to be presented as an option: {message}");
+        assert!(!message.contains("Cancel"), "there is no Cancel button, so the text must not promise one: {message}");
+        assert!(message.contains("stays open until you do"), "and it says the prompt will wait: {message}");
     }
 
     #[test]
