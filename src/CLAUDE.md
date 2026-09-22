@@ -811,11 +811,17 @@ Signing from the Applications screen passes no id and so clears nothing — that
 review, which says nothing about whether anything was repaired.
 
 **Nothing but a real execution failure belongs here.** An application with no signed patchable path,
-the macOS daemon's `runs_as_root` refusal, an unreachable server, an OS update — those are
-configuration problems or have no script to fix, and a queue full of them hides the ones the AI can
+the macOS daemon's `runs_as_root` refusal, an unreachable server — those are configuration problems
+or have no script to fix, and a queue full of them hides the ones the AI can repair. The one
+non-script row is a macOS install that actually ran and failed: the macOS agent files it under the
+application name `macOS` (`os_update::OS_FAILURE_APPLICATION_NAME`), because a Mac that silently
+never updated was the worse outcome, and the screen offers it no repair since there is no script to
 repair. `ReportPatchResultCommandHandler` closes any outstanding failure for the same
-(host, application), so a fixed script clears its own row; `DismissPatchFailureCommand` is for the
-ones that cannot recur.
+(host, application), so a fixed script clears its own row; `ReportOperatingSystemPatchedCommandHandler`
+does the same for the `macOS` row when the agent reports an install finished — which, for the
+ordinary install that reboots the Mac from inside `softwareupdate`, the agent sends on its next start
+(see `clients/macos-agent/CLAUDE.md`). Before it did, a macOS failure had no way off the screen but
+the dismiss button. `DismissPatchFailureCommand` is for the ones that cannot recur.
 
 
 ## Verifying a server-written upgrade script
