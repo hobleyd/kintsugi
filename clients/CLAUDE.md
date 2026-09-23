@@ -82,7 +82,7 @@ original — then the others for what each platform forced to differ. The differ
 | Privileged half | root LaunchDaemon, re-invoked by launchd | resident service (`windows-service`) | systemd oneshot on a `.timer` |
 | Per-user half | LaunchAgent | logon-triggered task for `BUILTIN\Users` | systemd user unit, `graphical-session.target` |
 | Check-in schedule | rewrites its own plist, reloads launchd via a detached helper | computes its next wake in-process | rewrites its own `.timer`, `daemon-reload` |
-| Privilege handoff | queue: OS download, OS install, AI-researched scripts and App Store rows; Homebrew stays per-user | queue, everything | queue, everything |
+| Privilege handoff | queue: OS download, OS install, AI-researched scripts and App Store rows; Homebrew stays per-user, and a `pkg` cask leaves Homebrew to become an AI-researched row (see the macOS `CLAUDE.md`) | queue, everything | queue, everything |
 | Inventory | `/Applications` bundles + Homebrew + App Store (by receipt) | uninstall registry (3 views) + winget + Chocolatey | Flatpak + Snap as *applications*; dpkg/rpm reported separately as packages (see below) |
 | OS updates | `softwareupdate` | Windows Update Agent COM API, via PowerShell | apt / dnf / yum / zypper / pacman / apk |
 | Host identity | hardware serial, always present | SMBIOS serial, **often a placeholder** | DMI serial, **often a placeholder** |

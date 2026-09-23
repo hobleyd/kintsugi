@@ -18,8 +18,9 @@ pub struct InstalledApp {
     /// Whatever stably names this application: the app bundle's `CFBundleIdentifier` (e.g.
     /// "com.example.MyApp"), or a Homebrew formula name / cask token. The backend's
     /// `is_patchable` refuses to run a `Script` row without one, so leaving it unset is how an
-    /// entry says "do not try" — which is what a cask whose upgrade needs root gets, see
-    /// [`cask_requires_root`].
+    /// entry says "do not try" — which is what a cask whose upgrade needs root gets when it cannot
+    /// be handed to the root daemon instead, see [`cask_requires_root`] and
+    /// [`pkg_casks_leaving_homebrew`].
     #[serde(rename = "applicationIdentifier", skip_serializing_if = "Option::is_none")]
     pub application_identifier: Option<String>,
     /// The latest version available, when known independently of any
@@ -393,7 +394,27 @@ pub fn scan_homebrew() -> HomebrewScan {
         Err(err) => crate::logging::warn(&format!("could not determine Homebrew's own version: {err}")),
     }
 
-    let info = brew_installed_info(&brew, run_as.as_deref());
+    let mut info = brew_installed_info(&brew, run_as.as_deref());
+
+    // A `pkg` cask whose application is in /Applications leaves Homebrew here, before the
+    // listing below, so this very report already shows it as the standalone bundle the folder
+    // scan finds rather than as a Homebrew row nothing can patch — see
+    // `pkg_casks_leaving_homebrew` for the reasoning and `forget_cask` for what "leaves" means.
+    let leaving = pkg_casks_leaving_homebrew(&info, &receipt_bundle_names, &bundle_is_in_applications);
+    for (token, bundle_names) in &leaving {
+        crate::logging::info(&format!(
+            "the cask '{token}' installs {} with a root-owned installer, which Homebrew cannot upgrade from this agent; \
+             taking it out of Homebrew's records so the bundle is patched directly, as root, instead",
+            bundle_names.join(", ")
+        ));
+        if let Err(err) = forget_cask(&brew, run_as.as_deref(), token) {
+            // The report is right either way — this cask is omitted from the Homebrew rows and its
+            // bundle is reported standalone regardless — so Homebrew merely keeps a stale record
+            // that the next scan tries to drop again.
+            crate::logging::warn(&format!("could not take the cask '{token}' out of Homebrew's records: {err:#}"));
+        }
+        info.leave_homebrew(token, bundle_names);
+    }
 
     apps.extend(list_brew_packages(&brew, run_as.as_deref(), "--formula", &info));
     apps.extend(list_brew_packages(&brew, run_as.as_deref(), "--cask", &info));
@@ -403,6 +424,7 @@ pub fn scan_homebrew() -> HomebrewScan {
 
 /// Extra per-package detail read from `brew info`, keyed by formula name or
 /// cask token, that `brew list --versions` alone doesn't provide.
+#[derive(Debug, Default)]
 struct BrewInstalledInfo {
     /// Latest version available per Homebrew's own catalog (a formula's
     /// stable version, or a cask's defined version) — not necessarily what's
@@ -424,8 +446,43 @@ struct BrewInstalledInfo {
     cask_app_bundle_names: HashSet<String>,
     /// Tokens of the installed casks whose `brew upgrade` would need root — see
     /// [`cask_requires_root`]. These are reported without an
-    /// `application_identifier`, which is what keeps them off the patch list.
+    /// `application_identifier`, which is what keeps them off the patch list — unless they are
+    /// among the `pkg_casks` below and leave Homebrew altogether.
     root_required_casks: HashSet<String>,
+    /// Every installed cask with a `pkg`/`installer` artifact, keyed by token: what its own
+    /// stanzas say about where its application lands. The candidates for
+    /// [`pkg_casks_leaving_homebrew`].
+    pkg_casks: HashMap<String, PkgCask>,
+    /// Tokens `scan_homebrew` decided are leaving Homebrew in this scan. `parse_brew_list` omits
+    /// them whether or not [`forget_cask`] managed to remove the record, so the report's shape
+    /// never depends on that `rm` — the bundle is reported standalone by the folder scan instead.
+    casks_left: HashSet<String>,
+}
+
+impl BrewInstalledInfo {
+    /// Records that `token` is leaving Homebrew: its bundles are no longer accounted for by a cask
+    /// (so [`scan_applications_folder`] reports them), it is no longer a root-required Homebrew
+    /// row, and [`parse_brew_list`] drops it.
+    fn leave_homebrew(&mut self, token: &str, bundle_names: &[String]) {
+        for name in bundle_names {
+            self.cask_app_bundle_names.remove(name);
+        }
+        self.root_required_casks.remove(token);
+        self.casks_left.insert(token.to_string());
+    }
+}
+
+/// What a `pkg` cask's stanzas say about the application its installer places. Both are hints,
+/// not truth: a receipt is the record of what the installer *actually* wrote (see
+/// [`receipt_bundle_names`]), and the disk is what says whether it is still there.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct PkgCask {
+    /// Bundle names (e.g. "Nextcloud.app") the cask itself names under /Applications — its `app`
+    /// artifact, or the `/Applications/*.app` paths of its `uninstall delete:`.
+    declared_bundle_names: Vec<String>,
+    /// The receipt ids (regular expressions, as `pkgutil --pkgs=` takes them) of its
+    /// `uninstall pkgutil:` stanza — what Homebrew itself would `--forget`.
+    pkgutil_ids: Vec<String>,
 }
 
 /// Basename of `path` if it names a top-level `/Applications/*.app` bundle,
@@ -462,12 +519,7 @@ fn brew_installed_info(brew: &Path, run_as: Option<&str>) -> BrewInstalledInfo {
     let mut command = brew_command(brew, run_as);
     command.args(["info", "--json=v2", "--installed"]);
 
-    let empty = || BrewInstalledInfo {
-        latest_versions: HashMap::new(),
-        installed_versions: HashMap::new(),
-        cask_app_bundle_names: HashSet::new(),
-        root_required_casks: HashSet::new(),
-    };
+    let empty = BrewInstalledInfo::default;
 
     let output = match command.output() {
         Ok(output) if output.status.success() => output,
@@ -535,17 +587,183 @@ fn strings_in(value: &serde_json::Value) -> Vec<&str> {
 /// every cask cost before this existed (the row is not patched); erring the other way costs the
 /// quit-and-fail loop above.
 fn cask_requires_root(cask: &serde_json::Value) -> bool {
-    const ROOT_ARTIFACTS: [&str; 2] = ["pkg", "installer"];
     const ROOT_UNINSTALL_KEYS: [&str; 4] = ["pkgutil", "kext", "script", "launchctl"];
 
-    cask["artifacts"].as_array().into_iter().flatten().any(|artifact| {
-        ROOT_ARTIFACTS.iter().any(|key| !artifact[key].is_null())
-            || artifact["uninstall"]
+    cask_installs_a_pkg(cask)
+        || cask["artifacts"].as_array().into_iter().flatten().any(|artifact| {
+            artifact["uninstall"]
                 .as_array()
                 .into_iter()
                 .flatten()
                 .any(|entry| ROOT_UNINSTALL_KEYS.iter().any(|key| !entry[key].is_null()))
-    })
+        })
+}
+
+/// Whether this cask installs through a `pkg` or `installer` artifact — `installer -pkg`, run as
+/// root, so everything it places is root-owned. The narrower half of [`cask_requires_root`], and
+/// the only half that qualifies a cask to leave Homebrew (see [`pkg_casks_leaving_homebrew`]): a
+/// cask that needs root *only* for its uninstall stanza is user-owned on disk and stays, unpatched
+/// but visible, as it always has.
+fn cask_installs_a_pkg(cask: &serde_json::Value) -> bool {
+    const PKG_ARTIFACTS: [&str; 2] = ["pkg", "installer"];
+
+    cask["artifacts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .any(|artifact| PKG_ARTIFACTS.iter().any(|key| !artifact[key].is_null()))
+}
+
+/// The `pkg` casks this scan takes out of Homebrew, each with the `/Applications/*.app` bundle
+/// names it leaves behind for [`scan_applications_folder`] to report. Sorted by token, so the log
+/// reads the same on every host.
+///
+/// A `pkg` cask is the one kind of Homebrew row this agent can never patch: `brew upgrade` has to
+/// remove root-owned files, `brew` refuses to run as root, and the per-user process has no
+/// password to give `sudo` and no way to get one (see [`cask_requires_root`] for the failure's
+/// exact shape). The same application *not* under Homebrew is patchable — the folder scan reports
+/// it with its `CFBundleIdentifier`, the server researches a `macOS`-bucket script that downloads
+/// the vendor's `.pkg` and runs `installer -pkg ... -target /`, and `upgrade::runs_as_root` sends
+/// that row to the root daemon, which is the path every standalone bundle has taken since the
+/// queue existed and asks nobody for a password. So the cask leaves Homebrew and the bundle takes
+/// that path. Homebrew's record was rarely right for these anyway: the installer is the vendor's
+/// own, the application updates itself or is updated by hand, and the Caskroom goes on saying
+/// whatever version `brew` last installed — on the Mac this was written on, Nextcloud's cask said
+/// 34.0.1 while the receipt and the bundle both said 34.0.4.
+///
+/// Only a cask whose application is *on disk at the top level of /Applications* leaves, because
+/// that is the only place the folder scan looks: a cask released without that would simply vanish
+/// from the inventory, which is worse than an unpatchable row that at least shows the application
+/// exists. Where the bundle is comes from two sources, both checked against the disk. The cask's
+/// own stanzas name it for most casks (`app`, or `uninstall delete:`), but a `pkg` cask's stanzas
+/// describe what its *author* believed the installer does, and they drift: `displaylink` deletes
+/// `/Applications/DisplayLink` — a folder from an earlier layout — while the installer today writes
+/// `DisplayLink Manager.app`. The receipt (`pkgutil --files`, via [`receipt_bundle_names`]) is
+/// what the installer actually wrote, so it is consulted too, through the cask's own `uninstall
+/// pkgutil:` ids. Two casks on the same Mac therefore stay where they are, deliberately:
+/// `temurin` installs a JDK under `/Library/Java/JavaVirtualMachines` and no bundle anywhere the
+/// scan looks, and `adobe-acrobat-reader`'s receipt names `Adobe Acrobat Reader.app` while Adobe's
+/// own updater has since moved it to `Adobe Acrobat DC/Adobe Acrobat.app`, a folder deep.
+///
+/// The two probes are parameters so the decision can be tested against captured `brew info` output
+/// without a Caskroom or a receipt database present.
+fn pkg_casks_leaving_homebrew(
+    info: &BrewInstalledInfo,
+    receipt_bundle_names: &dyn Fn(&str) -> Vec<String>,
+    bundle_is_in_applications: &dyn Fn(&str) -> bool,
+) -> Vec<(String, Vec<String>)> {
+    let mut leaving: Vec<(String, Vec<String>)> = info
+        .pkg_casks
+        .iter()
+        .filter_map(|(token, cask)| {
+            let mut bundle_names = cask.declared_bundle_names.clone();
+            bundle_names.extend(cask.pkgutil_ids.iter().flat_map(|id| receipt_bundle_names(id)));
+            bundle_names.sort();
+            bundle_names.dedup();
+            bundle_names.retain(|name| bundle_is_in_applications(name));
+            (!bundle_names.is_empty()).then(|| (token.clone(), bundle_names))
+        })
+        .collect();
+    leaving.sort();
+    leaving
+}
+
+/// Whether `/Applications/<name>` is a bundle [`read_app_bundle`] will be able to report — the
+/// probe [`pkg_casks_leaving_homebrew`] uses against the real disk.
+fn bundle_is_in_applications(name: &str) -> bool {
+    app_bundle_name_in_applications(&format!("/Applications/{name}")).is_some()
+        && Path::new("/Applications").join(name).join("Contents/Info.plist").is_file()
+}
+
+/// The top-level `/Applications/*.app` bundles the receipts matching `pkgutil_id` say they
+/// installed, read from `pkgutil` — the same records Homebrew's own `Cask::Pkg#uninstall` reads.
+/// Best-effort in the safe direction: any failure answers no bundles, and a cask with no other
+/// evidence of a bundle then stays in Homebrew.
+fn receipt_bundle_names(pkgutil_id: &str) -> Vec<String> {
+    let listing = Command::new(PKGUTIL).arg(format!("--pkgs={pkgutil_id}")).output();
+    let receipt_ids: Vec<String> = match listing {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout).lines().map(str::to_string).collect(),
+        // `pkgutil --pkgs=<regex>` exits 1 with nothing on stdout when no receipt matches, which is
+        // an ordinary answer for a cask whose stanza names a receipt this Mac never had.
+        Ok(_) => return Vec::new(),
+        Err(err) => {
+            crate::logging::warn(&format!("could not run pkgutil for '{pkgutil_id}': {err}"));
+            return Vec::new();
+        }
+    };
+
+    let mut names = Vec::new();
+    for receipt_id in receipt_ids {
+        let info = Command::new(PKGUTIL).args(["--pkg-info", &receipt_id]).output();
+        let files = Command::new(PKGUTIL).args(["--files", &receipt_id]).output();
+        match (info, files) {
+            (Ok(info), Ok(files)) if info.status.success() && files.status.success() => {
+                let location = receipt_location(&String::from_utf8_lossy(&info.stdout));
+                names.extend(bundle_names_in_receipt(&location, &String::from_utf8_lossy(&files.stdout)));
+            }
+            _ => crate::logging::warn(&format!("could not read the receipt '{receipt_id}' from pkgutil")),
+        }
+    }
+    names
+}
+
+const PKGUTIL: &str = "/usr/sbin/pkgutil";
+
+/// The `location:` line of `pkgutil --pkg-info`, relative to the volume — `Applications` for a
+/// package installed into that folder, empty for one installed at the volume's root, whose file
+/// list then carries the `Applications/` prefix itself.
+fn receipt_location(pkg_info: &str) -> String {
+    pkg_info
+        .lines()
+        .find_map(|line| line.strip_prefix("location:"))
+        .map(|location| location.trim().trim_matches('/').to_string())
+        .unwrap_or_default()
+}
+
+/// The pure half of [`receipt_bundle_names`]: which lines of `pkgutil --files`, joined onto the
+/// receipt's `location`, name a top-level `/Applications/*.app`.
+fn bundle_names_in_receipt(location: &str, files: &str) -> Vec<String> {
+    files
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|file| if location.is_empty() { format!("/{file}") } else { format!("/{location}/{file}") })
+        .filter_map(|path| app_bundle_name_in_applications(&path))
+        .collect()
+}
+
+/// Takes `token` out of Homebrew's records without running its uninstall stanza — `brew
+/// uninstall` would run it, and it is the very thing that needs the password this process does
+/// not have. Homebrew holds nothing about an installed cask outside `$(brew --caskroom)/<token>`,
+/// so removing that directory is exactly what `brew uninstall` itself ends with after the stanza
+/// (`Cask::Installer#purge_versioned_files`), and it is the remedy Homebrew's own maintainers
+/// give when a cask's uninstall is broken. The application, its receipt and anything else the
+/// installer wrote are untouched. A `binary` symlink the cask made (`/opt/homebrew/bin/nextcloudcmd`
+/// → into the bundle) is left too: it points at the application, not the Caskroom, and goes on
+/// working.
+///
+/// Run as Homebrew's owner when this process is root, the way every `brew` call here is: the
+/// Caskroom is that user's tree, and deleting inside it needs no more privilege than they have.
+fn forget_cask(brew: &Path, run_as: Option<&str>, token: &str) -> Result<()> {
+    let caskroom = brew_command(brew, run_as).arg("--caskroom").output().context("failed to run brew --caskroom")?;
+    if !caskroom.status.success() {
+        anyhow::bail!("brew --caskroom exited with status {}: {}", caskroom.status, String::from_utf8_lossy(&caskroom.stderr));
+    }
+    let caskroom = String::from_utf8_lossy(&caskroom.stdout).trim().to_string();
+    if caskroom.is_empty() {
+        anyhow::bail!("brew --caskroom printed nothing");
+    }
+
+    let cask_dir = Path::new(&caskroom).join(token);
+    if !cask_dir.is_dir() {
+        return Ok(()); // Already gone — an earlier scan removed it after reporting.
+    }
+
+    let output = owner_command(run_as, "/bin/rm").arg("-rf").arg(&cask_dir).output().context("failed to run rm")?;
+    if !output.status.success() {
+        anyhow::bail!("rm -rf {} exited with status {}: {}", cask_dir.display(), output.status, String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(())
 }
 
 /// The pure half of [`brew_installed_info`], split out so it can be exercised
@@ -571,31 +789,43 @@ fn parse_brew_installed_info(json_text: &str) -> Result<BrewInstalledInfo> {
 
     let mut cask_app_bundle_names = HashSet::new();
     let mut root_required_casks = HashSet::new();
+    let mut pkg_casks = HashMap::new();
 
     for cask in json["casks"].as_array().into_iter().flatten() {
-        if let Some(token) = cask["token"].as_str() {
-            if let Some(latest) = cask["version"].as_str() {
-                latest_versions.insert(token.to_string(), latest.to_string());
-            }
-            if cask_requires_root(cask) {
-                root_required_casks.insert(token.to_string());
+        let mut declared_bundle_names = Vec::new();
+        let mut pkgutil_ids = Vec::new();
+
+        for artifact in cask["artifacts"].as_array().into_iter().flatten() {
+            declared_bundle_names.extend(strings_in(&artifact["app"]).into_iter().map(str::to_string));
+
+            for entry in artifact["uninstall"].as_array().into_iter().flatten() {
+                declared_bundle_names.extend(strings_in(&entry["delete"]).into_iter().filter_map(app_bundle_name_in_applications));
+                pkgutil_ids.extend(strings_in(&entry["pkgutil"]).into_iter().map(str::to_string));
             }
         }
 
-        for artifact in cask["artifacts"].as_array().into_iter().flatten() {
-            cask_app_bundle_names.extend(strings_in(&artifact["app"]).into_iter().map(str::to_string));
+        cask_app_bundle_names.extend(declared_bundle_names.iter().cloned());
 
-            let deleted_apps = artifact["uninstall"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .flat_map(|entry| strings_in(&entry["delete"]))
-                .filter_map(app_bundle_name_in_applications);
-            cask_app_bundle_names.extend(deleted_apps);
+        let Some(token) = cask["token"].as_str() else { continue };
+        if let Some(latest) = cask["version"].as_str() {
+            latest_versions.insert(token.to_string(), latest.to_string());
+        }
+        if cask_requires_root(cask) {
+            root_required_casks.insert(token.to_string());
+        }
+        if cask_installs_a_pkg(cask) {
+            pkg_casks.insert(token.to_string(), PkgCask { declared_bundle_names, pkgutil_ids });
         }
     }
 
-    Ok(BrewInstalledInfo { latest_versions, installed_versions, cask_app_bundle_names, root_required_casks })
+    Ok(BrewInstalledInfo {
+        latest_versions,
+        installed_versions,
+        cask_app_bundle_names,
+        root_required_casks,
+        pkg_casks,
+        casks_left: HashSet::new(),
+    })
 }
 
 /// Homebrew installs to a fixed prefix depending on CPU architecture
@@ -642,13 +872,20 @@ fn brew_owner_username(brew: &Path) -> Result<String> {
 /// Builds a `brew` invocation, transparently wrapped in `sudo -u <run_as>`
 /// when Homebrew must be run as a different (non-root) user.
 fn brew_command(brew: &Path, run_as: Option<&str>) -> Command {
+    owner_command(run_as, brew)
+}
+
+/// `program`, run as `run_as` through `sudo -u` when one is given (this process is root and the
+/// work belongs to Homebrew's owner) and directly otherwise. `brew` and the `rm` in [`forget_cask`]
+/// both go through here, so the two never run with different privilege.
+fn owner_command(run_as: Option<&str>, program: impl AsRef<std::ffi::OsStr>) -> Command {
     match run_as {
         Some(username) => {
             let mut cmd = Command::new("/usr/bin/sudo");
-            cmd.args(["-u", username, "-H"]).arg(brew);
+            cmd.args(["-u", username, "-H"]).arg(program);
             cmd
         }
-        None => Command::new(brew),
+        None => Command::new(program),
     }
 }
 
@@ -678,7 +915,9 @@ fn brew_own_version(brew: &Path, run_as: Option<&str>) -> Result<String> {
 /// name from `--appName` and ignores `--appId`, but the backend's `is_patchable` requires an
 /// identifier before it will run any `Script` row, and a formula/cask has nothing more stable to
 /// offer than the token `brew upgrade` takes. The exception is a cask in
-/// `info.root_required_casks`, which is left without one on purpose — see [`cask_requires_root`].
+/// `info.root_required_casks`, which is left without one on purpose — see [`cask_requires_root`] —
+/// and a cask in `info.casks_left` is not listed at all, because it is no longer Homebrew's to
+/// report: see [`pkg_casks_leaving_homebrew`].
 fn list_brew_packages(brew: &Path, run_as: Option<&str>, kind: &str, info: &BrewInstalledInfo) -> Vec<InstalledApp> {
     let mut command = brew_command(brew, run_as);
     command.args(["list", kind, "--versions"]);
@@ -714,6 +953,9 @@ fn parse_brew_list(listing: &str, info: &BrewInstalledInfo) -> Vec<InstalledApp>
             // last token is only the fallback when `brew info` failed.
             let mut tokens = line.split_whitespace();
             let name = tokens.next()?.to_string();
+            if info.casks_left.contains(&name) {
+                return None;
+            }
             let listed_version = tokens.last()?.to_string();
             let version = info.installed_versions.get(&name).cloned().unwrap_or(listed_version);
             let available_version = info.latest_versions.get(&name).cloned();
@@ -743,7 +985,11 @@ mod tests {
     /// (for `latest_versions`), an `app` cask, a `pkg` cask whose `pkg` stanza
     /// is a bare string, and a `pkg` cask whose `uninstall` stanza names a
     /// single path — which Homebrew writes as a bare string rather than a
-    /// one-element array.
+    /// one-element array. The last three are the `pkg` casks that decide
+    /// `pkg_casks_leaving_homebrew` each way: `displaylink` whose stanzas
+    /// name a folder that no longer exists while its receipt names the real
+    /// bundle, `adobe-acrobat-reader` whose declared bundle Adobe's own
+    /// updater has since moved, and `temurin`, a JDK with no bundle at all.
     const BREW_INFO_JSON: &str = r#"{
       "formulae": [
         { "name": "jq", "versions": { "stable": "1.7.1" } },
@@ -770,6 +1016,8 @@ mod tests {
             {
               "uninstall": [
                 {
+                  "launchctl": "com.microsoft.teams.TeamsUpdaterDaemon",
+                  "pkgutil": [ "com.microsoft.MSTeamsAudioDevice", "com.microsoft.teams2" ],
                   "delete": [
                     "/Applications/Microsoft Teams.app",
                     "/Library/Preferences/com.microsoft.teams.plist"
@@ -778,6 +1026,46 @@ mod tests {
               ]
             },
             { "pkg": "MicrosoftTeams.pkg" }
+          ]
+        },
+        {
+          "token": "displaylink",
+          "version": "17.0,2026-09",
+          "artifacts": [
+            {
+              "uninstall": [
+                {
+                  "launchctl": [ "com.displaylink.displaylinkmanager", "com.displaylink.useragent" ],
+                  "quit": "DisplayLinkUserAgent",
+                  "pkgutil": "com.displaylink.*",
+                  "delete": [ "/Applications/DisplayLink", "/Library/LaunchDaemons/com.displaylink.displaylinkmanager.plist" ]
+                }
+              ]
+            },
+            { "pkg": [ "DisplayLink Manager Graphics Connectivity17.0-EXE.pkg" ] }
+          ]
+        },
+        {
+          "token": "adobe-acrobat-reader",
+          "version": "26.001.21662",
+          "artifacts": [
+            {
+              "uninstall": [
+                {
+                  "pkgutil": [ "com.adobe.acrobat.DC.reader.*", "com.adobe.armdc.app.pkg" ],
+                  "delete": [ "/Applications/Adobe Acrobat Reader.app", "/Library/Preferences/com.adobe.reader.DC.WebResource.plist" ]
+                }
+              ]
+            },
+            { "pkg": [ "AcroRdrDC_2600121662_MUI.pkg" ] }
+          ]
+        },
+        {
+          "token": "temurin",
+          "version": "27,35",
+          "artifacts": [
+            { "uninstall": [ { "pkgutil": "net.temurin.27.jdk" } ] },
+            { "pkg": [ "OpenJDK27U-jdk_aarch64_mac_hotspot_27_35.pkg" ] }
           ]
         },
         {
@@ -812,13 +1100,161 @@ mod tests {
     fn parse_brew_installed_info_flags_casks_whose_upgrade_needs_root() {
         let info = parse_brew_installed_info(BREW_INFO_JSON).expect("should parse");
 
-        // Both `pkg` casks — one by its `pkg` artifact (a bare string, so this is also the
-        // single-item shape), the other by that and its `pkgutil` uninstall. An `app` cask
-        // installs and uninstalls entirely as the user and stays patchable.
+        // Every `pkg` cask — `microsoft-teams` by its `pkg` artifact (a bare string, so this is
+        // also the single-item shape), the rest by that and their `pkgutil` uninstall. An `app`
+        // cask installs and uninstalls entirely as the user and stays patchable.
         assert_eq!(
             info.root_required_casks,
-            ["microsoft-teams", "nextcloud"].into_iter().map(str::to_string).collect::<HashSet<String>>()
+            ["adobe-acrobat-reader", "displaylink", "microsoft-teams", "nextcloud", "temurin"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<HashSet<String>>()
         );
+    }
+
+    #[test]
+    fn cask_installs_a_pkg_is_the_installer_half_of_needing_root() {
+        let installs_a_pkg = |json: &str| cask_installs_a_pkg(&serde_json::from_str::<serde_json::Value>(json).unwrap());
+
+        assert!(installs_a_pkg(r#"{ "artifacts": [ { "pkg": "Thing.pkg" } ] }"#));
+        assert!(installs_a_pkg(r#"{ "artifacts": [ { "installer": [ { "script": { "executable": "install.sh", "sudo": true } } ] } ] }"#));
+        // Root for the uninstall alone is `cask_requires_root` but not this: the files are the
+        // user's, and such a cask stays in Homebrew.
+        assert!(!installs_a_pkg(r#"{ "artifacts": [ { "uninstall": [ { "launchctl": "com.example.daemon" } ] }, { "app": "App.app" } ] }"#));
+        assert!(!installs_a_pkg(r#"{ "artifacts": [ { "app": "App.app" } ] }"#));
+    }
+
+    #[test]
+    fn parse_brew_installed_info_collects_each_pkg_cask_with_its_declared_bundles_and_receipts() {
+        let info = parse_brew_installed_info(BREW_INFO_JSON).expect("should parse");
+
+        assert_eq!(info.pkg_casks.len(), 5, "{:?}", info.pkg_casks.keys().collect::<Vec<_>>());
+        assert!(!info.pkg_casks.contains_key("rectangle"));
+        // Both stanzas in both shapes: a bare-string `pkgutil` and a bare-string `delete` on
+        // nextcloud, arrays on microsoft-teams.
+        assert_eq!(
+            info.pkg_casks["nextcloud"],
+            PkgCask {
+                declared_bundle_names: vec!["Nextcloud.app".to_string()],
+                pkgutil_ids: vec!["com.nextcloud.desktopclient".to_string()],
+            }
+        );
+        assert_eq!(
+            info.pkg_casks["microsoft-teams"],
+            PkgCask {
+                declared_bundle_names: vec!["Microsoft Teams.app".to_string()],
+                pkgutil_ids: vec!["com.microsoft.MSTeamsAudioDevice".to_string(), "com.microsoft.teams2".to_string()],
+            }
+        );
+        // `/Applications/DisplayLink` is a folder, not a bundle: nothing declared, only a receipt.
+        assert_eq!(
+            info.pkg_casks["displaylink"],
+            PkgCask { declared_bundle_names: Vec::new(), pkgutil_ids: vec!["com.displaylink.*".to_string()] }
+        );
+        assert_eq!(
+            info.pkg_casks["temurin"],
+            PkgCask { declared_bundle_names: Vec::new(), pkgutil_ids: vec!["net.temurin.27.jdk".to_string()] }
+        );
+    }
+
+    /// The disk and the receipt database of the Mac the fixture was captured on, as
+    /// `pkg_casks_leaving_homebrew`'s two probes would see them.
+    fn on_disk(name: &str) -> bool {
+        ["Nextcloud.app", "Microsoft Teams.app", "DisplayLink Manager.app", "Rectangle.app"].contains(&name)
+    }
+
+    fn receipts(pkgutil_id: &str) -> Vec<String> {
+        match pkgutil_id {
+            "com.nextcloud.desktopclient" => vec!["Nextcloud.app".to_string()],
+            "com.microsoft.teams2" => vec!["Microsoft Teams.app".to_string()],
+            "com.displaylink.*" => vec!["DisplayLink Manager.app".to_string()],
+            // Adobe's receipt still names the bundle the installer wrote; the disk no longer has it.
+            "com.adobe.acrobat.DC.reader.*" => vec!["Adobe Acrobat Reader.app".to_string()],
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn pkg_casks_leave_homebrew_only_when_their_bundle_is_on_disk_in_applications() {
+        let info = parse_brew_installed_info(BREW_INFO_JSON).expect("should parse");
+
+        let leaving = pkg_casks_leaving_homebrew(&info, &receipts, &on_disk);
+
+        assert_eq!(
+            leaving,
+            vec![
+                // Receipt evidence alone: the cask's own stanzas name a folder that is not there.
+                ("displaylink".to_string(), vec!["DisplayLink Manager.app".to_string()]),
+                // Declared and receipted, once — the two sources agree and are not double-counted.
+                ("microsoft-teams".to_string(), vec!["Microsoft Teams.app".to_string()]),
+                ("nextcloud".to_string(), vec!["Nextcloud.app".to_string()]),
+            ]
+        );
+        // `adobe-acrobat-reader` has a bundle name from both sources and neither is on disk;
+        // `temurin` has none from either. Both stay: leaving would make them vanish from the
+        // inventory, where staying keeps them visible as the unpatchable rows they were.
+        assert!(!leaving.iter().any(|(token, _)| token == "adobe-acrobat-reader" || token == "temurin"));
+    }
+
+    #[test]
+    fn a_cask_that_only_needs_root_to_uninstall_never_leaves_homebrew() {
+        let json = r#"{ "casks": [ {
+            "token": "some-agent",
+            "version": "1.0",
+            "artifacts": [
+              { "uninstall": [ { "launchctl": "com.example.agent", "delete": "/Applications/Some Agent.app" } ] },
+              { "app": [ "Some Agent.app" ] }
+            ]
+        } ] }"#;
+        let info = parse_brew_installed_info(json).expect("should parse");
+
+        // Root-required (Homebrew may reach for sudo on the launchctl plist), so it is reported
+        // without an identifier — but its files are the user's, and it is not a pkg cask.
+        assert!(info.root_required_casks.contains("some-agent"));
+        assert!(pkg_casks_leaving_homebrew(&info, &receipts, &|_| true).is_empty());
+    }
+
+    #[test]
+    fn leaving_homebrew_frees_the_bundle_for_the_folder_scan_and_drops_the_homebrew_row() {
+        let mut info = parse_brew_installed_info(BREW_INFO_JSON).expect("should parse");
+        assert!(info.cask_app_bundle_names.contains("Nextcloud.app"));
+
+        info.leave_homebrew("nextcloud", &["Nextcloud.app".to_string()]);
+
+        // The folder scan now reports /Applications/Nextcloud.app, with its bundle identifier.
+        assert!(!info.cask_app_bundle_names.contains("Nextcloud.app"));
+        // ...and `brew list` no longer contributes a row for it, whether or not the Caskroom entry
+        // was actually removed — `brew list` may still print it if `rm` failed.
+        let apps = parse_brew_list("rectangle 1.100\nnextcloud 34.0.1\nmicrosoft-teams 26.1.0\n", &info);
+        let names: Vec<&str> = apps.iter().map(|app| app.name.as_str()).collect();
+        assert_eq!(names, vec!["rectangle", "microsoft-teams"]);
+        // A pkg cask that did *not* leave keeps today's shape: listed, unpatchable.
+        assert_eq!(apps[1].application_identifier, None);
+    }
+
+    #[test]
+    fn bundle_names_in_receipt_reads_both_shapes_pkgutil_writes() {
+        // A package installed into /Applications lists files relative to that location...
+        assert_eq!(
+            bundle_names_in_receipt("Applications", "Microsoft Teams.app\nMicrosoft Teams.app/Contents\nMicrosoft Teams.app/Contents/Info.plist\n"),
+            vec!["Microsoft Teams.app".to_string()]
+        );
+        // ...while one installed at the volume root carries the folder itself.
+        assert_eq!(
+            bundle_names_in_receipt("", "Applications\nApplications/Nextcloud.app\nApplications/Nextcloud.app/Contents\n"),
+            vec!["Nextcloud.app".to_string()]
+        );
+        // A receipt for something that is not an application contributes nothing.
+        assert!(bundle_names_in_receipt("Library/Audio/Plug-Ins/HAL", "MSTeamsAudioDevice.driver\n").is_empty());
+        assert!(bundle_names_in_receipt("", "Library/Java/JavaVirtualMachines/temurin-27.jdk\n").is_empty());
+    }
+
+    #[test]
+    fn receipt_location_reads_the_location_line_and_defaults_to_the_volume_root() {
+        assert_eq!(receipt_location("package-id: com.microsoft.teams2\nversion: 26198\nvolume: /\nlocation: Applications\n"), "Applications");
+        assert_eq!(receipt_location("package-id: com.nextcloud.desktopclient\nvolume: /\nlocation: \n"), "");
+        assert_eq!(receipt_location("package-id: x\nlocation: /Applications/\n"), "Applications");
+        assert_eq!(receipt_location("package-id: x\n"), "");
     }
 
     #[test]
@@ -920,7 +1356,7 @@ mod tests {
         // one — nor must the `pkg`/`binary` stanzas contribute anything.
         assert_eq!(
             info.cask_app_bundle_names,
-            ["Rectangle.app", "Microsoft Teams.app", "Nextcloud.app"]
+            ["Rectangle.app", "Microsoft Teams.app", "Nextcloud.app", "Adobe Acrobat Reader.app"]
                 .into_iter()
                 .map(str::to_string)
                 .collect::<HashSet<String>>()

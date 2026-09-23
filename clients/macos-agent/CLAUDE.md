@@ -294,6 +294,47 @@ first `Version:` in the output, which on a host offered Safari, macOS 26.7 and m
 `Title:` names macOS counts, and of those the highest, because `-a` installs all of them.
 
 
+## `pkg` casks leave Homebrew, because no process here can give `brew` a password
+
+**A cask that installs through a `.pkg` is the one Homebrew row this agent can never patch, and the
+fix is to stop it being a Homebrew row.** `brew upgrade` on such a cask runs its `uninstall` stanza
+first, which removes root-owned files through `sudo`; the per-user process has no TTY and no
+`SUDO_ASKPASS`, `brew` refuses to run as root at all, and every documented door around that is
+closed (the failure's exact shape, and the four doors, are in `.claude/rules/package-manager-names.md`).
+There is no way to get the root password to `brew` and none is coming. So
+`system_info::pkg_casks_leaving_homebrew` takes such a cask out of Homebrew's records during the
+inventory scan — `forget_cask` removes `$(brew --caskroom)/<token>` as Homebrew's owner, which is
+the record and not the files, and is what `brew uninstall` itself ends with — and the same report
+omits the Homebrew row and lets `scan_applications_folder` report the bundle as a standalone
+application with its `CFBundleIdentifier`. From there it is on the path every standalone bundle has
+taken since the queue existed: the server researches a `macOS`-bucket script (`installer -pkg …
+-target /`, told it runs as root from a LaunchDaemon), a human signs it, and `upgrade::runs_as_root`
+sends the row to the root daemon, which asks nobody for anything. The three casks it took off the
+Mac this was written on were `nextcloud`, `microsoft-teams` and `displaylink`. Nothing on the server
+changed for it: the bundle arrives as a new application, often under a new name (`Microsoft Teams`
+for `microsoft-teams`), with no row to resolve until "Find Upgrade Paths" writes one — unsigned.
+
+**Homebrew's record of these was wrong anyway, which is the second reason not to keep it.** The
+installer is the vendor's, the application updates itself or gets updated by hand, and the Caskroom
+keeps saying whatever `brew` last installed: Nextcloud's cask said 34.0.1 while its receipt and the
+bundle both said 34.0.4, so the agent was reporting an update that had already happened.
+
+**Two limits, both deliberate.** Only a cask whose bundle is on disk at the top level of
+`/Applications` leaves, because that is the only place the folder scan looks — released without
+that it would simply vanish from the inventory, and an unpatchable row that shows the application
+exists is better than nothing. Where the bundle is comes from the cask's own `app`/`uninstall
+delete:` stanzas *and* from its `pkgutil` receipts (`receipt_bundle_names`), because the stanzas
+describe what the cask's author believed and drift from what the installer writes: `displaylink`
+deletes `/Applications/DisplayLink`, a folder from an older layout, while its receipt names
+`DisplayLink Manager.app`. That is why `temurin` (a JDK under `/Library/Java/JavaVirtualMachines`,
+no bundle anywhere) and `adobe-acrobat-reader` (Adobe's own updater moved it into `Adobe Acrobat
+DC/Adobe Acrobat.app`, a folder deep) stay exactly as they were. And only a cask with a
+`pkg`/`installer` artifact qualifies (`cask_installs_a_pkg`); one flagged by `cask_requires_root` for
+its uninstall stanza alone — a `launchctl` label Homebrew *might* remove with sudo — is user-owned on
+disk and stays in Homebrew, unpatched and visible, as before. The decision is a pure function of the
+`brew info` JSON plus two probes (the disk, the receipts), which is how the tests pin every one of
+those cases without a Caskroom present.
+
 ## Remote control and the remote shell
 
 **macOS needs a handoff for that, and it is a third root job.** Remote control lives in its per-user

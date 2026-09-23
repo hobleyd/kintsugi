@@ -23,7 +23,8 @@ silently stops an entire manager's applications resolving.
   `script` or `launchctl` uninstall). Leaving the identifier off is deliberately how a row is kept out
   of a patch cycle — the alternative is the Nextcloud loop, where every cycle quits the application,
   fails inside `brew`, and leaves it stopped. Do not "fix" a Homebrew row that never patches by
-  adding an identifier server-side.
+  adding an identifier server-side. A `pkg` cask whose bundle is in /Applications is no longer
+  reported as a Homebrew row at all — see the last bullet.
 - **"Is this installation behind" is answered by the agent's package manager first and a version
   comparison second, and the Linux agent is the only one that supplies the first answer.**
   `InstalledApp.update_available` (→ `ApplicationEntry.UpdateAvailable` →
@@ -66,7 +67,28 @@ silently stops an entire manager's applications resolving.
   arrangement that fixes this inside Homebrew: `brew` refuses to run as root (`brew.sh`'s
   `check-run-command-as-root`), `as-console-user` immediately drops back to the console user,
   `SUDO_ASKPASS` still needs a real password, and `HOMEBREW_SUDO_THROUGH_SUDO_USER` is only
-  passwordless if brew is already root. Root-requiring casks are therefore **not agent-patchable**;
-  do not try to route them through the root queue by having the daemon drive `brew`. The macOS
-  agent's `system_info::cask_requires_root` is what keeps them off the patch list, by reporting
-  them without an `applicationIdentifier` — see the identifier bullet above.
+  passwordless if brew is already root. Root-requiring casks are therefore **not patchable through
+  Homebrew**; do not try to route them through the root queue by having the daemon drive `brew`.
+  The macOS agent's `system_info::cask_requires_root` is what keeps them off the patch list, by
+  reporting them without an `applicationIdentifier` — see the identifier bullet above.
+- **So a `pkg` cask whose application is in /Applications leaves Homebrew, and is patched as a
+  standalone bundle instead** (macOS agent 0.16.0, `system_info::pkg_casks_leaving_homebrew`).
+  The same application *not* under Homebrew was always patchable: the folder scan reports it with
+  its `CFBundleIdentifier`, the server researches a `macOS`-bucket script that fetches the vendor's
+  `.pkg` and runs `installer -pkg … -target /`, and `upgrade::runs_as_root` sends the row to the
+  root daemon, which asks nobody for a password. "Leaves" means `forget_cask` removes
+  `$(brew --caskroom)/<token>` as Homebrew's owner — the record, not the files, and not `brew
+  uninstall`, whose stanza is the very thing that needs the password — and the report in the same
+  scan omits the Homebrew row and stops shielding the bundle from `scan_applications_folder`. The
+  server needs nothing: the bundle arrives as a new standalone application (often under a different
+  name — `Microsoft Teams`, where the cask was `microsoft-teams`), `ResolvePath` finds no row for
+  it, and "Find Upgrade Paths" researches one, unsigned, for a human to review. The old
+  `pm:Homebrew` row for the token is left behind unused. Two limits are deliberate and tested. Only
+  a cask whose bundle is *on disk at the top level of /Applications* leaves, read from the cask's
+  own stanzas **and** from its `pkgutil` receipts (`pkgutil --files`; the stanzas drift —
+  `displaylink` deletes a folder from an older layout while its receipt names `DisplayLink
+  Manager.app`) — a cask released without that would vanish from the inventory, so `temurin` (a
+  JDK, no bundle) and `adobe-acrobat-reader` (moved by Adobe's updater into `Adobe Acrobat DC/`)
+  stay as unpatchable Homebrew rows. And only a cask with a `pkg`/`installer` artifact qualifies
+  (`cask_installs_a_pkg`): one that needs root for its *uninstall* alone is user-owned on disk and
+  stays in Homebrew.
