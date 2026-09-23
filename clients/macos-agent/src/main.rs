@@ -1049,12 +1049,13 @@ fn run_scheduler(
     }
 }
 
-/// Combines /Applications bundle scanning with Homebrew formulae/casks. A
-/// cask-installed GUI app also lives under /Applications, so the folder
-/// scan is told which bundle names Homebrew already accounts for
-/// (`cask_app_bundle_names`) and skips those, keeping the Homebrew-tagged
+/// Combines the bundle scan (/Applications, one folder deep, and the JDKs
+/// under /Library/Java — see `system_info::APPLICATIONS_DIR`) with Homebrew
+/// formulae/casks. A cask-installed GUI app also lives under /Applications,
+/// so the scan is told which bundle paths Homebrew already accounts for
+/// (`cask_bundle_paths`) and skips those, keeping the Homebrew-tagged
 /// entry as the single source of truth for that app rather than also
-/// reporting it as a separate, unmanaged application. The folder scan itself
+/// reporting it as a separate, unmanaged application. The scan itself
 /// tells App Store installs apart from standalone bundles by their receipt
 /// (see `system_info::read_app_bundle`). Any remaining exact
 /// (name, version, ...) duplicates are still deduplicated, since the
@@ -1063,7 +1064,7 @@ fn collect_installed_applications() -> Vec<InstalledApp> {
     let homebrew = system_info::scan_homebrew();
 
     let mut seen = HashSet::new();
-    system_info::scan_applications_folder(&homebrew.cask_app_bundle_names)
+    system_info::scan_installed_bundles(&homebrew.cask_bundle_paths)
         .into_iter()
         .chain(homebrew.apps)
         .filter(|app| seen.insert(app.clone()))

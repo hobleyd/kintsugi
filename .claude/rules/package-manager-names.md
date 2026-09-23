@@ -71,24 +71,35 @@ silently stops an entire manager's applications resolving.
   Homebrew**; do not try to route them through the root queue by having the daemon drive `brew`.
   The macOS agent's `system_info::cask_requires_root` is what keeps them off the patch list, by
   reporting them without an `applicationIdentifier` — see the identifier bullet above.
-- **So a `pkg` cask whose application is in /Applications leaves Homebrew, and is patched as a
+- **So a `pkg` cask whose bundle the scan can see leaves Homebrew, and is patched as a
   standalone bundle instead** (macOS agent 0.16.0, `system_info::pkg_casks_leaving_homebrew`).
-  The same application *not* under Homebrew was always patchable: the folder scan reports it with
-  its `CFBundleIdentifier`, the server researches a `macOS`-bucket script that fetches the vendor's
+  The same application *not* under Homebrew was always patchable: the scan reports it with its
+  `CFBundleIdentifier`, the server researches a `macOS`-bucket script that fetches the vendor's
   `.pkg` and runs `installer -pkg … -target /`, and `upgrade::runs_as_root` sends the row to the
   root daemon, which asks nobody for a password. "Leaves" means `forget_cask` removes
   `$(brew --caskroom)/<token>` as Homebrew's owner — the record, not the files, and not `brew
   uninstall`, whose stanza is the very thing that needs the password — and the report in the same
-  scan omits the Homebrew row and stops shielding the bundle from `scan_applications_folder`. The
-  server needs nothing: the bundle arrives as a new standalone application (often under a different
-  name — `Microsoft Teams`, where the cask was `microsoft-teams`), `ResolvePath` finds no row for
+  scan omits the Homebrew row and stops shielding the bundle from `scan_installed_bundles`. The
+  server needs nothing but its prompt knowing where bundles live: the bundle arrives as a new
+  standalone application (often under a different name — `Microsoft Teams`, where the cask was
+  `microsoft-teams`; `temurin-26`, where the cask was `temurin`), `ResolvePath` finds no row for
   it, and "Find Upgrade Paths" researches one, unsigned, for a human to review. The old
-  `pm:Homebrew` row for the token is left behind unused. Two limits are deliberate and tested. Only
-  a cask whose bundle is *on disk at the top level of /Applications* leaves, read from the cask's
+  `pm:Homebrew` row for the token is left behind unused. Where the bundle is comes from the cask's
   own stanzas **and** from its `pkgutil` receipts (`pkgutil --files`; the stanzas drift —
   `displaylink` deletes a folder from an older layout while its receipt names `DisplayLink
-  Manager.app`) — a cask released without that would vanish from the inventory, so `temurin` (a
-  JDK, no bundle) and `adobe-acrobat-reader` (moved by Adobe's updater into `Adobe Acrobat DC/`)
-  stay as unpatchable Homebrew rows. And only a cask with a `pkg`/`installer` artifact qualifies
-  (`cask_installs_a_pkg`): one that needs root for its *uninstall* alone is user-owned on disk and
-  stays in Homebrew.
+  Manager.app`), with the receipt ids re-spelled for the *installed* version because `brew info`
+  describes the catalog's cask (`net.temurin.27.jdk` on a Mac whose receipt is
+  `net.temurin.26.jdk`). Three outcomes, each tested: a bundle on disk → leaves and the scan
+  reports it; bundles named but none on disk → leaves as a ghost record (Adobe's updater moved
+  Reader into `Adobe Acrobat DC/Adobe Acrobat.app` under a new name; the scan reports what is
+  really there); nothing named anywhere the scan looks → stays, unpatchable and visible, as
+  before. And only a cask with a `pkg`/`installer` artifact qualifies (`cask_installs_a_pkg`): one
+  that needs root for its *uninstall* alone is user-owned on disk and stays in Homebrew.
+- **"Where the scan looks" is one function, `system_info::scanned_bundle_path`, and the macOS
+  research prompt repeats it in words.** `/Applications/*.app`, `/Applications/<Folder>/*.app`
+  (one level — vendors ship suites in a folder, and Adobe *moves* Reader into one), and
+  `/Library/Java/JavaVirtualMachines/*.jdk`. A JDK is named by its directory (`temurin-26`), not
+  its plist — `CFBundleName` carries the version and every OpenJDK build shares one
+  `CFBundleIdentifier` — and the prompt in `AiUpgradePathResearchClient` tells the script to find
+  it at `/Library/Java/JavaVirtualMachines/<appName>.jdk` and to stay on that feature line. Adding
+  a fourth place means all three: the constant list, `scanned_bundle_path`, and the prompt.

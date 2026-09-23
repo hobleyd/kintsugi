@@ -940,11 +940,20 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient, ICpeSugge
               but `$HOME` is root's, nothing user-specific is reachable, and an Apple event sent from
               here does not reach the logged-in user's applications:
               - Re-run the same latest-version check as `--update-version` internally.
-              - Determine the currently installed version (e.g. via `defaults read
-                /Applications/<appName>.app/Contents/Info.plist CFBundleShortVersionString`), and
-                verify the installed bundle's CFBundleIdentifier matches `--appId` before touching
+              - Locate the installed bundle. It is usually `/Applications/<appName>.app`, but the
+                agent also inventories bundles one folder deep (`/Applications/<Vendor>/<appName>.app`
+                — Adobe's updater moves Acrobat into `/Applications/Adobe Acrobat DC/`, for example)
+                and JDKs, which are reported under the name of their directory in
+                `/Library/Java/JavaVirtualMachines/<appName>.jdk` (`temurin-26`, `zulu-21`,
+                `amazon-corretto-21`, Oracle's `jdk-21`) and are patched with the vendor's `.pkg` for
+                that same feature line, never a different major. Check those places rather than
+                assuming the top level, and read the installed version from the bundle's
+                `Contents/Info.plist` (`defaults read <bundle>/Contents/Info.plist
+                CFBundleShortVersionString`).
+              - Verify the installed bundle's CFBundleIdentifier matches `--appId` before touching
                 anything — treat a mismatch as a fatal error (wrong app), not something to silently
-                ignore.
+                ignore. (Every OpenJDK build shares `net.java.openjdk.jdk`, so for a JDK the
+                directory name is what tells one line from another.)
               - If already at or above the latest version, print a message and exit 0 without
                 downloading or changing anything (idempotent).
               - If the application is currently running, quit it gracefully before replacing it —

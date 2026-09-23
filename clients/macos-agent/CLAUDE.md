@@ -305,35 +305,56 @@ There is no way to get the root password to `brew` and none is coming. So
 `system_info::pkg_casks_leaving_homebrew` takes such a cask out of Homebrew's records during the
 inventory scan — `forget_cask` removes `$(brew --caskroom)/<token>` as Homebrew's owner, which is
 the record and not the files, and is what `brew uninstall` itself ends with — and the same report
-omits the Homebrew row and lets `scan_applications_folder` report the bundle as a standalone
+omits the Homebrew row and lets `scan_installed_bundles` report the bundle as a standalone
 application with its `CFBundleIdentifier`. From there it is on the path every standalone bundle has
 taken since the queue existed: the server researches a `macOS`-bucket script (`installer -pkg …
 -target /`, told it runs as root from a LaunchDaemon), a human signs it, and `upgrade::runs_as_root`
-sends the row to the root daemon, which asks nobody for anything. The three casks it took off the
-Mac this was written on were `nextcloud`, `microsoft-teams` and `displaylink`. Nothing on the server
-changed for it: the bundle arrives as a new application, often under a new name (`Microsoft Teams`
-for `microsoft-teams`), with no row to resolve until "Find Upgrade Paths" writes one — unsigned.
+sends the row to the root daemon, which asks nobody for anything. Nothing on the server changed
+for it beyond the prompt knowing where bundles live: the bundle arrives as a new application, often
+under a new name (`Microsoft Teams` for `microsoft-teams`, `temurin-26` for `temurin`), with no row
+to resolve until "Find Upgrade Paths" writes one — unsigned.
 
 **Homebrew's record of these was wrong anyway, which is the second reason not to keep it.** The
 installer is the vendor's, the application updates itself or gets updated by hand, and the Caskroom
 keeps saying whatever `brew` last installed: Nextcloud's cask said 34.0.1 while its receipt and the
 bundle both said 34.0.4, so the agent was reporting an update that had already happened.
 
-**Two limits, both deliberate.** Only a cask whose bundle is on disk at the top level of
-`/Applications` leaves, because that is the only place the folder scan looks — released without
-that it would simply vanish from the inventory, and an unpatchable row that shows the application
-exists is better than nothing. Where the bundle is comes from the cask's own `app`/`uninstall
-delete:` stanzas *and* from its `pkgutil` receipts (`receipt_bundle_names`), because the stanzas
-describe what the cask's author believed and drift from what the installer writes: `displaylink`
-deletes `/Applications/DisplayLink`, a folder from an older layout, while its receipt names
-`DisplayLink Manager.app`. That is why `temurin` (a JDK under `/Library/Java/JavaVirtualMachines`,
-no bundle anywhere) and `adobe-acrobat-reader` (Adobe's own updater moved it into `Adobe Acrobat
-DC/Adobe Acrobat.app`, a folder deep) stay exactly as they were. And only a cask with a
-`pkg`/`installer` artifact qualifies (`cask_installs_a_pkg`); one flagged by `cask_requires_root` for
-its uninstall stanza alone — a `launchctl` label Homebrew *might* remove with sudo — is user-owned on
-disk and stays in Homebrew, unpatched and visible, as before. The decision is a pure function of the
-`brew info` JSON plus two probes (the disk, the receipts), which is how the tests pin every one of
-those cases without a Caskroom present.
+**Where the bundle is comes from two sources, both checked against the disk, and the decision has
+three outcomes.** The cask's own `app`/`uninstall delete:` stanzas name it for most casks, but a
+`pkg` cask's stanzas describe what its author believed and drift from what the installer writes:
+`displaylink` deletes `/Applications/DisplayLink`, a folder from an older layout, while its receipt
+names `DisplayLink Manager.app`. So the `pkgutil` receipts (`receipt_bundle_paths`) are read too,
+through the cask's `pkgutil:` ids — re-spelled for the installed version
+(`pkgutil_ids_for_installed_version`), because `brew info` describes the *catalog's* cask and says
+`net.temurin.27.jdk` on a Mac whose receipt is `net.temurin.26.jdk`, and Homebrew's own copy of the
+installed definition (`.metadata/…/Casks/<token>.json`) is an empty object for anything installed
+from its API. A bundle on disk: the cask leaves and the scan reports the bundle. Bundles named and
+none on disk: the cask leaves too — Homebrew is describing an install that is not there, as with
+Acrobat Reader after Adobe's updater moved it into `Adobe Acrobat DC/Adobe Acrobat.app` under a new
+name; the scan already reports what is really on disk, and keeping the record means a `brew upgrade`
+that would *reinstall* it and fail. Nothing named anywhere the scan looks (a driver whose receipt
+lists only a kext): the cask stays as it always was, unpatchable and visible, because leaving would
+make it vanish from the inventory. Only a cask with a `pkg`/`installer` artifact qualifies at all
+(`cask_installs_a_pkg`); one flagged by `cask_requires_root` for its uninstall stanza alone is
+user-owned on disk and stays in Homebrew. The decision is a pure function of the `brew info` JSON
+plus two probes (the disk, the receipts), which is how the tests pin every case without a Caskroom.
+
+**Where the scan looks is one list, and it is longer than `/Applications`.** `scanned_bundle_path`
+is the single definition: `/Applications/*.app`; `/Applications/<Folder>/*.app`, one level and no
+deeper, because vendors ship suites in a folder and Adobe *moves* Reader into one — the scan used to
+stop at the top level and lost Reader the day that happened; and
+`/Library/Java/JavaVirtualMachines/*.jdk`, because a JDK is a root-owned, `.pkg`-installed bundle
+patched exactly like the others and living nowhere near /Applications. The cask stanzas and
+receipts are filtered through the same function, so a cask can only ever account for a bundle the
+scan would otherwise have reported. **A `.jdk` is named by its directory, not its plist**
+(`read_app_bundle`): Temurin 26's `CFBundleName` is "OpenJDK 26.0.2.1" — the version in the name,
+so every update release would be a new application — and its `CFBundleIdentifier`
+`net.java.openjdk.jdk` is shared by every OpenJDK build from every vendor and major. The directory
+(`temurin-26.jdk`, `zulu-21.jdk`, `amazon-corretto-21.jdk`, Oracle's `jdk-21.jdk`) is what the
+vendor's installer names the *feature line*, stays put across update releases, and tells vendors
+and majors apart. The server's macOS prompt (`AiUpgradePathResearchClient`) names that path and
+tells the script to stay on the line rather than jump majors; adding a fourth place to the scan
+means the constant list, `scanned_bundle_path`, and that prompt.
 
 ## Remote control and the remote shell
 
