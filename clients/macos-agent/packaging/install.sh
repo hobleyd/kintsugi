@@ -225,6 +225,24 @@ mkdir -p "$IDENTITY_DIR"
 chown root:admin "$IDENTITY_DIR"
 chmod 0770 "$IDENTITY_DIR"
 
+# The same quarantine flag, on the files this script installs *beside* the binaries. A release
+# fetched through a browser quarantines every file in the archive and `install` copies the
+# attribute along with the bytes; clearing it only from the two binaries was enough while nothing
+# executed the plists — macOS 26 and earlier merely lint a quarantined plist and load it anyway.
+# macOS 27's launchd refuses it outright ("Could not import service ... error = 155: Refusing to
+# execute/trust quarantined program/file"), which is how a Mac that took the macOS 27 upgrade came
+# back with neither its check-in daemon nor its menu bar agent, and no check-in left to say so.
+# Called after every install below, and also on the LaunchDaemon plist when it is *kept*: that one
+# is preserved across reinstalls (see below) and the agent's own rewrite of it is in place, so a
+# flag it picked up at first install would otherwise outlive every later install. The agent does the
+# same on every check-in for hosts already in the field — see self_update::repair_quarantine_flags.
+clear_quarantine() {
+    local f
+    for f in "$@"; do
+        xattr -d com.apple.quarantine "$f" 2>/dev/null || true
+    done
+}
+
 # The LaunchDaemon plist is the one file the agent owns after installation: its first check-in
 # assigns this host a minute and rewrites the plist with a StartCalendarInterval for it
 # (src/checkin_schedule.rs), and the packaged copy deliberately has none. Overwriting a plist that
@@ -241,6 +259,7 @@ else
     echo "Installing LaunchDaemon to ${PLIST_DEST}..."
     install -o root -g wheel -m 644 "$SCRIPT_DIR/${LABEL}.plist" "$PLIST_DEST"
 fi
+clear_quarantine "$PLIST_DEST" "$CONFIG_DEST"
 
 # Unload first in case this is a reinstall/upgrade.
 launchctl bootout system "$PLIST_DEST" 2>/dev/null || true
@@ -251,6 +270,7 @@ launchctl enable "system/${LABEL}"
 # schedule to preserve — so it is always overwritten with the packaged copy.
 echo "Installing remote shell LaunchDaemon to ${REMOTE_SHELL_PLIST_DEST}..."
 install -o root -g wheel -m 644 "$SCRIPT_DIR/${REMOTE_SHELL_LABEL}.plist" "$REMOTE_SHELL_PLIST_DEST"
+clear_quarantine "$REMOTE_SHELL_PLIST_DEST"
 
 launchctl bootout system "$REMOTE_SHELL_PLIST_DEST" 2>/dev/null || true
 launchctl bootstrap system "$REMOTE_SHELL_PLIST_DEST"
@@ -258,6 +278,7 @@ launchctl enable "system/${REMOTE_SHELL_LABEL}"
 
 echo "Installing per-user patching LaunchAgent to ${UI_PLIST_DEST}..."
 install -o root -g wheel -m 644 "$SCRIPT_DIR/${UI_LABEL}.plist" "$UI_PLIST_DEST"
+clear_quarantine "$UI_PLIST_DEST"
 
 # /Library/LaunchAgents is auto-loaded for every NEW login session from here on with no further
 # action needed. For a user already logged in right now, load it into their session immediately

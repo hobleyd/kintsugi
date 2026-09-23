@@ -348,6 +348,24 @@ flag only helps future updates — so `self_update::repair_installed_ownership` 
 bootstraps the job whenever launchd has not got it. That is what makes a host that has *already*
 self-updated into the broken state heal itself rather than needing a reinstall.
 
+**The third repair is the quarantine flag, and it is the one with a deadline.** A release
+downloaded through a browser carries `com.apple.quarantine` on every file in the archive, and BSD
+`install` copies the attribute with the bytes. install.sh stripped it from the two binaries —
+Gatekeeper refuses to run a quarantined executable — and from nothing else, on the reasoning that
+nothing executes a plist. macOS 26 agreed and merely linted it; **macOS 27's launchd refuses to load
+a quarantined plist** (`Could not import service ... error = 155: Refusing to execute/trust
+quarantined program/file`, visible only in the unified log), so the first Mac to take that upgrade
+came back with no check-in daemon and no menu bar agent, and nothing to report either absence. The
+LaunchDaemon plist is the exposed file: install.sh keeps it across reinstalls to preserve the
+check-in minute, and `checkin_schedule`'s rewrite is an in-place `fs::write`, which keeps existing
+attributes — so a flag from the first install survived every later one. install.sh now clears all
+four files, and `self_update::repair_quarantine_flags` clears them on every check-in; but the
+repair runs inside the daemon that the flag stops from loading, so it only reaches a host that
+takes this agent release *before* the OS upgrade. After it, the fix is by hand, as root:
+`xattr -d com.apple.quarantine` on the plists, then `launchctl bootstrap` for `system/` and for
+`gui/<uid>/`. `sfltool dumpbtm` is a false lead here — it shows the developer group as disabled,
+which is the Login Items toggle and not what launchd is refusing on.
+
 
 **Nothing is shown on the Mac while a shell session runs**, deliberately. The menu bar reports a
 *screen* session, because somebody's screen is being watched; a root shell is not a session inside

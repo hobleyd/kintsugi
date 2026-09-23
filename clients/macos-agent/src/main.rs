@@ -182,13 +182,16 @@ fn run_daemon() -> Result<()> {
         config::default_config_path().display()
     ));
 
-    // Before anything that can fail over the network: put right what a self-update cannot. Both of
-    // these are repairs rather than installations, and both exist because `self_update` runs under
+    // Before anything that can fail over the network: put right what a self-update cannot. All
+    // three are repairs rather than installations, and all exist because `self_update` runs under
     // the *old* binary and never re-runs packaging/install.sh — so a host in the field has no other
     // path back to a correct state. The first restores `root:wheel` on the binary launchd executes
-    // as root and on `kintsugi-mas`; the second makes sure a terminal session has a job to be
-    // served by. Silent on the overwhelming majority of check-ins, where there is nothing to do.
+    // as root and on `kintsugi-mas`; the second strips the quarantine flag macOS 27's launchd
+    // refuses to load a plist under, which has to happen while this daemon still loads at all; the
+    // third makes sure a terminal session has a job to be served by. Silent on the overwhelming
+    // majority of check-ins, where there is nothing to do.
     self_update::repair_installed_ownership();
+    self_update::repair_quarantine_flags();
     remote_shell::ensure_job_installed();
 
     let checkin_schedule_path = config::checkin_schedule_path();

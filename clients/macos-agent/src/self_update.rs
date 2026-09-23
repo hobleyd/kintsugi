@@ -13,6 +13,10 @@ use crate::logging;
 
 const PLATFORM: &str = "macos";
 
+/// The attribute Gatekeeper puts on anything a browser downloads, and that macOS 27's launchd
+/// refuses to load a plist under — see `repair_quarantine_flags`.
+const QUARANTINE_XATTR: &str = "com.apple.quarantine";
+
 /// Longer than the daemon's usual 15s HTTP timeout (see `main::run_daemon`) — that's sized for the
 /// small, fast host/application registration calls this shares a client with; downloading a whole
 /// package needs enough headroom for a slow link, not just a slow server.
@@ -286,6 +290,67 @@ pub fn repair_installed_ownership() {
             metadata.gid()
         ));
     }
+}
+
+/// Strips `com.apple.quarantine` from everything packaging/install.sh puts down, on every root
+/// check-in.
+///
+/// A release fetched through a browser carries the flag on every file in the archive, and BSD
+/// `install` copies extended attributes along with the bytes. install.sh cleared it from the two
+/// binaries, which Gatekeeper would otherwise refuse to run, but not from the plists or
+/// config.toml, which nothing executes — a distinction that held until macOS 27, whose launchd
+/// refuses to load a quarantined plist at all (`Could not import service ... error = 155: Refusing
+/// to execute/trust quarantined program/file`, where macOS 26 logged a lint and loaded it). A Mac
+/// that took the upgrade with flagged plists came back with neither the check-in daemon nor the
+/// menu bar agent, and no check-in to say so. The LaunchDaemon plist is the exposed one: install.sh
+/// keeps it across reinstalls to preserve this host's check-in minute, and `checkin_schedule`'s
+/// rewrite is an in-place `fs::write`, which keeps existing attributes — so a flag picked up at
+/// first install was shed by no later step. install.sh now clears all of them, but that reaches
+/// only fresh installs; this is what reaches a host already in the field, and it has to get there
+/// *before* the upgrade, because afterwards the daemon that would run it no longer loads.
+///
+/// Shelled out to `xattr` like `chown_root_wheel` shells out to `chown`: std has no xattr API and
+/// this is not worth a dependency. Silent when there is nothing to do, which is every check-in
+/// after the first.
+pub fn repair_quarantine_flags() {
+    for path in [
+        config::daemon_plist_path(),
+        config::ui_plist_path(),
+        config::remote_shell_plist_path(),
+        config::default_config_path(),
+        config::installed_binary_path(),
+        config::mas_binary_path(),
+    ] {
+        if !path.exists() || !has_quarantine_flag(&path) {
+            continue;
+        }
+
+        match Command::new("/usr/bin/xattr").arg("-d").arg(QUARANTINE_XATTR).arg(&path).output() {
+            Ok(output) if output.status.success() => {
+                logging::info(&format!("removed the {QUARANTINE_XATTR} attribute from {}", path.display()))
+            }
+            Ok(output) => logging::warn(&format!(
+                "xattr -d {QUARANTINE_XATTR} {} exited with {}: {}",
+                path.display(),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            Err(err) => logging::warn(&format!("failed to run xattr on {}: {err}", path.display())),
+        }
+    }
+}
+
+/// `xattr -p` exits non-zero when the attribute is absent, so the exit status alone answers this
+/// without parsing its output — and a failure to run `xattr` at all reads as "absent", which just
+/// means the removal above is skipped rather than attempted with the same tool.
+fn has_quarantine_flag(path: &Path) -> bool {
+    Command::new("/usr/bin/xattr")
+        .arg("-p")
+        .arg(QUARANTINE_XATTR)
+        .arg(path)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
 }
 
 /// Restarts both launchd jobs that run this binary so the update actually takes effect: the root
