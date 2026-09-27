@@ -1,6 +1,6 @@
 [package]
 name = "kintsugi-agent"
-version = "0.12.1"
+version = "0.13.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Background agent that registers this Linux host with the patching system's host inventory."
@@ -70,7 +70,7 @@ rustls-native-certs = "0.8"
 # monitor and where each one sits inside the root window. Pure Rust like the rest of x11rb — it is
 # request encoding and reply parsing, not a binding — so it costs the no-C-library invariant above
 # nothing, which is the only reason it is affordable here.
-x11rb = { version = "0.14", default-features = false, features = ["xtest", "xfixes", "randr"] }
+x11rb = { version = "0.14", default-features = false, features = ["xtest", "xfixes", "randr", "dpms"] }
 
 ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
 # "jpeg" alongside "png": png is the tray icon, jpeg is every remote control frame. Also brings

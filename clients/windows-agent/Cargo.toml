@@ -1,6 +1,6 @@
 [package]
 name = "kintsugi-agent"
-version = "0.11.2"
+version = "0.12.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Background agent that registers this PC with the patching system's host inventory."
@@ -80,6 +80,11 @@ features = [
     # CreateNamedPipeW and friends: the channel between the service (which holds this host's
     # identity) and the tray process (which holds the desktop) — see remote_ipc.
     "Win32_System_Pipes",
+    # RegisterPowerSettingNotification and POWERBROADCAST_SETTING: the tray window asks Windows
+    # whether the console display is on, which is what tells `presence` a patching prompt would be
+    # seen. GUID_CONSOLE_DISPLAY_STATE itself lives under SystemServices.
+    "Win32_System_Power",
+    "Win32_System_SystemServices",
     # WTSGetActiveConsoleSessionId and WTSQueryUserToken: which session owns the screen, and whether
     # anybody is logged into it — the service's reachability test, and where it launches the session
     # helper.

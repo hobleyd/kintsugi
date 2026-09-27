@@ -1,6 +1,9 @@
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+
+use crate::schedule::now_epoch;
 
 const DELAY_BUTTON: &str = "Delay";
 const PATCH_NOW_BUTTON: &str = "Patch Now";
@@ -9,8 +12,9 @@ const PATCH_NOW_BUTTON: &str = "Patch Now";
 pub enum ConfirmChoice {
     PatchNow,
     Delay,
-    /// The dialog was left up long enough that AppleScript's `giving up after` clause dismissed
-    /// it on its own.
+    /// The dialog stood for a whole delay period of wall-clock time without an answer — either
+    /// AppleScript's `giving up after` clause dismissed it, or this process closed it because the
+    /// deadline had passed (see `run_osascript_until` for why both exist).
     ///
     /// It counts against the delay budget — the user was asked and said nothing — but **not** the
     /// way an explicit `Delay` does: the dialog stands there for a whole delay period, so that
@@ -18,6 +22,89 @@ pub enum ConfirmChoice {
     /// count the budget down half as fast as the policy says. See
     /// `ScheduleState::register_unanswered_prompt`.
     TimedOut,
+}
+
+/// How often a dialog's subprocess is checked against its wall-clock deadline. Small enough that a
+/// Mac woken past its deadline closes the stale prompt before the person has finished reading it;
+/// each check is one `try_wait`, so there is nothing to save by making it larger.
+const DEADLINE_POLL: Duration = Duration::from_secs(5);
+
+/// How a dialog subprocess ended.
+enum DialogRun {
+    /// The process exited on its own — a button was clicked, or AppleScript's own timeout fired —
+    /// and this is what it printed.
+    Finished(String),
+    /// The wall-clock deadline arrived first and the process was killed, which takes its dialog
+    /// down with it. Every caller reads this as "nobody answered".
+    DeadlinePassed,
+}
+
+/// Runs a dialog script and holds it to a deadline on the **wall clock**, which AppleScript's own
+/// `giving up after` clause does not do.
+///
+/// That clause measures time the Mac spent running, so it stops for as long as the Mac is asleep
+/// and only ticks through the seconds-long dark wakes Power Nap grants a closed lid. Measured on
+/// this fleet's own Mac: a confirm dialog raised with a one-hour giveup on a Friday morning was
+/// still standing, still offering all eight delays, on the Monday, and gave up seventy-one hours
+/// after it went up — five minutes into that morning's session. The whole delay budget the policy
+/// describes is meant to run from the moment the person is asked, whether or not the lid is shut in
+/// between, and the only party that can see a wall clock across a sleep is this process, so it
+/// polls the child against `deadline_epoch` and kills it when the deadline has passed. The clause
+/// is kept in every script all the same: while the Mac stays awake it closes the dialog cleanly at
+/// exactly the period, with a result this side can read, and costs nothing.
+///
+/// `now_epoch` rather than `Instant` for the deadline, for the reason `schedule` gives: `Instant`
+/// stops during sleep as well, and the sleep is the case this exists for.
+fn run_osascript_until(script: &str, deadline_epoch: u64) -> Result<DialogRun> {
+    let child = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to run osascript")?;
+
+    match wait_until(child, deadline_epoch, DEADLINE_POLL)? {
+        ChildRun::Exited(output) => {
+            if !output.status.success() {
+                anyhow::bail!(
+                    "osascript exited with {}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+            Ok(DialogRun::Finished(String::from_utf8_lossy(&output.stdout).trim().to_string()))
+        }
+        ChildRun::Killed => Ok(DialogRun::DeadlinePassed),
+    }
+}
+
+/// How `wait_until` saw a child end.
+enum ChildRun {
+    Exited(std::process::Output),
+    Killed,
+}
+
+/// Waits for `child` to exit, or kills it once the wall clock reaches `deadline_epoch`, whichever
+/// comes first. Split from `run_osascript_until` so the deadline behaviour can be tested with an
+/// ordinary command rather than a dialog. The deadline is checked before each sleep rather than
+/// after, so a deadline that has already passed — the wake-from-sleep case — is acted on at once.
+fn wait_until(mut child: Child, deadline_epoch: u64, poll: Duration) -> Result<ChildRun> {
+    loop {
+        if child.try_wait().context("could not poll the dialog process")?.is_some() {
+            let output = child.wait_with_output().context("could not read the dialog's output")?;
+            return Ok(ChildRun::Exited(output));
+        }
+        if now_epoch() >= deadline_epoch {
+            // A kill that fails because the child exited in between is not a problem: the wait
+            // reaps it either way, and the deadline had passed, so "nobody answered" stands.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(ChildRun::Killed);
+        }
+        std::thread::sleep(poll);
+    }
 }
 
 /// Escapes a string for embedding inside a double-quoted AppleScript string literal — this
@@ -130,11 +217,11 @@ fn confirmation_message(
 /// confirmed there's real work — `app_names`/`os_update_available` describe what that is, so the
 /// dialog says something concrete rather than a generic "patches are ready".
 ///
-/// `timeout_seconds` bounds how long the dialog stays up before AppleScript dismisses it on its
-/// own (`ConfirmChoice::TimedOut`) — otherwise an ignored dialog would sit on screen forever.
-/// Callers pass the delay period itself, so an ignored dialog has spent one whole delay period by
-/// the time it gives up — which is why that outcome counts the budget down without postponing the
-/// cycle any further.
+/// `timeout_seconds` bounds how long the dialog stays up, on the wall clock, before it is taken
+/// down unanswered (`ConfirmChoice::TimedOut`) — otherwise an ignored dialog would sit on screen
+/// forever. Callers pass the delay period itself, so an ignored dialog has spent one whole delay
+/// period by the time it gives up — which is why that outcome counts the budget down without
+/// postponing the cycle any further. Wall clock, not run time: see `run_osascript_until`.
 pub fn confirm_patch(
     delay_label: &str,
     delays_remaining: u32,
@@ -157,8 +244,10 @@ pub fn confirm_patch(
         timeout_seconds
     );
 
-    let result = run_osascript(&script)?;
-    let choice = parse_confirm_result(&result, &delay_button_label);
+    let choice = match run_osascript_until(&script, now_epoch() + timeout_seconds)? {
+        DialogRun::Finished(result) => parse_confirm_result(&result, &delay_button_label),
+        DialogRun::DeadlinePassed => ConfirmChoice::TimedOut,
+    };
 
     crate::logging::info(&format!(
         "user chose: {}",
@@ -258,8 +347,10 @@ pub fn confirm_remote_control(requested_by: &str, restrictions: &[String], timeo
         timeout_seconds
     );
 
-    let result = run_osascript(&script)?;
-    let choice = parse_remote_control_result(&result);
+    let choice = match run_osascript_until(&script, now_epoch() + timeout_seconds)? {
+        DialogRun::Finished(result) => parse_remote_control_result(&result),
+        DialogRun::DeadlinePassed => RemoteControlChoice::TimedOut,
+    };
 
     crate::logging::info(&format!(
         "console user chose: {}",
@@ -291,6 +382,8 @@ fn parse_remote_control_result(result: &str) -> RemoteControlChoice {
 ///
 /// Takes a `timeout_seconds` cap for the same reason `confirm_patch` does: patching must start
 /// once the delay budget is spent regardless of whether anyone is at the keyboard to click "OK".
+/// Held to the wall clock like every other dialog here (`run_osascript_until`), so the five-minute
+/// notice before an automatic start is five minutes of real time even across a closed lid.
 pub fn acknowledge(message: &str, timeout_seconds: u64) -> Result<()> {
     crate::logging::info(&format!("showing acknowledgement dialog: {message}"));
     let script = format!(
@@ -298,7 +391,7 @@ pub fn acknowledge(message: &str, timeout_seconds: u64) -> Result<()> {
         escape(message),
         timeout_seconds
     );
-    run_osascript(&script).map(|_| ())
+    run_osascript_until(&script, now_epoch() + timeout_seconds).map(|_| ())
 }
 
 const AUTHORIZE_BUTTON: &str = "Authorize";
@@ -471,6 +564,31 @@ pub fn progress_bar(completed: usize, total: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wake-from-sleep case: a deadline that has already passed is acted on at the first
+    /// check, before any sleep, so a stale prompt comes down within a poll of the Mac waking.
+    #[test]
+    fn wait_until_kills_a_child_whose_deadline_has_already_passed() {
+        let child = Command::new("/bin/sleep").arg("30").stdout(Stdio::piped()).spawn().unwrap();
+        let started = std::time::Instant::now();
+
+        let run = wait_until(child, now_epoch().saturating_sub(1), Duration::from_secs(60)).unwrap();
+
+        assert!(matches!(run, ChildRun::Killed));
+        assert!(started.elapsed() < Duration::from_secs(5), "must not have waited out the poll interval");
+    }
+
+    #[test]
+    fn wait_until_returns_the_output_of_a_child_that_exits_before_its_deadline() {
+        let child = Command::new("/bin/echo").arg("button returned:OK").stdout(Stdio::piped()).spawn().unwrap();
+
+        let run = wait_until(child, now_epoch() + 3600, Duration::from_millis(50)).unwrap();
+
+        match run {
+            ChildRun::Exited(output) => assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "button returned:OK"),
+            ChildRun::Killed => panic!("a child that exited on its own was reported killed"),
+        }
+    }
 
     const DELAY_LABEL: &str = "Delay 1 hour(s) (3 left)";
 

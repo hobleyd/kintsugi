@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
+
+use crate::schedule::now_epoch;
 
 const DELAY_BUTTON: &str = "Delay";
 const PATCH_NOW_BUTTON: &str = "Patch Now";
@@ -11,7 +14,9 @@ const TITLE: &str = "Kintsugi Patching";
 pub enum ConfirmChoice {
     PatchNow,
     Delay,
-    /// The dialog was left up long enough that it dismissed itself.
+    /// The dialog stood for a whole delay period of wall-clock time without an answer — either
+    /// zenity's own `--timeout` dismissed it, or this process closed it because the deadline had
+    /// passed (see `run_until` for why both exist).
     ///
     /// It counts against the delay budget — the user was asked and said nothing — but **not** the
     /// way an explicit `Delay` does: the dialog stands there for a whole delay period, so that
@@ -19,6 +24,70 @@ pub enum ConfirmChoice {
     /// count the budget down half as fast as the policy says. See
     /// `ScheduleState::register_unanswered_prompt`.
     TimedOut,
+}
+
+/// How often a dialog's subprocess is checked against its wall-clock deadline. Small enough that a
+/// laptop resumed past its deadline closes the stale prompt before the person has finished reading
+/// it; each check is one `try_wait`, so there is nothing to save by making it larger.
+const DEADLINE_POLL: Duration = Duration::from_secs(5);
+
+/// How a dialog subprocess ended.
+enum DialogRun {
+    /// The process exited on its own — a button was clicked, or zenity's own timeout fired — with
+    /// this exit status (`None` for a signal death, which the callers read as a decline).
+    Exited(Option<i32>),
+    /// The wall-clock deadline arrived first and the process was killed, which takes its dialog
+    /// down with it. Every caller reads this as "nobody answered".
+    DeadlinePassed,
+}
+
+/// Runs a dialog program and holds it to a deadline on the **wall clock**, which neither zenity's
+/// `--timeout` nor coreutils' `timeout` reliably does.
+///
+/// zenity's timeout is a GLib timeout on `CLOCK_MONOTONIC`, which on Linux does not advance while
+/// the machine is suspended, so a laptop closed with the prompt up resumes with the timer having
+/// lost the whole suspend. The macOS agent measured the same class of defect on its own dialog
+/// program — a one-hour prompt that stood for seventy-one hours across a weekend of sleep — and the
+/// whole delay budget the policy describes is meant to run from the moment the person is asked,
+/// lid open or shut. The only party that can see a wall clock across a suspend is this process, so
+/// it polls the child against `deadline_epoch` and kills it when the deadline has passed. zenity's
+/// own `--timeout` is kept all the same: while the machine stays awake it closes the dialog cleanly
+/// at exactly the period, with its own exit status, and costs nothing. kdialog has no timeout of
+/// its own and used to borrow coreutils' `timeout`, which is dropped here — this process's kill is
+/// the timeout now, and it means one fewer program a desktop has to have installed.
+///
+/// `now_epoch` rather than `Instant` for the deadline, for the reason `schedule` gives: `Instant`
+/// stops during suspend as well, and the suspend is the case this exists for.
+fn run_until(path: &Path, args: &[&str], deadline_epoch: u64) -> Result<DialogRun> {
+    let child = dialog_command(path)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to run {}", path.display()))?;
+
+    wait_until(child, deadline_epoch, DEADLINE_POLL)
+}
+
+/// Waits for `child` to exit, or kills it once the wall clock reaches `deadline_epoch`, whichever
+/// comes first. Split from `run_until` so the deadline behaviour can be tested with an ordinary
+/// command rather than a dialog. The deadline is checked before each sleep rather than after, so a
+/// deadline that has already passed — the resume-from-suspend case — is acted on at once.
+fn wait_until(mut child: Child, deadline_epoch: u64, poll: Duration) -> Result<DialogRun> {
+    loop {
+        if let Some(status) = child.try_wait().context("could not poll the dialog process")? {
+            return Ok(DialogRun::Exited(status.code()));
+        }
+        if now_epoch() >= deadline_epoch {
+            // A kill that fails because the child exited in between is not a problem: the wait
+            // reaps it either way, and the deadline had passed, so "nobody answered" stands.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(DialogRun::DeadlinePassed);
+        }
+        std::thread::sleep(poll);
+    }
 }
 
 /// Which dialog program this desktop has. Both are checked because neither is universal: zenity
@@ -101,11 +170,11 @@ fn confirmation_message(delay_label: &str, delays_remaining: u32, app_names: &[S
 /// confirmed there's real work — `app_names`/`os_update_available` describe what that is, so the
 /// dialog says something concrete rather than a generic "patches are ready".
 ///
-/// `timeout_seconds` bounds how long the dialog stays up before it dismisses itself
-/// (`ConfirmChoice::TimedOut`) — otherwise an ignored dialog would sit on screen forever. Callers
-/// pass the delay period itself, so an ignored dialog has spent one whole delay period by the
-/// time it gives up — which is why that outcome counts the budget down without postponing the
-/// cycle any further.
+/// `timeout_seconds` bounds how long the dialog stays up, on the wall clock, before it is taken
+/// down unanswered (`ConfirmChoice::TimedOut`) — otherwise an ignored dialog would sit on screen
+/// forever. Callers pass the delay period itself, so an ignored dialog has spent one whole delay
+/// period by the time it gives up — which is why that outcome counts the budget down without
+/// postponing the cycle any further. Wall clock, not run time: see `run_until`.
 pub fn confirm_patch(
     delay_label: &str,
     delays_remaining: u32,
@@ -119,12 +188,13 @@ pub fn confirm_patch(
 
     crate::logging::info(&format!("showing patch confirmation dialog ({delays_remaining} delay(s) available)"));
 
-    let status = match &tool {
+    let deadline = now_epoch() + timeout_seconds;
+    let run = match &tool {
         // zenity answers entirely through its exit status — 0 for the OK button, 1 for cancel (or
         // the window being closed), 5 for `--timeout` expiring. That is a far cleaner contract than
         // the macOS agent's, which has to string-parse `osascript`'s result *and* check `gave up:`
         // first, because AppleScript reports the default button as pressed even on a timeout.
-        DialogTool::Zenity(path) => run_for_status(
+        DialogTool::Zenity(path) => run_until(
             path,
             &[
                 "--question",
@@ -142,11 +212,10 @@ pub fn confirm_patch(
                 &format!("--cancel-label={delay_button_label}"),
                 &format!("--timeout={timeout_seconds}"),
             ],
+            deadline,
         )?,
-        // kdialog has no timeout of its own, so coreutils' `timeout` supplies one; it exits 124
-        // when it has to kill the command, which `interpret_exit_status` maps to the same
-        // `TimedOut` as zenity's 5.
-        DialogTool::KDialog(path) => run_with_timeout(
+        // kdialog has no timeout of its own; the deadline `run_until` enforces is the only one.
+        DialogTool::KDialog(path) => run_until(
             path,
             &[
                 "--title",
@@ -158,11 +227,14 @@ pub fn confirm_patch(
                 "--yesno",
                 &message,
             ],
-            timeout_seconds,
+            deadline,
         )?,
     };
 
-    let choice = interpret_exit_status(status);
+    let choice = match run {
+        DialogRun::Exited(status) => interpret_exit_status(status),
+        DialogRun::DeadlinePassed => ConfirmChoice::TimedOut,
+    };
 
     crate::logging::info(&format!(
         "user chose: {}",
@@ -238,13 +310,14 @@ pub fn confirm_remote_control(
     // The two tools are handled separately rather than through a shared exit-status mapper, because
     // their safe defaults are reached in opposite ways and hiding that in one function is how it
     // would eventually get "simplified" into a hole.
+    let deadline = now_epoch() + timeout_seconds;
     let choice = match &tool {
         // zenity can be told to make Cancel the default (`--default-cancel`), so the labels sit the
         // natural way round: OK is Allow, Cancel is Deny. Exit 0 is Allow, 5 is its own timeout,
         // and everything else — including the window being closed and a markup parse failure — is a
         // refusal.
         DialogTool::Zenity(path) => {
-            let status = run_for_status(
+            let run = run_until(
                 path,
                 &[
                     "--question",
@@ -259,12 +332,13 @@ pub fn confirm_remote_control(
                     &format!("--cancel-label={DENY_BUTTON}"),
                     &format!("--timeout={timeout_seconds}"),
                 ],
+                deadline,
             )?;
 
-            match status {
-                Some(0) => RemoteControlChoice::Allow,
-                Some(5) => RemoteControlChoice::TimedOut,
-                _ => RemoteControlChoice::Deny,
+            match run {
+                DialogRun::Exited(Some(0)) => RemoteControlChoice::Allow,
+                DialogRun::Exited(Some(5)) | DialogRun::DeadlinePassed => RemoteControlChoice::TimedOut,
+                DialogRun::Exited(_) => RemoteControlChoice::Deny,
             }
         }
 
@@ -274,7 +348,7 @@ pub fn confirm_remote_control(
         // every unexpected status falls through to Deny too. Labelling them the natural way round
         // would mean Return granted a session to whoever asked.
         DialogTool::KDialog(path) => {
-            let status = run_with_timeout(
+            let run = run_until(
                 path,
                 &[
                     "--title",
@@ -286,15 +360,14 @@ pub fn confirm_remote_control(
                     "--yesno",
                     &message,
                 ],
-                timeout_seconds,
+                deadline,
             )?;
 
-            match status {
+            match run {
                 // 1 is the No button, which this dialog labels Allow.
-                Some(1) => RemoteControlChoice::Allow,
-                // coreutils' `timeout` uses 124 when it has to kill the command.
-                Some(124) => RemoteControlChoice::TimedOut,
-                _ => RemoteControlChoice::Deny,
+                DialogRun::Exited(Some(1)) => RemoteControlChoice::Allow,
+                DialogRun::DeadlinePassed => RemoteControlChoice::TimedOut,
+                DialogRun::Exited(_) => RemoteControlChoice::Deny,
             }
         }
     };
@@ -311,14 +384,14 @@ pub fn confirm_remote_control(
     Ok(choice)
 }
 
-/// Maps a confirm dialog's exit status onto a choice. zenity uses 5 for its own `--timeout`;
-/// `timeout(1)` uses 124 for the kdialog path. Anything else that isn't a clean 0 is a decline,
-/// which includes the user closing the window — the conservative reading, since a closed window
-/// is not consent to start patching.
+/// Maps a confirm dialog's exit status onto a choice. zenity uses 5 for its own `--timeout` (a
+/// deadline this process enforced never reaches here — see `run_until`). Anything else that isn't
+/// a clean 0 is a decline, which includes the user closing the window — the conservative reading,
+/// since a closed window is not consent to start patching.
 fn interpret_exit_status(status: Option<i32>) -> ConfirmChoice {
     match status {
         Some(0) => ConfirmChoice::PatchNow,
-        Some(5) | Some(124) => ConfirmChoice::TimedOut,
+        Some(5) => ConfirmChoice::TimedOut,
         _ => ConfirmChoice::Delay,
     }
 }
@@ -360,38 +433,20 @@ fn dialog_command(program: &Path) -> Command {
     command
 }
 
-fn run_for_status(path: &Path, args: &[&str]) -> Result<Option<i32>> {
-    let output = dialog_command(path)
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to run {}", path.display()))?;
-    Ok(output.status.code())
-}
-
-fn run_with_timeout(path: &Path, args: &[&str], timeout_seconds: u64) -> Result<Option<i32>> {
-    let timeout = find_binary("timeout").context("coreutils' `timeout` is required to bound a kdialog prompt")?;
-
-    // The locale has to be set on `timeout`, since that is the process that execs kdialog.
-    let output = dialog_command(&timeout)
-        .arg(timeout_seconds.to_string())
-        .arg(path)
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to run {}", path.display()))?;
-    Ok(output.status.code())
-}
-
 /// A single-button dialog for the "no delays left, proceeding regardless" case, and other
 /// blocking messages the user must actively dismiss rather than a passive notification banner.
 ///
 /// Takes a `timeout_seconds` cap for the same reason `confirm_patch` does: patching must start
 /// once the delay budget is spent regardless of whether anyone is at the keyboard to click "OK".
+/// Held to the wall clock like every other dialog here (`run_until`), so the five-minute notice
+/// before an automatic start is five minutes of real time even across a suspend.
 pub fn acknowledge(message: &str, timeout_seconds: u64) -> Result<()> {
     let tool = detect_dialog_tool().context("no dialog program (zenity or kdialog) is installed")?;
     crate::logging::info(&format!("showing acknowledgement dialog: {message}"));
 
+    let deadline = now_epoch() + timeout_seconds;
     match &tool {
-        DialogTool::Zenity(path) => run_for_status(
+        DialogTool::Zenity(path) => run_until(
             path,
             &[
                 "--warning",
@@ -399,8 +454,9 @@ pub fn acknowledge(message: &str, timeout_seconds: u64) -> Result<()> {
                 &format!("--text={message}"),
                 &format!("--timeout={timeout_seconds}"),
             ],
+            deadline,
         )?,
-        DialogTool::KDialog(path) => run_with_timeout(path, &["--title", TITLE, "--sorry", message], timeout_seconds)?,
+        DialogTool::KDialog(path) => run_until(path, &["--title", TITLE, "--sorry", message], deadline)?,
     };
 
     Ok(())
@@ -482,12 +538,32 @@ mod tests {
         assert_eq!(interpret_exit_status(Some(1)), ConfirmChoice::Delay);
     }
 
-    /// The two ways a prompt can time out — zenity's own `--timeout` and `timeout(1)` killing
-    /// kdialog — must both count as "nobody was there", not as a decision.
+    /// zenity's own `--timeout` must count as "nobody was there", not as a decision.
     #[test]
-    fn interpret_exit_status_maps_both_timeout_conventions_to_timed_out() {
+    fn interpret_exit_status_maps_zenitys_timeout_to_timed_out() {
         assert_eq!(interpret_exit_status(Some(5)), ConfirmChoice::TimedOut);
-        assert_eq!(interpret_exit_status(Some(124)), ConfirmChoice::TimedOut);
+    }
+
+    /// The resume-from-suspend case: a deadline that has already passed is acted on at the first
+    /// check, before any sleep, so a stale prompt comes down within a poll of the machine waking.
+    #[test]
+    fn wait_until_kills_a_child_whose_deadline_has_already_passed() {
+        let child = Command::new("sleep").arg("30").spawn().unwrap();
+        let started = std::time::Instant::now();
+
+        let run = wait_until(child, now_epoch().saturating_sub(1), Duration::from_secs(60)).unwrap();
+
+        assert!(matches!(run, DialogRun::DeadlinePassed));
+        assert!(started.elapsed() < Duration::from_secs(5), "must not have waited out the poll interval");
+    }
+
+    #[test]
+    fn wait_until_reports_the_exit_status_of_a_child_that_exits_before_its_deadline() {
+        let child = Command::new("sh").args(["-c", "exit 5"]).spawn().unwrap();
+
+        let run = wait_until(child, now_epoch() + 3600, Duration::from_millis(50)).unwrap();
+
+        assert!(matches!(run, DialogRun::Exited(Some(5))), "zenity's own timeout status has to reach the caller");
     }
 
     /// A dialog killed by a signal has no exit code at all; treating that as consent to start

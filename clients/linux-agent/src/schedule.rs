@@ -104,9 +104,11 @@ impl ScheduleState {
     ///
     /// `shown_at_epoch` is when the dialog went up, and the count credits however many whole delay
     /// periods actually elapsed rather than assuming one: a machine that slept for hours with the
-    /// dialog open wakes to find its giveup fires at once, and the delays that passed while it was
-    /// asleep are spent rather than started again. Never fewer than one, since the dialog only
-    /// gives up after a full period.
+    /// dialog open wakes to have `dialogs` take the prompt down within seconds — the deadline is
+    /// held on the wall clock by this process, because the dialog program's own timer stops while
+    /// the machine sleeps — and the delays that passed while it was asleep are spent here rather
+    /// than started again. Never fewer than one, since the dialog only gives up after a full
+    /// period.
     pub fn register_unanswered_prompt(&mut self, policy: &PatchingPolicy, shown_at_epoch: u64) {
         let period = policy.delay_seconds().max(1);
         let elapsed = now_epoch().saturating_sub(shown_at_epoch);

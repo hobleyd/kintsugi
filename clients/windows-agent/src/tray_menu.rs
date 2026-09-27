@@ -4,6 +4,8 @@ use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows_sys::Win32::System::Power::{RegisterPowerSettingNotification, POWERBROADCAST_SETTING};
+use windows_sys::Win32::System::SystemServices::GUID_CONSOLE_DISPLAY_STATE;
 use windows_sys::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
 };
@@ -13,6 +15,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     IDI_APPLICATION, MF_GRAYED, MF_SEPARATOR, MF_STRING, MSG, SM_CXSMICON, SM_CYSMICON, TPM_BOTTOMALIGN, TPM_RIGHTALIGN, WM_APP, WM_DESTROY,
     WM_RBUTTONUP, WM_SETTINGCHANGE, WS_OVERLAPPED,
 };
+use windows_sys::Win32::UI::WindowsAndMessaging::{DEVICE_NOTIFY_WINDOW_HANDLE, PBT_POWERSETTINGCHANGE, WM_POWERBROADCAST};
 use windows_sys::Win32::Foundation::POINT;
 use winreg::enums::{HKEY_CURRENT_USER, KEY_READ};
 use winreg::RegKey;
@@ -150,6 +153,16 @@ pub fn run(menu_tx: Sender<MenuAction>) -> Result<()> {
 
     add_icon(hwnd).context("could not add the notification-area icon")?;
     logging::info("notification-area icon created");
+
+    // Asks Windows to tell this window whenever the console display is switched on or off, which
+    // is how `presence` knows whether a patching prompt would be seen. Windows sends the current
+    // state immediately on registration. A failure is logged and nothing more: `presence` then
+    // believes the display is on, which is the behaviour this agent had before the check existed.
+    // SAFETY: the window is live for the life of this function, and the GUID is a static constant.
+    let registration = unsafe { RegisterPowerSettingNotification(hwnd, &GUID_CONSOLE_DISPLAY_STATE, DEVICE_NOTIFY_WINDOW_HANDLE) };
+    if registration == 0 {
+        logging::warn("could not register for display power notifications; the display will be assumed on");
+    }
 
     // Applied here rather than left to WM_STATUS_CHANGED: `post_to_ui_thread` is a no-op until
     // TRAY_HWND is set just above, and the scheduler thread reports its first status within
@@ -540,6 +553,11 @@ fn tray_class() -> &'static WindowClass {
     })
 }
 
+/// Field-by-field, because windows-sys's `GUID` derives no `PartialEq`.
+fn guid_eq(a: &windows_sys::core::GUID, b: &windows_sys::core::GUID) -> bool {
+    a.data1 == b.data1 && a.data2 == b.data2 && a.data3 == b.data3 && a.data4 == b.data4
+}
+
 unsafe extern "system" fn tray_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> isize {
     use windows_sys::Win32::UI::WindowsAndMessaging::{WM_COMMAND, WM_LBUTTONUP};
 
@@ -591,6 +609,22 @@ unsafe extern "system" fn tray_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lp
                 show_balloon(hwnd, &title, &message);
             }
             0
+        }
+        WM_POWERBROADCAST => {
+            // Only the display-state setting this window registered for (see `run`) is acted on;
+            // the resume/suspend broadcasts every window gets carry no setting and fall through.
+            if wparam == PBT_POWERSETTINGCHANGE as usize {
+                let setting = lparam as *const POWERBROADCAST_SETTING;
+                // SAFETY: for PBT_POWERSETTINGCHANGE, lparam points at a POWERBROADCAST_SETTING
+                // that Windows keeps alive for the length of this call; Data is DataLength bytes.
+                unsafe {
+                    if !setting.is_null() && guid_eq(&(*setting).PowerSetting, &GUID_CONSOLE_DISPLAY_STATE) && (*setting).DataLength >= 1 {
+                        crate::presence::record_display_state((*setting).Data[0]);
+                    }
+                }
+            }
+            // TRUE: the broadcast was handled.
+            1
         }
         WM_SETTINGCHANGE => {
             // Broadcast to every top-level window for any system setting; the theme flip is the

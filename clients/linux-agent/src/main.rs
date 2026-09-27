@@ -9,6 +9,7 @@ mod logging;
 mod os_update;
 mod patch_cycle;
 mod policy;
+mod presence;
 mod progress_window;
 mod pty;
 mod queue;
@@ -941,6 +942,33 @@ fn spawn_forced_cycle(
     })
 }
 
+/// Whether a due cycle may start now, which turns on whether its confirmation dialog would be
+/// seen — see `presence`. Logs the hold when it begins and again when it lifts, and nothing in
+/// between: `held_for` is the reason last logged, kept by the caller across ticks.
+///
+/// Only the automatic entry point asks. "Patch Now" is a click, so somebody is looking; a forced
+/// run is an administrator's decision that the interruption is warranted, and it shows nothing
+/// that needs an answer (see `patch_cycle::run_forced`). The root service's unattended cycle
+/// never asks either: it runs precisely because nobody is logged in to see anything. Kept
+/// identical in the other two agents.
+fn prompt_can_be_seen(held_for: &mut Option<String>) -> bool {
+    match presence::obstruction() {
+        Some(reason) => {
+            if held_for.as_deref() != Some(reason.as_str()) {
+                logging::info(&format!("patch cycle is due, but held until its prompt can be seen: {reason}"));
+                *held_for = Some(reason);
+            }
+            false
+        }
+        None => {
+            if held_for.take().is_some() {
+                logging::info("the screen can be seen again; starting the held patch cycle");
+            }
+            true
+        }
+    }
+}
+
 /// The background half of `run_ui_agent` — see its doc comment for why this is a separate
 /// thread. Reports its state to the notification area via `report` at every meaningful
 /// transition, and treats a "Patch Now" click the same as a naturally due cycle except it skips
@@ -980,6 +1008,10 @@ fn run_scheduler(
     // not moved.
     let checkin_schedule_path = config::checkin_schedule_path();
     let mut shown_check_in: Option<CheckInStatus> = None;
+
+    // Why a due cycle is being held rather than started — see `prompt_can_be_seen`. Kept across
+    // ticks only so the hold is logged when it begins and when it ends, not once a minute.
+    let mut held_for: Option<String> = None;
 
     loop {
         // Tells the root service this host has somebody driving it, so it doesn't start patching
@@ -1074,7 +1106,7 @@ fn run_scheduler(
                 if !pending_forced.is_empty() && state.is_some() {
                     let owned = state.take().expect("just checked that the state is here");
                     in_flight = Some(spawn_forced_cycle(&queue_dir, &current_policy, owned, report, std::mem::take(&mut pending_forced)));
-                } else if state.as_ref().is_some_and(|current| current.is_due()) {
+                } else if state.as_ref().is_some_and(|current| current.is_due()) && prompt_can_be_seen(&mut held_for) {
                     let owned = state.take().expect("just checked that the state is here");
                     in_flight = Some(spawn_cycle(patch_cycle::run, &queue_dir, &current_policy, owned, report));
                 }

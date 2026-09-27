@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use anyhow::Result;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -9,6 +9,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_CHILD, WS_EX_TOPMOST, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
 };
 
+use crate::schedule::now_epoch;
 use crate::win32::{apply_default_font, center_on_screen, instance, register_class, wide, WindowClass};
 
 /// `SS_LEFT` — a static control's default, left-aligned text style. Spelled out here because
@@ -23,7 +24,8 @@ const PATCH_NOW_BUTTON: &str = "Patch Now";
 pub enum ConfirmChoice {
     PatchNow,
     Delay,
-    /// The dialog was left up long enough that its own timer dismissed it.
+    /// The dialog stood for a whole delay period of wall-clock time without an answer, and its
+    /// window procedure took it down (see `DEADLINE_POLL_MS`).
     ///
     /// It counts against the delay budget — the user was asked and said nothing — but **not** the
     /// way an explicit `Delay` does: the dialog stands there for a whole delay period, so that
@@ -124,11 +126,11 @@ pub fn confirm_remote_control(
 /// real work — `app_names`/`os_update_available` describe what that is, so the dialog says
 /// something concrete rather than a generic "patches are ready".
 ///
-/// `timeout_seconds` bounds how long the dialog stays up before dismissing itself
-/// (`ConfirmChoice::TimedOut`) — otherwise an ignored dialog would sit on screen forever. Callers
-/// pass the delay period itself, so an ignored dialog has spent one whole delay period by the time
-/// it gives up — which is why that outcome counts the budget down without postponing the cycle any
-/// further.
+/// `timeout_seconds` bounds how long the dialog stays up, on the wall clock, before it is taken
+/// down unanswered (`ConfirmChoice::TimedOut`) — otherwise an ignored dialog would sit on screen
+/// forever. Callers pass the delay period itself, so an ignored dialog has spent one whole delay
+/// period by the time it gives up — which is why that outcome counts the budget down without
+/// postponing the cycle any further. Wall clock, not a timer period: see `DEADLINE_POLL_MS`.
 pub fn confirm_patch(
     delay_label: &str,
     delays_remaining: u32,
@@ -264,7 +266,23 @@ const MARGIN: i32 = 16;
 // two threads exist at once. A shared global would let one clobber the other's result.
 thread_local! {
     static RESULT: RefCell<Option<usize>> = const { RefCell::new(None) };
+    /// When the dialog on this thread is to be taken down unanswered, as a wall-clock epoch —
+    /// see `DEADLINE_POLL_MS` for why the deadline is compared rather than handed to `SetTimer`.
+    static DEADLINE: Cell<u64> = const { Cell::new(0) };
 }
+
+/// How often the dialog checks the wall clock against `DEADLINE`, in milliseconds.
+///
+/// The timeout used to be the `SetTimer` period itself, and that makes the dialog program's timer
+/// the authority on when a delay period has elapsed. On the other two platforms that timer stops
+/// while the machine sleeps — measured on macOS as a one-hour prompt that stood for seventy-one
+/// hours across a weekend — and the delay budget the policy describes is meant to run from the
+/// moment the person is asked, lid open or shut. A Windows timer *is* documented to include time
+/// spent asleep, but a five-second poll against `now_epoch` costs nothing, needs no reasoning
+/// about which kernel clock backs `WM_TIMER`, and reads the same as the other two agents' loops:
+/// the agent holds the deadline, on the wall clock, and a machine resumed past it closes the stale
+/// prompt within one poll. `now_epoch` rather than `Instant`, for the reason `schedule` gives.
+const DEADLINE_POLL_MS: u32 = 5_000;
 
 /// Shows a modal dialog with `buttons` (index 0 is the default) and blocks until one is clicked or
 /// `timeout_seconds` elapses. Returns the clicked index, or `None` on timeout.
@@ -356,11 +374,11 @@ fn show_dialog(message: &str, buttons: &[&str], timeout_seconds: u64) -> Result<
         // appearing.
         SetForegroundWindow(hwnd);
 
-        // Clamped to what SetTimer can express (a u32 of milliseconds, ~49 days) — a policy could
-        // legitimately set a multi-day delay period, and an overflow would fire the timer
-        // immediately, turning every dialog into an instant timeout.
-        let timeout_ms = timeout_seconds.saturating_mul(1000).min(u64::from(u32::MAX - 1)) as u32;
-        SetTimer(hwnd, TIMER_ID, timeout_ms, None);
+        // The deadline is the agent's, on the wall clock; the timer only decides how often the
+        // window procedure looks at it — see DEADLINE_POLL_MS. That also removes the old clamp: a
+        // multi-day delay period is an epoch, not a u32 of milliseconds.
+        DEADLINE.with(|deadline| deadline.set(now_epoch().saturating_add(timeout_seconds)));
+        SetTimer(hwnd, TIMER_ID, DEADLINE_POLL_MS, None);
 
         run_modal_loop();
 
@@ -431,8 +449,12 @@ unsafe extern "system" fn dialog_wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, 
             0
         }
         WM_TIMER if wparam == TIMER_ID => {
-            // Left as None — the caller reads that as "nobody answered", which counts as a delay.
-            PostQuitMessage(0);
+            // A poll, not the timeout: only the wall clock passing the deadline ends the dialog.
+            // The result is left as None — the caller reads that as "nobody answered", which
+            // counts as a delay.
+            if now_epoch() >= DEADLINE.with(|deadline| deadline.get()) {
+                PostQuitMessage(0);
+            }
             0
         }
         WM_DESTROY => {

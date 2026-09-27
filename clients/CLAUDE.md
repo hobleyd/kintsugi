@@ -473,16 +473,49 @@ count decremented. `ScheduleState::register_unanswered_prompt` is the unanswered
 charges the budget for however many whole delay periods actually elapsed while the dialog stood
 there, and leaves the cycle due *now*, so the next poll tick re-asks at once and the count falls
 8 → 7 → 6 once per period. Crediting elapsed periods rather than assuming one is what covers sleep
-— a machine that slept with the dialog open wakes to a giveup that fires immediately, and spends
-the delays that passed rather than starting them again. The budget running out needs no special
-case: the next tick finds `can_delay` false and shows the "no delays left" dialog, which is where
-the five-minute notice comes from. **That dialog is the warning rather than a preamble to it**: it
-states the period, stands there for as much of it as the user leaves it up, and `remaining_warning`
-hands `execute` whatever is left, so the notice is five minutes in total — somebody who reads it and
-clicks OK still gets the rest of the period, and a host with nobody at it waits five minutes instead
-of the ten that showing both in series cost. Nothing here is a running timer — `is_due` compares wall
-clock against a persisted absolute epoch, which is why sleep, hibernation and a restart all need no
-wake detection.
+— a machine that slept with the dialog open wakes to have the prompt taken down within seconds (see
+below), and spends the delays that passed rather than starting them again. The budget running out
+needs no special case: the next tick finds `can_delay` false and shows the "no delays left" dialog,
+which is where the five-minute notice comes from. **That dialog is the warning rather than a
+preamble to it**: it states the period, stands there for as much of it as the user leaves it up, and
+`remaining_warning` hands `execute` whatever is left, so the notice is five minutes in total —
+somebody who reads it and clicks OK still gets the rest of the period, and a host with nobody at it
+waits five minutes instead of the ten that showing both in series cost. Nothing here is a running
+timer — `is_due` compares wall clock against a persisted absolute epoch, which is why sleep,
+hibernation and a restart all need no wake detection.
+
+**The dialog's deadline is the agent's, on the wall clock, because every dialog program's own timer
+stops when the machine sleeps.** "Wakes to a giveup that fires immediately" was the assumption
+above until it was measured: on this fleet's own Mac a confirm dialog raised with a one-hour
+`giving up after` on a Friday morning was still up, still offering all eight delays, on the Monday,
+and gave up **seventy-one hours** after it went up — five minutes into that morning's session, the
+lid having been open for two minutes on the Sunday and five on the Monday in between. AppleScript's
+clause counts time the Mac spent running, dark wakes included, and nothing else; zenity's
+`--timeout` is a GLib timeout on `CLOCK_MONOTONIC`, which Linux stops during suspend; Windows'
+`SetTimer` is documented to include sleep, and is not relied on either. So every dialog in all three
+`dialogs.rs` is now held to `shown_at + delay_seconds` on `now_epoch` by the agent itself — macOS
+and Linux spawn the dialog program and poll it every five seconds, killing it once the deadline
+has passed (`run_osascript_until`, `run_until`); Windows makes its `WM_TIMER` a five-second poll
+against a thread-local deadline (`DEADLINE_POLL_MS`) — and the program's own timeout is kept only
+as the clean way down while the machine stays awake. Linux's kdialog path dropped coreutils'
+`timeout` with this: the agent's kill is the timeout, and one fewer program has to be installed.
+
+**And a cycle only starts to a screen somebody can see, because a wall-clock deadline makes the
+opposite worse.** The per-user process ticks during macOS's Power Nap dark wakes, and that is
+where the Friday prompt came from: raised at 08:47 to a lid that had been shut for five minutes.
+With the deadline on the wall clock, that prompt would have spent the whole eight-hour budget behind
+the closed lid and the person would have opened it to "patching will begin in 5 minutes" without
+ever having been offered a delay. So `main::prompt_can_be_seen` asks `presence::obstruction` before
+starting an *automatic* cycle and holds the cycle — logging once when the hold begins and once when
+it lifts — while the screen cannot be seen. What "cannot be seen" means is whatever each platform
+can actually read, and each `presence.rs` says why: macOS asks the window server whether the main
+display is asleep, whether the screen is locked and whether this session owns the console; Windows
+asks the input desktop (locked), the console display's power state (`GUID_CONSOLE_DISPLAY_STATE`
+notifications the tray window registers for) and the screen saver; Linux asks logind's `LockedHint`
+over `busctl` and, on X11, DPMS. Every check fails towards "nothing in the way", which is the
+behaviour the agents had before it existed. "Patch Now" and a forced run are not gated: one is a
+click, the other an administrator's decision that shows nothing needing an answer. Neither is the
+Linux root service's unattended cycle, which runs precisely because nobody is there.
 
 
 **A host with several monitors is watched one at a time, and the picker is a media-protocol
