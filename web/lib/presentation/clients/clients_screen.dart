@@ -286,8 +286,10 @@ class _DownloadCell extends StatelessWidget {
         SecondaryButton(
           label: 'Download',
           // A link the browser follows, not a request: the response is a file, and the
-          // route is anonymous by design so an enrolled agent's own self-update can reach
-          // it before it has proven anything.
+          // route stays reachable without a session so an enrolled agent's own self-update
+          // can reach it before it has proven anything. The navigation carries this
+          // session's cookie, which is what gets the enrollment token written into the
+          // archive — an anonymous download comes back with it blank.
           onPressed: () => _download(AgentPackageRepositoryImpl.downloadUrl(package.platform)),
         ),
         if (isWindows)

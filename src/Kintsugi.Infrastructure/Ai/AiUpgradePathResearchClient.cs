@@ -917,6 +917,14 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient, ICpeSugge
                 which resolves to whatever is current without needing the version number) over
                 constructing a per-version URL from the discovered version string, when the
                 distribution channel supports it.
+              - Verify what was downloaded before installing it. Use the vendor's published checksum
+                when there is one (`Get-FileHash -Algorithm SHA256` against it). Whether or not there
+                is, check the installer's Authenticode signature with `Get-AuthenticodeSignature`: its
+                `Status` must be `Valid`, and the signer's subject should match the `Publisher` the
+                uninstall registry key records for the installed application. A missing or invalid
+                signature, or a different publisher, is a fatal error — never something to install
+                anyway. The Kintsugi signature on this script covers the script's text, not what the
+                script downloads; this step is the only thing that does.
               - For an `.msi`: install via
                 `Start-Process msiexec.exe -ArgumentList '/i', $path, '/qn', '/norestart' -Wait -PassThru`
                 and check the returned `ExitCode` (0, 1641, and 3010 all mean success; 1641/3010 mean a
@@ -970,10 +978,20 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient, ICpeSugge
                 GitHub's `.../releases/latest/download/<asset-filename>`, which resolves to whatever
                 is current without needing the version number) over constructing a per-version URL
                 from the discovered version string, when the distribution channel supports it.
+              - Verify what was downloaded before it replaces anything. Use the vendor's published
+                checksum or signature when there is one (a `SHA256SUMS`/`.sha256` beside the asset, a
+                `.sig`/`.asc`). Whether or not there is, check the code signature of what arrived:
+                `codesign --verify --deep --strict` on the new bundle (`pkgutil --check-signature` on a
+                .pkg), and compare its Team ID (`codesign -dv --verbose=4 <bundle> 2>&1 | grep
+                TeamIdentifier`) with the installed bundle's. A different team, an invalid signature, or
+                an unsigned download where the installed copy was signed is a fatal error — never
+                something to install anyway. The Kintsugi signature on this script covers the script's
+                text, not what the script downloads; this step is the only thing that does.
               - For a .dmg: mount with `hdiutil attach -nobrowse -quiet`, copy the .app bundle into
-                /Applications (replacing any existing install), detach the volume, then remove the
-                quarantine attribute (`xattr -dr com.apple.quarantine "/Applications/<appName>.app"`)
-                since this is very likely a Developer-ID/unsigned distribution, not a Mac App Store one.
+                /Applications (replacing any existing install), detach the volume, then — only once the
+                signature check above has passed — remove the quarantine attribute
+                (`xattr -dr com.apple.quarantine "/Applications/<appName>.app"`) so Gatekeeper does not
+                block an unattended first launch of a Developer-ID distribution.
               - For a .pkg: install via `installer -pkg <path> -target /`.
               - For any other distribution form, use your best judgement for the equivalent
                 non-interactive macOS approach.
@@ -1010,6 +1028,15 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient, ICpeSugge
                   `.../releases/latest/download/<asset-filename>`, which resolves to whatever is
                   current without needing the version number) over constructing a per-version URL from
                   the discovered version string, when the distribution channel supports it.
+                - Verify what was downloaded before installing it. Use the vendor's published checksum
+                  or signature when there is one (`sha256sum -c` against a `SHA256SUMS`/`.sha256`
+                  beside the asset; `gpg --verify` against a `.asc`/`.sig` with the vendor's published
+                  key). A `.deb`/`.rpm` installed from a downloaded file bypasses the repository
+                  signing the package manager would otherwise enforce, so prefer the vendor's own
+                  apt/dnf repository where one exists. Where only a bare download is offered and the
+                  vendor publishes no checksum, say so in a comment rather than silently trusting the
+                  bytes. The Kintsugi signature on this script covers the script's text, not what the
+                  script downloads; this step is the only thing that does.
                 - If the application is currently running, stop it gracefully before replacing it —
                   already-authorized, so this can be automatic. Send `TERM` (via `systemctl stop` for
                   something that runs as a unit, or `pkill -x`), poll for it to actually exit for a

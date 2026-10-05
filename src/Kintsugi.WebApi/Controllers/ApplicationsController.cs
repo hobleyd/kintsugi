@@ -1,14 +1,31 @@
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
-using Kintsugi.Application.Applications;
 using Kintsugi.Application.Applications.Commands.RegisterApplications;
 using Kintsugi.Application.Applications.Commands.ReportPatchResult;
-using Kintsugi.Application.Applications.Queries.GetApplicationSummaries;
 using Kintsugi.Application.PatchFailures.Commands.ReportPatchFailure;
 using Kintsugi.WebApi.Filters;
 
 namespace Kintsugi.WebApi.Controllers;
 
+/// <summary>
+/// The agent-facing application routes. Every action here is identity-scoped by
+/// <see cref="RequireAgentIdentityAttribute"/>, and that is now the whole of this controller.
+/// </summary>
+/// <remarks>
+/// There used to be a <c>GET /api/applications</c> beside these, listing every application
+/// installed anywhere in the fleet with the hosts reporting it. It sat inside nginx's
+/// client-certificate regex, so it needed an agent certificate — and nothing more, because a read
+/// with no body gives <see cref="RequireAgentIdentityAttribute"/> no serial number to compare the
+/// certificate against. Any enrolled agent (or anyone holding one host's certificate, or anyone who
+/// had enrolled a rogue one with a harvested token) could therefore read the whole fleet's
+/// inventory, host names included. Nothing legitimate called it: the three agents only ever
+/// <c>POST</c> this path, and the admin UI reads the Applications screen from
+/// <c>/api/admin/applications</c>, which carries <c>[RequireAdminSession]</c>. So it was removed
+/// rather than gated, the same way <c>report-version</c> and the agent-side <c>PUT
+/// /api/patching-policy</c> were (see src/CLAUDE.md). If a fleet-wide read is ever wanted on an
+/// agent route again, it needs a <c>serialNumber</c> to scope by and the attribute — not the regex
+/// alone, which only proves the caller is <em>an</em> agent.
+/// </remarks>
 [ApiController]
 [Route("api/[controller]")]
 [Produces("application/json")]
@@ -34,12 +51,6 @@ public class ApplicationsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<RegisterApplicationsResult>> Register(RegisterApplicationsCommand command, CancellationToken cancellationToken) =>
         Ok(await _sender.Send(command, cancellationToken));
-
-    /// <summary>Lists installed applications by name, with a count of hosts reporting each one installed.</summary>
-    [HttpGet]
-    [ProducesResponseType(typeof(IReadOnlyList<ApplicationSummaryDto>), StatusCodes.Status200OK)]
-    public async Task<ActionResult<IReadOnlyList<ApplicationSummaryDto>>> GetAll(CancellationToken cancellationToken) =>
-        Ok(await _sender.Send(new GetApplicationSummariesQuery(), cancellationToken));
 
     /// <summary>
     /// Records that an agent successfully patched one already-installed application to a new

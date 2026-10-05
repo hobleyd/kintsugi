@@ -5,16 +5,27 @@ using Kintsugi.Application.AgentPackages.Commands.PublishAgentPackage;
 using Kintsugi.Application.AgentPackages.Queries.GetAgentPackages;
 using Kintsugi.Application.AgentPackages.Queries.GetLatestAgentPackage;
 using Kintsugi.Application.Common.Interfaces;
+using Kintsugi.WebApi.Filters;
 
 namespace Kintsugi.WebApi.Controllers;
 
 /// <summary>
-/// Installable kintsugi-agent builds. Deliberately not gated behind
+/// Installable kintsugi-agent builds. The read routes are deliberately not gated behind
 /// <see cref="Filters.RequireAgentIdentityAttribute"/> like host/application registration is — the
 /// listing and download routes need to work from a plain browser (the Clients page) and from an
 /// agent that hasn't necessarily enrolled yet, and the package content itself is authenticated by
 /// its own signature (see <see cref="AgentPackageDto.Sha256Signature"/>), not by who's asking for it.
 /// </summary>
+/// <remarks>
+/// That reasoning covers reading only. <see cref="Publish"/> carries
+/// <see cref="RequireAdminSessionAttribute"/>, because publishing is what the signed checksum
+/// vouches for: the handler signs whatever was uploaded with the key every agent pins, so the
+/// signature says nothing about who uploaded it, and the route itself has to. And
+/// <see cref="Download"/> writes the live enrollment token into an archive only for a caller the
+/// same rule accepts (<see cref="RequireAdminSessionAttribute.IsAdministrator"/>); anyone else
+/// gets the package exactly as published, with the blank token it was built with. Both were
+/// anonymous until a penetration test of a live deployment pointed them out.
+/// </remarks>
 [ApiController]
 [Route("api/agent-packages")]
 [Produces("application/json")]
@@ -32,17 +43,20 @@ public class AgentPackagesController : ControllerBase
     private readonly IAgentPackageStorage _storage;
     private readonly IAgentPackageArchiveRewriter _archiveRewriter;
     private readonly IAgentEnrollmentOptions _enrollmentOptions;
+    private readonly IAuthenticationSettingsRepository _authenticationSettings;
 
     public AgentPackagesController(
         ISender sender,
         IAgentPackageStorage storage,
         IAgentPackageArchiveRewriter archiveRewriter,
-        IAgentEnrollmentOptions enrollmentOptions)
+        IAgentEnrollmentOptions enrollmentOptions,
+        IAuthenticationSettingsRepository authenticationSettings)
     {
         _sender = sender;
         _storage = storage;
         _archiveRewriter = archiveRewriter;
         _enrollmentOptions = enrollmentOptions;
+        _authenticationSettings = authenticationSettings;
     }
 
     /// <summary>Lists the latest published package for every platform — what the Clients page
@@ -67,8 +81,8 @@ public class AgentPackagesController : ControllerBase
     }
 
     /// <summary>
-    /// Downloads the latest published package file for one platform. For an anonymous request
-    /// (a browser on the Clients page, doing a fresh install), the current
+    /// Downloads the latest published package file for one platform. For a signed-in
+    /// administrator (a browser on the Clients page, doing a fresh install), the current
     /// <c>AGENT_ENROLLMENT_TOKEN</c> is substituted into the archive's <c>config.toml</c> entry —
     /// see <see cref="IAgentPackageArchiveRewriter"/> for why that happens on every download
     /// rather than once at publish time. An already-enrolled agent's own self-update check (see
@@ -77,6 +91,17 @@ public class AgentPackagesController : ControllerBase
     /// identity and doesn't need a token rewritten in, and rewriting it would change the archive's
     /// bytes enough that its checksum would no longer match the one signed at publish time.
     /// </summary>
+    /// <remarks>
+    /// Anyone else — no certificate, no session on a server that requires one — also gets the
+    /// archive as published. The route stays reachable, since the package is public anyway (CI
+    /// publishes the same bytes as a GitHub release), but the token is a credential and it used to
+    /// be written in for every anonymous download. The decision is
+    /// <see cref="RequireAdminSessionAttribute.IsAdministrator"/>, the same rule the Clients
+    /// screen's own routes are gated by, so a browser that can see the page can also download a
+    /// package that enrolls; the Clients page follows this URL as a navigation, which carries the
+    /// session cookie. The Windows bootstrap script is unaffected: it is rendered under
+    /// <c>AdminClientsController</c>'s own gate.
+    /// </remarks>
     [HttpGet("{platform}/download")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -91,6 +116,12 @@ public class AgentPackagesController : ControllerBase
         var storedStream = _storage.OpenRead(package.Platform, package.FileName);
 
         if (RequestPresentedAVerifiedAgentCertificate(Request.Headers[AgentCertVerifiedHeader]))
+        {
+            return File(storedStream, "application/gzip", package.FileName);
+        }
+
+        var settings = await _authenticationSettings.GetAsync(cancellationToken);
+        if (!RequireAdminSessionAttribute.IsAdministrator(settings, User))
         {
             return File(storedStream, "application/gzip", package.FileName);
         }
@@ -114,13 +145,23 @@ public class AgentPackagesController : ControllerBase
 
     /// <summary>
     /// Publishes a new build for a platform — meant to be called from a release script (see
-    /// clients/macos-agent/packaging/publish-release.sh) or a CI job, not from the browser UI.
-    /// Idempotent: re-publishing the exact same (platform, version, content) that's already
-    /// published is a no-op that returns the existing record, so a pipeline can call this on
-    /// every build without checking first. Publishing different content under a (platform,
-    /// version) pair that's already out is still rejected — there is no overwrite/replace.
+    /// clients/macos-agent/packaging/publish-release.sh), not from the browser UI; the usual
+    /// path is CI publishing a GitHub release and the Clients screen's "Refresh clients" importing
+    /// it through <c>AdminClientsController</c>. Idempotent: re-publishing the exact same
+    /// (platform, version, content) that's already published is a no-op that returns the
+    /// existing record, so a pipeline can call this on every build without checking first.
+    /// Publishing different content under a (platform, version) pair that's already out is still
+    /// rejected — there is no overwrite/replace.
     /// </summary>
+    /// <remarks>
+    /// Requires a signed-in administrator, like every other route that decides what agents will
+    /// run. nginx's <c>/api/agent-packages</c> block checks nothing, so without this attribute the
+    /// route is anonymous — the class remark above says why that is right for the reads and wrong
+    /// here. A release script calling this directly therefore has to carry an admin session
+    /// cookie on a server with authentication enabled; both scripts say so.
+    /// </remarks>
     [HttpPost]
+    [RequireAdminSession]
     [RequestSizeLimit(200_000_000)]
     [ProducesResponseType(typeof(AgentPackageDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]

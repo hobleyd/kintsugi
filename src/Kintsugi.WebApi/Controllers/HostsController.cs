@@ -1,5 +1,6 @@
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Kintsugi.Application.Hosts;
 using Kintsugi.Application.Hosts.Commands.ConfirmHostRemoval;
 using Kintsugi.Application.Hosts.Commands.CreateHost;
@@ -9,6 +10,7 @@ using Kintsugi.Application.Hosts.Commands.RequestHostRemoval;
 using Kintsugi.Application.Hosts.Queries.GetHostById;
 using Kintsugi.Application.Hosts.Queries.GetHosts;
 using Kintsugi.WebApi.Filters;
+using Kintsugi.WebApi.Security;
 
 namespace Kintsugi.WebApi.Controllers;
 
@@ -73,9 +75,12 @@ public class HostsController : ControllerBase
     /// certificate — signed by this fleet's own CA — bound to its serial number. nginx requires
     /// and verifies that certificate on every subsequent agent-only request (see
     /// nginx/default.conf); deliberately not behind <see cref="RequireAgentIdentityAttribute"/>
-    /// itself, since an unenrolled agent has no certificate yet to be checked against.
+    /// itself, since an unenrolled agent has no certificate yet to be checked against. That makes
+    /// it the one agent route with nothing in front of it but the token, so it is the one route
+    /// that is rate-limited — see <see cref="EnrollmentRateLimit"/>.
     /// </summary>
     [HttpPost("/api/host/enroll")]
+    [EnableRateLimiting(EnrollmentRateLimit.PolicyName)]
     [ProducesResponseType(typeof(EnrollAgentResult), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]

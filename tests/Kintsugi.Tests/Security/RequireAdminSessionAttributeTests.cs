@@ -93,6 +93,24 @@ public class RequireAdminSessionAttributeTests
         Assert.Null(context.Result);
     }
 
+    /// <summary>
+    /// The rule as a pure function, which AgentPackagesController.Download also calls: it cannot
+    /// refuse an anonymous download, but it writes the enrollment token in only for a caller this
+    /// accepts. Pinned here so the two call sites cannot disagree.
+    /// </summary>
+    [Fact]
+    public void IsAdministrator_MatchesTheFilterInEveryState()
+    {
+        var anonymous = new ClaimsPrincipal(new ClaimsIdentity());
+        var signedIn = new ClaimsPrincipal(new ClaimsIdentity(new[] { new Claim(ClaimTypes.Name, "admin@example.invalid") }, "TestAuth"));
+
+        Assert.False(RequireAdminSessionAttribute.IsAdministrator(Settings(isEnabled: true), anonymous));
+        Assert.False(RequireAdminSessionAttribute.IsAdministrator(Settings(isEnabled: true), user: null));
+        Assert.True(RequireAdminSessionAttribute.IsAdministrator(Settings(isEnabled: true), signedIn));
+        Assert.True(RequireAdminSessionAttribute.IsAdministrator(Settings(isEnabled: false), anonymous));
+        Assert.True(RequireAdminSessionAttribute.IsAdministrator(settings: null, anonymous));
+    }
+
     [Fact]
     public async Task WhenNothingHasBeenConfiguredYet_Allows()
     {

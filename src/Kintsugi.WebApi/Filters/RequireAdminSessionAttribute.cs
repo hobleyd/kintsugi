@@ -1,6 +1,8 @@
+using System.Security.Claims;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
 using Kintsugi.Application.Common.Interfaces;
+using Kintsugi.Domain.Entities;
 
 namespace Kintsugi.WebApi.Filters;
 
@@ -44,12 +46,30 @@ namespace Kintsugi.WebApi.Filters;
 /// </remarks>
 public class RequireAdminSessionAttribute : ActionFilterAttribute
 {
+    /// <summary>
+    /// The one rule this attribute enforces, as a pure function: whether <paramref name="user"/>
+    /// counts as an administrator under <paramref name="settings"/>. Required precisely when an
+    /// administrator has saved authentication settings and enabled them; otherwise the site is
+    /// deliberately open (or not yet configured) and every caller passes.
+    /// </summary>
+    /// <remarks>
+    /// Public so a route that cannot simply refuse an anonymous caller can still make the same
+    /// decision with the same inputs. <c>AgentPackagesController.Download</c> is the case: an
+    /// anonymous download must keep working (an enrolled agent's self-update, a browser on the
+    /// Clients page), but the live enrollment token is written into the archive only for a caller
+    /// this returns true for. Keeping that decision here, rather than re-deriving it in the
+    /// controller, is what stops the two drifting — the whole point of mirroring <c>Program.cs</c>'s
+    /// gate was that a second shape would eventually disagree with the first.
+    /// </remarks>
+    public static bool IsAdministrator(AuthenticationSettings? settings, ClaimsPrincipal? user) =>
+        settings?.IsEnabled != true || user?.Identity?.IsAuthenticated == true;
+
     public override async Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
     {
         var settingsRepository = context.HttpContext.RequestServices.GetRequiredService<IAuthenticationSettingsRepository>();
         var settings = await settingsRepository.GetAsync(context.HttpContext.RequestAborted);
 
-        if (settings?.IsEnabled == true && context.HttpContext.User.Identity?.IsAuthenticated != true)
+        if (!IsAdministrator(settings, context.HttpContext.User))
         {
             context.Result = new ObjectResult(new ProblemDetails
             {

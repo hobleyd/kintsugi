@@ -40,6 +40,11 @@ builder.Services.Configure<ForwardedHeadersOptions>(options =>
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 
+// Only one route is limited — enrollment, the single agent route with neither a client certificate
+// nor a session in front of it. See EnrollmentRateLimit for the figures and why they are per
+// source address. Every other route keeps its existing gate and no limiter.
+builder.Services.AddRateLimiter(EnrollmentRateLimit.Configure);
+
 builder.Services.AddApplication();
 builder.Services.AddInfrastructure(builder.Configuration);
 
@@ -199,6 +204,10 @@ app.UseWebSockets();
 // stop it.
 
 app.UseAuthorization();
+
+// After routing (implicit at the front of this pipeline) so the endpoint's [EnableRateLimiting]
+// is visible, and after UseForwardedHeaders so the partition key is the real client address.
+app.UseRateLimiter();
 
 app.MapControllers();
 app.MapHealthChecks("/health");

@@ -53,6 +53,42 @@ public class PublishAgentPackageCommandValidatorTests
         _validator.TestValidate(command).ShouldHaveValidationErrorFor(x => x.FileName);
     }
 
+    /// <summary>
+    /// The file name is joined onto the platform directory by AgentPackageFileStorage, and a name
+    /// carrying a path wrote outside it — verified against a live deployment before this rule
+    /// existed. Dot entries are listed separately because the character class alone admits them.
+    /// </summary>
+    [Theory]
+    [InlineData("../kintsugi-traversal-proof.txt")]
+    [InlineData("../../etc/passwd")]
+    [InlineData("/data/agent-ca-private/ca.key")]
+    [InlineData("sub/dir.tar.gz")]
+    [InlineData("back\\slash.tar.gz")]
+    [InlineData(".")]
+    [InlineData("..")]
+    [InlineData(".hidden.tar.gz")]
+    [InlineData("has space.tar.gz")]
+    [InlineData("new\nline.tar.gz")]
+    public void FileName_ThatIsNotABareName_IsRejected(string fileName)
+    {
+        var command = ValidCommand() with { FileName = fileName };
+
+        _validator.TestValidate(command).ShouldHaveValidationErrorFor(x => x.FileName);
+    }
+
+    /// <summary>What CI actually names the archives, and the Windows one — both must keep passing.</summary>
+    [Theory]
+    [InlineData("kintsugi-agent-linux-v0.13.0.tar.gz")]
+    [InlineData("kintsugi-agent-windows-installer.tar.gz")]
+    [InlineData("kintsugi-agent-macos-0.2.0.tar.gz")]
+    [InlineData("payload_1.tar.gz")]
+    public void FileName_ThatIsABareName_IsAccepted(string fileName)
+    {
+        var command = ValidCommand() with { FileName = fileName };
+
+        _validator.TestValidate(command).ShouldNotHaveValidationErrorFor(x => x.FileName);
+    }
+
     [Fact]
     public void Content_Null_IsRejected()
     {

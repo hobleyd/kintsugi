@@ -43,9 +43,16 @@ CI uses: `cd clients/<platform>-agent && cargo test --locked`.
   `config.toml` and `kintsugi-agent.exe` as top-level archive entries, so it is coupled to
   `publish-release.ps1`'s `tar` invocation exactly as `self_update.rs` is.
 - The enrollment token is not baked into published packages — `AgentPackageArchiveRewriter` writes
-  the current `AGENT_ENROLLMENT_TOKEN` into `config.toml` on every download, so rotation never
-  staleness-breaks a published package. `AgentPackagesController.Download` skips that rewrite for a
-  cert-bearing agent, because rewriting would change the bytes and break the publish-time checksum.
+  the current `AGENT_ENROLLMENT_TOKEN` into `config.toml` on every download *by a signed-in
+  administrator*, so rotation never staleness-breaks a published package.
+  `AgentPackagesController.Download` skips that rewrite for a cert-bearing agent, because rewriting
+  would change the bytes and break the publish-time checksum, and for an anonymous caller, because
+  the token is a credential; both get the archive as published, token blank. The Clients page
+  follows the download URL as a navigation so the session cookie travels with it — a fetch would
+  too, but a link opened from outside the signed-in browser gets a package that cannot enroll.
+- `POST /api/agent-packages` carries `[RequireAdminSession]`. The three `publish-release` scripts
+  still POST there directly, and on a server with authentication enabled that call needs a session
+  cookie; the supported path is `--output-dir`, a GitHub release, and "Refresh clients".
 - CI's release tags (`<platform>-agent-v<version>`) are parsed by `GitHubAgentPackageSourceClient`
   to work out which platform and version a release is. Renaming a tag on either side silently stops
   that platform ever being found again — a refresh just reports nothing new.

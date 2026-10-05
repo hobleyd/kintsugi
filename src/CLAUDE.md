@@ -41,10 +41,29 @@ gated, because neither could be secured as it stood:
   route belongs.
 
 Still anonymous by design, and correctly so: `POST /api/host/enroll` (an unenrolled agent has no
-certificate; the enrollment token is what protects it) and everything under `/api/agent-packages`
-(a self-updating agent has to see what is published before proving anything, and the download is
-protected by a signed checksum instead). `/swagger` is also exempt from the sign-in gate, so the
-route listing is readable anonymously — disclosure only, but worth knowing.
+certificate; the enrollment token is what protects it — and it is the one route with a rate limit,
+`EnrollmentRateLimit`, per source address) and the *reads* under `/api/agent-packages` (a
+self-updating agent has to see what is published before proving anything, and the download is
+protected by a signed checksum instead). Two things under that prefix are not anonymous, and a
+penetration test is what found them: `POST /api/agent-packages` carries `[RequireAdminSession]`,
+because the handler signs the uploaded checksum with the key every agent pins — the signature
+proves the bytes passed through this server, so the route has to prove who sent them; and
+`Download` writes the live enrollment token into the archive only for a caller
+`RequireAdminSessionAttribute.IsAdministrator` accepts, with everyone else getting the package as
+published. That static is the one rule in two places on purpose — use it rather than re-deriving
+the gate's semantics. `/swagger` is also exempt from the sign-in gate, so the route listing is
+readable anonymously — disclosure only, but worth knowing.
+
+`GET /api/applications` was a third removal of the `report-version` kind: inside the regex, so it
+needed a certificate, but a bodiless read gives `[RequireAgentIdentity]` nothing to compare the CN
+against, so any one agent's certificate read the whole fleet's inventory with host names. Nothing
+called it — the agents only `POST` the path and the UI reads `/api/admin/applications`.
+
+`PublishAgentPackageCommandValidator` restricts `FileName` to a bare name
+(`^[A-Za-z0-9_-][A-Za-z0-9._-]*$`), and `AgentPackageFileStorage.RequireBareName` checks again
+before touching the disk: the name is joined onto the platform directory, and `Path.Combine` will
+follow `..` or discard everything before a rooted segment. Both layers, because the storage class
+is reached from the import as well as the publish.
 
 
 **Removing a host is two-phase, and the soft-deleted row still owns its name.** The Hosts screen's

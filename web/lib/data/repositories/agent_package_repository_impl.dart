@@ -26,10 +26,13 @@ class AgentPackageRepositoryImpl implements AgentPackageRepository {
 
   /// Where a package is downloaded from.
   ///
-  /// Anonymous by design on the server side: an already-enrolled agent's self-update has to be
-  /// able to see what is published before it has proven anything, and the download is protected by
-  /// a signed checksum instead. Exposed as a URL rather than fetched, because the browser should
-  /// be doing the downloading.
+  /// Reachable without a session on the server side: an already-enrolled agent's self-update has
+  /// to be able to see what is published before it has proven anything, and the download is
+  /// protected by a signed checksum instead. But the enrollment token is written into the archive
+  /// only for a signed-in administrator — anyone else gets the package as published, with a blank
+  /// token (see AgentPackagesController.Download). Exposed as a URL rather than fetched, because
+  /// the browser should be doing the downloading; a same-origin navigation carries the session
+  /// cookie, which is what makes the downloaded package able to enroll.
   static String downloadUrl(String platform) =>
       '/api/agent-packages/${Uri.encodeComponent(platform)}/download';
 }
