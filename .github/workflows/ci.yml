@@ -34,11 +34,11 @@ jobs:
     name: Backend tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # 8.0.x, not `latest`: every csproj targets net8.0 and dotnet-ef is pinned to 8.0.10 with
       # rollForward disabled (see .config/dotnet-tools.json), so a newer SDK alone will not do.
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           dotnet-version: '8.0.x'
 
@@ -54,12 +54,12 @@ jobs:
     name: Admin UI tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # Pinned to match FLUTTER_VERSION in nginx/Dockerfile, which is what actually compiles the
       # bundle that ships. Testing against a different SDK than the one the image uses would let a
       # green run hide a build failure that only appears at `docker compose build`.
-      - uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           flutter-version: '3.47.0'
           channel: stable
@@ -109,12 +109,12 @@ jobs:
             runner: ubuntu-latest
             apt: libpipewire-0.3-dev
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       # The Windows agent builds natively here, so none of the mingw/Wine cross-compilation setup
       # CLAUDE.md describes is needed — that's a workaround for developing it from a Mac.
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: |
             ~/.cargo/registry
@@ -156,7 +156,7 @@ jobs:
       linux-version: ${{ steps.plan.outputs.linux-version }}
       linux-needed: ${{ steps.plan.outputs.linux-needed }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - id: plan
         env:
@@ -191,7 +191,7 @@ jobs:
     steps:
       # Full history and tags, for the release notes: .github/scripts/agent-release-notes.sh lists
       # the commits since this platform's previous release tag.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
@@ -322,7 +322,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
@@ -360,7 +360,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
