@@ -17,8 +17,15 @@
     looks for "kintsugi-agent.exe" by name.
 
     The bundled config.toml's enrollment_token is left blank on purpose: the server substitutes
-    whatever AGENT_ENROLLMENT_TOKEN currently is on every download request, not just once at publish
-    time, so a token rotation never makes an already-published package stale.
+    whatever AGENT_ENROLLMENT_TOKEN currently is on every download by a signed-in administrator,
+    not just once at publish time, so a token rotation never makes an already-published package
+    stale.
+
+    Publishing straight to a server (no -OutputDir) requires a signed-in administrator: POST
+    /api/agent-packages carries [RequireAdminSession], so on a server with authentication enabled
+    the curl call needs that session's cookie, passed through -CurlArgs (e.g. -CurlArgs
+    '--cookie','.AspNetCore.Cookies=...'). The supported route is -OutputDir, a GitHub release, and
+    the Clients screen's "Refresh clients", which needs no cookie here at all.
 
     The version published is always this crate's own Cargo.toml version - bump that first. Run from
     a plain (non-elevated) shell; unlike install.ps1 this never needs administrator rights, since
@@ -45,7 +52,11 @@ param(
     [string] $ApiBaseUrl = $(if ($env:AGENT_API_BASE_URL) { $env:AGENT_API_BASE_URL } else { 'https://kintsugi.example.com:8443' }),
     [string] $ReleaseNotes = '',
     [string] $Binary = '',
-    [string] $OutputDir = ''
+    [string] $OutputDir = '',
+    # Extra arguments for the curl.exe publish call - an administrator's session cookie, since
+    # POST /api/agent-packages requires one on a server with authentication enabled. Ignored with
+    # -OutputDir, which never contacts a server.
+    [string[]] $CurlArgs = @()
 )
 
 # Keep this file pure ASCII, for the reason install.ps1 spells out at this same point: Windows
@@ -122,7 +133,7 @@ try {
     #
     # The platform is "windows" - the agent-package namespace, which is deliberately separate from
     # PlatformBucket's upgrade-path buckets on the server. self_update.rs asks for this same string.
-    $body = & curl.exe --silent --show-error --write-out '\n%{http_code}' `
+    $body = & curl.exe --silent --show-error --write-out '\n%{http_code}' @CurlArgs `
         -F 'platform=windows' `
         -F "version=$Version" `
         -F "releaseNotes=$ReleaseNotes" `
@@ -133,6 +144,9 @@ try {
     $lines = @($body)
     $httpStatus = $lines[-1]
     $responseBody = ($lines[0..($lines.Count - 2)] -join "`n")
+    if ($httpStatus -eq '401') {
+        throw "Publish failed (HTTP 401): publishing requires a signed-in administrator. Pass the session cookie via -CurlArgs, or use -OutputDir and publish through a GitHub release and the Clients screen's `"Refresh clients`"."
+    }
     if ($httpStatus -ne '200') {
         throw "Publish failed (HTTP $httpStatus): $responseBody"
     }

@@ -17,6 +17,13 @@ documented remedy — recreates it under root's own `wheel`, and the per-user pr
 its own key again. It fails half-visibly: the root daemon is fine, the host keeps registering, and
 only the per-user half stops, presenting no certificate at all and drawing a 403.
 
+`config.toml` is `root:admin 0640` for the same reader: the per-user process needs `api_base_url`
+from it, and the enrollment token in it is a credential no other local account should read.
+`config::repair_config_file_mode` re-asserts the group and the mode on every daemon run, since
+`self_update` never re-runs the installer and the file shipped `0644`. Scripts the daemon runs are
+staged under `config_dir()/scripts` (`0700`), not `/tmp` — see "A signed script is staged where
+only the process running it can write" in `clients/CLAUDE.md`.
+
 
 ## macOS updates: root is not enough, and the download comes first
 

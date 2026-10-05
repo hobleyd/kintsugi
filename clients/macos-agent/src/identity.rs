@@ -251,8 +251,9 @@ fn grant_admin_group_access(dir: &Path) {
 
 /// The numeric gid of the `admin` group, looked up rather than hardcoded to 80 — the value is
 /// stable across every macOS release to date, but a wrong gid here would hand this host's private
-/// key to whichever group happened to hold that number.
-fn admin_group_id() -> Option<u32> {
+/// key to whichever group happened to hold that number. Also what `config::repair_config_file_mode`
+/// gives `config.toml`, for the same reader and the same reason.
+pub(crate) fn admin_group_id() -> Option<u32> {
     // SAFETY: getgrnam() returns either a valid pointer into a thread-local static buffer (read
     // immediately, before any other libc call in this thread could invalidate it) or null. The
     // name is a literal with an explicit NUL, so it is a valid C string.

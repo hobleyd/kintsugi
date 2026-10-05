@@ -40,6 +40,12 @@ read `identity/` (still `0700`, and deliberately). `install.sh` sets it, and
 belt-and-braces, because `self_update` replaces the binary and never re-runs the installer, so
 hosts already in the field have no other repair path.
 
+**`/etc/kintsugi-agent/config.toml` is `0600`** (`config::CONFIG_FILE_MODE`), re-asserted by the
+same function and for the same reason. It carries the enrollment token until the host enrolls, and
+the per-user process has no use for it: it makes no network call, `Config::load` treats an
+unreadable file as absent, and the only thing it would have shown is `api_base_url` in its own log
+line. It shipped `0644`, which handed the token to every local account.
+
 
 **Two root entry points mean an explicit lock.** launchd and the Windows SCM both give mutual
 exclusion for free (one instance per job; one resident service). systemd guarantees that per *unit*,

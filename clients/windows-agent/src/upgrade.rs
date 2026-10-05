@@ -290,6 +290,8 @@ pub fn patch_one(status: &UpgradeStatus, identity: &AgentIdentity) -> Result<()>
                 .application_identifier
                 .as_deref()
                 .context("no application identifier known, but the script requires --appId")?;
+            reject_unsafe_script_argument("--appName", &status.application_name)?;
+            reject_unsafe_script_argument("--appId", app_id)?;
             run_script(
                 &status.application_name,
                 script,
@@ -299,6 +301,24 @@ pub fn patch_one(status: &UpgradeStatus, identity: &AgentIdentity) -> Result<()>
         }
         other => anyhow::bail!("no runnable upgrade action for method {other:?}"),
     }
+}
+
+/// The two values a signed script receives on its command line come from the server, and the
+/// signature does not cover them — it covers the script text alone. Every approved script
+/// interpolates `--appName` into a path (`/Applications/<appName>.app`, `%ProgramFiles%\<appName>`),
+/// so a value carrying a separator or a dot entry would walk that path somewhere else through a
+/// script that verifies perfectly. A compromised server could already do worse by other routes;
+/// this closes the one that turns a *legitimately* signed script against the host it runs on, and
+/// it costs nothing, because no real application name or identifier contains any of these.
+/// Mirrored in all three agents.
+fn reject_unsafe_script_argument(flag: &str, value: &str) -> Result<()> {
+    let unsafe_char = |c: char| c == '/' || c == '\\' || c.is_control();
+    if value.is_empty() || value == "." || value == ".." || value.chars().any(unsafe_char) {
+        anyhow::bail!(
+            "refusing to pass {flag} {value:?} to the upgrade script: it is empty, a dot entry, or contains a path separator or control character"
+        );
+    }
+    Ok(())
 }
 
 fn run_shell_command(command: &str) -> Result<()> {
@@ -404,6 +424,20 @@ fn run_script(application_name: &str, script: &str, args: &[&str]) -> Result<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_script_argument_that_could_be_a_path_is_refused() {
+        for value in ["../Other", "..", ".", "Foo/Bar", "Foo\\Bar", "", "Foo\nBar", "/Applications/Foo"] {
+            assert!(reject_unsafe_script_argument("--appName", value).is_err(), "{value:?} should have been refused");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_application_name_or_identifier_passes() {
+        for value in ["Visual Studio Code", "Adobe Acrobat (64-bit)", "com.electron.ollama", "temurin-26", "Calibre Agent", "net.java.openjdk.jdk"] {
+            assert!(reject_unsafe_script_argument("--appName", value).is_ok(), "{value:?} should have been accepted");
+        }
+    }
 
     #[test]
     fn a_short_failure_is_reported_whole() {

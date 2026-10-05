@@ -306,6 +306,8 @@ pub fn patch_one(status: &UpgradeStatus, identity: &AgentIdentity) -> Result<()>
                 .application_identifier
                 .as_deref()
                 .context("no application identifier known, but the script requires --appId")?;
+            reject_unsafe_script_argument("--appName", &status.application_name)?;
+            reject_unsafe_script_argument("--appId", app_id)?;
             run_script(
                 &status.application_name,
                 script,
@@ -315,6 +317,24 @@ pub fn patch_one(status: &UpgradeStatus, identity: &AgentIdentity) -> Result<()>
         }
         other => anyhow::bail!("no runnable upgrade action for method {other:?}"),
     }
+}
+
+/// The two values a signed script receives on its command line come from the server, and the
+/// signature does not cover them — it covers the script text alone. Every approved script
+/// interpolates `--appName` into a path (`/Applications/<appName>.app`, `%ProgramFiles%\<appName>`),
+/// so a value carrying a separator or a dot entry would walk that path somewhere else through a
+/// script that verifies perfectly. A compromised server could already do worse by other routes;
+/// this closes the one that turns a *legitimately* signed script against the host it runs on, and
+/// it costs nothing, because no real application name or identifier contains any of these.
+/// Mirrored in all three agents.
+fn reject_unsafe_script_argument(flag: &str, value: &str) -> Result<()> {
+    let unsafe_char = |c: char| c == '/' || c == '\\' || c.is_control();
+    if value.is_empty() || value == "." || value == ".." || value.chars().any(unsafe_char) {
+        anyhow::bail!(
+            "refusing to pass {flag} {value:?} to the upgrade script: it is empty, a dot entry, or contains a path separator or control character"
+        );
+    }
+    Ok(())
 }
 
 fn run_shell_command(command: &str) -> Result<()> {
@@ -374,13 +394,15 @@ fn truncate_for_log(text: &str) -> String {
     format!("{}\n... [truncated, {} more byte(s)]", &trimmed[..cut], trimmed.len() - cut)
 }
 
-/// Where a script is staged before it runs. Not `/tmp`, which is where the macOS agent stages
-/// its copy: there, this runs as the logged-in user, so a world-writable staging directory is no
-/// worse than that user's own privileges. Here it runs as root, and a root process creating a
-/// semi-predictable path under a world-writable, non-sticky-safe directory is the textbook setup
-/// for another local user to win the race with a symlink and have root write — then execute —
-/// wherever they point it. This directory is inside the agent's own root-only state directory
-/// (`/var/lib/kintsugi-agent`, mode 0700), so nobody else can create anything in it at all.
+/// Where a script is staged before it runs. Not `/tmp`: this runs as root, and a root process
+/// creating a semi-predictable path under a world-writable directory is the textbook setup for
+/// another local user to win the race with a symlink and have root write — then execute —
+/// wherever they point it. This directory is inside the agent's own state directory
+/// (`/var/lib/kintsugi-agent`, root-owned and traverse-only at `0711`) and is itself `0700`, so
+/// nobody else can create anything in it at all. The macOS agent staged in `/tmp` on the reasoning
+/// that its scripts ran as the logged-in user; they have run as root through its queue since
+/// `runs_as_root` sent AI-researched rows to the daemon, and it now stages the same way as this —
+/// see its `script_staging_dir`.
 fn script_staging_dir() -> PathBuf {
     config::state_dir().join("scripts")
 }
@@ -441,6 +463,20 @@ fn run_script(application_name: &str, script: &str, args: &[&str]) -> Result<Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_script_argument_that_could_be_a_path_is_refused() {
+        for value in ["../Other", "..", ".", "Foo/Bar", "Foo\\Bar", "", "Foo\nBar", "/Applications/Foo"] {
+            assert!(reject_unsafe_script_argument("--appName", value).is_err(), "{value:?} should have been refused");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_application_name_or_identifier_passes() {
+        for value in ["Visual Studio Code", "Adobe Acrobat (64-bit)", "com.electron.ollama", "temurin-26", "Calibre Agent", "net.java.openjdk.jdk"] {
+            assert!(reject_unsafe_script_argument("--appName", value).is_ok(), "{value:?} should have been accepted");
+        }
+    }
 
     #[test]
     fn a_short_failure_is_reported_whole() {

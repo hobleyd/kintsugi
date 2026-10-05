@@ -100,7 +100,15 @@ network call at all** — it decides *when*, and asks. macOS is the odd one out 
 Homebrew *refuses* to run as root and installs into a user-writable prefix. The queue directory is
 `root:root 1733` (a drop-box: anyone may write, only root may read or list), which is the Linux
 spelling of the macOS queue's `root:admin 0770` and needs no group — "local administrators" is
-`sudo` on Debian, `wheel` on Red Hat, and neither elsewhere.
+`sudo` on Debian, `wheel` on Red Hat, and neither elsewhere. "Anyone may write" is why the root
+side trusts nothing about an entry but what it reads from the opened file: every entry is opened
+`O_NOFOLLOW|O_NONBLOCK` and must be a regular file, a request is acted on only if its owner has a
+login session (`/run/user/<uid>`), a result is written fresh under a name root has just unlinked,
+and the per-user side believes a result only if the queue directory's owner wrote it. A
+penetration test triggered a root `apt-get upgrade` from an unprivileged account and showed the
+symlink cases were being held off only by the kernel's `fs.protected_symlinks` default;
+`queue.rs`'s module docs name each check. What that does *not* change: a logged-in user can still
+ask for an OS update or an early run of an already-signed script, which is "Patch Now".
 
 
 **macOS hands off by row, and `upgrade::runs_as_root` is the one place that decision lives.** The
@@ -277,7 +285,23 @@ mean the majority of hosts silently never patched. The per-user process writes a
 queue directory (`queue::record_heartbeat`); when the root service's hourly check-in finds none
 recent, it runs the cycle itself with the confirm/delay/warning steps dropped rather than faked —
 there is nobody to ask. The per-user process exits immediately when it has no `DISPLAY`, so an SSH
-login can't suppress a server's own patching by leaving a heartbeat behind.
+login can't suppress a server's own patching by leaving a heartbeat behind. Nor can a file: a
+heartbeat counts only if it is owned by the uid its name carries, that uid has a login session, and
+its timestamp is no further ahead of the clock than `HEARTBEAT_MAX_AGE` — a forged
+`ui-424242.heartbeat` with `touch -d` into next year read as "0s ago" on every check-in, for ever,
+before those three checks existed (`queue::live_ui_agent_with`).
+
+**A signed script is staged where only the process running it can write, and its arguments are
+checked.** Linux stages under `/var/lib/kintsugi-agent/scripts` and macOS under
+`/Library/Application Support/kintsugi-agent/scripts` as root (or the per-user state directory for
+a Homebrew row), both `0700` and created `O_EXCL|O_NOFOLLOW`; Windows stages in SYSTEM's own
+`%TEMP%`, where creating a symlink needs a privilege ordinary users lack. macOS staged in `/tmp`
+on the reasoning that its scripts ran as the logged-in user, which stopped being true when
+`runs_as_root` sent AI-researched rows to the daemon — a root process writing a predictable name
+into a world-writable directory is a local-root race. And the signature covers the script text, not
+the `--appName`/`--appId` it is handed, so `reject_unsafe_script_argument` (mirrored in all three)
+refuses a value with a path separator, a control character or a dot entry before any script sees
+it; every approved script interpolates `--appName` into a path.
 
 
 **Windows and Linux serial numbers are frequently placeholders.** `HKLM\HARDWARE\DESCRIPTION\System\BIOS`

@@ -320,6 +320,45 @@ pub fn config_dir() -> PathBuf {
     PathBuf::from("/Library/Application Support/kintsugi-agent")
 }
 
+/// The mode `packaging/install.sh` gives `config.toml`: `root:admin 0640`. The file carries the
+/// enrollment token until this host enrolls, and the only non-root reader is the per-user process,
+/// which runs as the logged-in administrator and needs `api_base_url` from it to reach the server
+/// at all — the same `admin` group that lets it read the identity directory (see
+/// `identity::grant_admin_group_access`). Not world-readable, because any other local account
+/// could otherwise read a credential that enrolls a host into the fleet; it shipped `0644`. The
+/// Linux agent's is `0600`, because there the per-user process never reads it.
+pub const CONFIG_FILE_MODE: u32 = 0o640;
+
+/// Re-asserts `CONFIG_FILE_MODE` and the `admin` group on `config.toml`, on every daemon run.
+///
+/// Here as well as in the installer because `self_update` replaces the binary and never re-runs the
+/// installer, so a host already in the field has no other path from the `0644` it was installed
+/// with. Best-effort, like `identity::grant_admin_group_access`: a daemon that could not tighten a
+/// file mode should still check in and say so, not stop.
+pub fn repair_config_file_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = default_config_path();
+    let Ok(metadata) = std::fs::metadata(&path) else {
+        return;
+    };
+
+    if let Some(admin_gid) = crate::identity::admin_group_id() {
+        // uid unchanged (None is "leave it alone"); the owner is already root.
+        let _ = std::os::unix::fs::chown(&path, None, Some(admin_gid));
+    }
+
+    let current = metadata.permissions().mode() & 0o7777;
+    if current == CONFIG_FILE_MODE {
+        return;
+    }
+
+    match std::fs::set_permissions(&path, std::fs::Permissions::from_mode(CONFIG_FILE_MODE)) {
+        Ok(()) => crate::logging::info(&format!("corrected the mode on {} from {current:04o} to {CONFIG_FILE_MODE:04o}", path.display())),
+        Err(err) => crate::logging::warn(&format!("could not correct the mode on {} (currently {current:04o}): {err}", path.display())),
+    }
+}
+
 /// Where the `--agent` (per-user) process keeps its own state: the cached patching policy and
 /// scheduling state (next due time, delays used). Lives under the invoking user's home directory
 /// since, unlike the root daemon's config, this process never runs as root.

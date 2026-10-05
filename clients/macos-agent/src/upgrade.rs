@@ -1,5 +1,7 @@
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -8,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-use crate::config::Config;
+use crate::config::{self, Config};
 use crate::identity::{self, AgentIdentity};
 use crate::logging;
 use crate::system_info;
@@ -364,6 +366,8 @@ pub fn patch_one(status: &UpgradeStatus, identity: &AgentIdentity) -> Result<()>
                 .application_identifier
                 .as_deref()
                 .context("no bundle identifier known, but the script requires --appId")?;
+            reject_unsafe_script_argument("--appName", &status.application_name)?;
+            reject_unsafe_script_argument("--appId", app_id)?;
             run_script(
                 &status.application_name,
                 script,
@@ -419,6 +423,24 @@ fn prepend_homebrew_prefixes(inherited: &str) -> String {
         )
         .collect::<Vec<_>>()
         .join(":")
+}
+
+/// The two values a signed script receives on its command line come from the server, and the
+/// signature does not cover them — it covers the script text alone. Every approved script
+/// interpolates `--appName` into a path (`/Applications/<appName>.app`, `%ProgramFiles%\<appName>`),
+/// so a value carrying a separator or a dot entry would walk that path somewhere else through a
+/// script that verifies perfectly. A compromised server could already do worse by other routes;
+/// this closes the one that turns a *legitimately* signed script against the host it runs on, and
+/// it costs nothing, because no real application name or identifier contains any of these.
+/// Mirrored in all three agents.
+fn reject_unsafe_script_argument(flag: &str, value: &str) -> Result<()> {
+    let unsafe_char = |c: char| c == '/' || c == '\\' || c.is_control();
+    if value.is_empty() || value == "." || value == ".." || value.chars().any(unsafe_char) {
+        anyhow::bail!(
+            "refusing to pass {flag} {value:?} to the upgrade script: it is empty, a dot entry, or contains a path separator or control character"
+        );
+    }
+    Ok(())
 }
 
 fn run_shell_command(command: &str) -> Result<()> {
@@ -479,10 +501,31 @@ fn truncate_for_log(text: &str) -> String {
     format!("{}\n... [truncated, {} more byte(s)]", &trimmed[..cut], trimmed.len() - cut)
 }
 
-/// Writes `script` to a private temp file, runs it with `args`, and removes it afterward
-/// regardless of outcome — an AI-generated script left lying around in /tmp is unnecessary
-/// exposure once it's done running. Returns captured stdout on success (the caller trims it, since
-/// `--update-version` is specified to print only the bare version string).
+/// Where a script is staged before it runs — and it depends on who is running it.
+///
+/// The root daemon stages under its own `/Library/Application Support/kintsugi-agent/scripts`:
+/// the parent is `root:wheel 0755`, so nobody else can create an entry in it, and this directory
+/// is made `0700`. The per-user process, which still runs Homebrew rows itself, stages under its
+/// own `user_state_dir`. Neither is `/tmp`, which is where every script used to go: a root process
+/// writing a semi-predictable name into a world-writable directory with `fs::write` — which
+/// follows a symlink — lets any local user choose where root writes, and then what root runs.
+/// That was tolerable while these scripts ran as the logged-in user, and has not been since
+/// `runs_as_root` moved AI-researched rows to the daemon. The Linux agent's `script_staging_dir`
+/// made the same decision first; the Windows agent stages in SYSTEM's own `%TEMP%`, where creating
+/// a symlink needs a privilege ordinary users lack.
+fn script_staging_dir() -> Result<PathBuf> {
+    // SAFETY: `geteuid` cannot fail and touches nothing.
+    if unsafe { libc::geteuid() } == 0 {
+        Ok(config::config_dir().join("scripts"))
+    } else {
+        Ok(config::user_state_dir()?.join("scripts"))
+    }
+}
+
+/// Writes `script` to a private file, runs it with `args`, and removes it afterward regardless of
+/// outcome — an AI-generated script left lying around is unnecessary exposure once it's done
+/// running. Returns captured stdout on success (the caller trims it, since `--update-version` is
+/// specified to print only the bare version string).
 fn run_script(application_name: &str, script: &str, args: &[&str]) -> Result<String> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -492,15 +535,26 @@ fn run_script(application_name: &str, script: &str, args: &[&str]) -> Result<Str
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .collect();
-    let script_path = std::env::temp_dir().join(format!("kintsugi-upgrade-{sanitized_name}-{timestamp}.sh"));
 
-    fs::write(&script_path, script).context("failed to write script to a temp file")?;
+    let staging_dir = script_staging_dir()?;
+    fs::create_dir_all(&staging_dir).with_context(|| format!("failed to create the script staging directory {}", staging_dir.display()))?;
+    fs::set_permissions(&staging_dir, fs::Permissions::from_mode(0o700)).context("failed to lock down the script staging directory")?;
 
-    let mut permissions = fs::metadata(&script_path)
-        .context("failed to read temp script permissions")?
-        .permissions();
-    permissions.set_mode(0o700);
-    fs::set_permissions(&script_path, permissions).context("failed to make script executable")?;
+    let script_path = staging_dir.join(format!("kintsugi-upgrade-{sanitized_name}-{timestamp}.sh"));
+
+    // `create_new` and O_NOFOLLOW on top of the private directory: they cost nothing, and they
+    // make a name that is somehow already there — a symlink above all — an error rather than
+    // something to write through. Mode set on the descriptor, so the umask cannot narrow it.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o700)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&script_path)
+        .with_context(|| format!("failed to create the script's staging file {}", script_path.display()))?;
+    file.write_all(script.as_bytes()).context("failed to write the script to its staging file")?;
+    file.set_permissions(fs::Permissions::from_mode(0o700)).context("failed to make the script executable")?;
+    drop(file);
 
     let invocation = format!("{} {}", script_path.display(), args.join(" "));
     logging::info(&format!("running script for {application_name}: {invocation}"));
@@ -535,6 +589,20 @@ fn run_script(application_name: &str, script: &str, args: &[&str]) -> Result<Str
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_script_argument_that_could_be_a_path_is_refused() {
+        for value in ["../Other", "..", ".", "Foo/Bar", "Foo\\Bar", "", "Foo\nBar", "/Applications/Foo"] {
+            assert!(reject_unsafe_script_argument("--appName", value).is_err(), "{value:?} should have been refused");
+        }
+    }
+
+    #[test]
+    fn an_ordinary_application_name_or_identifier_passes() {
+        for value in ["Visual Studio Code", "Adobe Acrobat (64-bit)", "com.electron.ollama", "temurin-26", "Calibre Agent", "net.java.openjdk.jdk"] {
+            assert!(reject_unsafe_script_argument("--appName", value).is_ok(), "{value:?} should have been accepted");
+        }
+    }
+
     fn status(method: UpgradeMethod, package_manager: Option<&str>) -> UpgradeStatus {
         UpgradeStatus {
             application_name: "Ollama".to_string(),
@@ -550,6 +618,18 @@ mod tests {
             command_signature: None,
             package_manager: package_manager.map(str::to_string),
         }
+    }
+
+    /// Never `/tmp`, whoever is running: the daemon's scripts run as root, and a world-writable
+    /// staging directory under a predictable name is a local user's way of choosing what root runs.
+    #[test]
+    fn scripts_are_staged_under_a_directory_only_this_process_can_write() {
+        let dir = script_staging_dir().unwrap();
+
+        assert!(!dir.starts_with(std::env::temp_dir()), "{} is under the shared temp directory", dir.display());
+        // SAFETY: `geteuid` cannot fail and touches nothing — the same call `script_staging_dir` makes.
+        let expected_parent = if unsafe { libc::geteuid() } == 0 { config::config_dir() } else { config::user_state_dir().unwrap() };
+        assert_eq!(dir, expected_parent.join("scripts"));
     }
 
     #[test]

@@ -193,6 +193,7 @@ fn run_daemon() -> Result<()> {
     // majority of check-ins, where there is nothing to do.
     self_update::repair_installed_ownership();
     self_update::repair_quarantine_flags();
+    config::repair_config_file_mode();
     remote_shell::ensure_job_installed();
 
     let checkin_schedule_path = config::checkin_schedule_path();

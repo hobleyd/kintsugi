@@ -10,9 +10,15 @@
 # self_update.rs's extraction) — so there's only ever one artifact to build and publish, not two.
 #
 # The bundled config.toml's enrollment_token is left blank here on purpose: the server rewrites it
-# to whatever AGENT_ENROLLMENT_TOKEN currently is on every download request, not just once at
-# publish time — see AgentPackageArchiveRewriter — so a token rotation never makes an already-
-# published package stale, and there's no --enrollment-token flag to remember to pass here.
+# to whatever AGENT_ENROLLMENT_TOKEN currently is on every download by a signed-in administrator,
+# not just once at publish time — see AgentPackageArchiveRewriter — so a token rotation never makes
+# an already-published package stale, and there's no --enrollment-token flag to remember to pass here.
+#
+# Publishing straight to a server (the default below, with no --output-dir) requires a signed-in
+# administrator: POST /api/agent-packages carries [RequireAdminSession], so on a server with
+# authentication enabled this curl needs that session's cookie, passed through PUBLISH_CURL_ARGS
+# (e.g. PUBLISH_CURL_ARGS='--cookie .AspNetCore.Cookies=...'). The supported route is --output-dir,
+# a GitHub release, and the Clients screen's "Refresh clients", which needs no cookie here at all.
 #
 #   packaging/publish-release.sh
 #   packaging/publish-release.sh --api-base-url https://kintsugi.example.com:8443
@@ -294,7 +300,8 @@ if [[ -n "$OUTPUT_DIR" ]]; then
 fi
 
 echo "Publishing ${ARCHIVE_NAME} to ${API_BASE_URL}..."
-RESPONSE="$(curl -sS -w '\n%{http_code}' \
+# shellcheck disable=SC2086 — PUBLISH_CURL_ARGS is meant to split into several curl arguments.
+RESPONSE="$(curl -sS -w '\n%{http_code}' ${PUBLISH_CURL_ARGS:-} \
     -F "platform=macos" \
     -F "version=${VERSION}" \
     -F "releaseNotes=${RELEASE_NOTES}" \
@@ -305,6 +312,10 @@ BODY="$(echo "$RESPONSE" | sed '$d')"
 
 if [[ "$HTTP_STATUS" != "200" ]]; then
     echo "Publish failed (HTTP ${HTTP_STATUS}): ${BODY}" >&2
+    if [[ "$HTTP_STATUS" == "401" ]]; then
+        echo "  Publishing requires a signed-in administrator. Pass the session cookie via PUBLISH_CURL_ARGS," >&2
+        echo "  or use --output-dir and publish through a GitHub release and the Clients screen's \"Refresh clients\"." >&2
+    fi
     exit 1
 fi
 

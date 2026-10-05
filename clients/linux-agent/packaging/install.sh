@@ -100,7 +100,12 @@ install -d -o root -g root -m 755 "$CONFIG_DIR"
 # enrollment token). A stale local override surviving a reinstall would just be a silent way for a
 # host to drift from that. The enrollment token itself is one-time-use (see identity.rs) — once a
 # host is enrolled, this file being reset to defaults on every reinstall costs nothing.
-install -o root -g root -m 644 "$SCRIPT_DIR/config.toml" "$CONFIG_DEST"
+#
+# 0600, not 0644: the enrollment token in this file is a credential, and nothing outside root reads
+# the file — the per-user process makes no network call and treats an unreadable config as absent.
+# The root service re-asserts this mode on every check-in (config::repair_directory_modes), since a
+# self-update never re-runs this script.
+install -o root -g root -m 600 "$SCRIPT_DIR/config.toml" "$CONFIG_DEST"
 
 if [[ -n "$ENROLLMENT_TOKEN" ]]; then
     # Rewritten via grep+printf rather than sed -i: the token is a secret whose content this
@@ -113,7 +118,7 @@ if [[ -n "$ENROLLMENT_TOKEN" ]]; then
     printf 'enrollment_token = "%s"\n' "$ESCAPED_TOKEN" >> "${CONFIG_DEST}.tmp"
     mv "${CONFIG_DEST}.tmp" "$CONFIG_DEST"
     chown root:root "$CONFIG_DEST"
-    chmod 644 "$CONFIG_DEST"
+    chmod 600 "$CONFIG_DEST"
     echo "  enrollment token set from the command line/environment."
 elif ! grep -q '^enrollment_token = "[^"]' "$CONFIG_DEST" 2>/dev/null; then
     echo "  WARNING: no enrollment token supplied (--enrollment-token / \$AGENT_ENROLLMENT_TOKEN)"

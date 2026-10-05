@@ -36,6 +36,15 @@ pub const STATE_DIR_MODE: u32 = 0o711;
 /// See `QUEUE_DIR` and `queue`'s module documentation for what each bit of this is carrying.
 pub const QUEUE_DIR_MODE: u32 = 0o1733;
 
+/// The mode `packaging/install.sh` gives `config.toml`, re-asserted beside the two directory modes
+/// above. `0600`, because the file carries the enrollment token — a credential that enrolls a host
+/// into the fleet — until this host enrolls, and nothing outside root needs to read it: the
+/// per-user process makes no network call, `Config::load` treats an unreadable file as absent, and
+/// the only field it would have shown is `api_base_url` in its own log line. The macOS agent's
+/// `config.toml` is `root:admin 0640` instead, because there the per-user process does talk to the
+/// server. It shipped `0644` here, which handed the token to every local account.
+pub const CONFIG_FILE_MODE: u32 = 0o600;
+
 const ENV_OVERRIDE: &str = "PATCHING_AGENT_API_BASE_URL";
 const ENROLLMENT_TOKEN_ENV_OVERRIDE: &str = "PATCHING_AGENT_ENROLLMENT_TOKEN";
 
@@ -345,18 +354,21 @@ pub fn policy_cache_path() -> PathBuf {
     state_dir().join("policy.json")
 }
 
-/// Re-asserts the two directory modes `packaging/install.sh` sets, on every root check-in.
+/// Re-asserts the two directory modes `packaging/install.sh` sets, and the config file's, on every
+/// root check-in.
 ///
 /// Not belt-and-braces: `self_update` replaces the binary in place and never re-runs the
 /// installer, so a packaging mistake in these modes is otherwise permanent on every host already
 /// in the field — there is no upgrade path that would repair it. Doing it here means the fix
-/// arrives with the next check-in instead of with a manual reinstall of the whole fleet.
+/// arrives with the next check-in instead of with a manual reinstall of the whole fleet. The config
+/// file is the case in point: it was installed `0644` for a year of releases, and this is how the
+/// hosts that installed one of them get `CONFIG_FILE_MODE`.
 ///
-/// Deliberately narrow: only widens the two directories whose modes the privilege handoff depends
-/// on, only when they differ from what is expected, and never touches `IDENTITY_DIR` — that one is
-/// `0700` on purpose and nothing here should be able to loosen it.
+/// Deliberately narrow: only the two directories whose modes the privilege handoff depends on and
+/// the one file that holds a credential, only when they differ from what is expected, and never
+/// `IDENTITY_DIR` — that one is `0700` on purpose and nothing here should be able to loosen it.
 pub fn repair_directory_modes() {
-    for (path, mode) in [(state_dir(), STATE_DIR_MODE), (queue_dir(), QUEUE_DIR_MODE)] {
+    for (path, mode) in [(state_dir(), STATE_DIR_MODE), (queue_dir(), QUEUE_DIR_MODE), (default_config_path(), CONFIG_FILE_MODE)] {
         repair_mode(&path, mode);
     }
 }

@@ -1,5 +1,6 @@
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::io::{Read, Write};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -43,6 +44,17 @@ use crate::forced_patch_run::ForcedPatchRun;
 /// `BUILTIN\Users` ACL — and it needs no group, which matters because the "local administrators"
 /// group is `sudo` on Debian, `wheel` on Red Hat, and neither on plenty of others. See
 /// packaging/install.sh.
+///
+/// "Any logged-in user" is enforced, not assumed. Every name in that directory was chosen by an
+/// unprivileged process, so the root side opens each entry without following a symlink and acts on
+/// a request only when the file is owned by a uid that has a login session on this host
+/// (`owner_may_use_the_queue`); a result is written fresh under a name root has just unlinked
+/// (`write_result`), and the per-user side believes a result only if the queue directory's owner
+/// wrote it (`submit`). A heartbeat counts only if it is owned by the uid its name carries, that uid
+/// is logged in, and its timestamp is not further ahead of the clock than `HEARTBEAT_MAX_AGE`
+/// (`live_ui_agent_with`). None of this leans on the kernel's `fs.protected_symlinks`, which on a
+/// default kernel happens to refuse root a symlink follow in a sticky world-writable directory —
+/// that is a sysctl, not a property of this design.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestKind {
     /// "What is there to patch right now?" — answered from the server, with this host's identity.
@@ -192,6 +204,95 @@ fn result_path_for(request_path: &Path) -> PathBuf {
     PathBuf::from(path)
 }
 
+/// Opens one entry in the queue directory the way both sides must: without following a symlink,
+/// without blocking on a FIFO, and refusing anything that is not a regular file. Returns the file
+/// and the metadata of the thing actually opened — `fstat`, not `stat` — so every decision made
+/// downstream (owner, age) is about the bytes that will be read, not about whatever the path
+/// pointed at a moment earlier.
+///
+/// Before this, a request was read with `read_to_string` and a result written with `fs::write`,
+/// both of which follow a symlink — so a name in the drop-box could point root at any file it can
+/// read, or at any file it can write. A default Linux kernel's `fs.protected_symlinks` refuses
+/// root that follow in a sticky world-writable directory, which is the only reason that was never
+/// more than a finding; a kernel tuned otherwise loses the backstop, and this does not need it.
+fn open_queue_entry(path: &Path) -> std::io::Result<(fs::File, fs::Metadata)> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        // O_NONBLOCK so that a FIFO planted under a request's name is opened and then refused by
+        // the file-type check below, rather than blocking the root service forever.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.file_type().is_file() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file"));
+    }
+    Ok((file, metadata))
+}
+
+/// Whether `uid` currently has a login session on this host — which is what makes it a user whose
+/// per-user process could legitimately have written a request or a heartbeat.
+///
+/// systemd-logind creates `/run/user/<uid>` when a user's first session opens and removes it when
+/// the last closes (or keeps it, with lingering enabled — and a lingering user's `systemd --user`
+/// is exactly one that may be running the per-user unit). That same `systemd --user` is what starts
+/// the per-user process, so anything it writes is from a uid this returns true for. What it rules
+/// out is everything else: a daemon account, or a uid that exists nowhere at all — a forged
+/// `ui-424242.heartbeat` held a host's patching schedule indefinitely before this check existed.
+fn uid_has_login_session(uid: u32) -> bool {
+    Path::new("/run/user").join(uid.to_string()).is_dir()
+}
+
+/// Which uids the privileged side acts for. Injected rather than called directly so the tests — run
+/// as whoever runs them, with or without a session, root in a container — can say what counts.
+type SessionCheck<'a> = &'a dyn Fn(u32) -> bool;
+
+fn owner_may_use_the_queue(metadata: &fs::Metadata, has_session: SessionCheck) -> Result<(), String> {
+    let uid = metadata.uid();
+    if has_session(uid) {
+        Ok(())
+    } else {
+        Err(format!("owned by uid {uid}, which has no login session on this host"))
+    }
+}
+
+/// The uid that owns the queue directory: root on an installed host, whoever runs the tests under a
+/// scratch directory. A result is believed only when its owner is this — the service is the only
+/// thing that writes results, and it is the only thing that could own the directory they go in.
+fn queue_owner_uid(queue_dir: &Path) -> Option<u32> {
+    fs::metadata(queue_dir).ok().map(|metadata| metadata.uid())
+}
+
+/// Writes a result where nothing but this process can have put a file first.
+///
+/// Whatever already sits at `result_path` was not written by this process — results are removed
+/// by their reader, and this request is only now being answered — so it is a leftover or a plant: a
+/// file some other user created under a predicted name to be handed to the requester as the answer.
+/// The sticky bit stops users unlinking each other's files; it does not stop root. So the entry is
+/// unlinked and the result created fresh, `O_EXCL` so a name that reappears in between is an error
+/// and `O_NOFOLLOW` so it is never written through.
+fn write_result(result_path: &Path, json: &str) -> std::io::Result<()> {
+    match fs::remove_file(result_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o644)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(result_path)?;
+    file.write_all(json.as_bytes())?;
+    // World-readable on purpose, and this is the one place it matters: the queue directory itself
+    // is unreadable to anyone but root, so a result file is only ever reachable by a process that
+    // already knows the exact path — which is to say, the one that wrote the matching request. It
+    // carries no secret either way; the whole point of this design is that nothing executable or
+    // confidential crosses it. Set on the open descriptor rather than by path, so the umask cannot
+    // have narrowed it and the path cannot have changed under us.
+    file.set_permissions(fs::Permissions::from_mode(0o644))
+}
+
 /// Drops a request into the queue and returns its path. The file name carries the process id and a
 /// monotonic counter alongside the timestamp so two requests made inside the same second — which a
 /// patch cycle does constantly, one per application — can't collide on a name and read each
@@ -233,10 +334,20 @@ pub fn submit(queue_dir: &Path, kind: RequestKind, body: &str, timeout: Duration
     let result_path = result_path_for(&request_path);
 
     let started = Instant::now();
+    let service_uid = queue_owner_uid(queue_dir);
     loop {
-        if let Ok(contents) = fs::read_to_string(&result_path) {
-            let _ = fs::remove_file(&result_path);
-            return serde_json::from_str(&contents).context("could not parse the queue result written by the service");
+        // Only the service writes results, and it owns the queue directory. A result owned by anyone
+        // else was planted under this predicted name by another user, to be taken for the answer;
+        // it is ignored (this process could not remove another user's file from a sticky directory
+        // anyway) until the service unlinks it and writes the real one — see `write_result`.
+        if let Ok((mut file, metadata)) = open_queue_entry(&result_path) {
+            if Some(metadata.uid()) == service_uid {
+                let mut contents = String::new();
+                file.read_to_string(&mut contents).context("could not read the queue result written by the service")?;
+                drop(file);
+                let _ = fs::remove_file(&result_path);
+                return serde_json::from_str(&contents).context("could not parse the queue result written by the service");
+            }
         }
 
         if started.elapsed() >= timeout {
@@ -273,12 +384,18 @@ pub trait RequestHandler {
 /// at once would deadlock on the dpkg lock, and the per-user process asks for one application at a
 /// time anyway.
 pub fn process_queue(queue_dir: &Path, handler: &mut impl RequestHandler) {
-    process_queue_at(queue_dir, handler, SystemTime::now())
+    process_queue_with(queue_dir, handler, SystemTime::now(), &uid_has_login_session)
 }
 
 /// The testable half of [`process_queue`] — `now` is a parameter so the staleness rule can be
-/// exercised without a test that has to sleep for minutes.
+/// exercised without a test that has to sleep for minutes, and every uid is accepted, since the
+/// tests run as whoever runs them.
+#[cfg(test)]
 fn process_queue_at(queue_dir: &Path, handler: &mut impl RequestHandler, now: SystemTime) {
+    process_queue_with(queue_dir, handler, now, &|_| true)
+}
+
+fn process_queue_with(queue_dir: &Path, handler: &mut impl RequestHandler, now: SystemTime, has_session: SessionCheck) {
     let Ok(entries) = fs::read_dir(queue_dir) else {
         return;
     };
@@ -305,20 +422,43 @@ fn process_queue_at(queue_dir: &Path, handler: &mut impl RequestHandler, now: Sy
             continue;
         };
 
-        if is_stale(&request_path, now) {
+        // Opened before anything is decided about it, and everything below — owner, age, body — is
+        // read from the opened file rather than from the path, which another user chose.
+        let (mut file, metadata) = match open_queue_entry(&request_path) {
+            Ok(opened) => opened,
+            Err(err) => {
+                crate::logging::warn(&format!(
+                    "discarding a {kind:?} request that is not a regular file ({err}) without acting on it: {}",
+                    request_path.display()
+                ));
+                discard(&request_path);
+                continue;
+            }
+        };
+
+        if let Err(reason) = owner_may_use_the_queue(&metadata, has_session) {
+            crate::logging::warn(&format!("discarding a {kind:?} request {reason} without acting on it: {}", request_path.display()));
+            discard(&request_path);
+            continue;
+        }
+
+        if is_stale(&metadata, now) {
             crate::logging::warn(&format!(
                 "discarding a {kind:?} request older than {} seconds without acting on it: {}",
                 MAX_REQUEST_AGE.as_secs(),
                 request_path.display()
             ));
-            let _ = fs::remove_file(&request_path);
-            let _ = fs::remove_file(result_path_for(&request_path));
+            discard(&request_path);
             continue;
         }
 
         crate::logging::info(&format!("processing {kind:?} request: {}", request_path.display()));
 
-        let body = fs::read_to_string(&request_path).unwrap_or_default();
+        let mut body = String::new();
+        if file.read_to_string(&mut body).is_err() {
+            body.clear();
+        }
+        drop(file);
         let result = run_request(kind, body.trim(), handler);
 
         crate::logging::info(&format!(
@@ -332,28 +472,28 @@ fn process_queue_at(queue_dir: &Path, handler: &mut impl RequestHandler, now: Sy
         // where a crash here re-runs a request that has already been answered.
         let _ = fs::remove_file(&request_path);
         if let Ok(json) = serde_json::to_string(&result) {
-            let result_path = result_path_for(&request_path);
-            match fs::write(&result_path, json) {
-                // World-readable on purpose, and this is the one place it matters: the queue
-                // directory itself is unreadable to anyone but root, so a result file is only ever
-                // reachable by a process that already knows the exact path — which is to say, the
-                // one that wrote the matching request. It carries no secret either way; the whole
-                // point of this design is that nothing executable or confidential crosses it.
-                Ok(()) => {
-                    let _ = fs::set_permissions(&result_path, fs::Permissions::from_mode(0o644));
-                }
-                Err(err) => crate::logging::warn(&format!("could not write the queue result: {err}")),
+            if let Err(err) = write_result(&result_path_for(&request_path), &json) {
+                crate::logging::warn(&format!("could not write the queue result: {err}"));
             }
         }
     }
 }
 
+/// Removes a request that will not be acted on, and anything already sitting where its result
+/// would go — the per-user process waits on that path, and a leftover there would be read as the
+/// answer to the next request that happens to reuse the name.
+fn discard(request_path: &Path) {
+    let _ = fs::remove_file(request_path);
+    let _ = fs::remove_file(result_path_for(request_path));
+}
+
 /// Whether a request has been sitting unanswered long enough that its owner must be gone — see
 /// [`MAX_REQUEST_AGE`]. An unreadable or future-dated modification time counts as *not* stale, so
-/// a clock that has just jumped backwards can't silently swallow live requests.
-fn is_stale(request_path: &Path, now: SystemTime) -> bool {
-    fs::metadata(request_path)
-        .and_then(|metadata| metadata.modified())
+/// a clock that has just jumped backwards can't silently swallow live requests. Judged from the
+/// metadata of the opened file, never from the path.
+fn is_stale(metadata: &fs::Metadata, now: SystemTime) -> bool {
+    metadata
+        .modified()
         .ok()
         .and_then(|modified| now.duration_since(modified).ok())
         .is_some_and(|age| age > MAX_REQUEST_AGE)
@@ -422,8 +562,17 @@ pub fn record_heartbeat(queue_dir: &Path) {
 
     // Written rather than merely touched: `utimensat` on a file this process already owns would
     // do, but writing is one call, needs no extra dependency, and the content is a useful thing to
-    // find when reading the directory by hand.
-    if let Err(err) = fs::write(&path, now_epoch().to_string()) {
+    // find when reading the directory by hand. Not `fs::write`, though, which follows a symlink:
+    // another user can create this name first, and the sticky bit stops this process replacing
+    // it. O_NOFOLLOW makes that a logged failure rather than a write into wherever they pointed.
+    let written = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(&path)
+        .and_then(|mut file| file.write_all(now_epoch().to_string().as_bytes()));
+    if let Err(err) = written {
         crate::logging::warn(&format!("could not record a heartbeat at {}: {err}", path.display()));
     }
 }
@@ -434,8 +583,9 @@ pub fn record_heartbeat(queue_dir: &Path) {
 /// with nothing in it to check against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UiAgentHeartbeat {
-    /// The uid the heartbeat file names, as written (see `record_heartbeat`), or `"?"` if the
-    /// file name doesn't parse — a diagnostic, never something dispatched on.
+    /// The uid the heartbeat file names (see `record_heartbeat`), which is also the uid that owns
+    /// the file — a heartbeat whose name and owner disagree is not a heartbeat (see
+    /// `live_ui_agent_with`). A diagnostic, never something dispatched on.
     pub uid: String,
     pub age: Duration,
 }
@@ -448,10 +598,22 @@ pub struct UiAgentHeartbeat {
 /// it is and how stale the claim is; see `main::patch_unattended_if_nobody_is_logged_in`, the only
 /// caller, for why that detail earns its place.
 pub fn live_ui_agent(queue_dir: &Path, max_age: Duration) -> Option<UiAgentHeartbeat> {
-    live_ui_agent_at(queue_dir, max_age, SystemTime::now())
+    live_ui_agent_with(queue_dir, max_age, SystemTime::now(), &uid_has_login_session)
 }
 
+/// The testable form: `now` is a parameter, and every uid counts as logged in.
+#[cfg(test)]
 fn live_ui_agent_at(queue_dir: &Path, max_age: Duration, now: SystemTime) -> Option<UiAgentHeartbeat> {
+    live_ui_agent_with(queue_dir, max_age, now, &|_| true)
+}
+
+/// Deferring the patching schedule is the one decision in this agent that can leave a host
+/// unpatched, and a heartbeat is a file any local user can create. So three things have to hold
+/// before one counts, and each closes something that was demonstrated against a live host: the
+/// file is owned by the uid its name carries (a forged `ui-424242.heartbeat` was owned by somebody
+/// else entirely); that uid has a login session (424242 existed nowhere); and its timestamp is not
+/// further ahead of the clock than `max_age` — a `touch -d` into next year read as "0s ago" forever.
+fn live_ui_agent_with(queue_dir: &Path, max_age: Duration, now: SystemTime, has_session: SessionCheck) -> Option<UiAgentHeartbeat> {
     let entries = fs::read_dir(queue_dir).ok()?;
 
     entries
@@ -459,23 +621,33 @@ fn live_ui_agent_at(queue_dir: &Path, max_age: Duration, now: SystemTime) -> Opt
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|extension| extension == "heartbeat"))
         .filter_map(|path| {
-            let modified = fs::metadata(&path).and_then(|metadata| metadata.modified()).ok()?;
-            // A heartbeat dated in the future counts as live, with an age of zero: a clock that
-            // has just jumped is not evidence that the user went away.
-            let age = now.duration_since(modified).unwrap_or_default();
-            (age <= max_age).then(|| UiAgentHeartbeat { uid: uid_from_heartbeat_name(&path), age })
+            let uid = uid_from_heartbeat_name(&path)?;
+            let (_file, metadata) = open_queue_entry(&path).ok()?;
+            if metadata.uid() != uid || !has_session(uid) {
+                return None;
+            }
+            let age = heartbeat_age(metadata.modified().ok()?, now, max_age)?;
+            Some(UiAgentHeartbeat { uid: uid.to_string(), age })
         })
         .min_by_key(|heartbeat| heartbeat.age)
 }
 
+/// How old a heartbeat is, or `None` if it is not live. A heartbeat a little ahead of the clock
+/// counts as live with an age of zero: a clock that has just jumped is not evidence that the user
+/// went away. One further ahead than `max_age` is not a clock jump a per-user process refreshing
+/// every minute would produce, so it is not live — without that bound a future-dated file never
+/// ages out at all.
+fn heartbeat_age(modified: SystemTime, now: SystemTime, max_age: Duration) -> Option<Duration> {
+    match now.duration_since(modified) {
+        Ok(age) => (age <= max_age).then_some(age),
+        Err(ahead) => (ahead.duration() <= max_age).then_some(Duration::ZERO),
+    }
+}
+
 /// Pulls the uid back out of a `ui-{uid}.heartbeat` file name — see `record_heartbeat`, which puts
-/// it there. Only ever used to make a log line say *whose* session is holding the schedule.
-fn uid_from_heartbeat_name(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|stem| stem.to_str())
-        .and_then(|stem| stem.strip_prefix("ui-"))
-        .unwrap_or("?")
-        .to_string()
+/// it there. A name that does not carry a parseable uid is not a heartbeat at all.
+fn uid_from_heartbeat_name(path: &Path) -> Option<u32> {
+    path.file_stem()?.to_str()?.strip_prefix("ui-")?.parse().ok()
 }
 
 #[cfg(test)]
@@ -564,7 +736,7 @@ mod tests {
         write_request(&dir, RequestKind::OsUpdate, "").unwrap();
 
         let mut handler = RecordingHandler::default();
-        process_queue(&dir, &mut handler);
+        process_queue_at(&dir, &mut handler, SystemTime::now());
 
         assert_eq!(handler.plans_requested, 1);
         assert_eq!(handler.patched, vec!["Firefox".to_string()]);
@@ -578,7 +750,7 @@ mod tests {
         let dir = scratch_queue("results");
         let request_path = write_request(&dir, RequestKind::AppPatch, "Firefox").unwrap();
 
-        process_queue(&dir, &mut RecordingHandler::default());
+        process_queue_at(&dir, &mut RecordingHandler::default(), SystemTime::now());
 
         assert!(!request_path.exists(), "the request should be removed once answered");
         let result: RequestResult = serde_json::from_str(&fs::read_to_string(result_path_for(&request_path)).unwrap()).unwrap();
@@ -593,7 +765,7 @@ mod tests {
         let request_path = write_request(&dir, RequestKind::AppPatch, "Firefox").unwrap();
 
         let mut handler = RecordingHandler { fail_patches: true, ..Default::default() };
-        process_queue(&dir, &mut handler);
+        process_queue_at(&dir, &mut handler, SystemTime::now());
 
         let result: RequestResult = serde_json::from_str(&fs::read_to_string(result_path_for(&request_path)).unwrap()).unwrap();
         assert!(!result.success);
@@ -607,7 +779,7 @@ mod tests {
         let dir = scratch_queue("plan-data");
         let request_path = write_request(&dir, RequestKind::Plan, "").unwrap();
 
-        process_queue(&dir, &mut RecordingHandler::default());
+        process_queue_at(&dir, &mut RecordingHandler::default(), SystemTime::now());
 
         let result: RequestResult = serde_json::from_str(&fs::read_to_string(result_path_for(&request_path)).unwrap()).unwrap();
         let plan = result.data.expect("a Plan request must answer with a plan");
@@ -655,7 +827,7 @@ mod tests {
         let request_path = write_request(&dir, RequestKind::ForcedPatchRuns, "").unwrap();
 
         let mut handler = RecordingHandler::default();
-        process_queue(&dir, &mut handler);
+        process_queue_at(&dir, &mut handler, SystemTime::now());
 
         assert_eq!(handler.forced_collections, 1);
         let result: RequestResult = serde_json::from_str(&fs::read_to_string(result_path_for(&request_path)).unwrap()).unwrap();
@@ -675,7 +847,7 @@ mod tests {
         let request_path = write_request(&dir, RequestKind::CheckIn, "").unwrap();
 
         let mut handler = RecordingHandler::default();
-        process_queue(&dir, &mut handler);
+        process_queue_at(&dir, &mut handler, SystemTime::now());
 
         assert_eq!(handler.check_ins, 1);
         let result: RequestResult = serde_json::from_str(&fs::read_to_string(result_path_for(&request_path)).unwrap()).unwrap();
@@ -692,7 +864,7 @@ mod tests {
         let request_path = write_request(&dir, RequestKind::AppPatch, "").unwrap();
 
         let mut handler = RecordingHandler::default();
-        process_queue(&dir, &mut handler);
+        process_queue_at(&dir, &mut handler, SystemTime::now());
 
         assert!(handler.patched.is_empty(), "nothing should be patched without a name to patch");
         let result: RequestResult = serde_json::from_str(&fs::read_to_string(result_path_for(&request_path)).unwrap()).unwrap();
@@ -755,12 +927,19 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// What the production entry point does, minus the login-session lookup — a test runs as
+    /// whoever runs it, which in a container is root with no `/run/user/0`. The dispatch tests go
+    /// through `process_queue_at` for the same reason; the session check has tests of its own.
+    fn live(dir: &Path) -> Option<UiAgentHeartbeat> {
+        live_ui_agent_at(dir, HEARTBEAT_MAX_AGE, SystemTime::now())
+    }
+
     #[test]
     fn live_ui_agent_sees_a_fresh_heartbeat() {
         let dir = scratch_queue("heartbeat-fresh");
         record_heartbeat(&dir);
 
-        assert!(live_ui_agent(&dir, HEARTBEAT_MAX_AGE).is_some());
+        assert!(live(&dir).is_some());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -773,7 +952,7 @@ mod tests {
         let dir = scratch_queue("heartbeat-uid");
         record_heartbeat(&dir);
 
-        let heartbeat = live_ui_agent(&dir, HEARTBEAT_MAX_AGE).expect("the heartbeat just written should be live");
+        let heartbeat = live(&dir).expect("the heartbeat just written should be live");
 
         // SAFETY: `getuid` cannot fail and touches nothing — the same call `record_heartbeat` makes.
         assert_eq!(heartbeat.uid, unsafe { libc::getuid() }.to_string());
@@ -799,7 +978,7 @@ mod tests {
     fn live_ui_agent_finds_nothing_on_a_host_where_nobody_has_ever_logged_in() {
         let dir = scratch_queue("heartbeat-none");
 
-        assert!(live_ui_agent(&dir, HEARTBEAT_MAX_AGE).is_none());
+        assert!(live(&dir).is_none());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -811,12 +990,164 @@ mod tests {
         record_heartbeat(&dir);
 
         let mut handler = RecordingHandler::default();
-        process_queue(&dir, &mut handler);
+        process_queue_at(&dir, &mut handler, SystemTime::now());
 
         assert_eq!(handler.plans_requested, 0, "a heartbeat should not be dispatched as a request");
         assert!(handler.patched.is_empty());
         assert_eq!(handler.os_updates_installed, 0);
-        assert!(live_ui_agent(&dir, HEARTBEAT_MAX_AGE).is_some(), "and it should still be there afterwards");
+        assert!(live(&dir).is_some(), "and it should still be there afterwards");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn set_modified(path: &Path, when: SystemTime) {
+        fs::OpenOptions::new().write(true).open(path).unwrap().set_modified(when).unwrap();
+    }
+
+    /// The forgery that held a live host's schedule: a file named for a uid that exists nowhere,
+    /// written by somebody else. The owner check alone refuses it.
+    #[test]
+    fn a_heartbeat_owned_by_someone_other_than_the_uid_it_names_is_ignored() {
+        let dir = scratch_queue("heartbeat-forged-owner");
+        fs::write(dir.join("ui-424242.heartbeat"), "1").unwrap();
+
+        assert!(live(&dir).is_none(), "a heartbeat is only as good as the ownership of the file behind it");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_heartbeat_from_a_uid_with_no_login_session_is_ignored() {
+        let dir = scratch_queue("heartbeat-no-session");
+        record_heartbeat(&dir);
+
+        assert!(live_ui_agent_with(&dir, HEARTBEAT_MAX_AGE, SystemTime::now(), &|_| false).is_none());
+        assert!(live_ui_agent_with(&dir, HEARTBEAT_MAX_AGE, SystemTime::now(), &|_| true).is_some(), "the same file counts once its owner is logged in");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// `touch -d 2099-01-01` on one's own heartbeat read as "0s ago" on every check-in, for ever.
+    #[test]
+    fn a_heartbeat_dated_far_in_the_future_is_not_live() {
+        let dir = scratch_queue("heartbeat-future");
+        record_heartbeat(&dir);
+        // SAFETY: `getuid` cannot fail and touches nothing.
+        let path = dir.join(format!("ui-{}.heartbeat", unsafe { libc::getuid() }));
+        set_modified(&path, SystemTime::now() + HEARTBEAT_MAX_AGE + Duration::from_secs(60));
+
+        assert!(live(&dir).is_none(), "a timestamp no running per-user process could produce must not hold the schedule");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The tolerance that bound replaces: a clock that has just jumped is still not evidence that
+    /// the user went away.
+    #[test]
+    fn a_heartbeat_slightly_ahead_of_the_clock_is_live_with_an_age_of_zero() {
+        let dir = scratch_queue("heartbeat-slightly-ahead");
+        record_heartbeat(&dir);
+        // SAFETY: as above.
+        let path = dir.join(format!("ui-{}.heartbeat", unsafe { libc::getuid() }));
+        set_modified(&path, SystemTime::now() + Duration::from_secs(30));
+
+        let heartbeat = live(&dir).expect("a small clock jump must not cost a desktop its schedule");
+        assert_eq!(heartbeat.age, Duration::ZERO);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_heartbeat_that_is_a_symlink_is_ignored() {
+        let dir = scratch_queue("heartbeat-symlink");
+        let target = dir.join("elsewhere");
+        fs::write(&target, "1").unwrap();
+        // SAFETY: as above.
+        std::os::unix::fs::symlink(&target, dir.join(format!("ui-{}.heartbeat", unsafe { libc::getuid() }))).unwrap();
+
+        assert!(live(&dir).is_none());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_request_from_a_uid_with_no_login_session_is_discarded_unrun() {
+        let dir = scratch_queue("request-no-session");
+        let request_path = write_request(&dir, RequestKind::OsUpdate, "").unwrap();
+
+        let mut handler = RecordingHandler::default();
+        process_queue_with(&dir, &mut handler, SystemTime::now(), &|_| false);
+
+        assert_eq!(handler.os_updates_installed, 0, "a request from an account that is not logged in must not run as root");
+        assert!(!request_path.exists(), "and it should not be left for the next trigger to find either");
+        assert!(!result_path_for(&request_path).exists());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The request's name is chosen by an unprivileged user, so it may be a symlink to anything root
+    /// can read. It must neither be read through nor acted on.
+    #[test]
+    fn a_request_that_is_a_symlink_is_discarded_unrun() {
+        let dir = scratch_queue("request-symlink");
+        let target = dir.join("real-body");
+        fs::write(&target, "Firefox").unwrap();
+        let link = dir.join(format!("1756512000-1-0.{}", RequestKind::AppPatch.extension()));
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let mut handler = RecordingHandler::default();
+        process_queue_at(&dir, &mut handler, SystemTime::now());
+
+        assert!(handler.patched.is_empty(), "a symlinked request must not be followed");
+        assert!(!link.exists(), "the link itself should be removed");
+        assert!(target.exists(), "and never the file it pointed at");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_request_that_is_not_a_regular_file_is_discarded_unrun() {
+        let dir = scratch_queue("request-directory");
+        let not_a_file = dir.join(format!("1756512000-1-0.{}", RequestKind::OsUpdate.extension()));
+        fs::create_dir(&not_a_file).unwrap();
+
+        let mut handler = RecordingHandler::default();
+        process_queue_at(&dir, &mut handler, SystemTime::now());
+
+        assert_eq!(handler.os_updates_installed, 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A result file planted under a predicted name — a symlink here, the worst case — is replaced,
+    /// never written through: root unlinks whatever is there and creates the result afresh.
+    #[test]
+    fn a_result_is_written_fresh_rather_than_through_whatever_was_planted_at_its_path() {
+        let dir = scratch_queue("result-planted");
+        let victim = dir.join("victim");
+        fs::write(&victim, "untouched").unwrap();
+        let request_path = write_request(&dir, RequestKind::CheckIn, "").unwrap();
+        let result_path = result_path_for(&request_path);
+        std::os::unix::fs::symlink(&victim, &result_path).unwrap();
+
+        process_queue_at(&dir, &mut RecordingHandler::default(), SystemTime::now());
+
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "untouched", "the planted link's target must not be written");
+        assert!(!fs::symlink_metadata(&result_path).unwrap().file_type().is_symlink(), "the result should be a fresh regular file");
+        let result: RequestResult = serde_json::from_str(&fs::read_to_string(&result_path).unwrap()).unwrap();
+        assert!(result.success);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_result_leaves_the_file_world_readable_whatever_the_umask() {
+        let dir = scratch_queue("result-mode");
+        let path = dir.join("1-1-0.plan.request.result.json");
+
+        write_result(&path, "{}").unwrap();
+
+        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o644);
 
         let _ = fs::remove_dir_all(&dir);
     }

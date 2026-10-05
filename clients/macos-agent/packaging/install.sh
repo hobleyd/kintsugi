@@ -175,7 +175,12 @@ chown root:wheel "$CONFIG_DIR"
 # enrollment token). A stale local override surviving a reinstall would just be a silent way for a
 # host to drift from that. The enrollment token itself is one-time-use (see identity.rs) — once a
 # host is enrolled, this file being reset to defaults on every reinstall costs nothing.
-install -o root -g wheel -m 644 "$SCRIPT_DIR/config.toml" "$CONFIG_DEST"
+# root:admin 0640, the same pattern as the identity directory below and for the same reader: the
+# per-user agent runs as the logged-in administrator and needs api_base_url from this file, while
+# the enrollment token in it is a credential no other local account should be able to read. The
+# daemon re-asserts this on every run (config::repair_config_file_mode), since a self-update never
+# re-runs this script.
+install -o root -g admin -m 640 "$SCRIPT_DIR/config.toml" "$CONFIG_DEST"
 
 if [[ -n "$ENROLLMENT_TOKEN" ]]; then
     # Rewritten via grep+printf rather than sed -i: the token is a secret whose content this
@@ -187,8 +192,8 @@ if [[ -n "$ENROLLMENT_TOKEN" ]]; then
     grep -v '^enrollment_token' "$CONFIG_DEST" > "${CONFIG_DEST}.tmp"
     printf 'enrollment_token = "%s"\n' "$ESCAPED_TOKEN" >> "${CONFIG_DEST}.tmp"
     mv "${CONFIG_DEST}.tmp" "$CONFIG_DEST"
-    chown root:wheel "$CONFIG_DEST"
-    chmod 644 "$CONFIG_DEST"
+    chown root:admin "$CONFIG_DEST"
+    chmod 640 "$CONFIG_DEST"
     echo "  enrollment token set from the command line/environment."
 elif ! grep -q '^enrollment_token = "[^"]' "$CONFIG_DEST" 2>/dev/null; then
     echo "  WARNING: no enrollment token supplied (--enrollment-token / \$AGENT_ENROLLMENT_TOKEN)"
