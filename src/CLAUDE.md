@@ -157,6 +157,43 @@ genuinely-signed `#!/bin/bash` script reaching a PowerShell host is exactly the 
 `generic` bucket used to permit.
 
 
+**A GitHub App can stand in for both GitHub tokens, and it does so in exactly one place.**
+Settings > GitHub can create an App for this server through GitHub's manifest flow
+(`GitHubAppController`: `manifest` → GitHub → `callback` → GitHub's install page → `installed`).
+Once it is connected *and installed*, `GitHubSettingsProvider` mints an installation token in place
+of each stored token, and none of the five consumers changed — that seam is the whole design. Four
+things are load-bearing:
+
+- **The two tokens stay two scopes.** `GitHubTokenScope.ReadOnly` (`contents:read`, every
+  repository the installation reaches) replaces `ApiToken`; `GitHubTokenScope.ApprovalWrite`
+  (`contents:write` + `pull_requests:write`, restricted by *name* to the approval repository)
+  replaces `ScriptApprovalToken`. GitHub lets a token be minted narrower than its installation, and
+  that is what keeps `.claude/rules/script-approval-repo.md` true with one App behind both — the AI
+  research and agent-package clients still never hold write access.
+- **A failed mint is null, never an exception and never a fallback.** Null is already a supported
+  state for each token (anonymous reads; "signing approves locally and raises no pull request"), so
+  the Upgrade Scripts page reports it honestly, and the Settings page — needed to fix the App —
+  stays up. The stored personal tokens are deliberately *not* fallen back to: an installed App that
+  is failing must be seen to fail.
+- **Nothing on a redirect is taken on trust.** The manifest leg's `state` is a time-limited Data
+  Protection payload only this server can mint, so a `callback` carrying someone else's code is
+  refused; the installation id is confirmed by asking GitHub, *as the App*, about it
+  (`IGitHubAppClient.GetInstallationAccountAsync`) before it is stored. Both redirect targets carry
+  `[RequireAdminSession]` with the rest of the controller — they are top-level navigations, so the
+  `SameSite=Lax` session cookie rides along — and report failure by redirecting to the Settings
+  page with `githubAppError`, since the browser is mid-navigation and a JSON body would be the page
+  left on screen.
+- **An installation token reaches only the account the App is installed on.** An approval
+  repository owned by a different account than the App makes every write mint fail; the Settings
+  page says so in red rather than leaving it to a log line.
+
+`GitHubAppTokenProvider` is a singleton cache beside a transient typed client for the reason
+`VantaAccessTokenProvider` is, keyed on (App, installation, scope, a hash of the key) so reconnecting
+or changing the approval repository invalidates the right entries without anything remembering to.
+The App's private key is stored as written, like the tokens beside it: GitHub shows it once, at
+conversion, and this database is then the only copy.
+
+
 **The admin UI is a separate client, and everything it needs is a REST route.** It used to be
 Razor Pages that injected `ISender` and dispatched MediatR handlers directly, so most screens had no
 API at all. It is now a Flutter web application in `web/`, compiled by `nginx/Dockerfile` and served

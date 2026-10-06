@@ -8,11 +8,13 @@ abstract interface class PageNavigator {
   /// Navigates the current page to [url].
   void go(String url);
 
-  /// Navigates by submitting a POST to [url].
+  /// Navigates by submitting a POST to [url], carrying [fields] as form fields.
   ///
   /// Sign-out is a POST — as it was when it was a Razor form — because a GET that ends a session
-  /// can be triggered by any page that can get the browser to load a URL.
-  void post(String url);
+  /// can be triggered by any page that can get the browser to load a URL. Creating a GitHub App is
+  /// the case that carries fields: GitHub's manifest flow takes the manifest as a posted `manifest`
+  /// field, and only a navigating form lands the browser on GitHub's confirmation page.
+  void post(String url, {Map<String, String> fields = const {}});
 
   /// Opens [url] in a new tab, leaving this one where it is.
   ///

@@ -110,6 +110,9 @@ class GitHubSettings extends Equatable {
     required this.isScriptApprovalRepositoryDefault,
     required this.hasApiToken,
     required this.hasScriptApprovalToken,
+    this.gitHubAppSlug,
+    this.gitHubAppOwner,
+    this.isGitHubAppInstalled = false,
   });
 
   /// The effective value, defaults included, rather than a blank — the operator should see which
@@ -122,6 +125,24 @@ class GitHubSettings extends Equatable {
   final bool hasApiToken;
   final bool hasScriptApprovalToken;
 
+  /// The connected GitHub App's slug, or null when none is connected.
+  final String? gitHubAppSlug;
+
+  /// The account that owns the connected App — which is the only account its installation tokens
+  /// can reach, so the screen sets it against the approval repository's owner.
+  final String? gitHubAppOwner;
+
+  /// Whether the App is installed, which is when it takes over from both tokens.
+  final bool isGitHubAppInstalled;
+
+  bool get hasGitHubApp => gitHubAppSlug != null;
+
+  /// GitHub's own page for the App's installation — where an administrator installs it, or
+  /// changes which repositories it can reach.
+  String? get gitHubAppInstallUrl => gitHubAppSlug == null
+      ? null
+      : 'https://github.com/apps/${Uri.encodeComponent(gitHubAppSlug!)}/installations/new';
+
   @override
   List<Object?> get props => [
         agentPackageRepository,
@@ -130,7 +151,23 @@ class GitHubSettings extends Equatable {
         isScriptApprovalRepositoryDefault,
         hasApiToken,
         hasScriptApprovalToken,
+        gitHubAppSlug,
+        gitHubAppOwner,
+        isGitHubAppInstalled,
       ];
+}
+
+/// Mirrors `GitHubAppManifestDto`: GitHub's create-App page and the manifest to post to it.
+class GitHubAppManifest extends Equatable {
+  const GitHubAppManifest({required this.createUrl, required this.manifest});
+
+  final String createUrl;
+
+  /// The manifest JSON, posted as the form's `manifest` field.
+  final String manifest;
+
+  @override
+  List<Object?> get props => [createUrl, manifest];
 }
 
 /// Mirrors `VantaSettingsDto`.
