@@ -13,6 +13,11 @@ paths:
   `pull_requests:write` on the approval repository. Unset means signing approves locally and raises
   no pull request — the Upgrade Scripts screen says so, because the absence of an audit trail is
   otherwise only discoverable by looking for pull requests that were never opened.
+- **The same separation holds when a GitHub App replaces both tokens.** `GitHubSettingsProvider`
+  mints the read-side token as `GitHubTokenScope.ReadOnly` and the publisher's as
+  `GitHubTokenScope.ApprovalWrite`, restricted to the approval repository. Handing the publisher's
+  scope to every consumer because "it is the same App" is exactly the leak the bullet above exists
+  to prevent.
 - `ApprovedScriptCorpus` is the *only* description of the approval repository's layout, and both ends
   of the round trip go through it — the publisher writing an entry and the reader parsing one. A path
   or field changed on one side only means an approval that publishes fine and imports as nothing.

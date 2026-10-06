@@ -178,9 +178,11 @@ The remaining settings screens are alphabetical in the sidebar and independent o
 * **AI Agent** — which provider researches unknown upgrade paths: Anthropic API, OpenAI, Ollama,
   Goose, or the Claude Agent SDK (the `claude` CLI, which spends a Claude subscription's included
   usage rather than metered API credits). Nothing is researched until one is configured.
-* **GitHub** — the read-only token that lifts GitHub's anonymous rate limit, which repository agent
-  builds are pulled from, and the repository approved scripts are shared through, with its own
-  separate write token.
+* **GitHub** — which repository agent builds are pulled from and which repository approved scripts
+  are shared through, and the credentials for each: either **Create GitHub App**, which has this
+  server create and install an App for itself and mint short-lived tokens from it (owned by the
+  organisation, and its pull requests come from the App's bot), or two personal tokens — a
+  read-only one that lifts GitHub's anonymous rate limit and a separate write token for approvals.
 * **Patching Policy** — how often hosts patch, and how many times a user may delay.
 * **Auditing** — where audit events are shipped.
 * **Vanta** — off until switched on; pushes the fleet as compliance evidence.
