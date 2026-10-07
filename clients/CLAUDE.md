@@ -178,8 +178,9 @@ what stops the root service patching behind a per-user process that is present b
 macOS shipped the same invisible wait with a worse ending: its HTTP client was built once, from
 whatever identity was on disk at startup, so even after the daemon enrolled every request still
 went out certless — *every* first install sat iconless for good, until somebody restarted the
-LaunchAgent. `main::pick_up_identity` now rebuilds the client the moment the identity appears, in
-the wait and in `run_scheduler` alike.
+LaunchAgent. `main::refresh_identity` now rebuilds the client whenever the identity on disk appears
+or changes, in the wait and in `run_scheduler` alike — *changes* because re-enrolling after a
+regenerated CA left a running process presenting the old certificate, the same silent 403.
 
 **The matching retry could not be shared, because the root halves are shaped differently.** Windows
 is a resident service, so `service::retry_delay` just schedules its next wake at 2/5/15 minutes

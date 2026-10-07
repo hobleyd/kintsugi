@@ -47,7 +47,7 @@ const AGENT_POLL_INTERVAL: Duration = Duration::from_secs(60);
 const POLICY_REFRESH_INTERVAL: u64 = 60 * 60;
 
 /// The `--agent` process's HTTP client timeout — named because the client is built in two places:
-/// at startup, and again by `pick_up_identity` once the root daemon has enrolled.
+/// at startup, and again by `refresh_identity` whenever the root daemon (re-)enrolls.
 const UI_AGENT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// launchd retries this job on its own schedule (RunAtLoad + hourly
@@ -803,7 +803,7 @@ fn run_ui_agent() -> Result<()> {
 /// after the daemon had enrolled, behind nothing but a once-a-minute 403 in agent.log — an agent
 /// that looked like it had not installed, fixed by restarting it. The icon now goes up first and
 /// this reports `WaitingForPolicy` behind it, re-reading the identity every tick
-/// (`pick_up_identity`) so the first attempt after enrollment succeeds. The Windows and Linux
+/// (`refresh_identity`) so the first attempt after enrollment succeeds. The Windows and Linux
 /// agents shipped the same icon-first fix in 0.11.2 and 0.12.1; see `clients/CLAUDE.md`.
 ///
 /// Servicing `menu_rx` here rather than sleeping is the other half, as on the other two agents.
@@ -851,7 +851,7 @@ fn wait_for_policy(
             }
         }
 
-        pick_up_identity(agent_identity, client);
+        refresh_identity(agent_identity, client);
         // Without an identity a fetch can only draw nginx's 403, once a minute, into agent.log —
         // noise rather than news. The cache is still worth a look: it costs a file read.
         let policy = if agent_identity.is_some() {
@@ -866,28 +866,58 @@ fn wait_for_policy(
     }
 }
 
-/// Re-reads the identity the root daemon writes while this process has none, and rebuilds
-/// `client` around it the moment it appears.
+/// Re-reads the identity the root daemon writes, and rebuilds `client` around it whenever it has
+/// appeared or changed since this process last looked.
 ///
 /// The rebuild is the half that was missing. `run_scheduler` already re-read the identity every
 /// tick, and logged that it was "now available" — but the client it kept using had been built at
 /// startup without one, so every request still went out with no certificate and nginx still
 /// answered 403. Only `Patch Now`'s guard noticed the identity at all.
 ///
-/// A client that will not build is logged and the identity left unset, so the next tick tries
-/// again rather than carrying on certless while claiming otherwise.
-fn pick_up_identity(agent_identity: &mut Option<identity::AgentIdentity>, client: &mut reqwest::blocking::Client) {
-    if agent_identity.is_some() {
-        return;
-    }
-    let Some(found) = identity::load(&config::identity_dir()) else { return };
+/// *Changed*, not just appeared, because the same trap has a second door. Recovering from a
+/// regenerated CA means deleting `identity/` and letting the daemon enroll again (see
+/// `clients/macos-agent/CLAUDE.md`), and a per-user process that only ever filled an empty slot
+/// would go on presenting the old certificate — one nginx no longer trusts — for the rest of its
+/// life, which is the same silent 403 until somebody restarts it. Three small file reads a minute
+/// is the whole cost of watching for that. See `identity_to_adopt` for the decision itself.
+///
+/// `identity::enroll` writes its files one after another rather than atomically, so a tick can
+/// read a new certificate beside the old key. That is self-correcting rather than dangerous: the
+/// torn pair either fails to build (logged, nothing adopted) or builds a client that fails its
+/// handshakes, and the next tick reads the finished set, sees it differ again and adopts that.
+/// A client that will not build is never adopted, so this process never claims an identity its
+/// client is not actually presenting.
+fn refresh_identity(agent_identity: &mut Option<identity::AgentIdentity>, client: &mut reqwest::blocking::Client) {
+    let Some(found) = identity_to_adopt(agent_identity.as_ref(), identity::load(&config::identity_dir())) else { return };
     match identity::build_client(UI_AGENT_HTTP_TIMEOUT, Some(&found)) {
         Ok(rebuilt) => {
+            logging::info(if agent_identity.is_some() {
+                "agent identity changed on disk (the root daemon must have re-enrolled); now presenting the new certificate"
+            } else {
+                "agent identity now available (the root daemon must have enrolled since this process started)"
+            });
             *client = rebuilt;
             *agent_identity = Some(found);
-            logging::info("agent identity now available (the root daemon must have enrolled since this process started)");
         }
         Err(err) => logging::warn(&format!("found an agent identity but could not build a client with it: {err:#}")),
+    }
+}
+
+/// What `refresh_identity` should switch to, given what it holds and what is on disk now — `None`
+/// for "keep what you have".
+///
+/// Nothing on disk while something is held is deliberately *not* a reason to drop it: that is the
+/// moment between deleting `identity/` and the daemon's enrollment finishing, and the old
+/// certificate is no worse than none for the minute or so it lasts. It is also what an unreadable
+/// key looks like, and throwing away a working client over a permissions blip would be worse.
+fn identity_to_adopt(
+    held: Option<&identity::AgentIdentity>,
+    on_disk: Option<identity::AgentIdentity>,
+) -> Option<identity::AgentIdentity> {
+    match (held, on_disk) {
+        (_, None) => None,
+        (Some(held), Some(found)) if *held == found => None,
+        (_, Some(found)) => Some(found),
     }
 }
 
@@ -1020,11 +1050,12 @@ fn run_scheduler(
     // unenrolled either: the root daemon enrolls independently and asynchronously, and this
     // per-user process is long-running (KeepAlive), so it can easily already be up and running
     // from before the daemon ever got there (first boot, a delayed enrollment token, ...). So
-    // when this is `None`, the loop below re-checks disk on every tick rather than giving up for
+    // the loop below re-checks disk on every tick rather than giving up for
     // the rest of this process's life — cheap (a few local file reads, no network) next to the
     // alternative of the menu bar silently refusing to work until someone thinks to restart it.
     // `wait_for_policy` has usually picked it up already; and finding it means rebuilding `client`
-    // too, which is why the two travel together through `pick_up_identity`.
+    // too, which is why the two travel together through `refresh_identity` — which also notices a
+    // re-enrollment replacing an identity this process already holds.
     mut agent_identity: Option<identity::AgentIdentity>,
     policy_cache_path: std::path::PathBuf,
     menu_rx: mpsc::Receiver<MenuAction>,
@@ -1080,7 +1111,7 @@ fn run_scheduler(
             }
         }
 
-        pick_up_identity(&mut agent_identity, &mut client);
+        refresh_identity(&mut agent_identity, &mut client);
 
         if policy::is_stale(&current_policy, POLICY_REFRESH_INTERVAL) {
             if let Some(refreshed) = policy::load_or_fetch(&client, &config, &policy_cache_path) {
@@ -1386,5 +1417,40 @@ mod tests {
         ] {
             assert!(parse(args).is_err(), "{args:?} should have been refused");
         }
+    }
+
+    fn identity(certificate: &str) -> identity::AgentIdentity {
+        identity::AgentIdentity {
+            certificate_pem: certificate.to_string(),
+            private_key_pem: "key".to_string(),
+            artifact_signing_public_key_pem: "pub".to_string(),
+        }
+    }
+
+    #[test]
+    fn an_identity_appearing_is_adopted() {
+        assert_eq!(identity_to_adopt(None, Some(identity("new"))), Some(identity("new")));
+    }
+
+    #[test]
+    fn nothing_on_disk_is_nothing_to_adopt() {
+        assert_eq!(identity_to_adopt(None, None), None);
+    }
+
+    #[test]
+    fn the_identity_already_held_is_not_adopted_again() {
+        assert_eq!(identity_to_adopt(Some(&identity("same")), Some(identity("same"))), None);
+    }
+
+    /// The CA-regeneration case: `identity/` deleted and enrolled again under this process.
+    #[test]
+    fn a_re_enrollment_replaces_the_held_identity() {
+        assert_eq!(identity_to_adopt(Some(&identity("old")), Some(identity("new"))), Some(identity("new")));
+    }
+
+    /// Mid re-enrollment, or a key that could not be read: keep the client that works.
+    #[test]
+    fn an_identity_vanishing_from_disk_keeps_the_one_held() {
+        assert_eq!(identity_to_adopt(Some(&identity("old")), None), None);
     }
 }
