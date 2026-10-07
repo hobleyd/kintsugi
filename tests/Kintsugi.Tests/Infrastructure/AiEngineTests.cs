@@ -114,6 +114,31 @@ public class AiEngineAdapterTests
     }
 
     [Fact]
+    public async Task Google_NeverCapsOutput_BecauseTheCapIncludesThinking()
+    {
+        var handler = new RoutingHandler().OnJson(_ => true,
+            _ => new { candidates = new[] { new { content = new { role = "model", parts = new[] { new { text = "#!/bin/bash" } } } } } });
+
+        await TestAiEngine.Over(handler).ResearchAsync(
+            new AiRoute(Connection(AiWireProtocol.Google, hosted: true), "gemini-2.5-flash"),
+            AiWebSearchSettings.None, "research acrobat", 8192, CancellationToken.None);
+
+        // 8192 was spent entirely on thinking for a large application, leaving no answer at all.
+        Assert.Null(JsonNode.Parse(handler.Calls.Single().Body)!["generationConfig"]?["maxOutputTokens"]);
+    }
+
+    [Fact]
+    public async Task Google_RunningOutOfBudgetBeforeAnswering_SaysSo()
+    {
+        var handler = new RoutingHandler().OnJson(_ => true, _ => new { candidates = new[] { new { finishReason = "MAX_TOKENS" } } });
+
+        var ex = await Assert.ThrowsAsync<ExternalServiceException>(() => TestAiEngine.Over(handler).CompleteAsync(
+            new AiRoute(Connection(AiWireProtocol.Google), "gemini-2.5-flash"), "hi", null, CancellationToken.None));
+
+        Assert.Contains("thinking", ex.Message);
+    }
+
+    [Fact]
     public async Task Anthropic_OnVertex_MovesTheModelIntoTheUrlAndTheVersionIntoTheBody()
     {
         var handler = new RoutingHandler()

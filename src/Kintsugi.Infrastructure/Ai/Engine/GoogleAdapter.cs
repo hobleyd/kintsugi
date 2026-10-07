@@ -102,10 +102,11 @@ public class GoogleAdapter : IAiProtocolAdapter
             });
         }
 
-        if (request.MaxOutputTokens is { } max)
-        {
-            body["generationConfig"] = new JsonObject { ["maxOutputTokens"] = max };
-        }
+        // MaxOutputTokens is deliberately not sent. On Gemini it caps thinking *and* answer
+        // together, and the 2.5+ models think by default: research's 8192 — the ceiling Anthropic
+        // and OpenAI always had — let gemini-2.5-flash spend all of it reasoning about Adobe Acrobat
+        // and return no text at all (finishReason MAX_TOKENS). The model's own limit (64K for 2.5)
+        // is the honest ceiling; a script never comes near it.
 
         var url = connection.AuthMode == AiAuthMode.GoogleCloud
             ? $"{AiHttp.VertexBaseUrl(connection.GoogleCloudProject!, connection.GoogleCloudLocation!)}/publishers/google/models/{Uri.EscapeDataString(request.Model)}:generateContent"
@@ -120,7 +121,9 @@ public class GoogleAdapter : IAiProtocolAdapter
             var reason = candidate?["finishReason"]?.GetValue<string>()
                 ?? response["promptFeedback"]?["blockReason"]?.GetValue<string>()
                 ?? "no candidates";
-            throw new ExternalServiceException($"The AI provider ({connection.Name}) returned no content ({reason}).");
+            throw new ExternalServiceException(reason == "MAX_TOKENS"
+                ? $"The AI provider ({connection.Name}) used its whole output budget — on Gemini that includes the model's thinking — before writing any answer (MAX_TOKENS)."
+                : $"The AI provider ({connection.Name}) returned no content ({reason}).");
         }
 
         var text = new List<string>();
