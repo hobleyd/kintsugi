@@ -66,9 +66,11 @@ public class AiUpgradePathResearchClientTests
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => throw _exception;
     }
 
+    // The engine shares the handler, so the queue sees GitHub/GitLab lookups and AI calls in the
+    // order they happen — exactly as when the providers were hand-written in this class.
     private static AiUpgradePathResearchClient CreateClient(HttpMessageHandler handler) => new(
-        new HttpClient(handler),
-        new ConfigurationBuilder().Build(),
+        new HttpClient(handler, disposeHandler: false),
+        TestAiEngine.Over(handler),
         FakeGitHubSettings.Provider(),
         Mock.Of<IGooseCliClient>(),
         Mock.Of<IClaudeAgentSdkClient>(),

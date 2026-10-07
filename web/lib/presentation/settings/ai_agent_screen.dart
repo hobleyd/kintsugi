@@ -12,20 +12,29 @@ import '../../domain/entities/settings.dart';
 import '../../domain/repositories/repositories.dart';
 import '../../domain/usecases/settings_usecases.dart';
 import 'ai_agent_bloc.dart';
+import 'ai_routing_bloc.dart';
+import 'ai_routing_panel.dart';
 
 /// Which AI provider researches upgrade paths. What `Pages/Settings/AiAgent.cshtml` was.
 class AiAgentSettingsScreen extends StatelessWidget {
   const AiAgentSettingsScreen({super.key});
 
   @override
-  Widget build(BuildContext context) => BlocProvider(
-        create: (_) => AiAgentBloc(
-          getSettings: locator<GetAiAgentSettings>(),
-          updateSettings: locator<UpdateAiAgentSettings>(),
-          getOllamaModels: locator<GetOllamaModels>(),
-          checkGooseCliStatus: locator<CheckGooseCliStatus>(),
-          checkClaudeAgentSdkStatus: locator<CheckClaudeAgentSdkStatus>(),
-        )..add(const AiAgentSettingsRequested()),
+  Widget build(BuildContext context) => MultiBlocProvider(
+        providers: [
+          BlocProvider(
+            create: (_) => AiAgentBloc(
+              getSettings: locator<GetAiAgentSettings>(),
+              updateSettings: locator<UpdateAiAgentSettings>(),
+              getOllamaModels: locator<GetOllamaModels>(),
+              checkGooseCliStatus: locator<CheckGooseCliStatus>(),
+              checkClaudeAgentSdkStatus: locator<CheckClaudeAgentSdkStatus>(),
+            )..add(const AiAgentSettingsRequested()),
+          ),
+          // Loaded up front even when another provider is selected, so switching to Routed shows
+          // its connections immediately.
+          BlocProvider(create: (_) => AiRoutingBloc(locator<ManageAiRouting>())..add(const AiRoutingRequested())),
+        ],
         child: const _AiAgentForm(),
       );
 }
@@ -99,10 +108,11 @@ class _AiAgentFormState extends State<_AiAgentForm> {
           final isOllama = _provider == AiProvider.ollama;
           final isGoose = _provider == AiProvider.gooseCli;
           final isClaudeAgentSdk = _provider == AiProvider.claudeAgentSdk;
+          final isRouted = _provider == AiProvider.routed;
           // "Cloud" here means a hosted API called with a metered key. The Claude Agent SDK also
           // needs a stored credential, but it is a subscription's OAuth token rather than an API
           // key, so it gets its own field rather than borrowing this one's wording.
-          final isCloud = !isOllama && !isGoose && !isClaudeAgentSdk;
+          final isCloud = !isOllama && !isGoose && !isClaudeAgentSdk && !isRouted;
 
           return PageScaffold(
             title: 'AI Agent',
@@ -219,6 +229,12 @@ class _AiAgentFormState extends State<_AiAgentForm> {
                         ],
                       ),
                     ),
+                  if (isRouted)
+                    const HintText(
+                      'Each feature runs on its own connection and model, configured below. Pick '
+                      'Routed and the switch underneath, then Save Settings to make it the active mode.',
+                    ),
+                  if (!isRouted)
                   LabelledField(
                     label: 'Model',
                     hints: [
@@ -264,6 +280,10 @@ class _AiAgentFormState extends State<_AiAgentForm> {
                   ),
                 ],
               ),
+              if (isRouted) ...[
+                const SizedBox(height: 24),
+                AiRoutingPanel(settings: state.value),
+              ],
             ],
           );
         },
