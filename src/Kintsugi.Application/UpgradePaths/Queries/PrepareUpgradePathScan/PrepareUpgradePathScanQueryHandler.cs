@@ -6,21 +6,23 @@ namespace Kintsugi.Application.UpgradePaths.Queries.PrepareUpgradePathScan;
 
 public class PrepareUpgradePathScanQueryHandler : IRequestHandler<PrepareUpgradePathScanQuery, UpgradePathScanPlan>
 {
-    private readonly IAiAgentSettingsRepository _aiAgentSettingsRepository;
+    private readonly IAiProviderSettingsResolver _aiSettingsResolver;
     private readonly IInstalledApplicationRepository _installedApplicationRepository;
 
     public PrepareUpgradePathScanQueryHandler(
-        IAiAgentSettingsRepository aiAgentSettingsRepository,
+        IAiProviderSettingsResolver aiSettingsResolver,
         IInstalledApplicationRepository installedApplicationRepository)
     {
-        _aiAgentSettingsRepository = aiAgentSettingsRepository;
+        _aiSettingsResolver = aiSettingsResolver;
         _installedApplicationRepository = installedApplicationRepository;
     }
 
     public async Task<UpgradePathScanPlan> Handle(PrepareUpgradePathScanQuery request, CancellationToken cancellationToken)
     {
-        var settings = await _aiAgentSettingsRepository.GetAsync(cancellationToken);
-        var aiConfigured = settings is not null && settings.IsEnabled;
+        // Resolved once for the whole scan: enabled, and — in Routed mode — routed for script
+        // research. See AiProviderSettingsResolver.
+        var providerSettings = await _aiSettingsResolver.ResolveAsync(cancellationToken);
+        var aiConfigured = providerSettings is not null;
 
         var variants = await _installedApplicationRepository.GetApplicationVersionVariantsAsync(cancellationToken);
         var byName = variants.GroupBy(v => v.ApplicationName, StringComparer.OrdinalIgnoreCase).ToList();
@@ -96,7 +98,6 @@ public class PrepareUpgradePathScanQueryHandler : IRequestHandler<PrepareUpgrade
             }
         }
 
-        var providerSettings = aiConfigured ? new AiProviderSettings(settings!.Provider, settings.ApiKey, settings.BaseUrl, settings.Model) : null;
         return new UpgradePathScanPlan(aiConfigured, providerSettings, workItems);
     }
 }

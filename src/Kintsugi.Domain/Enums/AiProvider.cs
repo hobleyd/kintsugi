@@ -24,5 +24,14 @@ public enum AiProvider
     /// <see cref="Anthropic"/> spends metered API credits, while this authenticates with this
     /// host's own Claude Code login and so spends that subscription's included usage.
     /// </summary>
-    ClaudeAgentSdk
+    ClaudeAgentSdk,
+
+    /// <summary>
+    /// Any provider at all, reached through one of a handful of wire protocols rather than code
+    /// written for it: each AI feature (script research, script repair, CPE suggestion) is routed
+    /// to an <c>AiConnection</c> and a model by <c>AiFeatureRoute</c>, and the connections are
+    /// picked from the models.dev catalog or entered as a custom endpoint. See
+    /// <c>AiWireProtocol</c> and the "AI providers" section of src/CLAUDE.md.
+    /// </summary>
+    Routed
 }

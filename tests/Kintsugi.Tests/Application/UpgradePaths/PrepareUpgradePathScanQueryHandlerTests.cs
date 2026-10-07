@@ -12,7 +12,9 @@ public class PrepareUpgradePathScanQueryHandlerTests
     private readonly Mock<IAiAgentSettingsRepository> _aiAgentSettingsRepository = new();
     private readonly Mock<IInstalledApplicationRepository> _installedApplicationRepository = new();
 
-    private PrepareUpgradePathScanQueryHandler CreateHandler() => new(_aiAgentSettingsRepository.Object, _installedApplicationRepository.Object);
+    // The real resolver over the mocked settings row, so these also cover what "configured" means.
+    private PrepareUpgradePathScanQueryHandler CreateHandler() => new(
+        TestAiResolver.Over(_aiAgentSettingsRepository.Object), _installedApplicationRepository.Object);
 
     [Fact]
     public async Task Handle_WhenNoAiSettingsAreSaved_ReturnsAnUnconfiguredPlan_ButStillBuildsWorkItems()

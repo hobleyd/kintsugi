@@ -193,6 +193,28 @@ abstract interface class AiAgentSettingsRepository {
   Future<ClaudeAgentSdkStatus> claudeAgentSdkStatus();
 }
 
+/// Routed mode's half of the AI Agent screen: connections, per-feature routes, web search and the
+/// models.dev catalog.
+abstract interface class AiRoutingRepository {
+  Future<AiRouting> read();
+
+  Future<AiCatalog> catalog({bool refresh = false});
+
+  Future<AiConnection> saveConnection(AiConnectionDraft draft);
+
+  Future<void> deleteConnection(String id);
+
+  Future<AiConnectionTestResult> testConnection(String id, String model);
+
+  Future<AiFeatureRoute> setRoute(AiFeature feature, String connectionId, String model);
+
+  Future<void> clearRoute(AiFeature feature);
+
+  /// A null [apiKey] keeps the stored key; [clearApiKey] removes it.
+  Future<AiAgentSettings> updateWebSearch(
+      {required WebSearchBackend backend, required String? apiKey, required bool clearApiKey, required String? baseUrl});
+}
+
 /// The editable half of the AI agent settings.
 class AiAgentSettingsUpdate {
   const AiAgentSettingsUpdate({

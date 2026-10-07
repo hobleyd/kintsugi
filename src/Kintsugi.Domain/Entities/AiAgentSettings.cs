@@ -17,6 +17,17 @@ public class AiAgentSettings : BaseEntity
     public string? Model { get; private set; }
     public bool IsEnabled { get; private set; }
 
+    /// <summary>The search service behind Kintsugi's own <c>web_search</c> tool — used by any model
+    /// that has no hosted search of its own, or whose connection has it turned off. Applies to
+    /// <see cref="AiProvider.Routed"/> and <see cref="AiProvider.Ollama"/>.</summary>
+    public WebSearchBackend WebSearchBackend { get; private set; }
+
+    /// <summary>The backend's key (Ollama, Tavily, Brave). Stored as written, never returned.</summary>
+    public string? WebSearchApiKey { get; private set; }
+
+    /// <summary>The backend's address, for a self-hosted one (SearXNG).</summary>
+    public string? WebSearchBaseUrl { get; private set; }
+
     private AiAgentSettings()
     {
     }
@@ -39,6 +50,15 @@ public class AiAgentSettings : BaseEntity
     private void Apply(AiProvider provider, string? apiKey, string? baseUrl, string? model, bool isEnabled)
     {
         Provider = provider;
+
+        if (provider == AiProvider.Routed)
+        {
+            // The credentials live on each AiConnection. The legacy key is left exactly as it was
+            // rather than cleared, so switching back to a single provider does not mean pasting it
+            // in again.
+            IsEnabled = isEnabled;
+            return;
+        }
 
         if (provider == AiProvider.Ollama)
         {
@@ -83,5 +103,32 @@ public class AiAgentSettings : BaseEntity
         BaseUrl = string.IsNullOrWhiteSpace(baseUrl) ? null : baseUrl;
         Model = string.IsNullOrWhiteSpace(model) ? null : model;
         IsEnabled = isEnabled;
+    }
+
+    /// <summary>
+    /// Sets the search service behind Kintsugi's own <c>web_search</c> tool. A blank key keeps the
+    /// stored one (the page never receives it); <paramref name="clearApiKey"/> removes it.
+    /// </summary>
+    public void UpdateWebSearch(WebSearchBackend backend, string? apiKey, bool clearApiKey, string? baseUrl)
+    {
+        var resolvedKey = clearApiKey ? null : string.IsNullOrWhiteSpace(apiKey) ? WebSearchApiKey : apiKey.Trim();
+        var resolvedBaseUrl = string.IsNullOrWhiteSpace(baseUrl) ? null : baseUrl.Trim().TrimEnd('/');
+
+        if (backend is WebSearchBackend.OllamaWeb or WebSearchBackend.Tavily or WebSearchBackend.Brave
+            && string.IsNullOrWhiteSpace(resolvedKey))
+        {
+            throw new DomainException($"{backend} search needs an API key.");
+        }
+
+        if (backend == WebSearchBackend.SearXng
+            && (resolvedBaseUrl is null || !Uri.TryCreate(resolvedBaseUrl, UriKind.Absolute, out _)))
+        {
+            throw new DomainException("SearXNG search needs the instance's base URL.");
+        }
+
+        WebSearchBackend = backend;
+        WebSearchApiKey = backend is WebSearchBackend.None or WebSearchBackend.SearXng ? null : resolvedKey;
+        WebSearchBaseUrl = backend == WebSearchBackend.SearXng ? resolvedBaseUrl : null;
+        MarkUpdated();
     }
 }

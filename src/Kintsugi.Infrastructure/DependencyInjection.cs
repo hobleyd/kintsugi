@@ -11,6 +11,7 @@ using Kintsugi.Infrastructure.Persistence;
 using Kintsugi.Infrastructure.Persistence.Repositories;
 using Kintsugi.Infrastructure.Security;
 using Kintsugi.Infrastructure.Storage;
+using Kintsugi.Infrastructure.Ai.Engine;
 using Kintsugi.Infrastructure.GitHubApp;
 using Kintsugi.Infrastructure.Vanta;
 using Kintsugi.Infrastructure.Vulnerabilities;
@@ -73,6 +74,26 @@ public static class DependencyInjection
         services.AddHttpClient<IScriptApprovalSourceClient, GitHubScriptApprovalSourceClient>();
         services.AddHttpClient<IScriptApprovalPublisher, GitHubScriptApprovalPublisher>();
         services.AddHttpClient<IOllamaModelsClient, OllamaModelsClient>();
+        // The AI engine: one adapter per wire protocol, Kintsugi's own web tools, and the loop that
+        // drives them — what every provider but the two agents (Goose, the Claude Agent SDK) now
+        // runs through. See AiEngine and the "AI providers" section of src/CLAUDE.md.
+        services.AddScoped<IAiConnectionRepository, AiConnectionRepository>();
+        services.AddScoped<IAiFeatureRouteRepository, AiFeatureRouteRepository>();
+        services.AddScoped<IAiProviderSettingsResolver, AiProviderSettingsResolver>();
+        // Singletons with caches of their own: an hourly Google Cloud token, and one hardened
+        // HttpClient whose connect callback refuses non-public addresses (SafeWebFetcher).
+        services.AddSingleton<GoogleCloudAccessTokenProvider>();
+        services.AddSingleton<SafeWebFetcher>();
+        services.AddHttpClient<AiHttp>();
+        services.AddHttpClient<WebSearchClient>();
+        services.AddTransient<IAiProtocolAdapter, OpenAiChatCompletionsAdapter>();
+        services.AddTransient<IAiProtocolAdapter, OpenAiResponsesAdapter>();
+        services.AddTransient<IAiProtocolAdapter, AnthropicAdapter>();
+        services.AddTransient<IAiProtocolAdapter, GoogleAdapter>();
+        services.AddTransient<IAiProtocolAdapter, OllamaAdapter>();
+        services.AddTransient<AiEngine>();
+        services.AddTransient<IAiConnectionProbe>(sp => sp.GetRequiredService<AiEngine>());
+        services.AddHttpClient<IAiModelCatalog, ModelsDevCatalog>();
         services.AddHttpClient<IUpgradePathResearchClient, AiUpgradePathResearchClient>();
         // The same object under a second interface, not a second registration of the type: it is
         // where the per-provider dispatch lives, and a separate instance would mean a separate
