@@ -11,6 +11,13 @@ pub enum AgentStatus {
     Idle {
         next_due_epoch: u64,
     },
+    /// No patching policy yet, so nothing can be scheduled — reported by `main::wait_for_policy`,
+    /// in practice only on a fresh install while the root daemon is still enrolling.
+    ///
+    /// Greys "Patch Now" — there is no schedule to patch against — but deliberately *not* "Check In
+    /// Now", which is the one action that can end this state and is handled inside the wait itself.
+    /// Kept in step with the Windows and Linux agents' `AgentStatus::WaitingForPolicy`.
+    WaitingForPolicy,
     /// A dialog is on screen and the cycle is waiting for the person at the keyboard to answer it
     /// — the confirm-or-delay prompt, or the "no delays left" notice. Its own state rather than a
     /// flavour of `Patching`, because nothing is being patched yet and the progress window would

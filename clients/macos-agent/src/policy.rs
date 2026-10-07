@@ -122,7 +122,9 @@ pub fn fetch(client: &reqwest::blocking::Client, config: &Config, cache_path: &P
     Ok(policy)
 }
 
-fn load_cached(cache_path: &Path) -> Option<PatchingPolicy> {
+/// The cache alone, with no network attempt — what `main::wait_for_policy` falls back to while
+/// there is no identity to fetch with.
+pub fn load_cached(cache_path: &Path) -> Option<PatchingPolicy> {
     let contents = fs::read_to_string(cache_path).ok()?;
     serde_json::from_str(&contents).ok()
 }
