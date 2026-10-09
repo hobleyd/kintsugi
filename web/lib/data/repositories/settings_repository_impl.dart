@@ -253,3 +253,70 @@ class PatchingPolicySettingsRepositoryImpl implements PatchingPolicySettingsRepo
         }) as Map<String, dynamic>,
       );
 }
+
+class AiRoutingRepositoryImpl implements AiRoutingRepository {
+  const AiRoutingRepositoryImpl(this._api);
+
+  final ApiClient _api;
+
+  static const _base = '/api/ai-settings';
+
+  @override
+  Future<AiRouting> read() async =>
+      aiRoutingFromJson(await _api.getJson('$_base/routing') as Map<String, dynamic>);
+
+  @override
+  Future<AiCatalog> catalog({bool refresh = false}) async => aiCatalogFromJson(
+        await _api.getJson('$_base/catalog', query: {'refresh': refresh ? 'true' : null}) as Map<String, dynamic>,
+      );
+
+  @override
+  Future<AiConnection> saveConnection(AiConnectionDraft draft) async {
+    // Enums go as ordinals: the server has no string-enum converter for these (see json_reader).
+    final body = {
+      'name': draft.name,
+      'catalogProviderId': draft.catalogProviderId,
+      'protocol': draft.protocol.index,
+      'baseUrl': draft.baseUrl,
+      'authMode': draft.authMode.index,
+      'apiKey': draft.apiKey,
+      'googleCloudProject': draft.googleCloudProject,
+      'googleCloudLocation': draft.googleCloudLocation,
+      'useHostedWebSearch': draft.useHostedWebSearch,
+    };
+    final json = draft.id == null
+        ? await _api.postJson('$_base/connections', body: body)
+        : await _api.putJson('$_base/connections/${draft.id}', body: body);
+    return aiConnectionFromJson(json as Map<String, dynamic>);
+  }
+
+  @override
+  Future<void> deleteConnection(String id) => _api.delete('$_base/connections/$id');
+
+  @override
+  Future<AiConnectionTestResult> testConnection(String id, String model) async => aiConnectionTestResultFromJson(
+        await _api.postJson('$_base/connections/$id/test?model=${Uri.encodeQueryComponent(model)}')
+            as Map<String, dynamic>,
+      );
+
+  @override
+  Future<AiFeatureRoute> setRoute(AiFeature feature, String connectionId, String model) async =>
+      aiFeatureRouteFromJson(await _api.putJson('$_base/routes/${feature.wireName}',
+          body: {'connectionId': connectionId, 'model': model}) as Map<String, dynamic>);
+
+  @override
+  Future<void> clearRoute(AiFeature feature) => _api.delete('$_base/routes/${feature.wireName}');
+
+  @override
+  Future<AiAgentSettings> updateWebSearch(
+          {required WebSearchBackend backend,
+          required String? apiKey,
+          required bool clearApiKey,
+          required String? baseUrl}) async =>
+      aiAgentSettingsFromJson(await _api.putJson('$_base/web-search', body: {
+        'backend': backend.index,
+        'apiKey': apiKey,
+        'clearApiKey': clearApiKey,
+        'baseUrl': baseUrl,
+      }) as Map<String, dynamic>);
+}

@@ -52,7 +52,8 @@ enum AiProvider {
   openAI,
   ollama,
   gooseCli,
-  claudeAgentSdk;
+  claudeAgentSdk,
+  routed;
 
   String get label => switch (this) {
         AiProvider.anthropic => 'Anthropic API (Claude)',
@@ -60,7 +61,91 @@ enum AiProvider {
         AiProvider.ollama => 'Local LLM (Ollama)',
         AiProvider.gooseCli => 'Goose CLI',
         AiProvider.claudeAgentSdk => 'Claude Agent SDK (this server\'s Claude subscription)',
+        AiProvider.routed => 'Any provider — routed per feature (Vertex, OpenRouter, LiteLLM, Groq, …)',
       };
+}
+
+/// Mirrors `AiWireProtocol`. Sent as an ordinal, so this order is the C# declaration order and new
+/// members are appended, never inserted.
+enum AiWireProtocol {
+  openAiChatCompletions,
+  openAiResponses,
+  anthropic,
+  google,
+  ollama;
+
+  String get label => switch (this) {
+        AiWireProtocol.openAiChatCompletions => 'OpenAI-compatible (chat/completions)',
+        AiWireProtocol.openAiResponses => 'OpenAI Responses',
+        AiWireProtocol.anthropic => 'Anthropic Messages',
+        AiWireProtocol.google => 'Google Gemini',
+        AiWireProtocol.ollama => 'Ollama',
+      };
+
+  /// The three with a provider-hosted web search tool.
+  bool get hasHostedSearch =>
+      this == AiWireProtocol.openAiResponses || this == AiWireProtocol.anthropic || this == AiWireProtocol.google;
+}
+
+/// Mirrors `AiAuthMode`. Sent as an ordinal.
+enum AiAuthMode {
+  apiKey,
+  none,
+  googleCloud;
+
+  String get label => switch (this) {
+        AiAuthMode.apiKey => 'API key',
+        AiAuthMode.none => 'None',
+        AiAuthMode.googleCloud => 'Google Cloud (Workload Identity — no key stored)',
+      };
+}
+
+/// Mirrors `AiFeature`. Sent as an ordinal; in a route URL, by name.
+enum AiFeature {
+  scriptResearch,
+  scriptRepair,
+  cpeSuggestion;
+
+  String get label => switch (this) {
+        AiFeature.scriptResearch => 'Script research',
+        AiFeature.scriptRepair => 'Script repair',
+        AiFeature.cpeSuggestion => 'CPE suggestion',
+      };
+
+  /// The C# member name, for the `routes/{feature}` path.
+  String get wireName => switch (this) {
+        AiFeature.scriptResearch => 'ScriptResearch',
+        AiFeature.scriptRepair => 'ScriptRepair',
+        AiFeature.cpeSuggestion => 'CpeSuggestion',
+      };
+
+  String get description => switch (this) {
+        AiFeature.scriptResearch =>
+          'Researches an application and writes its upgrade script — the only feature that searches the web. Required.',
+        AiFeature.scriptRepair =>
+          'The one self-correction pass over a script that failed shellcheck/PSScriptAnalyzer. No search. Falls back to script research.',
+        AiFeature.cpeSuggestion =>
+          'Proposes a CPE vendor/product for the vulnerability mapping queue. No search. Falls back to script repair, then research.',
+      };
+}
+
+/// Mirrors `WebSearchBackend`. Sent as an ordinal.
+enum WebSearchBackend {
+  none,
+  ollamaWeb,
+  tavily,
+  brave,
+  searXng;
+
+  String get label => switch (this) {
+        WebSearchBackend.none => 'None',
+        WebSearchBackend.ollamaWeb => 'Ollama web search (ollama.com key)',
+        WebSearchBackend.tavily => 'Tavily',
+        WebSearchBackend.brave => 'Brave Search',
+        WebSearchBackend.searXng => 'SearXNG (self-hosted)',
+      };
+
+  bool get needsKey => this == WebSearchBackend.ollamaWeb || this == WebSearchBackend.tavily || this == WebSearchBackend.brave;
 }
 
 /// Mirrors `AuthProvider`. Sent as an ordinal.

@@ -17,6 +17,9 @@ public class ApplicationDbContext : DbContext, IUnitOfWork
     public DbSet<ForcedPatchRun> ForcedPatchRuns => Set<ForcedPatchRun>();
     public DbSet<InstalledApplication> InstalledApplications => Set<InstalledApplication>();
     public DbSet<AiAgentSettings> AiAgentSettings => Set<AiAgentSettings>();
+    public DbSet<AiConnection> AiConnections => Set<AiConnection>();
+    public DbSet<AiFeatureRoute> AiFeatureRoutes => Set<AiFeatureRoute>();
+    public DbSet<Kintsugi.Infrastructure.Ai.AiCatalogCacheEntry> AiCatalogCache => Set<Kintsugi.Infrastructure.Ai.AiCatalogCacheEntry>();
     public DbSet<UpgradePath> UpgradePaths => Set<UpgradePath>();
     public DbSet<PatchingPolicySettings> PatchingPolicySettings => Set<PatchingPolicySettings>();
     public DbSet<AgentPackage> AgentPackages => Set<AgentPackage>();

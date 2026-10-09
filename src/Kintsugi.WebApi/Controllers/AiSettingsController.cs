@@ -1,13 +1,22 @@
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
 using Kintsugi.Application.AiSettings;
+using Kintsugi.Application.AiSettings.Commands.DeleteAiConnection;
+using Kintsugi.Application.AiSettings.Commands.DeleteAiFeatureRoute;
+using Kintsugi.Application.AiSettings.Commands.SaveAiConnection;
+using Kintsugi.Application.AiSettings.Commands.SetAiFeatureRoute;
+using Kintsugi.Application.AiSettings.Commands.TestAiConnection;
 using Kintsugi.Application.AiSettings.Commands.UpdateAiAgentSettings;
+using Kintsugi.Application.AiSettings.Commands.UpdateWebSearchSettings;
+using Kintsugi.Application.AiSettings.Queries.GetAiCatalog;
+using Kintsugi.Application.AiSettings.Queries.GetAiConnections;
 using Kintsugi.Application.AiSettings.Queries.GetAiAgentSettings;
 using Kintsugi.Application.AiSettings.Queries.GetClaudeAgentSdkStatus;
 using Kintsugi.Application.AiSettings.Queries.GetGooseCliStatus;
 using Kintsugi.Application.AiSettings.Queries.GetOllamaModels;
 using Kintsugi.Application.Common.Interfaces;
 
+using Kintsugi.Domain.Enums;
 using Kintsugi.WebApi.Filters;
 
 namespace Kintsugi.WebApi.Controllers;
@@ -64,8 +73,75 @@ public class AiSettingsController : ControllerBase
     /// binary is installed and that the stored OAuth token still authenticates — to power a status
     /// check in Settings. It takes no parameters on purpose: the token is never sent to the
     /// browser, so the probe reads the stored one rather than one supplied by the caller.</summary>
+    /// <summary>Routed mode's connections and per-feature routes.</summary>
+    [HttpGet("routing")]
+    [ProducesResponseType(typeof(AiRoutingDto), StatusCodes.Status200OK)]
+    public async Task<ActionResult<AiRoutingDto>> GetRouting(CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(new GetAiRoutingQuery(), cancellationToken));
+
+    /// <summary>Creates a connection; the body's <c>id</c> is ignored.</summary>
+    [HttpPost("connections")]
+    [ProducesResponseType(typeof(AiConnectionDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<AiConnectionDto>> CreateConnection(SaveAiConnectionCommand command, CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(command with { Id = null }, cancellationToken));
+
+    /// <summary>Updates a connection. A blank <c>apiKey</c> keeps the stored one.</summary>
+    [HttpPut("connections/{id:guid}")]
+    [ProducesResponseType(typeof(AiConnectionDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<AiConnectionDto>> UpdateConnection(Guid id, SaveAiConnectionCommand command, CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(command with { Id = id }, cancellationToken));
+
+    /// <summary>Deletes a connection; refused (409) while any feature is routed to it.</summary>
+    [HttpDelete("connections/{id:guid}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> DeleteConnection(Guid id, CancellationToken cancellationToken)
+    {
+        await _sender.Send(new DeleteAiConnectionCommand(id), cancellationToken);
+        return NoContent();
+    }
+
+    /// <summary>Sends one tiny prompt down a stored connection with <paramref name="model"/>.</summary>
+    [HttpPost("connections/{id:guid}/test")]
+    [ProducesResponseType(typeof(AiConnectionTestResultDto), StatusCodes.Status200OK)]
+    public async Task<ActionResult<AiConnectionTestResultDto>> TestConnection(Guid id, [FromQuery] string model, CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(new TestAiConnectionCommand(id, model), cancellationToken));
+
+    [HttpPut("routes/{feature}")]
+    [ProducesResponseType(typeof(AiFeatureRouteDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<AiFeatureRouteDto>> SetRoute(AiFeature feature, SetAiFeatureRouteBody body, CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(new SetAiFeatureRouteCommand(feature, body.ConnectionId, body.Model), cancellationToken));
+
+    [HttpDelete("routes/{feature}")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> DeleteRoute(AiFeature feature, CancellationToken cancellationToken)
+    {
+        await _sender.Send(new DeleteAiFeatureRouteCommand(feature), cancellationToken);
+        return NoContent();
+    }
+
+    /// <summary>The search service behind Kintsugi's own web_search tool.</summary>
+    [HttpPut("web-search")]
+    [ProducesResponseType(typeof(AiAgentSettingsDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<AiAgentSettingsDto>> UpdateWebSearch(UpdateWebSearchSettingsCommand command, CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(command, cancellationToken));
+
+    /// <summary>The models.dev catalog, trimmed; <paramref name="refresh"/> refetches now.</summary>
+    [HttpGet("catalog")]
+    [ProducesResponseType(typeof(AiCatalogDto), StatusCodes.Status200OK)]
+    public async Task<ActionResult<AiCatalogDto>> GetCatalog([FromQuery] bool refresh, CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(new GetAiCatalogQuery(refresh), cancellationToken));
+
     [HttpGet("claude-agent-sdk-status")]
     [ProducesResponseType(typeof(ClaudeAgentSdkStatus), StatusCodes.Status200OK)]
     public async Task<ActionResult<ClaudeAgentSdkStatus>> GetClaudeAgentSdkStatus(CancellationToken cancellationToken) =>
         Ok(await _sender.Send(new GetClaudeAgentSdkStatusQuery(), cancellationToken));
 }
+
+/// <summary>The body of <c>PUT routes/{feature}</c>; the feature is in the path.</summary>
+public record SetAiFeatureRouteBody(Guid ConnectionId, string Model);

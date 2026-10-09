@@ -112,7 +112,7 @@ public class AssessPackagesCveUpsertTests
         _osvClient.Object,
         _packageRepository.Object,
         _cpeSuggestionClient.Object,
-        _aiAgentSettingsRepository.Object,
+        TestAiResolver.Over(_aiAgentSettingsRepository.Object),
         _unitOfWork.Object,
         _progress.Object);
 
