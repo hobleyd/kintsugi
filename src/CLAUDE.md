@@ -200,6 +200,54 @@ API at all. It is now a Flutter web application in `web/`, compiled by `nginx/Do
 as static files by nginx — see web/CLAUDE.md.
 
 
+## AI providers: protocols, not providers
+
+**A provider is configuration; a protocol is code.** `AiProvider.Routed` routes each `AiFeature`
+(script research, script repair, CPE suggestion) to an `AiConnection` and a model, and a connection
+is a wire protocol (`AiWireProtocol`: OpenAI chat/completions, OpenAI Responses, Anthropic Messages,
+Gemini, Ollama), an endpoint and a credential. Connections are picked from the models.dev catalog
+(`ModelsDevCatalog` — 226 providers, cached in `ai_catalog_cache`) or entered as a custom endpoint,
+so LiteLLM, vLLM, OpenRouter, Groq, Azure and Vertex need no code. The shape is NightMail's AI
+subsystem (`docs/superpowers/specs/2026-06-26-ai-subsystem-design.md` there), ported. Four things
+are load-bearing:
+
+- **One engine, and the original providers run on it.** `AiEngine` drives every protocol's
+  adapter through one tool loop. Anthropic, OpenAI and Ollama became fixed routes
+  (`AiUpgradePathResearchClient.LegacyRoute`) with their old model defaults, hosted search and
+  output ceilings, and `AiUpgradePathResearchClientTests` — written against the hand-written
+  clients — passes against it with only its constructor changed. Goose and the Claude Agent SDK are agents that run their
+  own loops and stay outside it.
+- **Web access is one rule for every protocol.** Research uses the provider's hosted search when
+  the connection allows it and the protocol has one (Anthropic, OpenAI Responses, Gemini
+  grounding); otherwise Kintsugi's own `web_search`/`web_fetch` when a `WebSearchBackend` is set
+  (Ollama web, Tavily, Brave, SearXNG); otherwise a prompt telling the model to flag in the script
+  that it had no web access. Hosted and Kintsugi tools are never offered together — Gemini refuses
+  the mixture — and with no backend no tools at all are sent, because a local model without tool
+  support errors on a request that carries any. `OLLAMA_WEB_API_KEY` is still honoured as the
+  backend when none is configured.
+- **`web_fetch` is an SSRF surface, and `SafeWebFetcher` is the whole defence.** The URL comes from
+  a model whose input includes pages it has read, so a page can ask for
+  `http://169.254.169.254/…` — on GKE, the pod's Google credentials. The address is checked in the
+  socket's `ConnectCallback`, against the address actually dialled, so DNS rebinding cannot swap it
+  after a check; redirects are followed by hand through the same callback. Loopback, RFC 1918, ULA,
+  link-local, CGNAT, multicast and documentation ranges are refused in IPv4, IPv6 and IPv4-mapped
+  form. Do not give it a shared `HttpClient`.
+- **Google Cloud authentication stores nothing.** `AiAuthMode.GoogleCloud` takes a token from the
+  metadata server (`GoogleCloudAccessTokenProvider`) — the pod's own service account under
+  Workload Identity — for Gemini and Claude on Vertex (`…/publishers/{google|anthropic}/models/…`)
+  and Vertex's OpenAI-compatible endpoint. The location is where inference runs, which is a
+  data-residency decision.
+
+Assistant turns are replayed verbatim (`AiChatMessage.ProviderContent`) rather than rebuilt:
+Anthropic insists on its own `tool_use` blocks back, and Gemini rejects a function call returned
+without its `thoughtSignature`. The protocol is derived per *model* from models.dev's `npm` field,
+because `google-vertex` lists Claude models whose own package is `@ai-sdk/google-vertex/anthropic`.
+Bedrock has no adapter and is dropped from the catalog. `AiProviderSettingsResolver` is the one
+place that decides whether AI is configured — Routed mode counts only with a script-research route
+— so the upgrade-path scan and the vulnerability run cannot disagree. The new enums cross the wire
+as ordinals like `AiProvider`; `web/test/data/ai_routing_mapper_test.dart` pins their positions.
+
+
 ## Remote control: the server's half
 
 The agents' half is in `clients/CLAUDE.md`; the viewer's is in `web/CLAUDE.md`.

@@ -246,3 +246,26 @@ class UpdatePatchingPolicySettings {
   Future<PatchingPolicySettings> call(PatchingPolicySettings settings) =>
       _repository.update(settings);
 }
+
+/// Routed mode's operations, one class rather than eight: they are only ever used together, by
+/// one bloc, and each is a straight pass-through to the repository.
+class ManageAiRouting {
+  const ManageAiRouting(this._repository);
+
+  final AiRoutingRepository _repository;
+
+  Future<AiRouting> read() => _repository.read();
+  Future<AiCatalog> catalog({bool refresh = false}) => _repository.catalog(refresh: refresh);
+  Future<AiConnection> saveConnection(AiConnectionDraft draft) => _repository.saveConnection(draft);
+  Future<void> deleteConnection(String id) => _repository.deleteConnection(id);
+  Future<AiConnectionTestResult> testConnection(String id, String model) => _repository.testConnection(id, model);
+  Future<AiFeatureRoute> setRoute(AiFeature feature, String connectionId, String model) =>
+      _repository.setRoute(feature, connectionId, model);
+  Future<void> clearRoute(AiFeature feature) => _repository.clearRoute(feature);
+  Future<AiAgentSettings> updateWebSearch(
+          {required WebSearchBackend backend,
+          required String? apiKey,
+          required bool clearApiKey,
+          required String? baseUrl}) =>
+      _repository.updateWebSearch(backend: backend, apiKey: apiKey, clearApiKey: clearApiKey, baseUrl: baseUrl);
+}
