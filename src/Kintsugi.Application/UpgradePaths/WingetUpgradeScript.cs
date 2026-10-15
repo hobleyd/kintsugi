@@ -108,7 +108,7 @@ public static class WingetUpgradeScript
                     return ($packaged | Sort-Object -Property @{ Expression = 'Native'; Descending = $true }, @{ Expression = 'Version'; Descending = $true } | Select-Object -First 1).Path
                 }
                 $onPath = Get-Command winget -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($onPath) { return $onPath.Source }
+                if ($onPath) { return $onPath.Path }
                 return $null
             }
             """;
