@@ -14,10 +14,19 @@ namespace Kintsugi.Application.GitHub;
 /// default" mean the same thing here and only one of them is informative.</param>
 /// <param name="IsAgentPackageRepositoryDefault">Whether the value above is the default rather than
 /// something an administrator chose.</param>
+/// <param name="GitHubAppSlug">The connected App's slug, or null when none is connected. Never the
+/// App's private key — that, like the tokens, is never returned.</param>
+/// <param name="GitHubAppOwner">The account that owns the connected App.</param>
+/// <param name="IsGitHubAppInstalled">Whether the App has been installed, which is when it takes over
+/// from both tokens. Connected but not installed is a real state: the App exists on GitHub and this
+/// server is waiting for an administrator to install it.</param>
 public record GitHubSettingsDto(
     string AgentPackageRepository,
     bool IsAgentPackageRepositoryDefault,
     string ScriptApprovalRepository,
     bool IsScriptApprovalRepositoryDefault,
     bool HasApiToken,
-    bool HasScriptApprovalToken);
+    bool HasScriptApprovalToken,
+    string? GitHubAppSlug,
+    string? GitHubAppOwner,
+    bool IsGitHubAppInstalled);

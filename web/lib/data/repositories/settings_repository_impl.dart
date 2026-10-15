@@ -1,4 +1,5 @@
 import '../../core/network/api_client.dart';
+import '../../core/platform/page_navigator.dart';
 import '../../domain/entities/enums.dart';
 import '../../domain/entities/settings.dart';
 import '../../domain/repositories/repositories.dart';
@@ -127,9 +128,10 @@ class AuditSettingsRepositoryImpl implements AuditSettingsRepository {
 }
 
 class GitHubSettingsRepositoryImpl implements GitHubSettingsRepository {
-  const GitHubSettingsRepositoryImpl(this._api);
+  const GitHubSettingsRepositoryImpl(this._api, this._navigator);
 
   final ApiClient _api;
+  final PageNavigator _navigator;
 
   @override
   Future<GitHubSettings> read() async => gitHubSettingsFromJson(
@@ -154,6 +156,25 @@ class GitHubSettingsRepositoryImpl implements GitHubSettingsRepository {
           'scriptApprovalToken': scriptApprovalToken,
           'clearScriptApprovalToken': clearScriptApprovalToken,
         }) as Map<String, dynamic>,
+      );
+
+  @override
+  Future<void> startGitHubAppSetup({required String? organization, required String? name}) async {
+    final manifest = gitHubAppManifestFromJson(
+      await _api.getJson('/api/admin/settings/github/app/manifest', query: {
+        'organization': organization == null || organization.isEmpty ? null : organization,
+        'name': name == null || name.isEmpty ? null : name,
+      }) as Map<String, dynamic>,
+    );
+
+    // A form POST from the page, not a request: GitHub answers with its own confirmation page, and
+    // the browser has to be the thing that lands on it — the same reason sign-out is a form.
+    _navigator.post(manifest.createUrl, fields: {'manifest': manifest.manifest});
+  }
+
+  @override
+  Future<GitHubSettings> disconnectGitHubApp() async => gitHubSettingsFromJson(
+        await _api.deleteJson('/api/admin/settings/github/app') as Map<String, dynamic>,
       );
 }
 

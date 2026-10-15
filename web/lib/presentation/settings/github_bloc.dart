@@ -53,15 +53,38 @@ final class GitHubSettingsEdited extends GitHubSettingsEvent {
   const GitHubSettingsEdited();
 }
 
+/// Starts GitHub's manifest flow. On success the page navigates away to GitHub and this bloc is
+/// gone with it; what it can still report is a refusal before that — an organisation name the
+/// server would not build a URL from, say.
+final class GitHubAppSetupRequested extends GitHubSettingsEvent {
+  const GitHubAppSetupRequested({required this.organization, required this.name});
+
+  final String? organization;
+  final String? name;
+
+  @override
+  List<Object?> get props => [organization, name];
+}
+
+final class GitHubAppDisconnectRequested extends GitHubSettingsEvent {
+  const GitHubAppDisconnectRequested();
+}
+
 class GitHubSettingsBloc extends Bloc<GitHubSettingsEvent, SettingsState<GitHubSettings>> {
   GitHubSettingsBloc({
     required GetGitHubSettings getSettings,
     required UpdateGitHubSettings updateSettings,
+    required StartGitHubAppSetup startAppSetup,
+    required DisconnectGitHubApp disconnectApp,
   })  : _getSettings = getSettings,
         _updateSettings = updateSettings,
+        _startAppSetup = startAppSetup,
+        _disconnectApp = disconnectApp,
         super(const SettingsState()) {
     on<GitHubSettingsRequested>(_onRequested);
     on<GitHubSettingsSaveRequested>(_onSave);
+    on<GitHubAppSetupRequested>(_onAppSetup);
+    on<GitHubAppDisconnectRequested>(_onAppDisconnect);
     on<GitHubSettingsEdited>(
       (_, emit) => emit(state.copyWith(saved: false, clearError: true, fieldErrors: const {})),
     );
@@ -69,6 +92,34 @@ class GitHubSettingsBloc extends Bloc<GitHubSettingsEvent, SettingsState<GitHubS
 
   final GetGitHubSettings _getSettings;
   final UpdateGitHubSettings _updateSettings;
+  final StartGitHubAppSetup _startAppSetup;
+  final DisconnectGitHubApp _disconnectApp;
+
+  Future<void> _onAppSetup(
+    GitHubAppSetupRequested event,
+    Emitter<SettingsState<GitHubSettings>> emit,
+  ) async {
+    emit(state.copyWith(saving: true, saved: false, clearError: true, fieldErrors: const {}));
+    try {
+      await _startAppSetup(organization: event.organization, name: event.name);
+      // Left "saving" on purpose: the page is navigating to GitHub, and a button that re-enabled
+      // in the instant before it went would invite a second, abandoned manifest flow.
+    } on ApiException catch (error) {
+      emit(state.copyWith(saving: false, error: error.message));
+    }
+  }
+
+  Future<void> _onAppDisconnect(
+    GitHubAppDisconnectRequested event,
+    Emitter<SettingsState<GitHubSettings>> emit,
+  ) async {
+    emit(state.copyWith(saving: true, saved: false, clearError: true));
+    try {
+      emit(state.copyWith(value: await _disconnectApp(), saving: false));
+    } on ApiException catch (error) {
+      emit(state.copyWith(saving: false, error: error.message));
+    }
+  }
 
   Future<void> _onRequested(
     GitHubSettingsRequested event,

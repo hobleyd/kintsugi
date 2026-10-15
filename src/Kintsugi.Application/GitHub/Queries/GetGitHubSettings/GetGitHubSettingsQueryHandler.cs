@@ -29,6 +29,9 @@ public class GetGitHubSettingsQueryHandler : IRequestHandler<GetGitHubSettingsQu
             effective.ScriptApprovalRepository,
             string.IsNullOrWhiteSpace(stored?.ScriptApprovalRepository),
             !string.IsNullOrWhiteSpace(stored?.ApiToken),
-            !string.IsNullOrWhiteSpace(stored?.ScriptApprovalToken));
+            !string.IsNullOrWhiteSpace(stored?.ScriptApprovalToken),
+            stored?.HasGitHubApp == true ? stored.GitHubAppSlug : null,
+            stored?.HasGitHubApp == true ? stored.GitHubAppOwner : null,
+            stored?.IsGitHubAppInstalled == true);
     }
 }

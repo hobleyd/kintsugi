@@ -1,8 +1,10 @@
+using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Application.GitHub.Commands.UpdateGitHubSettings;
 using Kintsugi.Application.GitHub.Queries.GetGitHubSettings;
 using Kintsugi.Domain.Entities;
+using Kintsugi.Infrastructure.GitHubApp;
 using Kintsugi.Infrastructure.ScriptApproval;
 
 namespace Kintsugi.Tests.Application.GitHub;
@@ -61,7 +63,12 @@ public class GitHubSettingsProviderTests
 {
     private readonly Mock<IGitHubSettingsRepository> _repository = new();
 
-    private GitHubSettingsProvider CreateProvider() => new(_repository.Object);
+    // No App is stored in any of these, so the token provider is never reached; it is given a
+    // factory that would fail loudly if it were.
+    private GitHubSettingsProvider CreateProvider() => new(
+        _repository.Object,
+        new GitHubAppTokenProvider(Mock.Of<IHttpClientFactory>(MockBehavior.Strict)),
+        NullLogger<GitHubSettingsProvider>.Instance);
 
     [Fact]
     public async Task GetAsync_WhenNothingIsStored_FallsBackToTheDefaultRepository()

@@ -7,6 +7,38 @@ import 'package:kintsugi_web/data/models/upgrade_path_mapper.dart';
 import 'package:kintsugi_web/domain/entities/enums.dart';
 
 void main() {
+  group('gitHubSettingsFromJson', () {
+    test('reads the GitHub App fields, and treats an older server as having none', () {
+      final connected = gitHubSettingsFromJson({
+        'agentPackageRepository': 'acme/kintsugi',
+        'scriptApprovalRepository': 'acme/approvals',
+        'gitHubAppSlug': 'kintsugi-acme',
+        'gitHubAppOwner': 'acme',
+        'isGitHubAppInstalled': true,
+      });
+      final older = gitHubSettingsFromJson({'agentPackageRepository': 'acme/kintsugi'});
+
+      expect(connected.hasGitHubApp, isTrue);
+      expect(connected.isGitHubAppInstalled, isTrue);
+      expect(connected.gitHubAppInstallUrl, 'https://github.com/apps/kintsugi-acme/installations/new');
+      // A server from before the App existed sends none of these keys, which has to read as "no
+      // App" rather than fail to parse.
+      expect(older.hasGitHubApp, isFalse);
+      expect(older.isGitHubAppInstalled, isFalse);
+      expect(older.gitHubAppInstallUrl, isNull);
+    });
+
+    test('reads a manifest DTO', () {
+      final manifest = gitHubAppManifestFromJson({
+        'createUrl': 'https://github.com/organizations/acme/settings/apps/new?state=s',
+        'manifest': '{"name":"Kintsugi"}',
+      });
+
+      expect(manifest.createUrl, startsWith('https://github.com/organizations/acme/'));
+      expect(manifest.manifest, '{"name":"Kintsugi"}');
+    });
+  });
+
   group('hostFromJson', () {
     test('reads HostStatus from the ordinal the server sends', () {
       // HostStatus carries no JSON converter, so System.Text.Json writes its ordinal.

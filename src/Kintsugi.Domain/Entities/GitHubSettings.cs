@@ -1,4 +1,5 @@
 using Kintsugi.Domain.Common;
+using Kintsugi.Domain.Exceptions;
 
 namespace Kintsugi.Domain.Entities;
 
@@ -47,6 +48,42 @@ public class GitHubSettings : BaseEntity
     /// can pick the approval up — which the Upgrade Scripts page says out loud.</summary>
     public string? ScriptApprovalToken { get; private set; }
 
+    /// <summary>The GitHub App this server authenticates as, when one has been created through
+    /// Settings &gt; GitHub. Null means none: the two tokens above are used as they are. When an App
+    /// is connected <em>and</em> installed it replaces both tokens — <c>GitHubSettingsProvider</c>
+    /// mints a short-lived installation token in place of each, narrowed so the read-side consumers
+    /// still never hold write access. See <c>GitHubAppTokenProvider</c>.</summary>
+    public long? GitHubAppId { get; private set; }
+
+    /// <summary>The App's URL slug — what <c>https://github.com/apps/{slug}</c> and its
+    /// installation page are built from, and the name its pull requests are opened under
+    /// (<c>{slug}[bot]</c>).</summary>
+    public string? GitHubAppSlug { get; private set; }
+
+    /// <summary>The account (organisation or user) that owns the App. An installation token can
+    /// only reach repositories on accounts the App is installed on, so this is what the Settings
+    /// page shows against the script-approval repository's owner.</summary>
+    public string? GitHubAppOwner { get; private set; }
+
+    /// <summary>The App's private key, PEM, as GitHub returned it when the manifest was converted.
+    /// Stored as written, like the tokens — see the remarks above. It is never returned by any
+    /// route, and it is the one value here that cannot be re-issued without the App's owner: GitHub
+    /// shows it once, at conversion, and this server is the only place it then exists.</summary>
+    public string? GitHubAppPrivateKey { get; private set; }
+
+    /// <summary>The installation the tokens are minted for. Null between the App being created and
+    /// an administrator installing it — the one window in which an App is connected but unused,
+    /// and the stored tokens (if any) still apply.</summary>
+    public long? GitHubAppInstallationId { get; private set; }
+
+    /// <summary>Whether App credentials are stored. Not whether the App is usable — see
+    /// <see cref="IsGitHubAppInstalled"/>.</summary>
+    public bool HasGitHubApp => GitHubAppId is not null && !string.IsNullOrWhiteSpace(GitHubAppPrivateKey);
+
+    /// <summary>Whether the App is connected and installed, which is the point at which it takes
+    /// over from the stored tokens.</summary>
+    public bool IsGitHubAppInstalled => HasGitHubApp && GitHubAppInstallationId is not null;
+
     private GitHubSettings()
     {
     }
@@ -82,6 +119,67 @@ public class GitHubSettings : BaseEntity
     public void ClearScriptApprovalToken()
     {
         ScriptApprovalToken = null;
+        MarkUpdated();
+    }
+
+    /// <summary>
+    /// Stores a GitHub App created from this server's manifest. Any earlier App's installation is
+    /// forgotten with it: an installation belongs to one App, and keeping the old id would have the
+    /// new App mint tokens for an installation it does not own.
+    /// </summary>
+    public void ConnectGitHubApp(long appId, string slug, string owner, string privateKeyPem)
+    {
+        if (appId <= 0)
+        {
+            throw new DomainException("A GitHub App id must be positive.");
+        }
+
+        if (string.IsNullOrWhiteSpace(slug) || string.IsNullOrWhiteSpace(owner))
+        {
+            throw new DomainException("A GitHub App needs both a slug and an owning account.");
+        }
+
+        if (string.IsNullOrWhiteSpace(privateKeyPem) || !privateKeyPem.Contains("PRIVATE KEY", StringComparison.Ordinal))
+        {
+            throw new DomainException("GitHub did not return a PEM private key for the App.");
+        }
+
+        GitHubAppId = appId;
+        GitHubAppSlug = slug.Trim();
+        GitHubAppOwner = owner.Trim();
+        GitHubAppPrivateKey = privateKeyPem;
+        GitHubAppInstallationId = null;
+        MarkUpdated();
+    }
+
+    /// <summary>Records which installation of the connected App to mint tokens for. The caller has
+    /// already confirmed with GitHub that the installation belongs to this App — this entity cannot,
+    /// and an id taken on trust from a redirect's query string is exactly what that check is for.</summary>
+    public void RecordGitHubAppInstallation(long installationId)
+    {
+        if (!HasGitHubApp)
+        {
+            throw new DomainException("No GitHub App is connected, so there is nothing to record an installation for.");
+        }
+
+        if (installationId <= 0)
+        {
+            throw new DomainException("A GitHub App installation id must be positive.");
+        }
+
+        GitHubAppInstallationId = installationId;
+        MarkUpdated();
+    }
+
+    /// <summary>Forgets the App entirely, after which the stored tokens (if any) apply again. The
+    /// App itself still exists on GitHub; deleting it there is the owner's act, not this server's.</summary>
+    public void DisconnectGitHubApp()
+    {
+        GitHubAppId = null;
+        GitHubAppSlug = null;
+        GitHubAppOwner = null;
+        GitHubAppPrivateKey = null;
+        GitHubAppInstallationId = null;
         MarkUpdated();
     }
 

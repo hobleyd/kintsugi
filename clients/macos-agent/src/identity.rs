@@ -17,8 +17,9 @@ const ARTIFACT_PUBKEY_FILE: &str = "artifact-signing.pub";
 
 /// This agent's mutual-TLS identity, established once via `enroll` (see
 /// Kintsugi.Application/Hosts/Commands/EnrollAgent) and reused from disk on every run after
-/// that — see `load`.
-#[derive(Debug, Clone)]
+/// that — see `load`. `PartialEq` so the per-user process can tell a re-enrollment from the
+/// identity it already holds — see `main::identity_to_adopt`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentIdentity {
     pub certificate_pem: String,
     pub private_key_pem: String,

@@ -46,6 +46,10 @@ const AGENT_POLL_INTERVAL: Duration = Duration::from_secs(60);
 /// — the policy changes rarely, so there's no need to hit the server every poll tick.
 const POLICY_REFRESH_INTERVAL: u64 = 60 * 60;
 
+/// The `--agent` process's HTTP client timeout — named because the client is built in two places:
+/// at startup, and again by `refresh_identity` whenever the root daemon (re-)enrolls.
+const UI_AGENT_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// launchd retries this job on its own schedule (RunAtLoad + hourly
 /// StartCalendarInterval); this bounded retry only exists to ride out the
 /// short window at boot where the network isn't up yet.
@@ -110,7 +114,61 @@ struct RegisterApplicationsRequest {
     applications: Vec<InstalledApp>,
 }
 
+/// Which of this binary's entry points a command line asks for.
+#[derive(Debug, PartialEq, Eq)]
+enum Mode {
+    /// No arguments: the root LaunchDaemon's check-in — see `run_daemon`.
+    Daemon,
+    /// `--agent`: the per-user LaunchAgent and its menu bar icon — see `run_ui_agent`.
+    UiAgent,
+    /// `--remote-shell`: the remote-shell LaunchDaemon — see `run_remote_shell`.
+    RemoteShell,
+    /// `--version`: print this build's version and exit, touching nothing.
+    Version,
+}
+
+const USAGE: &str = "usage: kintsugi-agent [--agent | --remote-shell | --version]";
+
+/// Reads the command line (without the program name) strictly: exactly one known flag, or none.
+///
+/// It used to look for `--agent` and `--remote-shell` anywhere and treat everything else as "no
+/// arguments", which made the bare root check-in the answer to any typo. That is the one mode that
+/// does real work — it registers the host, reports its inventory and drains the patch queue — so
+/// `kintsugi-agent --version`, typed by somebody wanting a version number, ran a full check-in
+/// instead. Every launchd job passes exactly one flag or none (see `packaging/*.plist`,
+/// `remote_shell::LAUNCHD_JOB_PLIST` and `checkin_schedule`'s own plist), so nothing legitimate
+/// is turned away by refusing the rest — including bare words like `version`, which are no less a
+/// mistake for lacking a dash.
+fn parse_mode(args: &[String]) -> std::result::Result<Mode, String> {
+    match args {
+        [] => Ok(Mode::Daemon),
+        [flag] => match flag.as_str() {
+            "--agent" => Ok(Mode::UiAgent),
+            "--remote-shell" => Ok(Mode::RemoteShell),
+            "--version" => Ok(Mode::Version),
+            other => Err(format!("unrecognised argument: {other}")),
+        },
+        _ => Err(format!("expected at most one argument, got {}: {}", args.len(), args.join(" "))),
+    }
+}
+
 fn main() -> Result<()> {
+    // Before anything else — logging, config, the panic hook — so a mistyped command line and
+    // `--version` leave no trace anywhere and change nothing. Exit code 2 is the usual one for
+    // a usage error, and distinct from the 1 a mode that ran and failed returns.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mode = match parse_mode(&args) {
+        Ok(Mode::Version) => {
+            println!("kintsugi-agent {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Ok(mode) => mode,
+        Err(err) => {
+            eprintln!("kintsugi-agent: {err}\n{USAGE}");
+            std::process::exit(2);
+        }
+    };
+
     // reqwest's rustls backend needs a process-wide default crypto provider installed before any
     // TLS connection is made; with exactly one provider feature compiled in (ring — see
     // Cargo.toml) higher-level callers usually do this themselves, but installing it explicitly,
@@ -126,19 +184,17 @@ fn main() -> Result<()> {
     // trace in the one file this agent's own docs point people at first.
     std::panic::set_hook(Box::new(|info| logging::error(&format!("panic: {info}"))));
 
-    if std::env::args().any(|arg| arg == "--agent") {
-        return run_ui_agent();
+    match mode {
+        Mode::UiAgent => run_ui_agent(),
+        // A root shell session, started by launchd's `WatchPaths` on the remote-shell queue rather
+        // than on a schedule. Its own mode and its own job because it runs for as long as somebody
+        // is typing: launchd will not run two instances of one job, so sharing the check-in
+        // daemon's would stall this host's check-ins for the length of a support call. See
+        // `remote_shell`.
+        Mode::RemoteShell => run_remote_shell(),
+        Mode::Daemon => run_daemon(),
+        Mode::Version => unreachable!("answered before anything else ran"),
     }
-
-    // A root shell session, started by launchd's `WatchPaths` on the remote-shell queue rather than
-    // on a schedule. Its own mode and its own job because it runs for as long as somebody is typing:
-    // launchd will not run two instances of one job, so sharing the check-in daemon's would stall
-    // this host's check-ins for the length of a support call. See `remote_shell`.
-    if std::env::args().any(|arg| arg == "--remote-shell") {
-        return run_remote_shell();
-    }
-
-    run_daemon()
 }
 
 /// One invocation of the remote-shell daemon: run whatever sessions are queued, then exit.
@@ -686,23 +742,11 @@ fn run_ui_agent() -> Result<()> {
     if agent_identity.is_none() {
         logging::warn("no enrolled agent identity found yet — requests will be rejected until the root daemon enrolls one");
     }
-    let client = identity::build_client(Duration::from_secs(30), agent_identity.as_ref())
+    let client = identity::build_client(UI_AGENT_HTTP_TIMEOUT, agent_identity.as_ref())
         .context("failed to build HTTP client")?;
 
     let policy_cache_path = state_dir.join("policy.json");
     let schedule_state_path = state_dir.join("schedule.json");
-
-    // Block (retrying) until a policy is available at all — nothing meaningful can be scheduled
-    // without one, and this only ever happens once, at first-ever startup with no cache and no
-    // network yet (e.g. very early in boot).
-    let current_policy = loop {
-        if let Some(policy) = policy::load_or_fetch(&client, &config, &policy_cache_path) {
-            break policy;
-        }
-        std::thread::sleep(AGENT_POLL_INTERVAL);
-    };
-
-    let state = ScheduleState::load_or_default(&schedule_state_path, &current_policy);
 
     let (menu_tx, menu_rx) = mpsc::channel();
     let report: StatusReporterFn = tray_menu::report_status;
@@ -726,12 +770,164 @@ fn run_ui_agent() -> Result<()> {
     let remote_control_flag = end_remote_session.clone();
     std::thread::spawn(move || remote_control::run(remote_control_config, remote_control_serial, remote_control_flag));
 
+    // The policy wait runs here, behind the menu bar icon, rather than ahead of `tray_menu::run`
+    // — see `wait_for_policy` for what it cost when it did not. Its reports cannot be lost to an
+    // icon that does not exist yet: they are dispatched to the main queue, which runs nothing
+    // until `tray_menu::run` reaches `app.run()`, and that function fills `MENU_STATE` first.
     std::thread::spawn(move || {
+        let mut client = client;
+        let mut agent_identity = agent_identity;
+        let current_policy = wait_for_policy(&config, &policy_cache_path, &mut client, &mut agent_identity, &menu_rx, report);
+        let state = ScheduleState::load_or_default(&schedule_state_path, &current_policy);
         run_scheduler(client, config, current_policy, state, schedule_state_path, serial_number, agent_identity, policy_cache_path, menu_rx, report)
     });
 
     // Blocks for the rest of the process's life — this call never returns normally.
     tray_menu::run(menu_tx, end_remote_session)
+}
+
+/// Blocks until a patching policy is available — fetched, or cached from an earlier run — which is
+/// the first thing the scheduler needs. Unlike the Windows and Linux agents' identically-named
+/// functions, which can only wait for the root half to publish one, this process holds the agent
+/// identity and fetches for itself (see `clients/macos-agent/CLAUDE.md`).
+///
+/// Ordinarily this returns on the first attempt. What it waits out is a fresh install: install.sh
+/// starts this LaunchAgent alongside the root daemon, and the daemon's first run has to enroll
+/// before there is an identity to present. Until then `/api/patching-policy`, which is inside
+/// nginx's client-certificate regex, answers 403 — and with no cache yet there is nothing to fall
+/// back on.
+///
+/// That used to be invisible twice over. The wait sat ahead of `tray_menu::run`, so there was no
+/// menu bar icon at all; and the HTTP client was built once, at startup, from whatever identity
+/// was on disk then. Every first install therefore waited forever, presenting no certificate long
+/// after the daemon had enrolled, behind nothing but a once-a-minute 403 in agent.log — an agent
+/// that looked like it had not installed, fixed by restarting it. The icon now goes up first and
+/// this reports `WaitingForPolicy` behind it, re-reading the identity every tick
+/// (`refresh_identity`) so the first attempt after enrollment succeeds. The Windows and Linux
+/// agents shipped the same icon-first fix in 0.11.2 and 0.12.1; see `clients/CLAUDE.md`.
+///
+/// Servicing `menu_rx` here rather than sleeping is the other half, as on the other two agents.
+/// "Check In Now" asks the root daemon to run, which is what enrolls a host whose first attempt
+/// failed — so it is the one action that can end this state from the outside. "Patch Now" is
+/// greyed by `AgentStatus::WaitingForPolicy`.
+fn wait_for_policy(
+    config: &Config,
+    policy_cache_path: &std::path::Path,
+    client: &mut reqwest::blocking::Client,
+    agent_identity: &mut Option<identity::AgentIdentity>,
+    menu_rx: &mpsc::Receiver<MenuAction>,
+    report: StatusReporterFn,
+) -> policy::PatchingPolicy {
+    // The first attempt goes out with or without an identity: it falls back to the cache, which
+    // is the usual answer on every start after the first.
+    if let Some(policy) = policy::load_or_fetch(client, config, policy_cache_path) {
+        return policy;
+    }
+
+    logging::info("waiting for a patching policy before scheduling anything");
+    report(AgentStatus::WaitingForPolicy);
+    show_scheduled_check_in();
+
+    loop {
+        match menu_rx.recv_timeout(AGENT_POLL_INTERVAL) {
+            Ok(MenuAction::CheckInNow) => {
+                logging::info("Check In Now clicked while waiting for a policy");
+                tray_menu::report_check_in(CheckInStatus::InProgress);
+                checkin_schedule::request_now(&config::queue_dir());
+                show_scheduled_check_in();
+            }
+            // Greyed while this state is showing, so this only happens for a click already on its
+            // way. Saying so beats silence for an action the user just took.
+            Ok(MenuAction::PatchNow) => {
+                logging::info("Patch Now ignored: no patching policy has reached this host yet");
+                dialogs::notify("Kintsugi Patching", "Waiting for this fleet's patching policy from the server.");
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                // As in `run_scheduler`: the sender lives in tray_menu for the life of the process,
+                // so this should never happen, but polling beats spinning on an instant error.
+                logging::error("menu action channel disconnected unexpectedly");
+                std::thread::sleep(AGENT_POLL_INTERVAL);
+            }
+        }
+
+        refresh_identity(agent_identity, client);
+        // Without an identity a fetch can only draw nginx's 403, once a minute, into agent.log —
+        // noise rather than news. The cache is still worth a look: it costs a file read.
+        let policy = if agent_identity.is_some() {
+            policy::load_or_fetch(client, config, policy_cache_path)
+        } else {
+            policy::load_cached(policy_cache_path)
+        };
+        if let Some(policy) = policy {
+            logging::info("patching policy available; scheduling resumes");
+            return policy;
+        }
+    }
+}
+
+/// Re-reads the identity the root daemon writes, and rebuilds `client` around it whenever it has
+/// appeared or changed since this process last looked.
+///
+/// The rebuild is the half that was missing. `run_scheduler` already re-read the identity every
+/// tick, and logged that it was "now available" — but the client it kept using had been built at
+/// startup without one, so every request still went out with no certificate and nginx still
+/// answered 403. Only `Patch Now`'s guard noticed the identity at all.
+///
+/// *Changed*, not just appeared, because the same trap has a second door. Recovering from a
+/// regenerated CA means deleting `identity/` and letting the daemon enroll again (see
+/// `clients/macos-agent/CLAUDE.md`), and a per-user process that only ever filled an empty slot
+/// would go on presenting the old certificate — one nginx no longer trusts — for the rest of its
+/// life, which is the same silent 403 until somebody restarts it. Three small file reads a minute
+/// is the whole cost of watching for that. See `identity_to_adopt` for the decision itself.
+///
+/// `identity::enroll` writes its files one after another rather than atomically, so a tick can
+/// read a new certificate beside the old key. That is self-correcting rather than dangerous: the
+/// torn pair either fails to build (logged, nothing adopted) or builds a client that fails its
+/// handshakes, and the next tick reads the finished set, sees it differ again and adopts that.
+/// A client that will not build is never adopted, so this process never claims an identity its
+/// client is not actually presenting.
+fn refresh_identity(agent_identity: &mut Option<identity::AgentIdentity>, client: &mut reqwest::blocking::Client) {
+    let Some(found) = identity_to_adopt(agent_identity.as_ref(), identity::load(&config::identity_dir())) else { return };
+    match identity::build_client(UI_AGENT_HTTP_TIMEOUT, Some(&found)) {
+        Ok(rebuilt) => {
+            logging::info(if agent_identity.is_some() {
+                "agent identity changed on disk (the root daemon must have re-enrolled); now presenting the new certificate"
+            } else {
+                "agent identity now available (the root daemon must have enrolled since this process started)"
+            });
+            *client = rebuilt;
+            *agent_identity = Some(found);
+        }
+        Err(err) => logging::warn(&format!("found an agent identity but could not build a client with it: {err:#}")),
+    }
+}
+
+/// What `refresh_identity` should switch to, given what it holds and what is on disk now — `None`
+/// for "keep what you have".
+///
+/// Nothing on disk while something is held is deliberately *not* a reason to drop it: that is the
+/// moment between deleting `identity/` and the daemon's enrollment finishing, and the old
+/// certificate is no worse than none for the minute or so it lasts. It is also what an unreadable
+/// key looks like, and throwing away a working client over a permissions blip would be worse.
+fn identity_to_adopt(
+    held: Option<&identity::AgentIdentity>,
+    on_disk: Option<identity::AgentIdentity>,
+) -> Option<identity::AgentIdentity> {
+    match (held, on_disk) {
+        (_, None) => None,
+        (Some(held), Some(found)) if *held == found => None,
+        (_, Some(found)) => Some(found),
+    }
+}
+
+/// Puts the root daemon's hourly minute back on the menu's "Next check-in" line, which also
+/// un-greys both actions after a `CheckInStatus::InProgress`. `run_scheduler` gets this for free by
+/// clearing `shown_check_in` and letting its next tick recompute; the wait above has no such tick.
+fn show_scheduled_check_in() {
+    tray_menu::report_check_in(CheckInStatus::Scheduled {
+        next_epoch: checkin_schedule::next_check_in_epoch(&config::checkin_schedule_path()),
+    });
 }
 
 
@@ -843,7 +1039,7 @@ fn prompt_can_be_seen(held_for: &mut Option<String>) -> bool {
 /// step entirely (see `patch_cycle::run_now`). A "Check In Now" click goes to the root daemon
 /// through the queue (see `checkin_schedule::request_now`).
 fn run_scheduler(
-    client: reqwest::blocking::Client,
+    mut client: reqwest::blocking::Client,
     config: Config,
     mut current_policy: policy::PatchingPolicy,
     state: ScheduleState,
@@ -854,9 +1050,12 @@ fn run_scheduler(
     // unenrolled either: the root daemon enrolls independently and asynchronously, and this
     // per-user process is long-running (KeepAlive), so it can easily already be up and running
     // from before the daemon ever got there (first boot, a delayed enrollment token, ...). So
-    // when this is `None`, the loop below re-checks disk on every tick rather than giving up for
+    // the loop below re-checks disk on every tick rather than giving up for
     // the rest of this process's life — cheap (a few local file reads, no network) next to the
     // alternative of the menu bar silently refusing to work until someone thinks to restart it.
+    // `wait_for_policy` has usually picked it up already; and finding it means rebuilding `client`
+    // too, which is why the two travel together through `refresh_identity` — which also notices a
+    // re-enrollment replacing an identity this process already holds.
     mut agent_identity: Option<identity::AgentIdentity>,
     policy_cache_path: std::path::PathBuf,
     menu_rx: mpsc::Receiver<MenuAction>,
@@ -912,12 +1111,7 @@ fn run_scheduler(
             }
         }
 
-        if agent_identity.is_none() {
-            agent_identity = identity::load(&config::identity_dir());
-            if agent_identity.is_some() {
-                logging::info("agent identity now available (the root daemon must have enrolled since this process started)");
-            }
-        }
+        refresh_identity(&mut agent_identity, &mut client);
 
         if policy::is_stale(&current_policy, POLICY_REFRESH_INTERVAL) {
             if let Some(refreshed) = policy::load_or_fetch(&client, &config, &policy_cache_path) {
@@ -1185,4 +1379,78 @@ fn post_with_retry<T: Serialize, R: serde::de::DeserializeOwned>(client: &reqwes
         "failed after {MAX_ATTEMPTS} attempts: {}",
         last_error.map(|e| e.to_string()).unwrap_or_default()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> std::result::Result<Mode, String> {
+        parse_mode(&args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn every_launchd_job_command_line_is_accepted() {
+        assert_eq!(parse(&[]), Ok(Mode::Daemon));
+        assert_eq!(parse(&["--agent"]), Ok(Mode::UiAgent));
+        assert_eq!(parse(&["--remote-shell"]), Ok(Mode::RemoteShell));
+    }
+
+    #[test]
+    fn version_is_its_own_mode() {
+        assert_eq!(parse(&["--version"]), Ok(Mode::Version));
+    }
+
+    /// Each of these used to fall through to the root check-in — see `parse_mode`.
+    #[test]
+    fn anything_else_is_refused_rather_than_run_as_a_check_in() {
+        for args in [
+            &["-v"][..],
+            &["-V"],
+            &["--help"],
+            &["version"],
+            &["--agnet"],
+            &[""],
+            &["--agent", "--remote-shell"],
+            &["--agent", "--version"],
+            &["--remote-shell", "extra"],
+        ] {
+            assert!(parse(args).is_err(), "{args:?} should have been refused");
+        }
+    }
+
+    fn identity(certificate: &str) -> identity::AgentIdentity {
+        identity::AgentIdentity {
+            certificate_pem: certificate.to_string(),
+            private_key_pem: "key".to_string(),
+            artifact_signing_public_key_pem: "pub".to_string(),
+        }
+    }
+
+    #[test]
+    fn an_identity_appearing_is_adopted() {
+        assert_eq!(identity_to_adopt(None, Some(identity("new"))), Some(identity("new")));
+    }
+
+    #[test]
+    fn nothing_on_disk_is_nothing_to_adopt() {
+        assert_eq!(identity_to_adopt(None, None), None);
+    }
+
+    #[test]
+    fn the_identity_already_held_is_not_adopted_again() {
+        assert_eq!(identity_to_adopt(Some(&identity("same")), Some(identity("same"))), None);
+    }
+
+    /// The CA-regeneration case: `identity/` deleted and enrolled again under this process.
+    #[test]
+    fn a_re_enrollment_replaces_the_held_identity() {
+        assert_eq!(identity_to_adopt(Some(&identity("old")), Some(identity("new"))), Some(identity("new")));
+    }
+
+    /// Mid re-enrollment, or a key that could not be read: keep the client that works.
+    #[test]
+    fn an_identity_vanishing_from_disk_keeps_the_one_held() {
+        assert_eq!(identity_to_adopt(Some(&identity("old")), None), None);
+    }
 }

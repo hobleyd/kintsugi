@@ -207,7 +207,15 @@ GoRouter createRouter(SessionBloc sessionBloc) {
             path: Routes.settingsAuthentication,
             builder: (_, _) => const AuthenticationSettingsScreen(),
           ),
-          GoRoute(path: Routes.settingsGitHub, builder: (_, _) => const GitHubSettingsScreen()),
+          GoRoute(
+            path: Routes.settingsGitHub,
+            // Both are set only by the server's GitHub App redirects (GitHubAppController), which
+            // land the browser back here mid-flow.
+            builder: (_, state) => GitHubSettingsScreen(
+              appError: state.uri.queryParameters['githubAppError'],
+              appInstalled: state.uri.queryParameters['githubApp'] == 'installed',
+            ),
+          ),
           GoRoute(
             path: Routes.settingsPatchingPolicy,
             builder: (_, _) => const PatchingPolicySettingsScreen(),

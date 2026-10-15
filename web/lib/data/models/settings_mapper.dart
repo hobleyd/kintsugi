@@ -70,6 +70,15 @@ GitHubSettings gitHubSettingsFromJson(Map<String, dynamic> json) => GitHubSettin
       isScriptApprovalRepositoryDefault: json['isScriptApprovalRepositoryDefault'] as bool? ?? false,
       hasApiToken: json['hasApiToken'] as bool? ?? false,
       hasScriptApprovalToken: json['hasScriptApprovalToken'] as bool? ?? false,
+      gitHubAppSlug: json['gitHubAppSlug'] as String?,
+      gitHubAppOwner: json['gitHubAppOwner'] as String?,
+      isGitHubAppInstalled: json['isGitHubAppInstalled'] as bool? ?? false,
+    );
+
+/// Reads a `GitHubAppManifestDto`.
+GitHubAppManifest gitHubAppManifestFromJson(Map<String, dynamic> json) => GitHubAppManifest(
+      createUrl: json['createUrl'] as String? ?? '',
+      manifest: json['manifest'] as String? ?? '',
     );
 
 /// Reads a `VantaSettingsDto`.

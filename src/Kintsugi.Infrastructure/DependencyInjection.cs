@@ -11,6 +11,7 @@ using Kintsugi.Infrastructure.Persistence;
 using Kintsugi.Infrastructure.Persistence.Repositories;
 using Kintsugi.Infrastructure.Security;
 using Kintsugi.Infrastructure.Storage;
+using Kintsugi.Infrastructure.GitHubApp;
 using Kintsugi.Infrastructure.Vanta;
 using Kintsugi.Infrastructure.Vulnerabilities;
 
@@ -43,6 +44,12 @@ public static class DependencyInjection
         // Scoped, and read per call by every GitHub client — see GitHubSettings for why none of them
         // may capture these values in a constructor any more.
         services.AddScoped<IGitHubSettingsProvider, GitHubSettingsProvider>();
+        // The GitHub App that, once installed, replaces both stored tokens. The token cache is a
+        // singleton beside a transient typed client for the reason VantaAccessTokenProvider is: every
+        // consumer reads through the scoped provider above per call, and minting on each of those
+        // would spend a GitHub round trip on every page load.
+        services.AddHttpClient<IGitHubAppClient, GitHubAppClient>();
+        services.AddSingleton<GitHubAppTokenProvider>();
         services.AddScoped<IAuthenticationSettingsRepository, AuthenticationSettingsRepository>();
         services.AddScoped<IAuditSettingsRepository, AuditSettingsRepository>();
         services.AddScoped<IVantaSettingsRepository, VantaSettingsRepository>();

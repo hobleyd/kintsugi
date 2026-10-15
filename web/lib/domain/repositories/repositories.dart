@@ -350,6 +350,14 @@ abstract interface class GitHubSettingsRepository {
     required String? scriptApprovalToken,
     required bool clearScriptApprovalToken,
   });
+
+  /// Fetches a manifest for [organization] (blank for the administrator's own account) and
+  /// navigates the whole page to GitHub with it — GitHub has the administrator confirm the App
+  /// before creating it, so this leaves the app, and comes back through the server's callback.
+  Future<void> startGitHubAppSetup({required String? organization, required String? name});
+
+  /// Forgets the connected App; the stored tokens apply again.
+  Future<GitHubSettings> disconnectGitHubApp();
 }
 
 abstract interface class PatchingPolicySettingsRepository {

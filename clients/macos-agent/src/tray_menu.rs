@@ -33,6 +33,10 @@ struct MenuState {
     // button that did nothing and then, minutes later, did something unasked.
     patching: bool,
     checking_in: bool,
+    // Set while `AgentStatus::WaitingForPolicy` is showing, and the one place the two actions
+    // diverge: there is no schedule to patch against, but a check-in is what enrolls a host that
+    // has not yet managed to, so that item has to stay live or the state has no exit but waiting.
+    awaiting_policy: bool,
 
     // The remote control block. Held rather than rebuilt because these three are inserted into and
     // removed from the menu as sessions come and go — a permanent "Remote session: none" line would
@@ -48,7 +52,7 @@ impl MenuState {
     fn refresh_actions(&self) {
         let enabled = !self.patching && !self.checking_in;
         self.check_in_now_item.set_enabled(enabled);
-        self.patch_now_item.set_enabled(enabled);
+        self.patch_now_item.set_enabled(enabled && !self.awaiting_policy);
     }
 }
 
@@ -128,6 +132,11 @@ pub fn report_status(status: AgentStatus) {
                     state.progress_item.set_text("Status: idle");
                     state.patching = false;
                 }
+                AgentStatus::WaitingForPolicy => {
+                    state.status_item.set_text("Next patch due: not scheduled yet");
+                    state.progress_item.set_text("Status: waiting for the patching policy");
+                    state.patching = false;
+                }
                 // Greyed like `Patching` via the same flag, but with the progress window left
                 // closed below: a prompt awaiting an answer is not progress, and a window claiming
                 // otherwise would be sitting on top of the dialog it is describing.
@@ -154,6 +163,7 @@ pub fn report_status(status: AgentStatus) {
                         .set_text(format!("Progress: {}", crate::dialogs::progress_bar(usize::from(*percent), 100)));
                 }
             }
+            state.awaiting_policy = matches!(status, AgentStatus::WaitingForPolicy);
             state.refresh_actions();
         });
 
@@ -166,7 +176,10 @@ pub fn report_status(status: AgentStatus) {
             // about has no claim on the screen, and one that floated up for an hour would be a
             // worse nuisance than the greyed menu this replaced. The menu bar line is where it
             // belongs, for whoever goes looking.
-            AgentStatus::Idle { .. } | AgentStatus::AwaitingAnswer | AgentStatus::PreFetching { .. } => {
+            AgentStatus::Idle { .. }
+            | AgentStatus::WaitingForPolicy
+            | AgentStatus::AwaitingAnswer
+            | AgentStatus::PreFetching { .. } => {
                 crate::progress_window::hide()
             }
             AgentStatus::Patching { current, completed, total } => {
@@ -310,6 +323,7 @@ fn build_tray_icon() -> Result<MenuState> {
         patch_now_item,
         patching: false,
         checking_in: false,
+        awaiting_policy: false,
         menu,
         remote_session_item,
         end_remote_session_item,

@@ -466,6 +466,23 @@ namespace Kintsugi.Infrastructure.Persistence.Migrations
                     b.Property<DateTimeOffset>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<long?>("GitHubAppId")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("GitHubAppInstallationId")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("GitHubAppOwner")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("GitHubAppPrivateKey")
+                        .HasColumnType("text");
+
+                    b.Property<string>("GitHubAppSlug")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
                     b.Property<string>("ScriptApprovalRepository")
                         .HasMaxLength(255)
                         .HasColumnType("character varying(255)");

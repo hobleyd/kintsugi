@@ -158,6 +158,23 @@ class UpdateGitHubSettings {
       );
 }
 
+class StartGitHubAppSetup {
+  const StartGitHubAppSetup(this._repository);
+
+  final GitHubSettingsRepository _repository;
+
+  Future<void> call({required String? organization, required String? name}) =>
+      _repository.startGitHubAppSetup(organization: organization, name: name);
+}
+
+class DisconnectGitHubApp {
+  const DisconnectGitHubApp(this._repository);
+
+  final GitHubSettingsRepository _repository;
+
+  Future<GitHubSettings> call() => _repository.disconnectGitHubApp();
+}
+
 class GetVantaSettings {
   const GetVantaSettings(this._repository);
 
