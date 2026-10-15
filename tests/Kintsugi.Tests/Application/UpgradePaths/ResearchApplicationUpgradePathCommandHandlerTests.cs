@@ -68,7 +68,7 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
         Assert.Contains("APP_NAME=\"$2\"", result.Script);
         // brew update runs first — it is Homebrew's own self-update as well as the index refresh —
         // so the upgrade isn't acting on a stale formula/cask index (see HomebrewUpgradeScript).
-        Assert.Contains("\nbrew update\n", result.Script);
+        Assert.Contains("\nbrew_update\n", result.Script);
         Assert.Contains("brew upgrade \"$APP_NAME\"", result.Script);
         Assert.Contains("--update-version", result.Script);
         Assert.Equal("128.0", result.LatestVersion);

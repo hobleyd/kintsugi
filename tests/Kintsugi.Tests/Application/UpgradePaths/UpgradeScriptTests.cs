@@ -107,7 +107,7 @@ public class UpgradeScriptTests
         // `brew update` is Homebrew's own self-update as well as the index refresh, and it runs
         // unconditionally before the per-application upgrade — so every application upgrade brings
         // Homebrew along, and Homebrew's row needs nothing more.
-        var update = script.IndexOf("\nbrew update\n", StringComparison.Ordinal);
+        var update = script.IndexOf("\nbrew_update\n", StringComparison.Ordinal);
         var upgrade = script.IndexOf("brew upgrade \"$APP_NAME\"", StringComparison.Ordinal);
         Assert.True(update >= 0, "brew update must run on its own line");
         Assert.True(upgrade > update, "brew update must precede the per-application upgrade");
@@ -116,6 +116,19 @@ public class UpgradeScriptTests
         // manager's row, approved or not. Each application has a row of its own for that.
         Assert.DoesNotContain("brew upgrade\n", script);
         Assert.DoesNotContain("brew update && brew upgrade\n", script);
+    }
+
+    [Fact]
+    public void HomebrewScript_WaitsOutAnotherBrewUpdate_ButFailsOnAnythingElse()
+    {
+        var script = HomebrewUpgradeScript.Build();
+
+        // A concurrent `brew update` (the user's own, a `brew autoupdate` job) holds Homebrew's lockf
+        // and makes ours fail at once; that is retried, bounded. Any other failure is not.
+        Assert.Contains("if output=$(brew update 2>&1); then", script);
+        Assert.Contains("*\"process is already running\"*) ;;", script);
+        Assert.Contains("*) return 1 ;;", script);
+        Assert.Contains("sleep 30", script);
     }
 
     [Fact]

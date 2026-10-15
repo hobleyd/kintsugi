@@ -137,7 +137,33 @@ public static class HomebrewUpgradeScript
             # acts on a stale catalog and reports "already up to date" for a version released since the
             # index was last refreshed. So every application upgrade brings Homebrew along, and for
             # Homebrew's own row it is the whole upgrade: the applications each have a row of their own.
-            brew update
+            #
+            # Homebrew serializes `brew update` with a lockf on its prefix, and a second one fails at
+            # once ("Another `brew update` process is already running") rather than waiting. The
+            # agent only ever runs one patch at a time, so the holder is something else on the Mac —
+            # the user's own brew, a `brew autoupdate` job, brew's auto-update inside a terminal
+            # `brew install` — and it finishes in a minute or so. Failing on it turned that into a
+            # patch failure that the next cycle would simply have succeeded at, so wait it out,
+            # bounded, and fail immediately on anything else.
+            brew_update() {
+              local attempt output
+              for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+                if output=$(brew update 2>&1); then
+                  printf '%s\n' "$output"
+                  return 0
+                fi
+                printf '%s\n' "$output" >&2
+                case "$output" in
+                  *"process is already running"*) ;;
+                  *) return 1 ;;
+                esac
+                echo "another brew update holds Homebrew's lock; retrying in 30s (attempt $attempt of 20)" >&2
+                sleep 30
+              done
+              return 1
+            }
+
+            brew_update
 
             if is_homebrew_itself; then
               exit 0
