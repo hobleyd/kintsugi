@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::net::UdpSocket;
+use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -863,8 +864,47 @@ fn run_package_manager(program: &str, args: &[&str]) -> Option<String> {
     }
 }
 
+/// Where to run winget from. `winget` on PATH is a per-user App Execution Alias
+/// (`%LOCALAPPDATA%\Microsoft\WindowsApps\winget.exe`), so the SYSTEM service — which is what runs
+/// every scheduled check-in — has no `winget` on its PATH at all, and the scan used to come back
+/// empty without a word: no winget row, no winget-managed packages, and "Not checked yet" for
+/// every one of them. SYSTEM can, however, list `Program Files\WindowsApps` (administrators
+/// cannot), so the real binary inside the newest App Installer package is used when it exists,
+/// falling back to the bare name for an interactive or otherwise PATH-equipped caller.
+fn winget_program() -> String {
+    find_packaged_winget().map(|path| path.to_string_lossy().into_owned()).unwrap_or_else(|| "winget".to_string())
+}
+
+fn find_packaged_winget() -> Option<PathBuf> {
+    let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
+    let windows_apps = program_files.join("WindowsApps");
+    let names: Vec<String> = std::fs::read_dir(&windows_apps)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    newest_app_installer_dir(names.iter().map(String::as_str))
+        .map(|name| windows_apps.join(name).join("winget.exe"))
+        .filter(|exe| exe.is_file())
+}
+
+/// Picks the newest `Microsoft.DesktopAppInstaller_<version>_<arch>__8wekyb3d8bbwe` directory name
+/// for this machine's architecture family (x64 or arm64), comparing versions numerically.
+fn newest_app_installer_dir<'a>(names: impl Iterator<Item = &'a str>) -> Option<&'a str> {
+    names
+        .filter_map(|name| {
+            let rest = name.strip_prefix("Microsoft.DesktopAppInstaller_")?;
+            let version = rest.strip_suffix("_x64__8wekyb3d8bbwe").or_else(|| rest.strip_suffix("_arm64__8wekyb3d8bbwe"))?;
+            let key: Vec<u64> = version.split('.').map(|part| part.parse().ok()).collect::<Option<_>>()?;
+            Some((key, name))
+        })
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, name)| name)
+}
+
 fn scan_winget() -> PackageManagerScan {
-    let Some(version_output) = run_package_manager("winget", &["--version"]) else {
+    let winget = winget_program();
+    let Some(version_output) = run_package_manager(&winget, &["--version"]) else {
         return empty_scan();
     };
 
@@ -886,7 +926,7 @@ fn scan_winget() -> PackageManagerScan {
     // "Name Id Version Available Source" column layout, which is the only machine-readable form
     // winget offers — it has no JSON output mode.
     if let Some(listing) = run_package_manager(
-        "winget",
+        &winget,
         &["list", "--accept-source-agreements", "--disable-interactivity"],
     ) {
         for package in parse_winget_list(&listing) {
@@ -1080,6 +1120,34 @@ fn parse_choco_outdated(output: &str) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn newest_app_installer_dir_picks_the_highest_version_numerically() {
+        let names = [
+            "Microsoft.DesktopAppInstaller_1.9.25200.0_x64__8wekyb3d8bbwe",
+            "Microsoft.DesktopAppInstaller_1.29.380.0_x64__8wekyb3d8bbwe",
+            "Microsoft.DesktopAppInstaller_1.29.380.0_neutral_~_8wekyb3d8bbwe",
+            "Microsoft.WindowsTerminal_1.21.0.0_x64__8wekyb3d8bbwe",
+        ];
+        assert_eq!(
+            newest_app_installer_dir(names.iter().copied()),
+            Some("Microsoft.DesktopAppInstaller_1.29.380.0_x64__8wekyb3d8bbwe")
+        );
+    }
+
+    #[test]
+    fn newest_app_installer_dir_accepts_arm64_and_ignores_unrelated_or_malformed_names() {
+        let names = [
+            "Microsoft.DesktopAppInstaller_1.29.380.0_arm64__8wekyb3d8bbwe",
+            "Microsoft.DesktopAppInstaller_notaversion_x64__8wekyb3d8bbwe",
+            "Contoso.DesktopAppInstaller_9.9.9.9_x64__8wekyb3d8bbwe",
+        ];
+        assert_eq!(
+            newest_app_installer_dir(names.iter().copied()),
+            Some("Microsoft.DesktopAppInstaller_1.29.380.0_arm64__8wekyb3d8bbwe")
+        );
+        assert_eq!(newest_app_installer_dir(std::iter::empty()), None);
+    }
 
     #[test]
     fn is_usable_serial_number_accepts_a_real_serial() {
