@@ -79,13 +79,47 @@ public static class WingetUpgradeScript
             }
             """;
 
+        // The agent runs --update as SYSTEM, and SYSTEM has no `winget` on PATH: the one on PATH is a
+        // per-user App Execution Alias (%LOCALAPPDATA%\Microsoft\WindowsApps\winget.exe). So, like
+        // the Windows agent's system_info::find_packaged_winget, run the real binary inside the
+        // newest App Installer package under Program Files\WindowsApps — a directory only
+        // TrustedInstaller can write to, which is also why it is preferred over anything on PATH.
+        // Without this, the agent seeing winget (windows-agent 0.12.2) would turn every
+        // winget-managed application into a failed patch.
+        //
+        // Two refinements on the agent's version: a folder is only a candidate if winget.exe is
+        // actually in it, so a half-removed newest package falls back to the next one rather than
+        // to PATH, and the host's own architecture wins a tie between x64 and arm64 packages.
+        // The bare name remains the last resort, for an interactive or otherwise PATH-equipped
+        // caller.
+        const string wingetResolution = """
+            function Resolve-Winget {
+                $nativeArch = if ($env:PROCESSOR_ARCHITECTURE -ieq 'ARM64') { 'arm64' } else { 'x64' }
+                $windowsApps = Join-Path $env:ProgramFiles 'WindowsApps'
+                $packaged = @(Get-ChildItem -LiteralPath $windowsApps -Directory -ErrorAction SilentlyContinue | ForEach-Object {
+                    if ($_.Name -match '^Microsoft\.DesktopAppInstaller_(\d+(?:\.\d+)*)_(x64|arm64)__8wekyb3d8bbwe$') {
+                        $exe = Join-Path $_.FullName 'winget.exe'
+                        if (Test-Path -LiteralPath $exe -PathType Leaf) {
+                            [pscustomobject]@{ Path = $exe; Native = ($Matches[2] -eq $nativeArch); Version = (ConvertTo-SortableVersion $Matches[1]) }
+                        }
+                    }
+                })
+                if ($packaged.Count -gt 0) {
+                    return ($packaged | Sort-Object -Property @{ Expression = 'Native'; Descending = $true }, @{ Expression = 'Version'; Descending = $true } | Select-Object -First 1).Path
+                }
+                $onPath = Get-Command winget -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($onPath) { return $onPath.Source }
+                return $null
+            }
+            """;
+
         // --exact so a partial id match can never upgrade a different package, and every
         // interactivity/agreement flag winget needs to run unattended — without them it blocks
         // forever waiting on a prompt no one will ever see. winget's own row upgrades App Installer,
         // which is the package winget actually ships in.
         const string updateCommand = """
             $upgradeId = if (Test-IsWingetItself) { 'Microsoft.AppInstaller' } else { $AppId }
-            winget upgrade --exact --id $upgradeId --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+            & $winget upgrade --exact --id $upgradeId --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
             """;
 
         return $$"""
@@ -100,6 +134,8 @@ public static class WingetUpgradeScript
             {{PowerShellUpgradeScript.ArgumentParsing}}
 
             {{latestVersionLogic}}
+
+            {{wingetResolution}}
 
             if ($Mode -eq 'update-version') {
                 try {
@@ -117,7 +153,8 @@ public static class WingetUpgradeScript
             }
 
             # --update mode: runs on the managed Windows host itself, where winget actually exists.
-            if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+            $winget = Resolve-Winget
+            if (-not $winget) {
                 [Console]::Error.WriteLine('winget is not installed (it ships with App Installer, from the Microsoft Store)')
                 exit 1
             }
