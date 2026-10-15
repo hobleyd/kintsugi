@@ -43,6 +43,12 @@ public class EnrollAgentCommandValidatorTests
     [InlineData("abc+CN=evil")]
     [InlineData("abc/../etc")]
     [InlineData("abc CN=evil")]
+    [InlineData("/abc")]
+    [InlineData("abc/")]
+    [InlineData("abc//def")]
+    [InlineData("abc/.hidden")]
+    [InlineData("abc./def")]
+    [InlineData("a..b/c")]
     public void SerialNumber_WithCharactersUnsafeForADistinguishedName_IsRejected(string serialNumber)
     {
         var result = _validator.TestValidate(ValidCommand(serialNumber: serialNumber));
@@ -53,6 +59,7 @@ public class EnrollAgentCommandValidatorTests
     [Theory]
     [InlineData("SERIAL-123")]
     [InlineData("C02.ABC123_xyz")]
+    [InlineData("B709098/002")]
     public void SerialNumber_WithOnlySafeCharacters_IsAccepted(string serialNumber)
     {
         var result = _validator.TestValidate(ValidCommand(serialNumber: serialNumber));
