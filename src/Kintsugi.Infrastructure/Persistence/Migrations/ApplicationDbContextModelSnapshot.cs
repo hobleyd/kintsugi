@@ -115,9 +115,114 @@ namespace Kintsugi.Infrastructure.Persistence.Migrations
                     b.Property<DateTimeOffset?>("UpdatedAtUtc")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("WebSearchApiKey")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<string>("WebSearchBackend")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasDefaultValue("None");
+
+                    b.Property<string>("WebSearchBaseUrl")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
                     b.HasKey("Id");
 
                     b.ToTable("ai_agent_settings", "patching");
+                });
+
+            modelBuilder.Entity("Kintsugi.Domain.Entities.AiConnection", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ApiKey")
+                        .HasMaxLength(1024)
+                        .HasColumnType("character varying(1024)");
+
+                    b.Property<string>("AuthMode")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("BaseUrl")
+                        .HasMaxLength(512)
+                        .HasColumnType("character varying(512)");
+
+                    b.Property<string>("CatalogProviderId")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("GoogleCloudLocation")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("GoogleCloudProject")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)");
+
+                    b.Property<string>("Protocol")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<DateTimeOffset?>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("UseHostedWebSearch")
+                        .HasColumnType("boolean");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("ai_connections", "patching");
+                });
+
+            modelBuilder.Entity("Kintsugi.Domain.Entities.AiFeatureRoute", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("ConnectionId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTimeOffset>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Feature")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<string>("Model")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTimeOffset?>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ConnectionId");
+
+                    b.HasIndex("Feature")
+                        .IsUnique();
+
+                    b.ToTable("ai_feature_routes", "patching");
                 });
 
             modelBuilder.Entity("Kintsugi.Domain.Entities.ApprovedScript", b =>
@@ -1303,6 +1408,32 @@ namespace Kintsugi.Infrastructure.Persistence.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("vulnerability_settings", "patching");
+                });
+
+            modelBuilder.Entity("Kintsugi.Infrastructure.Ai.AiCatalogCacheEntry", b =>
+                {
+                    b.Property<int>("Id")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTimeOffset>("FetchedAtUtc")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Json")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.HasKey("Id");
+
+                    b.ToTable("ai_catalog_cache", "patching");
+                });
+
+            modelBuilder.Entity("Kintsugi.Domain.Entities.AiFeatureRoute", b =>
+                {
+                    b.HasOne("Kintsugi.Domain.Entities.AiConnection", null)
+                        .WithMany()
+                        .HasForeignKey("ConnectionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("Kintsugi.Domain.Entities.CpeAssessment", b =>

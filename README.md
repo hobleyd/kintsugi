@@ -176,8 +176,11 @@ host runs as root, is then open to anyone who can reach it.
 The remaining settings screens are alphabetical in the sidebar and independent of each other:
 
 * **AI Agent** — which provider researches unknown upgrade paths: Anthropic API, OpenAI, Ollama,
-  Goose, or the Claude Agent SDK (the `claude` CLI, which spends a Claude subscription's included
-  usage rather than metered API credits). Nothing is researched until one is configured.
+  Goose, the Claude Agent SDK (the `claude` CLI, which spends a Claude subscription's included
+  usage rather than metered API credits), or **Routed** — any provider in the models.dev catalog
+  or any OpenAI-compatible endpoint (Vertex AI with no stored key under Workload Identity,
+  OpenRouter, LiteLLM, Groq, Azure, …), with each feature routed to its own model and web search
+  for models that have none of their own. Nothing is researched until one is configured.
 * **GitHub** — which repository agent builds are pulled from and which repository approved scripts
   are shared through, and the credentials for each: either **Create GitHub App**, which has this
   server create and install an App for itself and mint short-lived tokens from it (owned by the

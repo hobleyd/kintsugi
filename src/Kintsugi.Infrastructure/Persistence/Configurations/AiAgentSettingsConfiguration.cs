@@ -17,5 +17,9 @@ public class AiAgentSettingsConfiguration : IEntityTypeConfiguration<AiAgentSett
         builder.Property(s => s.BaseUrl).HasMaxLength(512);
         builder.Property(s => s.Model).HasMaxLength(128);
         builder.Property(s => s.IsEnabled).IsRequired();
+        builder.Property(s => s.WebSearchBackend).HasConversion<string>().HasMaxLength(32).IsRequired()
+            .HasDefaultValue(Kintsugi.Domain.Enums.WebSearchBackend.None);
+        builder.Property(s => s.WebSearchApiKey).HasMaxLength(512);
+        builder.Property(s => s.WebSearchBaseUrl).HasMaxLength(512);
     }
 }

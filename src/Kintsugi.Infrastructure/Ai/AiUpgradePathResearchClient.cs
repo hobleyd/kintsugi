@@ -5,54 +5,45 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Kintsugi.Application.AiSettings;
 using Kintsugi.Application.Common.Exceptions;
 using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Application.UpgradePaths;
 using Kintsugi.Domain.Enums;
+using Kintsugi.Infrastructure.Ai.Engine;
 
 namespace Kintsugi.Infrastructure.Ai;
 
 /// <summary>
 /// Generates each application's durable upgrade script in a single AI call — no separate JSON
-/// research step — by asking the configured AI provider. Anthropic and OpenAI are given their
-/// respective hosted web-search tool, since finding a current version number and download
-/// location is exactly the kind of question a model shouldn't answer from training data alone.
-/// Ollama gets the same capability via Ollama's hosted web search API when the
-/// OLLAMA_WEB_API_KEY configuration value is set: the local model is offered a web_search tool,
-/// and any tool call it makes is executed against that API and fed back for a final answer.
-/// Without that key, Ollama falls back to answering from what it already knows and is told to
-/// flag that plainly as a comment in the script itself — those results should be treated as a
-/// starting point, not a verified fact. Goose is reached over ACP against a `goose serve` instance
-/// rather than a local subprocess — see <see cref="GooseCliClient"/> — since it manages its own
-/// provider/web-search configuration outside this system; the prompt is simply handed to it as-is
-/// and its reply text is treated the same way as any other provider's answer. The Claude Agent SDK
-/// is handled the same way — the prompt goes over whole, and the agent does its own searching with
-/// the WebSearch and WebFetch tools it ships with — but its subprocess *is* in this image; see
-/// <see cref="ClaudeAgentSdkClient"/>, and note that what it authenticates with is a Claude
-/// subscription's OAuth token rather than the metered API key <see cref="AiProvider.Anthropic"/>
-/// uses.
+/// research step. Every provider but the two agents goes through <see cref="AiEngine"/>: one
+/// adapter per wire protocol, one tool loop, and one rule for how a model reaches the web (its own
+/// hosted search where the connection allows it, else Kintsugi's <c>web_search</c>/<c>web_fetch</c>
+/// against the configured backend, else a prompt telling it to flag that it had no web access). The
+/// original single providers — Anthropic, OpenAI, Ollama — are fixed routes on that engine
+/// (<see cref="LegacyRoute"/>) with exactly their old defaults; <see cref="AiProvider.Routed"/>
+/// routes each feature (research, repair, CPE suggestion) to its own connection and model. Goose
+/// and the Claude Agent SDK are agents that do their own searching, so the prompt is handed to them
+/// whole — see <see cref="GooseCliClient"/> and <see cref="ClaudeAgentSdkClient"/>, and note that
+/// the latter authenticates with a Claude subscription's OAuth token rather than an API key.
 /// </summary>
 public class AiUpgradePathResearchClient : IUpgradePathResearchClient, ICpeSuggestionClient
 {
-    private const string OllamaWebSearchUrl = "https://ollama.com/api/web_search";
-
     private static readonly JsonSerializerOptions ModelResultJsonOptions = new(JsonSerializerDefaults.Web);
 
     private readonly HttpClient _httpClient;
-    private readonly IConfiguration _configuration;
+    private readonly AiEngine _engine;
     private readonly IGitHubSettingsProvider _gitHubSettingsProvider;
     private readonly IGooseCliClient _gooseCliClient;
     private readonly IClaudeAgentSdkClient _claudeAgentSdkClient;
     private readonly ILogger<AiUpgradePathResearchClient> _logger;
 
-    public AiUpgradePathResearchClient(HttpClient httpClient, IConfiguration configuration, IGitHubSettingsProvider gitHubSettingsProvider, IGooseCliClient gooseCliClient, IClaudeAgentSdkClient claudeAgentSdkClient, ILogger<AiUpgradePathResearchClient> logger)
+    public AiUpgradePathResearchClient(HttpClient httpClient, AiEngine engine, IGitHubSettingsProvider gitHubSettingsProvider, IGooseCliClient gooseCliClient, IClaudeAgentSdkClient claudeAgentSdkClient, ILogger<AiUpgradePathResearchClient> logger)
     {
         _httpClient = httpClient;
         _httpClient.Timeout = TimeSpan.FromSeconds(300);
-        _configuration = configuration;
+        _engine = engine;
         _gitHubSettingsProvider = gitHubSettingsProvider;
         _gooseCliClient = gooseCliClient;
         _claudeAgentSdkClient = claudeAgentSdkClient;
@@ -121,7 +112,7 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient, ICpeSugge
 
         _logger.LogWarning("Script generated for {ApplicationName} ({Platform}) failed validation, retrying once: {Errors}", request.ApplicationName, request.Platform, errors);
 
-        var fixedScript = CleanScriptText(await AskProviderRawAsync(settings, BuildScriptFixPrompt(request, script, errors!), cancellationToken))
+        var fixedScript = CleanScriptText(await AskProviderRawAsync(settings, AiFeature.ScriptRepair, BuildScriptFixPrompt(request, script, errors!), cancellationToken))
             ?? throw new ExternalServiceException("The model's fix attempt did not contain a usable script.");
 
         // Same check on the repair: a model that disputes the findings answers in prose too, and the
@@ -256,289 +247,59 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient, ICpeSugge
 
     private Task<string> AskProviderWithSearchAsync(AiProviderSettings settings, UpgradePathScriptGenerationRequest request, string? hostingSiteContext, CancellationToken cancellationToken) => settings.Provider switch
     {
-        AiProvider.Anthropic => AskAnthropicWithSearchAsync(settings, request, hostingSiteContext, cancellationToken),
-        AiProvider.OpenAI => AskOpenAiWithSearchAsync(settings, request, hostingSiteContext, cancellationToken),
-        AiProvider.Ollama => AskOllamaWithSearchAsync(settings, request, hostingSiteContext, cancellationToken),
-        AiProvider.GooseCli => _gooseCliClient.RunAsync(ResolvePrompt(request, hostingSiteContext), settings.Model, settings.BaseUrl, cancellationToken),
         // No hosting-site context is stitched in for the two agent providers and no web-search
         // tool is declared: both drive an agent that does its own searching, so the prompt is
         // handed over whole. What ApiKey carries here is an OAuth token, not an API key — see
         // ClaudeAgentSdkClient.
+        AiProvider.GooseCli => _gooseCliClient.RunAsync(ResolvePrompt(request, hostingSiteContext), settings.Model, settings.BaseUrl, cancellationToken),
         AiProvider.ClaudeAgentSdk => _claudeAgentSdkClient.RunAsync(ResolvePrompt(request, hostingSiteContext), settings.Model, settings.ApiKey, cancellationToken),
-        _ => throw new ExternalServiceException($"Unsupported AI provider '{settings.Provider}'.")
+        // Everything else goes through the engine: one route per feature, whichever protocol it
+        // speaks. The three original single providers become fixed routes (LegacyRoute), so their
+        // behaviour — model defaults, hosted search, Ollama's search loop — is unchanged.
+        _ => _engine.ResearchAsync(RouteFor(settings, AiFeature.ScriptResearch), settings.WebSearch, ResolvePrompt(request, hostingSiteContext), ResearchMaxTokens, cancellationToken),
     };
 
-    private Task<string> AskProviderRawAsync(AiProviderSettings settings, string prompt, CancellationToken cancellationToken) => settings.Provider switch
+    private Task<string> AskProviderRawAsync(AiProviderSettings settings, AiFeature feature, string prompt, CancellationToken cancellationToken) => settings.Provider switch
     {
-        AiProvider.Anthropic => AskAnthropicRawAsync(settings, prompt, cancellationToken),
-        AiProvider.OpenAI => AskOpenAiRawAsync(settings, prompt, cancellationToken),
-        AiProvider.Ollama => AskOllamaRawAsync(settings, prompt, cancellationToken),
         AiProvider.GooseCli => _gooseCliClient.RunAsync(prompt, settings.Model, settings.BaseUrl, cancellationToken),
         AiProvider.ClaudeAgentSdk => _claudeAgentSdkClient.RunAsync(prompt, settings.Model, settings.ApiKey, cancellationToken),
-        _ => throw new ExternalServiceException($"Unsupported AI provider '{settings.Provider}'.")
+        _ => _engine.CompleteAsync(RouteFor(settings, feature), prompt, RawMaxTokens(settings), cancellationToken),
     };
 
-    private async Task<string> AskAnthropicWithSearchAsync(AiProviderSettings settings, UpgradePathScriptGenerationRequest request, string? hostingSiteContext, CancellationToken cancellationToken)
+    /// <summary>The output ceiling research has always asked for — Anthropic's required
+    /// <c>max_tokens</c> and OpenAI's <c>max_output_tokens</c>.</summary>
+    private const int ResearchMaxTokens = 8192;
+
+    /// <summary>Plain calls kept the ceilings the per-provider methods had: 4096 for Anthropic
+    /// (which requires one), none for anything else.</summary>
+    private static int? RawMaxTokens(AiProviderSettings settings) =>
+        settings.Provider == AiProvider.Anthropic ? 4096 : null;
+
+    /// <summary>
+    /// The route a feature runs on. In Routed mode, the configured one (with its fallbacks — see
+    /// <see cref="AiProviderSettings.RouteFor"/>); for the three original single providers, a fixed
+    /// route reproducing exactly what their hand-written clients did.
+    /// </summary>
+    public static AiRoute RouteFor(AiProviderSettings settings, AiFeature feature) => settings.Provider switch
     {
-        var payload = new
-        {
-            model = string.IsNullOrWhiteSpace(settings.Model) ? "claude-sonnet-4-5" : settings.Model,
-            max_tokens = 8192,
-            tools = new object[] { new { type = "web_search_20250305", name = "web_search", max_uses = 3 } },
-            messages = new object[] { new { role = "user", content = ResolvePrompt(request, hostingSiteContext) } }
-        };
-
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "https://api.anthropic.com/v1/messages");
-        httpRequest.Headers.Add("x-api-key", settings.ApiKey);
-        httpRequest.Headers.Add("anthropic-version", "2023-06-01");
-        httpRequest.Content = JsonContent.Create(payload);
-
-        using var response = await SendAsync(httpRequest, cancellationToken);
-        var body = await response.Content.ReadFromJsonAsync<AnthropicResponse>(cancellationToken: cancellationToken);
-
-        return string.Join("\n", (body?.Content ?? new())
-            .Where(b => b.Type == "text" && !string.IsNullOrEmpty(b.Text))
-            .Select(b => b.Text));
-    }
-
-    private async Task<string> AskOpenAiWithSearchAsync(AiProviderSettings settings, UpgradePathScriptGenerationRequest request, string? hostingSiteContext, CancellationToken cancellationToken)
-    {
-        var payload = new
-        {
-            model = string.IsNullOrWhiteSpace(settings.Model) ? "gpt-5" : settings.Model,
-            input = ResolvePrompt(request, hostingSiteContext),
-            tools = new object[] { new { type = "web_search_preview" } },
-            max_output_tokens = 8192
-        };
-
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "https://api.openai.com/v1/responses");
-        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", settings.ApiKey);
-        httpRequest.Content = JsonContent.Create(payload);
-
-        using var response = await SendAsync(httpRequest, cancellationToken);
-        var body = await response.Content.ReadFromJsonAsync<OpenAiResponse>(cancellationToken: cancellationToken);
-
-        return string.Join("\n", (body?.Output ?? new())
-            .Where(o => o.Type == "message")
-            .SelectMany(o => o.Content ?? new())
-            .Where(c => c.Type == "output_text" && !string.IsNullOrEmpty(c.Text))
-            .Select(c => c.Text));
-    }
-
-    private async Task<string> AskOllamaWithSearchAsync(AiProviderSettings settings, UpgradePathScriptGenerationRequest request, string? hostingSiteContext, CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(settings.BaseUrl))
-        {
-            throw new ExternalServiceException("No Ollama endpoint URL is configured.");
-        }
-
-        if (!Uri.TryCreate(settings.BaseUrl.TrimEnd('/') + "/api/chat", UriKind.Absolute, out var uri))
-        {
-            throw new ExternalServiceException("The configured Ollama endpoint URL is not valid.");
-        }
-
-        var webSearchApiKey = _configuration["OLLAMA_WEB_API_KEY"];
-        var hasWebSearch = !string.IsNullOrWhiteSpace(webSearchApiKey);
-
-        var basePrompt = ResolvePrompt(request, hostingSiteContext);
-        var prompt = hasWebSearch
-            ? basePrompt +
-                "\n\nUse the web_search tool to confirm the current version and download/release-notes " +
-                "URL before answering — don't rely on training data alone for those."
-            : basePrompt +
-                "\n\nNote: you do not have live web access for this request — write your best script " +
-                "anyway, using what you already know, but add a \"# WARNING: ...\" comment near the top " +
-                "explaining that the version or URL details may be out of date.";
-
-        var messages = new List<object> { new { role = "user", content = prompt } };
-        var tools = hasWebSearch ? BuildOllamaWebSearchTool() : null;
-
-        var body = await SendOllamaChatAsync(uri, settings.Model, messages, tools, format: null, cancellationToken);
-
-        if (hasWebSearch && body?.Message?.ToolCalls is { Count: > 0 } toolCalls)
-        {
-            messages.Add(new
-            {
-                role = "assistant",
-                content = body.Message.Content ?? string.Empty,
-                tool_calls = toolCalls
-                    .Select(call => new { function = new { name = call.Function?.Name, arguments = call.Function?.Arguments } })
-                    .ToList()
-            });
-
-            foreach (var call in toolCalls)
-            {
-                var query = ExtractQueryArgument(call.Function?.Arguments) ?? $"{request.ApplicationName} latest version";
-                var results = await SearchOllamaWebAsync(query, webSearchApiKey!, cancellationToken);
-                messages.Add(new { role = "tool", content = results });
-            }
-
-            body = await SendOllamaChatAsync(uri, settings.Model, messages, tools: null, format: null, cancellationToken);
-        }
-
-        return body?.Message?.Content ?? string.Empty;
-    }
-
-    /// <summary>Plain prompt-in, text-out completions for the one-shot self-correction retry —
-    /// deliberately without the web_search tooling the "with search" methods above use, since
-    /// fixing validation findings in an already-researched script is a code-fix task over facts
-    /// already in the prompt, not a research one.</summary>
-    private async Task<string> AskAnthropicRawAsync(AiProviderSettings settings, string prompt, CancellationToken cancellationToken)
-    {
-        var payload = new
-        {
-            model = string.IsNullOrWhiteSpace(settings.Model) ? "claude-sonnet-4-5" : settings.Model,
-            max_tokens = 4096,
-            messages = new object[] { new { role = "user", content = prompt } }
-        };
-
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "https://api.anthropic.com/v1/messages");
-        httpRequest.Headers.Add("x-api-key", settings.ApiKey);
-        httpRequest.Headers.Add("anthropic-version", "2023-06-01");
-        httpRequest.Content = JsonContent.Create(payload);
-
-        using var response = await SendAsync(httpRequest, cancellationToken);
-        var body = await response.Content.ReadFromJsonAsync<AnthropicResponse>(cancellationToken: cancellationToken);
-
-        return string.Join("\n", (body?.Content ?? new())
-            .Where(b => b.Type == "text" && !string.IsNullOrEmpty(b.Text))
-            .Select(b => b.Text));
-    }
-
-    private async Task<string> AskOpenAiRawAsync(AiProviderSettings settings, string prompt, CancellationToken cancellationToken)
-    {
-        var payload = new
-        {
-            model = string.IsNullOrWhiteSpace(settings.Model) ? "gpt-5" : settings.Model,
-            input = prompt
-        };
-
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "https://api.openai.com/v1/responses");
-        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", settings.ApiKey);
-        httpRequest.Content = JsonContent.Create(payload);
-
-        using var response = await SendAsync(httpRequest, cancellationToken);
-        var body = await response.Content.ReadFromJsonAsync<OpenAiResponse>(cancellationToken: cancellationToken);
-
-        return string.Join("\n", (body?.Output ?? new())
-            .Where(o => o.Type == "message")
-            .SelectMany(o => o.Content ?? new())
-            .Where(c => c.Type == "output_text" && !string.IsNullOrEmpty(c.Text))
-            .Select(c => c.Text));
-    }
-
-    private async Task<string> AskOllamaRawAsync(AiProviderSettings settings, string prompt, CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(settings.BaseUrl))
-        {
-            throw new ExternalServiceException("No Ollama endpoint URL is configured.");
-        }
-
-        if (!Uri.TryCreate(settings.BaseUrl.TrimEnd('/') + "/api/chat", UriKind.Absolute, out var uri))
-        {
-            throw new ExternalServiceException("The configured Ollama endpoint URL is not valid.");
-        }
-
-        var messages = new List<object> { new { role = "user", content = prompt } };
-        var body = await SendOllamaChatAsync(uri, settings.Model, messages, tools: null, format: null, cancellationToken);
-        return body?.Message?.Content ?? string.Empty;
-    }
-
-    private static object[] BuildOllamaWebSearchTool() => new object[]
-    {
-        new
-        {
-            type = "function",
-            function = new
-            {
-                name = "web_search",
-                description = "Search the public web for current information and return matching pages.",
-                parameters = new
-                {
-                    type = "object",
-                    properties = new { query = new { type = "string", description = "The search query." } },
-                    required = new[] { "query" }
-                }
-            }
-        }
+        AiProvider.Routed => settings.RouteFor(feature)
+            ?? throw new ExternalServiceException($"No AI route is configured for {feature}, and nothing it falls back to is either."),
+        _ => LegacyRoute(settings),
     };
 
-    private async Task<OllamaChatResponse?> SendOllamaChatAsync(Uri uri, string? model, List<object> messages, object? tools, string? format, CancellationToken cancellationToken)
+    public static AiRoute LegacyRoute(AiProviderSettings settings) => settings.Provider switch
     {
-        var payload = new Dictionary<string, object?>
-        {
-            ["model"] = model,
-            ["messages"] = messages,
-            ["stream"] = false
-        };
-
-        if (tools is not null)
-        {
-            payload["tools"] = tools;
-        }
-
-        if (format is not null)
-        {
-            payload["format"] = format;
-        }
-
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, uri) { Content = JsonContent.Create(payload) };
-        using var response = await SendAsync(httpRequest, cancellationToken);
-        return await response.Content.ReadFromJsonAsync<OllamaChatResponse>(cancellationToken: cancellationToken);
-    }
-
-    private async Task<string> SearchOllamaWebAsync(string query, string apiKey, CancellationToken cancellationToken)
-    {
-        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, OllamaWebSearchUrl)
-        {
-            Content = JsonContent.Create(new { query, max_results = 5 })
-        };
-        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-
-        using var response = await SendAsync(httpRequest, cancellationToken);
-        var body = await response.Content.ReadFromJsonAsync<OllamaWebSearchResponse>(cancellationToken: cancellationToken);
-
-        var results = (body?.Results ?? new())
-            .Select(r => new { title = r.Title, url = r.Url, content = Truncate(r.Content, 800) });
-
-        return JsonSerializer.Serialize(results, ModelResultJsonOptions);
-    }
-
-    private static string? Truncate(string? text, int maxLength) =>
-        string.IsNullOrEmpty(text) || text.Length <= maxLength ? text : text[..maxLength];
-
-    private static string? ExtractQueryArgument(JsonElement? arguments)
-    {
-        if (arguments is not { ValueKind: JsonValueKind.Object } element)
-        {
-            return null;
-        }
-
-        return element.TryGetProperty("query", out var value) && value.ValueKind == JsonValueKind.String
-            ? value.GetString()
-            : null;
-    }
-
-    private async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
-    {
-        HttpResponseMessage response;
-        try
-        {
-            response = await _httpClient.SendAsync(request, cancellationToken);
-        }
-        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
-        {
-            throw new ExternalServiceException($"Could not reach the AI provider: {ex.Message}", ex);
-        }
-
-        if (!response.IsSuccessStatusCode)
-        {
-            var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
-            throw new ExternalServiceException($"AI provider request failed (HTTP {(int)response.StatusCode}): {errorBody}");
-        }
-
-        return response;
-    }
+        AiProvider.Anthropic => new AiRoute(
+            new AiConnectionSettings("Anthropic", AiWireProtocol.Anthropic, null, AiAuthMode.ApiKey, settings.ApiKey, null, null, UseHostedWebSearch: true),
+            string.IsNullOrWhiteSpace(settings.Model) ? "claude-sonnet-4-5" : settings.Model),
+        AiProvider.OpenAI => new AiRoute(
+            new AiConnectionSettings("OpenAI", AiWireProtocol.OpenAiResponses, null, AiAuthMode.ApiKey, settings.ApiKey, null, null, UseHostedWebSearch: true),
+            string.IsNullOrWhiteSpace(settings.Model) ? "gpt-5" : settings.Model),
+        AiProvider.Ollama => new AiRoute(
+            new AiConnectionSettings("Ollama", AiWireProtocol.Ollama, settings.BaseUrl, AiAuthMode.None, null, null, null, UseHostedWebSearch: false),
+            settings.Model ?? string.Empty),
+        _ => throw new ExternalServiceException($"Unsupported AI provider '{settings.Provider}'."),
+    };
 
     /// <summary>
     /// Searches GitHub and GitLab's public repository-search APIs for the application, so the model
@@ -1531,7 +1292,7 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient, ICpeSugge
         // it invites a confident guess assembled from a vendor's marketing page. And a wrong guess
         // costs nothing anyway, because NvdClient.CpeExistsAsync throws it away before a reviewer
         // ever sees it.
-        var answer = await AskProviderRawAsync(settings, BuildCpeSuggestionPrompt(displayName, part), cancellationToken);
+        var answer = await AskProviderRawAsync(settings, AiFeature.CpeSuggestion, BuildCpeSuggestionPrompt(displayName, part), cancellationToken);
 
         var json = CleanScriptText(answer);
         if (json is null)
@@ -1660,92 +1421,5 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient, ICpeSugge
 
         [JsonPropertyName("star_count")]
         public int StarCount { get; set; }
-    }
-
-    private class AnthropicResponse
-    {
-        [JsonPropertyName("content")]
-        public List<AnthropicContentBlock>? Content { get; set; }
-    }
-
-    private class AnthropicContentBlock
-    {
-        [JsonPropertyName("type")]
-        public string Type { get; set; } = string.Empty;
-
-        [JsonPropertyName("text")]
-        public string? Text { get; set; }
-    }
-
-    private class OpenAiResponse
-    {
-        [JsonPropertyName("output")]
-        public List<OpenAiOutputItem>? Output { get; set; }
-    }
-
-    private class OpenAiOutputItem
-    {
-        [JsonPropertyName("type")]
-        public string Type { get; set; } = string.Empty;
-
-        [JsonPropertyName("content")]
-        public List<OpenAiContentBlock>? Content { get; set; }
-    }
-
-    private class OpenAiContentBlock
-    {
-        [JsonPropertyName("type")]
-        public string Type { get; set; } = string.Empty;
-
-        [JsonPropertyName("text")]
-        public string? Text { get; set; }
-    }
-
-    private class OllamaChatResponse
-    {
-        [JsonPropertyName("message")]
-        public OllamaMessage? Message { get; set; }
-    }
-
-    private class OllamaMessage
-    {
-        [JsonPropertyName("content")]
-        public string? Content { get; set; }
-
-        [JsonPropertyName("tool_calls")]
-        public List<OllamaToolCall>? ToolCalls { get; set; }
-    }
-
-    private class OllamaToolCall
-    {
-        [JsonPropertyName("function")]
-        public OllamaToolCallFunction? Function { get; set; }
-    }
-
-    private class OllamaToolCallFunction
-    {
-        [JsonPropertyName("name")]
-        public string? Name { get; set; }
-
-        [JsonPropertyName("arguments")]
-        public JsonElement Arguments { get; set; }
-    }
-
-    private class OllamaWebSearchResponse
-    {
-        [JsonPropertyName("results")]
-        public List<OllamaWebSearchResult>? Results { get; set; }
-    }
-
-    private class OllamaWebSearchResult
-    {
-        [JsonPropertyName("title")]
-        public string? Title { get; set; }
-
-        [JsonPropertyName("url")]
-        public string? Url { get; set; }
-
-        [JsonPropertyName("content")]
-        public string? Content { get; set; }
     }
 }

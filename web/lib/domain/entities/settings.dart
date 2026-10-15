@@ -10,6 +10,9 @@ class AiAgentSettings extends Equatable {
     required this.baseUrl,
     required this.isEnabled,
     required this.hasApiKey,
+    this.webSearchBackend = WebSearchBackend.none,
+    this.hasWebSearchApiKey = false,
+    this.webSearchBaseUrl,
   });
 
   final AiProvider provider;
@@ -21,8 +24,211 @@ class AiAgentSettings extends Equatable {
   /// form honestly offer "leave blank to keep the current one".
   final bool hasApiKey;
 
+  /// The search service behind Kintsugi's own `web_search` tool.
+  final WebSearchBackend webSearchBackend;
+  final bool hasWebSearchApiKey;
+  final String? webSearchBaseUrl;
+
   @override
-  List<Object?> get props => [provider, model, baseUrl, isEnabled, hasApiKey];
+  List<Object?> get props =>
+      [provider, model, baseUrl, isEnabled, hasApiKey, webSearchBackend, hasWebSearchApiKey, webSearchBaseUrl];
+}
+
+/// Mirrors `AiConnectionDto`.
+class AiConnection extends Equatable {
+  const AiConnection({
+    required this.id,
+    required this.name,
+    required this.catalogProviderId,
+    required this.protocol,
+    required this.baseUrl,
+    required this.authMode,
+    required this.hasApiKey,
+    required this.googleCloudProject,
+    required this.googleCloudLocation,
+    required this.useHostedWebSearch,
+  });
+
+  final String id;
+  final String name;
+  final String? catalogProviderId;
+  final AiWireProtocol protocol;
+  final String? baseUrl;
+  final AiAuthMode authMode;
+  final bool hasApiKey;
+  final String? googleCloudProject;
+  final String? googleCloudLocation;
+  final bool useHostedWebSearch;
+
+  /// Where requests go, as a person would describe it.
+  String get endpointLabel => authMode == AiAuthMode.googleCloud && googleCloudProject != null
+      ? 'Vertex AI · $googleCloudProject · $googleCloudLocation'
+      : baseUrl ?? 'protocol default';
+
+  @override
+  List<Object?> get props => [
+        id,
+        name,
+        catalogProviderId,
+        protocol,
+        baseUrl,
+        authMode,
+        hasApiKey,
+        googleCloudProject,
+        googleCloudLocation,
+        useHostedWebSearch,
+      ];
+}
+
+/// What the connection editor sends. A null [id] creates; a null [apiKey] keeps the stored key.
+class AiConnectionDraft {
+  const AiConnectionDraft({
+    required this.id,
+    required this.name,
+    required this.catalogProviderId,
+    required this.protocol,
+    required this.baseUrl,
+    required this.authMode,
+    required this.apiKey,
+    required this.googleCloudProject,
+    required this.googleCloudLocation,
+    required this.useHostedWebSearch,
+  });
+
+  final String? id;
+  final String name;
+  final String? catalogProviderId;
+  final AiWireProtocol protocol;
+  final String? baseUrl;
+  final AiAuthMode authMode;
+  final String? apiKey;
+  final String? googleCloudProject;
+  final String? googleCloudLocation;
+  final bool useHostedWebSearch;
+}
+
+/// Mirrors `AiFeatureRouteDto`.
+class AiFeatureRoute extends Equatable {
+  const AiFeatureRoute({required this.feature, required this.connectionId, required this.model});
+
+  final AiFeature feature;
+  final String connectionId;
+  final String model;
+
+  @override
+  List<Object?> get props => [feature, connectionId, model];
+}
+
+/// Mirrors `AiRoutingDto`.
+class AiRouting extends Equatable {
+  const AiRouting({required this.connections, required this.routes});
+
+  final List<AiConnection> connections;
+  final List<AiFeatureRoute> routes;
+
+  AiFeatureRoute? routeFor(AiFeature feature) => routes.where((r) => r.feature == feature).firstOrNull;
+
+  AiConnection? connection(String id) => connections.where((c) => c.id == id).firstOrNull;
+
+  /// The server's fallback chain (`AiProviderSettings.RouteFor`): which route a feature actually
+  /// runs on when it has none of its own.
+  AiFeatureRoute? effectiveRouteFor(AiFeature feature) {
+    final chain = switch (feature) {
+      AiFeature.cpeSuggestion => [AiFeature.cpeSuggestion, AiFeature.scriptRepair, AiFeature.scriptResearch],
+      AiFeature.scriptRepair => [AiFeature.scriptRepair, AiFeature.scriptResearch],
+      AiFeature.scriptResearch => [AiFeature.scriptResearch],
+    };
+    for (final candidate in chain) {
+      final route = routeFor(candidate);
+      if (route != null) return route;
+    }
+    return null;
+  }
+
+  @override
+  List<Object?> get props => [connections, routes];
+}
+
+/// Mirrors `AiCatalogModelDto`.
+class AiCatalogModel extends Equatable {
+  const AiCatalogModel({
+    required this.id,
+    required this.name,
+    required this.protocol,
+    required this.toolCall,
+    required this.reasoning,
+    required this.contextLimit,
+  });
+
+  final String id;
+  final String name;
+  final AiWireProtocol protocol;
+  final bool toolCall;
+  final bool reasoning;
+  final int? contextLimit;
+
+  @override
+  List<Object?> get props => [id, name, protocol, toolCall, reasoning, contextLimit];
+}
+
+/// Mirrors `AiCatalogProviderDto`.
+class AiCatalogProvider extends Equatable {
+  const AiCatalogProvider({
+    required this.id,
+    required this.name,
+    required this.protocol,
+    required this.defaultBaseUrl,
+    required this.requiresApiKey,
+    required this.usesGoogleCloud,
+    required this.docUrl,
+    required this.models,
+  });
+
+  final String id;
+  final String name;
+  final AiWireProtocol protocol;
+  final String? defaultBaseUrl;
+  final bool requiresApiKey;
+  final bool usesGoogleCloud;
+  final String? docUrl;
+  final List<AiCatalogModel> models;
+
+  @override
+  List<Object?> get props => [id, name, protocol, defaultBaseUrl, requiresApiKey, usesGoogleCloud, docUrl, models];
+}
+
+/// Mirrors `AiCatalogDto`.
+class AiCatalog extends Equatable {
+  const AiCatalog({required this.fetchedAt, required this.isStale, required this.providers});
+
+  static const empty = AiCatalog(fetchedAt: null, isStale: false, providers: []);
+
+  final DateTime? fetchedAt;
+  final bool isStale;
+  final List<AiCatalogProvider> providers;
+
+  AiCatalogProvider? provider(String? id) => id == null ? null : providers.where((p) => p.id == id).firstOrNull;
+
+  @override
+  List<Object?> get props => [fetchedAt, isStale, providers];
+}
+
+/// Mirrors `AiConnectionTestResultDto`.
+class AiConnectionTestResult extends Equatable {
+  const AiConnectionTestResult({
+    required this.succeeded,
+    required this.reply,
+    required this.error,
+    required this.elapsedMilliseconds,
+  });
+
+  final bool succeeded;
+  final String? reply;
+  final String? error;
+  final int elapsedMilliseconds;
+
+  @override
+  List<Object?> get props => [succeeded, reply, error, elapsedMilliseconds];
 }
 
 /// Mirrors `AuthenticationSettingsDto`.

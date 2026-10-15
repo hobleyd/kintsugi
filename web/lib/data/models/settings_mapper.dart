@@ -2,7 +2,11 @@ import '../../core/network/json_reader.dart';
 import '../../domain/entities/enums.dart';
 import '../../domain/entities/settings.dart';
 
-const _aiProviderNames = ['Anthropic', 'OpenAI', 'Ollama', 'GooseCli', 'ClaudeAgentSdk'];
+const _aiProviderNames = ['Anthropic', 'OpenAI', 'Ollama', 'GooseCli', 'ClaudeAgentSdk', 'Routed'];
+const _aiWireProtocolNames = ['OpenAiChatCompletions', 'OpenAiResponses', 'Anthropic', 'Google', 'Ollama'];
+const _aiAuthModeNames = ['ApiKey', 'None', 'GoogleCloud'];
+const _aiFeatureNames = ['ScriptResearch', 'ScriptRepair', 'CpeSuggestion'];
+const _webSearchBackendNames = ['None', 'OllamaWeb', 'Tavily', 'Brave', 'SearXng'];
 const _authProviderNames = ['GoogleWorkspace', 'MicrosoftEntra', 'GenericOidc', 'Clerk'];
 const _auditProviderNames = [
   'Datadog',
@@ -22,6 +26,81 @@ AiAgentSettings aiAgentSettingsFromJson(Map<String, dynamic> json) => AiAgentSet
       baseUrl: json['baseUrl'] as String?,
       isEnabled: json['isEnabled'] as bool? ?? false,
       hasApiKey: json['hasApiKey'] as bool? ?? false,
+      webSearchBackend: enumFromJson(
+          json['webSearchBackend'], WebSearchBackend.values, _webSearchBackendNames, WebSearchBackend.none),
+      hasWebSearchApiKey: json['hasWebSearchApiKey'] as bool? ?? false,
+      webSearchBaseUrl: json['webSearchBaseUrl'] as String?,
+    );
+
+AiWireProtocol _protocol(Object? raw) =>
+    enumFromJson(raw, AiWireProtocol.values, _aiWireProtocolNames, AiWireProtocol.openAiChatCompletions);
+
+/// Reads an `AiConnectionDto`.
+AiConnection aiConnectionFromJson(Map<String, dynamic> json) => AiConnection(
+      id: json['id'] as String? ?? '',
+      name: json['name'] as String? ?? '',
+      catalogProviderId: json['catalogProviderId'] as String?,
+      protocol: _protocol(json['protocol']),
+      baseUrl: json['baseUrl'] as String?,
+      authMode: enumFromJson(json['authMode'], AiAuthMode.values, _aiAuthModeNames, AiAuthMode.apiKey),
+      hasApiKey: json['hasApiKey'] as bool? ?? false,
+      googleCloudProject: json['googleCloudProject'] as String?,
+      googleCloudLocation: json['googleCloudLocation'] as String?,
+      useHostedWebSearch: json['useHostedWebSearch'] as bool? ?? false,
+    );
+
+/// Reads an `AiFeatureRouteDto`.
+AiFeatureRoute aiFeatureRouteFromJson(Map<String, dynamic> json) => AiFeatureRoute(
+      feature: enumFromJson(json['feature'], AiFeature.values, _aiFeatureNames, AiFeature.scriptResearch),
+      connectionId: json['connectionId'] as String? ?? '',
+      model: json['model'] as String? ?? '',
+    );
+
+/// Reads an `AiRoutingDto`.
+AiRouting aiRoutingFromJson(Map<String, dynamic> json) => AiRouting(
+      connections: [
+        for (final c in json['connections'] as List<dynamic>? ?? const []) aiConnectionFromJson(c as Map<String, dynamic>),
+      ],
+      routes: [
+        for (final r in json['routes'] as List<dynamic>? ?? const []) aiFeatureRouteFromJson(r as Map<String, dynamic>),
+      ],
+    );
+
+/// Reads an `AiCatalogDto`.
+AiCatalog aiCatalogFromJson(Map<String, dynamic> json) => AiCatalog(
+      fetchedAt: dateTimeFromJson(json['fetchedAtUtc']),
+      isStale: json['isStale'] as bool? ?? false,
+      providers: [
+        for (final p in json['providers'] as List<dynamic>? ?? const [])
+          AiCatalogProvider(
+            id: (p as Map<String, dynamic>)['id'] as String? ?? '',
+            name: p['name'] as String? ?? '',
+            protocol: _protocol(p['protocol']),
+            defaultBaseUrl: p['defaultBaseUrl'] as String?,
+            requiresApiKey: p['requiresApiKey'] as bool? ?? false,
+            usesGoogleCloud: p['usesGoogleCloud'] as bool? ?? false,
+            docUrl: p['docUrl'] as String?,
+            models: [
+              for (final m in p['models'] as List<dynamic>? ?? const [])
+                AiCatalogModel(
+                  id: (m as Map<String, dynamic>)['id'] as String? ?? '',
+                  name: m['name'] as String? ?? '',
+                  protocol: _protocol(m['protocol']),
+                  toolCall: m['toolCall'] as bool? ?? false,
+                  reasoning: m['reasoning'] as bool? ?? false,
+                  contextLimit: (m['contextLimit'] as num?)?.toInt(),
+                ),
+            ],
+          ),
+      ],
+    );
+
+/// Reads an `AiConnectionTestResultDto`.
+AiConnectionTestResult aiConnectionTestResultFromJson(Map<String, dynamic> json) => AiConnectionTestResult(
+      succeeded: json['succeeded'] as bool? ?? false,
+      reply: json['reply'] as String?,
+      error: json['error'] as String?,
+      elapsedMilliseconds: (json['elapsedMilliseconds'] as num?)?.toInt() ?? 0,
     );
 
 /// Reads an `AuthenticationSettingsDto`.
