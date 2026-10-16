@@ -415,6 +415,31 @@ public class UpgradeScriptTests
     }
 
     /// <summary>
+    /// The agent runs --update as SYSTEM, which has no <c>winget</c> on PATH (that one is a per-user
+    /// App Execution Alias), so the script has to find the packaged binary the way the Windows
+    /// agent's <c>system_info::find_packaged_winget</c> does — and must never fall back to the
+    /// bare name first, or every winget row fails once the agent can see winget.
+    /// </summary>
+    [Fact]
+    public void WingetScript_RunsThePackagedWinget_BecauseSystemHasNoWingetOnPath()
+    {
+        var script = WingetUpgradeScript.Build();
+
+        Assert.Contains("function Resolve-Winget", script);
+        Assert.Contains("Join-Path $env:ProgramFiles 'WindowsApps'", script);
+        Assert.Contains(@"'^Microsoft\.DesktopAppInstaller_(\d+(?:\.\d+)*)_(x64|arm64)__8wekyb3d8bbwe$'", script);
+        // A folder only counts when winget.exe is really in it, so a half-removed newest package
+        // falls back to the next one rather than to PATH.
+        Assert.Contains("Test-Path -LiteralPath $exe -PathType Leaf", script);
+        Assert.Contains("$winget = Resolve-Winget", script);
+        Assert.Contains("& $winget upgrade --exact --id $upgradeId", script);
+        // The old PATH-only guard, which is what failed under SYSTEM.
+        Assert.DoesNotContain("if (-not (Get-Command winget -ErrorAction SilentlyContinue))", script);
+        // The packaged lookup comes before the PATH fallback.
+        Assert.True(script.IndexOf("'WindowsApps'", StringComparison.Ordinal) < script.IndexOf("Get-Command winget", StringComparison.Ordinal));
+    }
+
+    /// <summary>
     /// winget is not a winget package under its own name — it ships inside App Installer — so its
     /// own row needs a different version source and a different id to upgrade. One script serves it
     /// and every package it manages (see <see cref="RecognizedPackageManager.BuildScript"/>), told
