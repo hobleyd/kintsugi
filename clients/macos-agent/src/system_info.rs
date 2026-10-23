@@ -656,8 +656,9 @@ fn strings_in(value: &serde_json::Value) -> Vec<&str> {
 /// `application_identifier` and never enters a patch cycle at all.
 ///
 /// `brew upgrade` runs the cask's `uninstall` stanza and then installs the new artifacts, so both
-/// halves are read. Root is needed for a `pkg` or `installer` artifact (`installer -pkg` as root),
-/// and for an `uninstall` naming `pkgutil` (`pkgutil --forget` plus a root `rm` of the receipt's
+/// halves are read. Root is needed for a `pkg` artifact (`installer -pkg` as root), for an
+/// `installer` artifact unless it is only scripts Homebrew runs as the user (see
+/// [`installer_runs_as_the_user`]), and for an `uninstall` naming `pkgutil` (`pkgutil --forget` plus a root `rm` of the receipt's
 /// files), `kext`, `script`, or `launchctl` — the last because Homebrew removes
 /// `/Library/LaunchDaemons/<label>.plist` via sudo when it exists, and the JSON cannot say whether
 /// the label is a per-user agent or a system daemon. Erring towards "needs root" costs only what
@@ -682,13 +683,32 @@ fn cask_requires_root(cask: &serde_json::Value) -> bool {
 /// cask that needs root *only* for its uninstall stanza is user-owned on disk and stays, unpatched
 /// but visible, as it always has.
 fn cask_installs_a_pkg(cask: &serde_json::Value) -> bool {
-    const PKG_ARTIFACTS: [&str; 2] = ["pkg", "installer"];
+    cask["artifacts"].as_array().into_iter().flatten().any(|artifact| {
+        !artifact["pkg"].is_null() || (!artifact["installer"].is_null() && !installer_runs_as_the_user(&artifact["installer"]))
+    })
+}
 
-    cask["artifacts"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|artifact| PKG_ARTIFACTS.iter().any(|key| !artifact[key].is_null()))
+/// Whether a cask's `installer` stanza is only `script` entries Homebrew runs as the invoking user.
+/// Homebrew's `Artifact::Installer` runs a `script` under `sudo` only when it says `sudo: true`;
+/// without that it is an ordinary process of whoever ran `brew`, and what it writes is theirs.
+/// `gcloud-cli` is the case that showed it: `installer script: google-cloud-sdk/install.sh`, no
+/// sudo, everything under /opt/homebrew owned by the user — but counted as root, it was reported
+/// with no identifier and sat two releases behind while every cycle and a forced run passed it
+/// over as "nothing patchable". A `manual` entry is still not the user's, though it needs no root:
+/// Homebrew only prints "you must also run the installer", so an unattended upgrade would install
+/// nothing, and keeping it off the patch list is the honest answer. Anything unrecognised errs the
+/// way [`cask_requires_root`] does.
+fn installer_runs_as_the_user(installer: &serde_json::Value) -> bool {
+    let entries: Vec<&serde_json::Value> = match installer {
+        serde_json::Value::Array(entries) => entries.iter().collect(),
+        entry => vec![entry],
+    };
+    !entries.is_empty()
+        && entries.iter().all(|entry| match &entry["script"] {
+            serde_json::Value::String(_) => true,
+            script @ serde_json::Value::Object(_) => script["sudo"].as_bool() != Some(true),
+            _ => false,
+        })
 }
 
 /// A `pkg` cask [`pkg_casks_leaving_homebrew`] decided to take out of Homebrew, and the evidence.
@@ -1275,6 +1295,14 @@ mod tests {
 
         assert!(installs_a_pkg(r#"{ "artifacts": [ { "pkg": "Thing.pkg" } ] }"#));
         assert!(installs_a_pkg(r#"{ "artifacts": [ { "installer": [ { "script": { "executable": "install.sh", "sudo": true } } ] } ] }"#));
+        assert!(installs_a_pkg(r#"{ "artifacts": [ { "installer": [ { "manual": "Install Thing.app" } ] } ] }"#));
+        // gcloud-cli's real stanza: a script Homebrew runs as the user, so nothing it places is
+        // root's and `brew upgrade` works from the per-user process.
+        assert!(!installs_a_pkg(
+            r#"{ "artifacts": [ { "installer": [ { "script": { "executable": "google-cloud-sdk/install.sh", "args": ["--quiet"] } } ] }, { "uninstall": [ { "trash": "/opt/homebrew/Caskroom/gcloud-cli/latest" } ] } ] }"#
+        ));
+        assert!(!installs_a_pkg(r#"{ "artifacts": [ { "installer": [ { "script": { "executable": "install.sh", "sudo": false } } ] } ] }"#));
+        assert!(!installs_a_pkg(r#"{ "artifacts": [ { "installer": [ { "script": "install.sh" } ] } ] }"#));
         // Root for the uninstall alone is `cask_requires_root` but not this: the files are the
         // user's, and such a cask stays in Homebrew.
         assert!(!installs_a_pkg(r#"{ "artifacts": [ { "uninstall": [ { "launchctl": "com.example.daemon" } ] }, { "app": "App.app" } ] }"#));
@@ -1504,6 +1532,7 @@ mod tests {
         assert!(!needs_root(
             r#"{ "artifacts": [ { "uninstall": [ { "quit": "com.example.App", "login_item": "App", "delete": "/Applications/App.app" } ] }, { "app": "App.app" } ] }"#
         ));
+        assert!(!needs_root(r#"{ "artifacts": [ { "installer": [ { "script": { "executable": "google-cloud-sdk/install.sh" } } ] } ] }"#));
         assert!(!needs_root(r#"{ "artifacts": [] }"#));
         assert!(!needs_root(r#"{}"#));
     }
