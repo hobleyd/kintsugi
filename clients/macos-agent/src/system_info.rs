@@ -299,11 +299,12 @@ fn read_app_bundle(app_path: &Path) -> Result<Option<InstalledApp>> {
             .context("could not determine application name")?
     };
 
-    let version = json["CFBundleShortVersionString"]
-        .as_str()
-        .or_else(|| json["CFBundleVersion"].as_str())
-        .unwrap_or("unknown")
-        .to_string();
+    let plist_version = json["CFBundleShortVersionString"].as_str().or_else(|| json["CFBundleVersion"].as_str());
+    let version = is_jdk
+        .then(|| jdk_runtime_version(app_path))
+        .flatten()
+        .or(plist_version.map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
 
     // The bundle identifier is what both ends of the App Store script key on: the server's
     // `--update-version` looks it up with `lookup?bundleId=`, and `mas` accepts it in place of the
@@ -322,6 +323,44 @@ fn read_app_bundle(app_path: &Path) -> Result<Option<InstalledApp>> {
         available_version: None,
         update_available: None,
     }))
+}
+
+/// A JDK's version, read from `Contents/Home/release` rather than its `Info.plist`, because the
+/// plist drops the build number: Temurin's respin `26.0.2.1+1` has `CFBundleShortVersionString`
+/// "26.0.2.1" and the bare build "1" in `CFBundleVersion`. The upgrade script reads the release
+/// file and the vendor's API, both of which carry the build, so a host reporting the plist's
+/// "26.0.2.1" against a latest of "26.0.2.1.1" was told it was behind on every cycle by a script
+/// that, correctly, found nothing to do. `None` (and the plist's version instead) when the file or
+/// the key is missing, or the value is not one [`normalize_java_version`] understands.
+fn jdk_runtime_version(jdk_path: &Path) -> Option<String> {
+    let release = fs::read_to_string(jdk_path.join("Contents/Home/release")).ok()?;
+    let value = release
+        .lines()
+        .find_map(|line| line.strip_prefix("JAVA_RUNTIME_VERSION="))?
+        .trim()
+        .trim_matches('"');
+    normalize_java_version(value)
+}
+
+/// A Java runtime version (`$FEATURE[.$INTERIM[.$UPDATE[.$PATCH]]]+$BUILD[-$OPT]`, JEP 322) as one
+/// dotted string the server's `VersionComparer` can order: the version number padded to four
+/// components, then the build. `26.0.2.1+1` -> `26.0.2.1.1`, `27+35` -> `27.0.0.0.35`,
+/// `21.0.5+11-LTS` -> `21.0.5.0.11`. The padding is the point: Java drops trailing zero components,
+/// so a GA `27+35` written naively as `27.35` would compare *newer* than its own update
+/// `27.0.1+8`, and the host would never be patched. `VersionComparer` stops reading at `+`, which
+/// is why the build cannot simply stay behind it. The server's macOS prompt
+/// (`AiUpgradePathResearchClient`) tells the script to print a JDK version in exactly this form;
+/// change one and the other must follow. A version with no build (Java 8's `1.8.0_412-b08`, or
+/// anything else unexpected) is `None`.
+fn normalize_java_version(runtime_version: &str) -> Option<String> {
+    let (number, rest) = runtime_version.split_once('+')?;
+    let build: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let mut parts: Vec<&str> = number.split('.').collect();
+    if build.is_empty() || parts.len() > 4 || parts.iter().any(|part| part.is_empty() || !part.chars().all(|c| c.is_ascii_digit())) {
+        return None;
+    }
+    parts.resize(4, "0");
+    Some(format!("{}.{build}", parts.join(".")))
 }
 
 /// Where the Mac App Store leaves its receipt inside a bundle it installed. The same path `mas`
@@ -1735,11 +1774,41 @@ mod tests {
         let installed = read_app_bundle(&jdk).unwrap().expect("a JDK is reported");
 
         assert_eq!(installed.name, "temurin-26");
+        // No release file in this scratch bundle, so the plist's version stands.
         assert_eq!(installed.version, "1.2.3");
         assert_eq!(installed.application_identifier.as_deref(), Some("net.java.openjdk.jdk"));
         assert_eq!(installed.package_manager, None);
 
         let _ = fs::remove_dir_all(jdk.parent().unwrap());
+    }
+
+    #[test]
+    fn read_app_bundle_versions_a_jdk_by_its_release_file_build_and_all() {
+        let jdk = std::env::temp_dir().join(format!("kintsugi-system-info-test-{}-release/temurin-26.jdk", std::process::id()));
+        scratch_bundle_at(&jdk, "OpenJDK 26.0.2.1", "net.java.openjdk.jdk", false);
+        fs::create_dir_all(jdk.join("Contents/Home")).unwrap();
+        // Temurin 26's real release file, abridged.
+        fs::write(
+            jdk.join("Contents/Home/release"),
+            "IMPLEMENTOR=\"Eclipse Adoptium\"\nIMPLEMENTOR_VERSION=\"Temurin-26.0.2.1+1\"\nJAVA_RUNTIME_VERSION=\"26.0.2.1+1\"\nJAVA_VERSION=\"26.0.2.1\"\n",
+        )
+        .unwrap();
+
+        let installed = read_app_bundle(&jdk).unwrap().expect("a JDK is reported");
+
+        assert_eq!(installed.version, "26.0.2.1.1");
+
+        let _ = fs::remove_dir_all(jdk.parent().unwrap());
+    }
+
+    #[test]
+    fn normalize_java_version_pads_to_four_components_then_appends_the_build() {
+        assert_eq!(normalize_java_version("26.0.2.1+1").as_deref(), Some("26.0.2.1.1"));
+        assert_eq!(normalize_java_version("27+35").as_deref(), Some("27.0.0.0.35"));
+        assert_eq!(normalize_java_version("21.0.5+11-LTS").as_deref(), Some("21.0.5.0.11"));
+        assert_eq!(normalize_java_version("1.8.0_412-b08"), None);
+        assert_eq!(normalize_java_version("26.0.2"), None);
+        assert_eq!(normalize_java_version("26.0.2+"), None);
     }
 
     #[test]
