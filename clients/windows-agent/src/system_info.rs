@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::net::UdpSocket;
+use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -841,10 +842,9 @@ fn empty_scan() -> PackageManagerScan {
     PackageManagerScan { apps: Vec::new(), managed_keys: ManagedKeys::default() }
 }
 
-/// Runs a package manager's CLI, returning its stdout on success. Both managers are invoked
-/// through their bare name rather than an absolute path: unlike Homebrew (which the macOS agent has
-/// to locate by hand because a root LaunchDaemon gets a minimal PATH), both of these install
-/// themselves onto the machine-wide PATH that a SYSTEM service inherits.
+/// Runs a package manager's CLI, returning its stdout on success. Chocolatey is invoked by its bare
+/// name, since it installs itself onto the machine-wide PATH a SYSTEM service inherits; winget is
+/// not on that PATH, so it arrives here as an absolute path from `winget_program`.
 fn run_package_manager(program: &str, args: &[&str]) -> Option<String> {
     match Command::new(program).args(args).output() {
         Ok(output) if output.status.success() => Some(String::from_utf8_lossy(&output.stdout).to_string()),
@@ -863,8 +863,78 @@ fn run_package_manager(program: &str, args: &[&str]) -> Option<String> {
     }
 }
 
+/// Where to run winget from. `winget` on PATH is a per-user App Execution Alias
+/// (`%LOCALAPPDATA%\Microsoft\WindowsApps\winget.exe`), so the SYSTEM service — which is what runs
+/// every scheduled check-in — has no `winget` on its PATH at all, and the scan used to come back
+/// empty without a word: no winget row, no winget-managed packages, and "Not checked yet" for
+/// every one of them. SYSTEM can, however, list `Program Files\WindowsApps` (administrators
+/// cannot), so the real binary inside the newest App Installer package is used when it exists,
+/// falling back to the bare name for an interactive or otherwise PATH-equipped caller.
+///
+/// The server-written winget script (`WingetUpgradeScript.Build`, `Resolve-Winget`) makes the same
+/// choice by the same rules for `--update`, so the binary that reports a package is the binary that
+/// upgrades it. Change one and change the other.
+fn winget_program() -> String {
+    match find_packaged_winget() {
+        Some(path) => {
+            let path = path.to_string_lossy().into_owned();
+            crate::logging::info(&format!("using packaged winget at {path}"));
+            path
+        }
+        None => {
+            crate::logging::info("no packaged winget under Program Files\\WindowsApps; trying `winget` on PATH");
+            "winget".to_string()
+        }
+    }
+}
+
+fn find_packaged_winget() -> Option<PathBuf> {
+    let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Program Files"));
+    let windows_apps = program_files.join("WindowsApps");
+    let names: Vec<String> = match std::fs::read_dir(&windows_apps) {
+        Ok(entries) => entries.flatten().map(|entry| entry.file_name().to_string_lossy().into_owned()).collect(),
+        Err(err) => {
+            crate::logging::warn(&format!("could not list {}: {err}", windows_apps.display()));
+            return None;
+        }
+    };
+    let native_arch = native_app_installer_arch(std::env::var("PROCESSOR_ARCHITECTURE").ok().as_deref());
+    best_app_installer_dir(names.iter().map(String::as_str), native_arch, |name| windows_apps.join(name).join("winget.exe").is_file())
+        .map(|name| windows_apps.join(name).join("winget.exe"))
+}
+
+/// The App Installer package architecture matching `PROCESSOR_ARCHITECTURE`. Anything but ARM64
+/// is treated as x64, the only other architecture App Installer ships for.
+fn native_app_installer_arch(processor_architecture: Option<&str>) -> &'static str {
+    match processor_architecture {
+        Some(arch) if arch.eq_ignore_ascii_case("ARM64") => "arm64",
+        _ => "x64",
+    }
+}
+
+/// Picks among `Microsoft.DesktopAppInstaller_<version>_<arch>__8wekyb3d8bbwe` directory names:
+/// only those `has_winget` confirms actually hold winget.exe (so a half-removed newest package
+/// falls back to the next one rather than to PATH), the host's own architecture first, then the
+/// highest version compared numerically.
+fn best_app_installer_dir<'a>(names: impl Iterator<Item = &'a str>, native_arch: &str, has_winget: impl Fn(&str) -> bool) -> Option<&'a str> {
+    names
+        .filter_map(|name| {
+            let rest = name.strip_prefix("Microsoft.DesktopAppInstaller_")?;
+            let (version, arch) = rest
+                .strip_suffix("_x64__8wekyb3d8bbwe")
+                .map(|v| (v, "x64"))
+                .or_else(|| rest.strip_suffix("_arm64__8wekyb3d8bbwe").map(|v| (v, "arm64")))?;
+            let key: Vec<u64> = version.split('.').map(|part| part.parse().ok()).collect::<Option<_>>()?;
+            Some(((arch == native_arch, key), name))
+        })
+        .filter(|(_, name)| has_winget(name))
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, name)| name)
+}
+
 fn scan_winget() -> PackageManagerScan {
-    let Some(version_output) = run_package_manager("winget", &["--version"]) else {
+    let winget = winget_program();
+    let Some(version_output) = run_package_manager(&winget, &["--version"]) else {
         return empty_scan();
     };
 
@@ -886,7 +956,7 @@ fn scan_winget() -> PackageManagerScan {
     // "Name Id Version Available Source" column layout, which is the only machine-readable form
     // winget offers — it has no JSON output mode.
     if let Some(listing) = run_package_manager(
-        "winget",
+        &winget,
         &["list", "--accept-source-agreements", "--disable-interactivity"],
     ) {
         for package in parse_winget_list(&listing) {
@@ -1080,6 +1150,71 @@ fn parse_choco_outdated(output: &str) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn best_app_installer_dir_picks_the_highest_version_numerically() {
+        let names = [
+            "Microsoft.DesktopAppInstaller_1.9.25200.0_x64__8wekyb3d8bbwe",
+            "Microsoft.DesktopAppInstaller_1.29.380.0_x64__8wekyb3d8bbwe",
+            "Microsoft.DesktopAppInstaller_1.29.380.0_neutral_~_8wekyb3d8bbwe",
+            "Microsoft.WindowsTerminal_1.21.0.0_x64__8wekyb3d8bbwe",
+        ];
+        assert_eq!(
+            best_app_installer_dir(names.iter().copied(), "x64", |_| true),
+            Some("Microsoft.DesktopAppInstaller_1.29.380.0_x64__8wekyb3d8bbwe")
+        );
+    }
+
+    #[test]
+    fn best_app_installer_dir_accepts_arm64_and_ignores_unrelated_or_malformed_names() {
+        let names = [
+            "Microsoft.DesktopAppInstaller_1.29.380.0_arm64__8wekyb3d8bbwe",
+            "Microsoft.DesktopAppInstaller_notaversion_x64__8wekyb3d8bbwe",
+            "Contoso.DesktopAppInstaller_9.9.9.9_x64__8wekyb3d8bbwe",
+        ];
+        assert_eq!(
+            best_app_installer_dir(names.iter().copied(), "x64", |_| true),
+            Some("Microsoft.DesktopAppInstaller_1.29.380.0_arm64__8wekyb3d8bbwe")
+        );
+        assert_eq!(best_app_installer_dir(std::iter::empty(), "x64", |_| true), None);
+    }
+
+    #[test]
+    fn best_app_installer_dir_skips_a_newest_folder_without_winget_rather_than_falling_to_path() {
+        let names = [
+            "Microsoft.DesktopAppInstaller_1.24.25200.0_x64__8wekyb3d8bbwe",
+            "Microsoft.DesktopAppInstaller_1.25.390.0_x64__8wekyb3d8bbwe",
+        ];
+        assert_eq!(
+            best_app_installer_dir(names.iter().copied(), "x64", |name| !name.contains("1.25.390.0")),
+            Some("Microsoft.DesktopAppInstaller_1.24.25200.0_x64__8wekyb3d8bbwe")
+        );
+        assert_eq!(best_app_installer_dir(names.iter().copied(), "x64", |_| false), None);
+    }
+
+    #[test]
+    fn best_app_installer_dir_prefers_the_hosts_own_architecture_over_a_newer_foreign_one() {
+        let names = [
+            "Microsoft.DesktopAppInstaller_1.24.0.0_x64__8wekyb3d8bbwe",
+            "Microsoft.DesktopAppInstaller_1.25.0.0_arm64__8wekyb3d8bbwe",
+        ];
+        assert_eq!(
+            best_app_installer_dir(names.iter().copied(), "x64", |_| true),
+            Some("Microsoft.DesktopAppInstaller_1.24.0.0_x64__8wekyb3d8bbwe")
+        );
+        assert_eq!(
+            best_app_installer_dir(names.iter().copied(), "arm64", |_| true),
+            Some("Microsoft.DesktopAppInstaller_1.25.0.0_arm64__8wekyb3d8bbwe")
+        );
+    }
+
+    #[test]
+    fn native_app_installer_arch_reads_processor_architecture() {
+        assert_eq!(native_app_installer_arch(Some("ARM64")), "arm64");
+        assert_eq!(native_app_installer_arch(Some("arm64")), "arm64");
+        assert_eq!(native_app_installer_arch(Some("AMD64")), "x64");
+        assert_eq!(native_app_installer_arch(None), "x64");
+    }
 
     #[test]
     fn is_usable_serial_number_accepts_a_real_serial() {
