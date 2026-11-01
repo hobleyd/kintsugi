@@ -1,5 +1,6 @@
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
+using Kintsugi.Application.Authentication;
 using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Application.UpgradePaths;
 using Kintsugi.Application.UpgradePaths.Commands.CheckApplicationUpdate;
@@ -207,11 +208,11 @@ public class UpgradePathsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<ActionResult<UpgradePathResultDto>> SignScript([FromBody] SignUpgradePathScriptRequest request, CancellationToken cancellationToken) =>
         Ok(await _sender.Send(
-            // The reviewer's own name, recorded in the approval entry and shown in the pull request —
+            // The reviewer's email (see AdminIdentity.SignerOf — the full address, revisable), recorded in the approval entry and shown in the pull request —
             // "a human reviewed this" is only an audit trail if it says which human. Null when the
             // site is deliberately running with authentication disabled.
             new SignUpgradePathScriptCommand(
-                request.ApplicationName, request.Platform, SignedBy: User.Identity?.Name, PatchFailureId: request.PatchFailureId),
+                request.ApplicationName, request.Platform, SignedBy: AdminIdentity.SignerOf(User), PatchFailureId: request.PatchFailureId),
             cancellationToken));
 }
 

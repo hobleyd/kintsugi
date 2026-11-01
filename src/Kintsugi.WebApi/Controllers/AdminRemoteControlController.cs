@@ -1,5 +1,7 @@
+using System.Security.Claims;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
+using Kintsugi.Application.Authentication;
 using Kintsugi.Application.RemoteControl;
 using Kintsugi.Domain.Enums;
 using Kintsugi.Application.RemoteControl.Commands.EndRemoteControlSession;
@@ -73,7 +75,7 @@ public class AdminRemoteControlController : ControllerBase
         // a caller-supplied value here would be a caller-supplied answer to "who wants to watch your
         // screen".
         var session = await _sender.Send(
-            new RequestRemoteControlSessionCommand(request.HostId, request.Kind, DescribeRequester()),
+            new RequestRemoteControlSessionCommand(request.HostId, request.Kind, DescribeRequester(User)),
             cancellationToken);
 
         return CreatedAtAction(nameof(GetSession), new { id = session.Id }, session);
@@ -139,10 +141,15 @@ public class AdminRemoteControlController : ControllerBase
     /// there genuinely is nobody to name, and the audit record and the host user's dialog should
     /// both say exactly that rather than invent a name or leave it blank.
     /// </summary>
-    private string DescribeRequester() =>
-        User.Identity?.Name
-        ?? User.FindFirst("email")?.Value
-        ?? "an administrator (sign-in is disabled on this server)";
+    /// <remarks>
+    /// Read through <see cref="AdminIdentity.SignerOf"/>, the same as a script's signer, and never
+    /// from <c>Identity.Name</c>: that is the provider's display name, which the user can set to
+    /// anything — "IT Support", or a colleague's address — and this string is what the person at
+    /// the host reads before deciding whether to let someone see their screen. Public and static so
+    /// it can be tested without a broker; MVC does not route static methods.
+    /// </remarks>
+    public static string DescribeRequester(ClaimsPrincipal? user) =>
+        AdminIdentity.SignerOf(user) ?? "an administrator (sign-in is disabled on this server)";
 
     /// <summary>See the matching note on <c>RemoteControlController</c>: a fresh scope, because this
     /// socket outlives any scoped DbContext, and no cancellation token, because this write must not

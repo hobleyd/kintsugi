@@ -85,7 +85,7 @@ public class SessionController : ControllerBase
             stored is not null,
             settings.IsEnabled,
             User.Identity?.IsAuthenticated == true,
-            User.Identity?.Name ?? User.FindFirst("email")?.Value,
+            AdminIdentity.DisplayNameOf(User),
             DescribeProvider(settings.Provider),
             settings.IsEnabled && settings.HasClientSecret,
             CallbackUrl,

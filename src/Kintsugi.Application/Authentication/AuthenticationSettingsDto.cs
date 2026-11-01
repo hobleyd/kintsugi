@@ -11,11 +11,12 @@ public record AuthenticationSettingsDto(
     string? TenantId,
     string? HostedDomain,
     bool IsEnabled,
-    bool HasClientSecret)
+    bool HasClientSecret,
+    IReadOnlyList<string> AdminEmails)
 {
     public static AuthenticationSettingsDto FromEntity(AuthenticationSettings entity) =>
-        new(entity.Provider, entity.ClientId, entity.Authority, entity.TenantId, entity.HostedDomain, entity.IsEnabled, !string.IsNullOrEmpty(entity.ClientSecret));
+        new(entity.Provider, entity.ClientId, entity.Authority, entity.TenantId, entity.HostedDomain, entity.IsEnabled, !string.IsNullOrEmpty(entity.ClientSecret), entity.AdminEmails.ToList());
 
     public static AuthenticationSettingsDto NotConfigured() =>
-        new(AuthProvider.GoogleWorkspace, null, null, null, null, IsEnabled: false, HasClientSecret: false);
+        new(AuthProvider.GoogleWorkspace, null, null, null, null, IsEnabled: false, HasClientSecret: false, AdminEmails: Array.Empty<string>());
 }
