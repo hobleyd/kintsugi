@@ -291,9 +291,17 @@ fn restrict_identity_permissions(dir: &Path) {
     // *alongside* whatever ProgramData already hands to Users, which is the whole thing being
     // removed. SIDs, not names: "SYSTEM" and "Administrators" are localized on a non-English
     // Windows install, and S-1-5-18 / S-1-5-32-544 never are.
+    //
+    // Applied to the directory only, never with /T. The identity files are written just before
+    // this runs and carry only inherited entries; /T would strip those from each file
+    // (/inheritance:r) while the (OI)(CI) grants, being container-inheritance flags, do not land on
+    // files — leaving every file with an empty DACL that not even SYSTEM can read, so the service
+    // could never load its certificate (seen on a fresh install, and reproduced with icacls alone
+    // on a second machine). Without /T the files keep inheriting, and so pick up exactly the
+    // directory's new SYSTEM + Administrators entries.
     let output = std::process::Command::new("icacls")
         .arg(dir)
-        .args(["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "/grant:r", "*S-1-5-32-544:(OI)(CI)F", "/T"])
+        .args(["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "/grant:r", "*S-1-5-32-544:(OI)(CI)F"])
         .output();
 
     match output {
@@ -489,5 +497,30 @@ mod tests {
         let result = verify_artifact_signature(&identity, "content", "AAAA");
 
         assert!(result.is_err());
+    }
+
+    /// Guards the "no /T" rule in `restrict_identity_permissions`: with /T, icacls strips the
+    /// inherited entries from each file while the (OI)(CI) grants do not land on files, leaving
+    /// every file with an empty DACL — unreadable even to an elevated administrator, which is what
+    /// the CI runner is. The function only logs failures, so the outcome is checked by reading the
+    /// files back. `load` must be `Ok(Some(_))`: `Ok(None)` means "not enrolled" and `Err` means
+    /// "present but refused", and neither is acceptable here.
+    #[cfg(windows)]
+    #[test]
+    fn identity_files_stay_readable_after_restricting_the_directory() {
+        let dir = scratch_dir("acl");
+        // Written before restricting, in the order `enroll` does it.
+        for file in [CERT_FILE, KEY_FILE, ARTIFACT_PUBKEY_FILE, CA_FILE] {
+            fs::write(dir.join(file), "pem").unwrap();
+        }
+
+        restrict_identity_permissions(&dir);
+
+        let loaded = load(&dir);
+        assert!(matches!(loaded, Ok(Some(_))), "identity unreadable after restricting its directory: {loaded:?}");
+        // `load` never reads ca.crt, so check it directly.
+        fs::read(dir.join(CA_FILE)).expect("ca.crt unreadable after restricting its directory");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

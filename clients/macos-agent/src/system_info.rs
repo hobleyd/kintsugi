@@ -299,11 +299,12 @@ fn read_app_bundle(app_path: &Path) -> Result<Option<InstalledApp>> {
             .context("could not determine application name")?
     };
 
-    let version = json["CFBundleShortVersionString"]
-        .as_str()
-        .or_else(|| json["CFBundleVersion"].as_str())
-        .unwrap_or("unknown")
-        .to_string();
+    let plist_version = json["CFBundleShortVersionString"].as_str().or_else(|| json["CFBundleVersion"].as_str());
+    let version = is_jdk
+        .then(|| jdk_runtime_version(app_path))
+        .flatten()
+        .or(plist_version.map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
 
     // The bundle identifier is what both ends of the App Store script key on: the server's
     // `--update-version` looks it up with `lookup?bundleId=`, and `mas` accepts it in place of the
@@ -322,6 +323,44 @@ fn read_app_bundle(app_path: &Path) -> Result<Option<InstalledApp>> {
         available_version: None,
         update_available: None,
     }))
+}
+
+/// A JDK's version, read from `Contents/Home/release` rather than its `Info.plist`, because the
+/// plist drops the build number: Temurin's respin `26.0.2.1+1` has `CFBundleShortVersionString`
+/// "26.0.2.1" and the bare build "1" in `CFBundleVersion`. The upgrade script reads the release
+/// file and the vendor's API, both of which carry the build, so a host reporting the plist's
+/// "26.0.2.1" against a latest of "26.0.2.1.1" was told it was behind on every cycle by a script
+/// that, correctly, found nothing to do. `None` (and the plist's version instead) when the file or
+/// the key is missing, or the value is not one [`normalize_java_version`] understands.
+fn jdk_runtime_version(jdk_path: &Path) -> Option<String> {
+    let release = fs::read_to_string(jdk_path.join("Contents/Home/release")).ok()?;
+    let value = release
+        .lines()
+        .find_map(|line| line.strip_prefix("JAVA_RUNTIME_VERSION="))?
+        .trim()
+        .trim_matches('"');
+    normalize_java_version(value)
+}
+
+/// A Java runtime version (`$FEATURE[.$INTERIM[.$UPDATE[.$PATCH]]]+$BUILD[-$OPT]`, JEP 322) as one
+/// dotted string the server's `VersionComparer` can order: the version number padded to four
+/// components, then the build. `26.0.2.1+1` -> `26.0.2.1.1`, `27+35` -> `27.0.0.0.35`,
+/// `21.0.5+11-LTS` -> `21.0.5.0.11`. The padding is the point: Java drops trailing zero components,
+/// so a GA `27+35` written naively as `27.35` would compare *newer* than its own update
+/// `27.0.1+8`, and the host would never be patched. `VersionComparer` stops reading at `+`, which
+/// is why the build cannot simply stay behind it. The server's macOS prompt
+/// (`AiUpgradePathResearchClient`) tells the script to print a JDK version in exactly this form;
+/// change one and the other must follow. A version with no build (Java 8's `1.8.0_412-b08`, or
+/// anything else unexpected) is `None`.
+fn normalize_java_version(runtime_version: &str) -> Option<String> {
+    let (number, rest) = runtime_version.split_once('+')?;
+    let build: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    let mut parts: Vec<&str> = number.split('.').collect();
+    if build.is_empty() || parts.len() > 4 || parts.iter().any(|part| part.is_empty() || !part.chars().all(|c| c.is_ascii_digit())) {
+        return None;
+    }
+    parts.resize(4, "0");
+    Some(format!("{}.{build}", parts.join(".")))
 }
 
 /// Where the Mac App Store leaves its receipt inside a bundle it installed. The same path `mas`
@@ -656,8 +695,9 @@ fn strings_in(value: &serde_json::Value) -> Vec<&str> {
 /// `application_identifier` and never enters a patch cycle at all.
 ///
 /// `brew upgrade` runs the cask's `uninstall` stanza and then installs the new artifacts, so both
-/// halves are read. Root is needed for a `pkg` or `installer` artifact (`installer -pkg` as root),
-/// and for an `uninstall` naming `pkgutil` (`pkgutil --forget` plus a root `rm` of the receipt's
+/// halves are read. Root is needed for a `pkg` artifact (`installer -pkg` as root), for an
+/// `installer` artifact unless it is only scripts Homebrew runs as the user (see
+/// [`installer_runs_as_the_user`]), and for an `uninstall` naming `pkgutil` (`pkgutil --forget` plus a root `rm` of the receipt's
 /// files), `kext`, `script`, or `launchctl` — the last because Homebrew removes
 /// `/Library/LaunchDaemons/<label>.plist` via sudo when it exists, and the JSON cannot say whether
 /// the label is a per-user agent or a system daemon. Erring towards "needs root" costs only what
@@ -682,13 +722,32 @@ fn cask_requires_root(cask: &serde_json::Value) -> bool {
 /// cask that needs root *only* for its uninstall stanza is user-owned on disk and stays, unpatched
 /// but visible, as it always has.
 fn cask_installs_a_pkg(cask: &serde_json::Value) -> bool {
-    const PKG_ARTIFACTS: [&str; 2] = ["pkg", "installer"];
+    cask["artifacts"].as_array().into_iter().flatten().any(|artifact| {
+        !artifact["pkg"].is_null() || (!artifact["installer"].is_null() && !installer_runs_as_the_user(&artifact["installer"]))
+    })
+}
 
-    cask["artifacts"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .any(|artifact| PKG_ARTIFACTS.iter().any(|key| !artifact[key].is_null()))
+/// Whether a cask's `installer` stanza is only `script` entries Homebrew runs as the invoking user.
+/// Homebrew's `Artifact::Installer` runs a `script` under `sudo` only when it says `sudo: true`;
+/// without that it is an ordinary process of whoever ran `brew`, and what it writes is theirs.
+/// `gcloud-cli` is the case that showed it: `installer script: google-cloud-sdk/install.sh`, no
+/// sudo, everything under /opt/homebrew owned by the user — but counted as root, it was reported
+/// with no identifier and sat two releases behind while every cycle and a forced run passed it
+/// over as "nothing patchable". A `manual` entry is still not the user's, though it needs no root:
+/// Homebrew only prints "you must also run the installer", so an unattended upgrade would install
+/// nothing, and keeping it off the patch list is the honest answer. Anything unrecognised errs the
+/// way [`cask_requires_root`] does.
+fn installer_runs_as_the_user(installer: &serde_json::Value) -> bool {
+    let entries: Vec<&serde_json::Value> = match installer {
+        serde_json::Value::Array(entries) => entries.iter().collect(),
+        entry => vec![entry],
+    };
+    !entries.is_empty()
+        && entries.iter().all(|entry| match &entry["script"] {
+            serde_json::Value::String(_) => true,
+            script @ serde_json::Value::Object(_) => script["sudo"].as_bool() != Some(true),
+            _ => false,
+        })
 }
 
 /// A `pkg` cask [`pkg_casks_leaving_homebrew`] decided to take out of Homebrew, and the evidence.
@@ -1275,6 +1334,14 @@ mod tests {
 
         assert!(installs_a_pkg(r#"{ "artifacts": [ { "pkg": "Thing.pkg" } ] }"#));
         assert!(installs_a_pkg(r#"{ "artifacts": [ { "installer": [ { "script": { "executable": "install.sh", "sudo": true } } ] } ] }"#));
+        assert!(installs_a_pkg(r#"{ "artifacts": [ { "installer": [ { "manual": "Install Thing.app" } ] } ] }"#));
+        // gcloud-cli's real stanza: a script Homebrew runs as the user, so nothing it places is
+        // root's and `brew upgrade` works from the per-user process.
+        assert!(!installs_a_pkg(
+            r#"{ "artifacts": [ { "installer": [ { "script": { "executable": "google-cloud-sdk/install.sh", "args": ["--quiet"] } } ] }, { "uninstall": [ { "trash": "/opt/homebrew/Caskroom/gcloud-cli/latest" } ] } ] }"#
+        ));
+        assert!(!installs_a_pkg(r#"{ "artifacts": [ { "installer": [ { "script": { "executable": "install.sh", "sudo": false } } ] } ] }"#));
+        assert!(!installs_a_pkg(r#"{ "artifacts": [ { "installer": [ { "script": "install.sh" } ] } ] }"#));
         // Root for the uninstall alone is `cask_requires_root` but not this: the files are the
         // user's, and such a cask stays in Homebrew.
         assert!(!installs_a_pkg(r#"{ "artifacts": [ { "uninstall": [ { "launchctl": "com.example.daemon" } ] }, { "app": "App.app" } ] }"#));
@@ -1504,6 +1571,7 @@ mod tests {
         assert!(!needs_root(
             r#"{ "artifacts": [ { "uninstall": [ { "quit": "com.example.App", "login_item": "App", "delete": "/Applications/App.app" } ] }, { "app": "App.app" } ] }"#
         ));
+        assert!(!needs_root(r#"{ "artifacts": [ { "installer": [ { "script": { "executable": "google-cloud-sdk/install.sh" } } ] } ] }"#));
         assert!(!needs_root(r#"{ "artifacts": [] }"#));
         assert!(!needs_root(r#"{}"#));
     }
@@ -1706,11 +1774,41 @@ mod tests {
         let installed = read_app_bundle(&jdk).unwrap().expect("a JDK is reported");
 
         assert_eq!(installed.name, "temurin-26");
+        // No release file in this scratch bundle, so the plist's version stands.
         assert_eq!(installed.version, "1.2.3");
         assert_eq!(installed.application_identifier.as_deref(), Some("net.java.openjdk.jdk"));
         assert_eq!(installed.package_manager, None);
 
         let _ = fs::remove_dir_all(jdk.parent().unwrap());
+    }
+
+    #[test]
+    fn read_app_bundle_versions_a_jdk_by_its_release_file_build_and_all() {
+        let jdk = std::env::temp_dir().join(format!("kintsugi-system-info-test-{}-release/temurin-26.jdk", std::process::id()));
+        scratch_bundle_at(&jdk, "OpenJDK 26.0.2.1", "net.java.openjdk.jdk", false);
+        fs::create_dir_all(jdk.join("Contents/Home")).unwrap();
+        // Temurin 26's real release file, abridged.
+        fs::write(
+            jdk.join("Contents/Home/release"),
+            "IMPLEMENTOR=\"Eclipse Adoptium\"\nIMPLEMENTOR_VERSION=\"Temurin-26.0.2.1+1\"\nJAVA_RUNTIME_VERSION=\"26.0.2.1+1\"\nJAVA_VERSION=\"26.0.2.1\"\n",
+        )
+        .unwrap();
+
+        let installed = read_app_bundle(&jdk).unwrap().expect("a JDK is reported");
+
+        assert_eq!(installed.version, "26.0.2.1.1");
+
+        let _ = fs::remove_dir_all(jdk.parent().unwrap());
+    }
+
+    #[test]
+    fn normalize_java_version_pads_to_four_components_then_appends_the_build() {
+        assert_eq!(normalize_java_version("26.0.2.1+1").as_deref(), Some("26.0.2.1.1"));
+        assert_eq!(normalize_java_version("27+35").as_deref(), Some("27.0.0.0.35"));
+        assert_eq!(normalize_java_version("21.0.5+11-LTS").as_deref(), Some("21.0.5.0.11"));
+        assert_eq!(normalize_java_version("1.8.0_412-b08"), None);
+        assert_eq!(normalize_java_version("26.0.2"), None);
+        assert_eq!(normalize_java_version("26.0.2+"), None);
     }
 
     #[test]
