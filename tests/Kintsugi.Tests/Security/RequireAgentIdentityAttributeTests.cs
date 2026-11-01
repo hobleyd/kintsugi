@@ -18,12 +18,20 @@ namespace Kintsugi.Tests.Security;
 /// </summary>
 public class RequireAgentIdentityAttributeTests
 {
-    private static ActionExecutingContext CreateContext(string? headerValue, IDictionary<string, object?> actionArguments)
+    // Verified defaults to what nginx sends for a certificate that verified, so the tests that are
+    // about the CN keep meaning exactly that.
+    private static ActionExecutingContext CreateContext(
+        string? headerValue, IDictionary<string, object?> actionArguments, string? verified = "SUCCESS")
     {
         var httpContext = new DefaultHttpContext();
         if (headerValue is not null)
         {
             httpContext.Request.Headers[RequireAgentIdentityAttribute.CertificateCnHeader] = headerValue;
+        }
+
+        if (verified is not null)
+        {
+            httpContext.Request.Headers[RequireAgentIdentityAttribute.CertificateVerifiedHeader] = verified;
         }
 
         var actionContext = new ActionContext(httpContext, new RouteData(), new ActionDescriptor());
@@ -94,6 +102,26 @@ public class RequireAgentIdentityAttributeTests
     public void NoClaimedIdentityAnywhereInTheArguments_IsRejectedWith403()
     {
         var context = CreateContext("SERIAL-789", new Dictionary<string, object?> { ["somethingElse"] = 42 });
+
+        new RequireAgentIdentityAttribute().OnActionExecuting(context);
+
+        Assert.Equal(StatusCodes.Status403Forbidden, ResultStatusCode(context));
+    }
+
+    // A matching CN is not enough without nginx saying the certificate verified: a location that
+    // forwarded the CN without its own $ssl_client_verify check, or `optional_no_ca`, would hand over
+    // the CN of a certificate that failed — and Verified is what says so. Null is a location that
+    // never set it; NONE and FAILED are what nginx itself reports.
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("NONE")]
+    [InlineData("FAILED:certificate has expired")]
+    [InlineData("success")]
+    public void MatchingCertificateCn_WithoutVerifiedSuccess_IsRejectedWith403(string? verified)
+    {
+        var command = new CreateHostCommand("host-1", "SERIAL-123");
+        var context = CreateContext("SERIAL-123", new Dictionary<string, object?> { ["command"] = command }, verified);
 
         new RequireAgentIdentityAttribute().OnActionExecuting(context);
 

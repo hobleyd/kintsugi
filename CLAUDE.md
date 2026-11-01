@@ -107,11 +107,15 @@ Both halves of this are invisible from the C# you are editing, and each has ship
    `index.html`: a 200 containing markup, much harder to diagnose than a 404.
 
 **Agent authentication is two layers, and adding a route needs both.** nginx requires a client
-certificate signed by the fleet CA on an *exact-match* regex —
-`^/api/(host|applications|patching-policy|upgrade-paths|patch-results|os-patch-results|patch-failures|forced-patch-runs|host-removed)$`
-— and forwards the verified Subject CN as `X-Agent-Cert-Cn`. `[RequireAgentIdentity]` then compares
+certificate signed by the fleet CA on an *exact-match*, case-insensitive regex —
+`~* ^/api/(host|applications|patching-policy|upgrade-paths|patch-results|os-patch-results|patch-failures|forced-patch-runs|host-removed)/?$`
+— and forwards the verified Subject CN as `X-Agent-Cert-Cn` and `$ssl_client_verify` as
+`X-Agent-Cert-Verified`. `[RequireAgentIdentity]` then requires `Verified == SUCCESS` and compares
 that CN against the `serialNumber` the request body claims (via `IAgentScopedRequest`), so a valid
-agent cert can't be used to report data for a different host. **A new agent-facing route is
+agent cert can't be used to report data for a different host. Those two headers are trustworthy only
+because **every other proxying `location` clears them** (`proxy_set_header X-Agent-Cert-Cn "";`):
+when the regex was case-sensitive, `/api/Host/` reached the same action through the general `/api`
+block carrying a client-chosen CN. A new `location` that proxies must clear both too. **A new agent-facing route is
 un-gated until `nginx/default.conf` is edited too** — nothing in the C# will tell you.
 `/api/host/enroll` is deliberately outside the regex (an unenrolled agent has no cert yet), as are
 the browser-driven `/api/upgrade-paths/...` sub-routes.
