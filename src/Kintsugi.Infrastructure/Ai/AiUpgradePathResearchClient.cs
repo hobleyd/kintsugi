@@ -718,7 +718,14 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient, ICpeSugge
                 that same feature line, never a different major. Check those places rather than
                 assuming the top level, and read the installed version from the bundle's
                 `Contents/Info.plist` (`defaults read <bundle>/Contents/Info.plist
-                CFBundleShortVersionString`).
+                CFBundleShortVersionString`) — except for a JDK, whose plist drops the build number:
+                read `JAVA_RUNTIME_VERSION` from `<bundle>/Contents/Home/release` instead.
+              - A JDK's version, installed or latest and in both modes, is written the way the agent
+                reports it: the version number padded to four components, then the build number,
+                all dot-separated — `26.0.2.1+1` is `26.0.2.1.1`, `27+35` is `27.0.0.0.35`,
+                `21.0.5+11-LTS` is `21.0.5.0.11`. `--update-version` must print exactly that form,
+                since it is compared with what the agent reports, and a GA `27+35` written as
+                `27.35` would sort above its own update `27.0.1+8`.
               - Verify the installed bundle's CFBundleIdentifier matches `--appId` before touching
                 anything — treat a mismatch as a fatal error (wrong app), not something to silently
                 ignore. (Every OpenJDK build shares `net.java.openjdk.jdk`, so for a JDK the
