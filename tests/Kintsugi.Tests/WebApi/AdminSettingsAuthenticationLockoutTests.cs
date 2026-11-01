@@ -27,12 +27,15 @@ public class AdminSettingsAuthenticationLockoutTests
     private AdminSettingsController Controller(params Claim[] claims) =>
         Controller(new ClaimsIdentity(claims, "TestAuth"), Array.Empty<string>());
 
-    private AdminSettingsController Controller(ClaimsIdentity identity, IReadOnlyList<string> storedAdmins)
+    private AdminSettingsController Controller(ClaimsIdentity identity, IReadOnlyList<string> storedAdmins) =>
+        Controller(identity, AuthenticationSettingsDto.NotConfigured() with { IsEnabled = true, AdminEmails = storedAdmins });
+
+    private AdminSettingsController Controller(ClaimsIdentity identity, AuthenticationSettingsDto stored)
     {
         _sender.Setup(s => s.Send(It.IsAny<UpdateAuthenticationSettingsCommand>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(AuthenticationSettingsDto.NotConfigured());
         _sender.Setup(s => s.Send(It.IsAny<GetAuthenticationSettingsQuery>(), It.IsAny<CancellationToken>()))
-            .ReturnsAsync(AuthenticationSettingsDto.NotConfigured() with { IsEnabled = true, AdminEmails = storedAdmins });
+            .ReturnsAsync(stored);
 
         return new AdminSettingsController(
             _sender.Object, Mock.Of<IOptionsMonitorCache<OpenIdConnectOptions>>(), Mock.Of<IVantaSyncCoordinator>())
@@ -160,6 +163,59 @@ public class AdminSettingsAuthenticationLockoutTests
         var controller = Controller(new ClaimsIdentity(), Array.Empty<string>());
 
         await controller.UpdateAuthentication(Command(true), CancellationToken.None);
+
+        VerifySaved(Times.Once());
+    }
+
+    // The caller's session proves who they are to the stored identity source, not the one being
+    // saved: switching provider (or hosted domain, tenant, issuer) under a list passes the email
+    // check and then locks everyone out once cookies expire.
+    private static AuthenticationSettingsDto StoredGoogle(string? hostedDomain, params string[] admins) =>
+        AuthenticationSettingsDto.NotConfigured() with { IsEnabled = true, HostedDomain = hostedDomain, AdminEmails = admins };
+
+    [Fact]
+    public async Task SwitchingProvider_UnderAList_IsRefused()
+    {
+        var controller = Controller(SignedInAs("me@example.invalid"), StoredGoogle("example.invalid", "me@example.invalid"));
+        var command = new UpdateAuthenticationSettingsCommand(
+            AuthProvider.GenericOidc, "client-id", "secret", "https://issuer.example.invalid", null, null, true, new[] { "me@example.invalid" });
+
+        var ex = await Assert.ThrowsAsync<DomainException>(() => controller.UpdateAuthentication(command, CancellationToken.None));
+        Assert.Contains("Clear the list first", ex.Message);
+        VerifySaved(Times.Never());
+    }
+
+    [Fact]
+    public async Task ChangingHostedDomain_UnderTheStoredList_IsRefused()
+    {
+        var controller = Controller(SignedInAs("me@example.invalid"), StoredGoogle("example.invalid", "me@example.invalid"));
+        var command = new UpdateAuthenticationSettingsCommand(
+            AuthProvider.GoogleWorkspace, "client-id", "secret", null, null, "other.invalid", true, null);
+
+        await Assert.ThrowsAsync<DomainException>(() => controller.UpdateAuthentication(command, CancellationToken.None));
+        VerifySaved(Times.Never());
+    }
+
+    [Fact]
+    public async Task SameIdentitySource_DifferingOnlyInCaseAndSpace_IsSaved()
+    {
+        var controller = Controller(SignedInAs("me@example.invalid"), StoredGoogle("example.invalid", "me@example.invalid"));
+        var command = new UpdateAuthenticationSettingsCommand(
+            AuthProvider.GoogleWorkspace, "client-id", "secret", null, null, " Example.invalid ", true, null);
+
+        await controller.UpdateAuthentication(command, CancellationToken.None);
+
+        VerifySaved(Times.Once());
+    }
+
+    [Fact]
+    public async Task SwitchingProvider_WithAnEmptyList_IsSaved()
+    {
+        var controller = Controller(SignedInAs("me@example.invalid"), StoredGoogle("example.invalid"));
+        var command = new UpdateAuthenticationSettingsCommand(
+            AuthProvider.GenericOidc, "client-id", "secret", "https://issuer.example.invalid", null, null, true, Array.Empty<string>());
+
+        await controller.UpdateAuthentication(command, CancellationToken.None);
 
         VerifySaved(Times.Once());
     }

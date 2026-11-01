@@ -23,6 +23,7 @@ using Kintsugi.Application.Vulnerabilities;
 using Kintsugi.Application.Vulnerabilities.Commands.UpdateVulnerabilitySettings;
 using Kintsugi.Application.Vulnerabilities.Queries.GetVulnerabilitySettings;
 using Kintsugi.Domain.Entities;
+using Kintsugi.Domain.Enums;
 using Kintsugi.WebApi.Filters;
 
 namespace Kintsugi.WebApi.Controllers;
@@ -123,6 +124,13 @@ public class AdminSettingsController : ControllerBase
     /// list, so turning sign-in on with an allowlist takes two saves, and the message says so rather
     /// than telling them to add an email they cannot be recognised by yet.
     /// </para>
+    /// <para>
+    /// The caller's session proves who they are to the <em>current</em> identity source, not to the
+    /// one being saved. Switching provider — or the tenant, issuer or hosted domain within one — while
+    /// a list is in force would pass the email check above and then lock everyone out once cookies
+    /// expire: the new source may not assert <c>email_verified</c>, or may assert a different address.
+    /// So that change is refused until the list is cleared, the same way enabling sign-in is.
+    /// </para>
     /// </remarks>
     private async Task EnsureCallerKeepsAccess(UpdateAuthenticationSettingsCommand command, CancellationToken cancellationToken)
     {
@@ -131,9 +139,10 @@ public class AdminSettingsController : ControllerBase
             return;
         }
 
+        var stored = await _sender.Send(new GetAuthenticationSettingsQuery(), cancellationToken);
         IReadOnlyList<string> effective = command.AdminEmails is not null
             ? AuthenticationSettings.NormaliseAdminEmails(command.AdminEmails)
-            : (await _sender.Send(new GetAuthenticationSettingsQuery(), cancellationToken)).AdminEmails;
+            : stored.AdminEmails;
         if (effective.Count == 0)
         {
             return;
@@ -151,6 +160,32 @@ public class AdminSettingsController : ControllerBase
         {
             throw new DomainException("The administrators list must include your own email, or you would lock yourself out.");
         }
+
+        if (stored.IsEnabled && ChangesIdentitySource(stored, command))
+        {
+            throw new DomainException(
+                "Changing the sign-in provider, tenant, issuer or hosted domain while an administrators list is set could lock "
+                + "everyone out. Clear the list first, make the change, sign in again, then restore the list.");
+        }
+    }
+
+    /// <summary>Whether the save points sign-in at a different identity source than the stored one,
+    /// comparing only the field each provider actually keeps (see <c>AuthenticationSettings.Update</c>).</summary>
+    private static bool ChangesIdentitySource(AuthenticationSettingsDto stored, UpdateAuthenticationSettingsCommand command)
+    {
+        if (command.Provider != stored.Provider)
+        {
+            return true;
+        }
+
+        static string? Norm(string? value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+        var (sent, kept) = command.Provider switch
+        {
+            AuthProvider.GoogleWorkspace => (command.HostedDomain, stored.HostedDomain),
+            AuthProvider.MicrosoftEntra => (command.TenantId, stored.TenantId),
+            _ => (command.Authority, stored.Authority),
+        };
+        return !string.Equals(Norm(sent), Norm(kept), StringComparison.OrdinalIgnoreCase);
     }
 
     [HttpGet("github")]
