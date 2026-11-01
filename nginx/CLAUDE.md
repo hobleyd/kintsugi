@@ -28,3 +28,13 @@ client certificate at all. The block is a plain `location /api` for that reason.
 means adding a location above it or the client answers it with `index.html` — a 200 containing
 markup, much harder to diagnose than a 404.
 
+**Every `location` that proxies must set or clear `X-Agent-Cert-Cn` and `X-Agent-Cert-Verified`.**
+The application trusts both (`RequireAgentIdentityAttribute`), and `proxy_set_header` is the only
+thing that stops a client's own copy reaching it. The two certificate locations set them from the
+handshake; `agent-packages` sets `Verified` and clears the CN; every other one sets both to `""`,
+which drops them. It has to be repeated per location: one that sets any `proxy_set_header` of its own
+inherits none from the server level. This is not hypothetical — while the agent regex was
+case-sensitive, `/api/Host/` fell through to `location /api`, which forwarded a client-chosen CN, and
+ASP.NET (which ignores case and a trailing slash) routed it to the agent action. The regex is now
+`~*` with `/?$`, but clearing the headers is what makes any spelling it still misses fail closed.
+

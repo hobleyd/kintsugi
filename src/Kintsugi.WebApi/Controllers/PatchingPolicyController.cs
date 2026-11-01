@@ -2,6 +2,7 @@ using MediatR;
 using Microsoft.AspNetCore.Mvc;
 using Kintsugi.Application.PatchingPolicy;
 using Kintsugi.Application.PatchingPolicy.Queries.GetPatchingPolicySettings;
+using Kintsugi.WebApi.Filters;
 
 namespace Kintsugi.WebApi.Controllers;
 
@@ -24,8 +25,16 @@ public class PatchingPolicyController : ControllerBase
     }
 
     /// <summary>Gets the current patching policy — sensible defaults if none has been saved yet.</summary>
+    /// <remarks>
+    /// <see cref="RequireAgentCertificateAttribute"/>, not <see cref="RequireAgentIdentityAttribute"/>:
+    /// the agents send no serial number here, because the policy is the same for every host, so
+    /// there is nothing to compare a certificate's CN with — the identity check would refuse the
+    /// whole fleet. This only requires that the caller is an enrolled agent.
+    /// </remarks>
     [HttpGet]
+    [RequireAgentCertificate]
     [ProducesResponseType(typeof(PatchingPolicySettingsDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
     public async Task<ActionResult<PatchingPolicySettingsDto>> Get(CancellationToken cancellationToken) =>
         Ok(await _sender.Send(new GetPatchingPolicySettingsQuery(), cancellationToken));
 
