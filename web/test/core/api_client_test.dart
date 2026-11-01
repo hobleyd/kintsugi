@@ -169,4 +169,72 @@ void main() {
       await notifier.dispose();
     });
   });
+
+  group('the 403 announcement', () {
+    // An administrator removed from the list while using the app keeps a valid cookie, so the
+    // server answers 403 ("Not an administrator.") rather than 401. It has to reach the session
+    // bloc the same way a 401 does, or the app sits on failed requests until the page is reloaded.
+    test('fires for an ordinary route, and the caller still gets the failure', () async {
+      final notifier = UnauthorizedNotifier();
+      var announced = 0;
+      notifier.stream.listen((_) => announced++);
+
+      final api = ApiClient(
+        httpClient: MockClient((_) async => http.Response('', 403)),
+        unauthorizedNotifier: notifier,
+      );
+
+      await expectLater(
+        api.getJson('/api/admin/hosts'),
+        throwsA(isA<ApiException>().having((e) => e.statusCode, 'statusCode', 403)),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(announced, 1);
+      await notifier.dispose();
+    });
+
+    test('is still a plain ApiException, not the sign-in one: signing in again would change nothing', () async {
+      final api = ApiClient(httpClient: MockClient((_) async => http.Response('', 403)));
+
+      await expectLater(
+        api.getJson('/api/admin/hosts'),
+        throwsA(isNot(isA<UnauthorizedApiException>())),
+      );
+    });
+
+    test('does not fire for /api/session itself', () async {
+      final notifier = UnauthorizedNotifier();
+      var announced = 0;
+      notifier.stream.listen((_) => announced++);
+
+      final api = ApiClient(
+        httpClient: MockClient((_) async => http.Response('', 403)),
+        unauthorizedNotifier: notifier,
+      );
+
+      await expectLater(api.getJson('/api/session'), throwsA(isA<ApiException>()));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(announced, 0);
+      await notifier.dispose();
+    });
+
+    test('does not fire for an ordinary failure such as a 400', () async {
+      final notifier = UnauthorizedNotifier();
+      var announced = 0;
+      notifier.stream.listen((_) => announced++);
+
+      final api = ApiClient(
+        httpClient: MockClient((_) async => http.Response('', 400)),
+        unauthorizedNotifier: notifier,
+      );
+
+      await expectLater(api.getJson('/api/admin/hosts'), throwsA(isA<ApiException>()));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(announced, 0);
+      await notifier.dispose();
+    });
+  });
 }

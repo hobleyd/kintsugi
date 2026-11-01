@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../core/di/locator.dart';
+import '../../core/theme/kintsugi_palette.dart';
 import '../../core/widgets/alert_box.dart';
 import '../../core/widgets/buttons.dart';
 import '../../core/widgets/form_bits.dart';
@@ -45,9 +46,14 @@ class _AuthenticationFormState extends State<_AuthenticationForm> {
   final _authority = TextEditingController();
   final _tenantId = TextEditingController();
   final _hostedDomain = TextEditingController();
+  final _adminEmails = TextEditingController();
 
   AuthProvider _provider = AuthProvider.googleWorkspace;
   bool _isEnabled = false;
+
+  /// Whether the administrators field holds something the server told us or the user typed. Until
+  /// it does, saving sends null so an empty, never-loaded field cannot wipe the stored list.
+  bool _adminEmailsKnown = false;
 
   @override
   void dispose() {
@@ -56,6 +62,7 @@ class _AuthenticationFormState extends State<_AuthenticationForm> {
     _authority.dispose();
     _tenantId.dispose();
     _hostedDomain.dispose();
+    _adminEmails.dispose();
     super.dispose();
   }
 
@@ -64,6 +71,8 @@ class _AuthenticationFormState extends State<_AuthenticationForm> {
     _authority.text = settings.authority ?? '';
     _tenantId.text = settings.tenantId ?? '';
     _hostedDomain.text = settings.hostedDomain ?? '';
+    _adminEmails.text = settings.adminEmails.join('\n');
+    _adminEmailsKnown = true;
     _clientSecret.clear();
     setState(() {
       _provider = settings.provider;
@@ -72,6 +81,42 @@ class _AuthenticationFormState extends State<_AuthenticationForm> {
   }
 
   void _edited() => context.read<AuthenticationSettingsBloc>().add(const AuthenticationSettingsEdited());
+
+  /// Asks first when this save would empty a non-empty administrators list while sign-in is
+  /// required, because an empty list makes every account that can sign in an administrator, which
+  /// is the opposite of what clearing a list reads as. [stored] is what the server last reported.
+  Future<void> _confirmAndSave(AuthenticationSettings? stored) async {
+    final clearing = _isEnabled &&
+        _adminEmailsKnown &&
+        (stored?.adminEmails.isNotEmpty ?? false) &&
+        _parseAdminEmails(_adminEmails.text).isEmpty;
+
+    if (clearing) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          backgroundColor: dialogContext.palette.backgroundAlt,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(6),
+            side: BorderSide(color: dialogContext.palette.border),
+          ),
+          title: Text('Clear the administrators list?',
+              style: Theme.of(dialogContext).textTheme.titleLarge),
+          content: const HintText(
+            'With the list empty, every account that can sign in will become an administrator '
+            'of this site.',
+          ),
+          actions: [
+            SecondaryButton(label: 'Cancel', onPressed: () => Navigator.of(dialogContext).pop(false)),
+            PrimaryButton(label: 'Clear list', onPressed: () => Navigator.of(dialogContext).pop(true)),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+    }
+
+    _save();
+  }
 
   void _save() =>
       context.read<AuthenticationSettingsBloc>().add(AuthenticationSettingsSaveRequested(
@@ -82,7 +127,36 @@ class _AuthenticationFormState extends State<_AuthenticationForm> {
             tenantId: _tenantId.text.trim(),
             hostedDomain: _hostedDomain.text.trim(),
             isEnabled: _isEnabled,
+            adminEmails: _adminEmailsKnown ? _parseAdminEmails(_adminEmails.text) : null,
           ));
+
+  /// One address per line; commas and semicolons also separate, so a pasted list works. An entry
+  /// pasted from a mail client as `Jake Uren <jake.uren@htw.com.au>` is reduced to the address
+  /// inside the angle brackets; a plain address is left as it is. Blanks are dropped here, and the
+  /// server lower-cases and de-duplicates.
+  ///
+  /// The reduction is not cosmetic. The server refuses a display name
+  /// (`UpdateAuthenticationSettingsCommandValidator`), so without it a pasted list is rejected
+  /// whole — and a display name containing a comma, which this splits on, still leaves a stray
+  /// fragment that the server then names under the field, rather than saving something that can
+  /// never match a sign-in.
+  List<String> _parseAdminEmails(String text) => text
+      .split(RegExp(r'[\n,;]'))
+      .map((entry) => RegExp(r'<([^<>]*)>').firstMatch(entry)?.group(1) ?? entry)
+      .map((entry) => entry.trim())
+      .where((entry) => entry.isNotEmpty)
+      .toList();
+
+  /// Server-side validation reports a bad entry under `AdminEmails[0]`, `AdminEmails[1]`, …, which
+  /// `errorFor('AdminEmails')` does not match, so the first of those is shown on the field.
+  String? _adminEmailsError(SettingsState<AuthenticationSettings> state) {
+    for (final entry in state.fieldErrors.entries) {
+      if (entry.key.toLowerCase().startsWith('adminemails[') && entry.value.isNotEmpty) {
+        return entry.value.first;
+      }
+    }
+    return null;
+  }
 
   @override
   Widget build(BuildContext context) =>
@@ -198,6 +272,38 @@ class _AuthenticationFormState extends State<_AuthenticationForm> {
                           onChanged: (_) => _edited(),
                         ),
                       ),
+                    LabelledField(
+                      label: 'Administrators',
+                      hints: const [
+                        HintText(
+                          'One email address per line. Only these accounts can use this site once '
+                          'sign-in is required; anyone else sees "Access denied". Leave empty to '
+                          'let every account that can sign in administer it.',
+                        ),
+                        HintText(
+                          'With sign-in required, the list must include your own email, or saving is '
+                          'refused. An account whose email the provider has not verified is never an '
+                          'administrator.',
+                        ),
+                        HintText(
+                          'First setup takes two saves: nobody is signed in yet, so the server cannot '
+                          'tell whose email to look for and refuses a list while turning sign-in on. '
+                          'Enable sign-in with this list empty, sign in, then come back and add the list.',
+                        ),
+                      ],
+                      child: KintsugiTextField(
+                        controller: _adminEmails,
+                        minLines: 3,
+                        maxLines: 8,
+                        keyboardType: TextInputType.multiline,
+                        hintText: 'name@example.com',
+                        errorText: state.errorFor('AdminEmails') ?? _adminEmailsError(state),
+                        onChanged: (_) {
+                          _adminEmailsKnown = true;
+                          _edited();
+                        },
+                      ),
+                    ),
                     KintsugiCheckbox(
                       label: 'Require sign-in to access this site',
                       value: _isEnabled,
@@ -215,7 +321,11 @@ class _AuthenticationFormState extends State<_AuthenticationForm> {
                       child: PrimaryButton(
                         label: 'Save Settings',
                         busy: state.saving,
-                        onPressed: state.loading ? null : _save,
+                        // Not until the settings have loaded: after a failed GET the form is
+                        // blank, and saving it would overwrite the server's settings with that.
+                        onPressed: state.loading || state.value == null
+                            ? null
+                            : () => _confirmAndSave(state.value),
                       ),
                     ),
                   ],

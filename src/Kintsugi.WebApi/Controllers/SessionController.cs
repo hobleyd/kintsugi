@@ -7,6 +7,7 @@ using Kintsugi.Application.Authentication;
 using Kintsugi.Application.Authentication.Queries.GetAuthenticationSettings;
 using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Domain.Enums;
+using Kintsugi.WebApi.Filters;
 
 namespace Kintsugi.WebApi.Controllers;
 
@@ -85,7 +86,16 @@ public class SessionController : ControllerBase
             stored is not null,
             settings.IsEnabled,
             User.Identity?.IsAuthenticated == true,
+            // Same rule as [RequireAdminSession], so the page cannot say "welcome" to a caller whose
+            // every request would be a 403. Only a yes/no about this caller: the allowlist itself
+            // is never disclosed here, because this route is anonymous.
+            RequireAdminSessionAttribute.IsAdministrator(stored, User),
             AdminIdentity.DisplayNameOf(User),
+            // The caller's own verified email, for the access-denied screen: DisplayNameOf stops at
+            // the '@', so "jake" cannot tell someone they signed in with jake@gmail.com rather than
+            // jake@htw.com.au. The same value the allowlist is compared against, so an email the
+            // provider has not verified is never reflected back here.
+            AdminIdentity.VerifiedEmailOf(User),
             DescribeProvider(settings.Provider),
             settings.IsEnabled && settings.HasClientSecret,
             CallbackUrl,
@@ -166,7 +176,13 @@ public class SessionController : ControllerBase
 /// leaving the rest of the UI reachable would be the wrong default in the other direction.</param>
 /// <param name="AuthenticationEnabled">Whether sign-in is required to use the site.</param>
 /// <param name="SignedIn">Whether this caller holds a valid session cookie.</param>
+/// <param name="Authorized">Whether this caller may use the site: true unless sign-in is required and
+/// they are either not signed in or signed in but not on the administrators list. The client shows
+/// "access denied" for <c>SignedIn &amp;&amp; !Authorized</c> and the sign-in screen for <c>!SignedIn</c>.</param>
 /// <param name="UserName">This caller's display name, or null when not signed in.</param>
+/// <param name="Email">This caller's own verified email, in full, or null when not signed in or the
+/// provider has not verified it. The access-denied screen shows it so a wrong-account sign-in is
+/// visible; <see cref="UserName"/> is only the part before the <c>@</c>.</param>
 /// <param name="ProviderDisplayName">What to call the provider on the sign-in screen.</param>
 /// <param name="CanSignIn">Whether the sign-in button should do anything: sign-in is both enabled
 /// and completely enough configured to challenge. Mirrors what the old Razor login page called
@@ -178,7 +194,9 @@ public record SessionDto(
     bool AuthenticationSettingsSaved,
     bool AuthenticationEnabled,
     bool SignedIn,
+    bool Authorized,
     string? UserName,
+    string? Email,
     string ProviderDisplayName,
     bool CanSignIn,
     string CallbackUrl,

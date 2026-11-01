@@ -10,9 +10,11 @@ import 'dart:async';
 /// with no way to do anything about it. Worse, the sidebar's log-out button is hidden in that
 /// state, because the session the client is holding still says it is signed in.
 ///
-/// So [ApiClient] raises this on any 401, once, from the one layer that can tell a 401 from an
-/// ordinary failure, and [SessionBloc] re-reads `GET /api/session` when it does — which routes to
-/// the sign-in screen through exactly the same gate a fresh page load would have used. Screen blocs
+/// So [ApiClient] raises this on any 401 — and on a 403, which is the same thing for an
+/// administrator removed from the list mid-session, whose cookie is still valid — once, from the
+/// one layer that can tell those from an ordinary failure, and [SessionBloc] re-reads `GET /api/session` when it does — which routes to
+/// the sign-in screen, or the access-denied one, through exactly the same gate a fresh page load
+/// would have used. Screen blocs
 /// stay unaware of it, which is the point: every one of them would otherwise need the same clause.
 class UnauthorizedNotifier {
   final _controller = StreamController<void>.broadcast();

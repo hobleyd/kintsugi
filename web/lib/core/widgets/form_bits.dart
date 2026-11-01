@@ -40,12 +40,19 @@ class KintsugiTextField extends StatelessWidget {
     this.onChanged,
     this.onEditingComplete,
     this.enabled = true,
+    this.minLines,
+    this.maxLines = 1,
   });
 
   final TextEditingController controller;
   final String? hintText;
   final bool obscureText;
   final TextInputType? keyboardType;
+
+  /// For a field that holds a list, one entry per line. A field that obscures its text must stay
+  /// on one line, which is what the default of 1 keeps.
+  final int? minLines;
+  final int? maxLines;
 
   /// A field-level validation failure, taken from the API's `ValidationProblemDetails`. The Razor
   /// forms could only render one flat list because `ModelState.AddModelError(string.Empty, …)`
@@ -61,6 +68,8 @@ class KintsugiTextField extends StatelessWidget {
         controller: controller,
         obscureText: obscureText,
         keyboardType: keyboardType,
+        minLines: minLines,
+        maxLines: maxLines,
         enabled: enabled,
         onChanged: onChanged,
         onEditingComplete: onEditingComplete,
