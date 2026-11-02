@@ -21,9 +21,9 @@ class ApiClient {
 
   /// The route that reports whether this browser is signed in.
   ///
-  /// Excluded from the 401 announcement below, and it has to be: announcing one would make the
-  /// session bloc re-read this same route, which would 401 again, which would announce again. A
-  /// 401 from here is handled where it lands instead — see `SessionBloc`.
+  /// Excluded from the 401 and 403 announcements below, and it has to be: announcing one would make
+  /// the session bloc re-read this same route, which would fail again, which would announce again.
+  /// A 401 from here is handled where it lands instead — see `SessionBloc`.
   static const _sessionPath = '/api/session';
 
   final http.Client _http;
@@ -80,6 +80,17 @@ class ApiClient {
       // showing "Not signed in." as though it were a validation message.
       if (path != _sessionPath) _unauthorized?.notify();
       throw UnauthorizedApiException(_problemMessage(response) ?? 'Not signed in.');
+    }
+
+    if (response.statusCode == 403 && path != _sessionPath) {
+      // `[RequireAdminSession]` answers 403 to a caller who is signed in but not on the
+      // administrators list, and it judges that against the stored list on every request — so an
+      // administrator removed while they are using the app keeps a valid cookie and gets this, not
+      // a 401. Announced like a 401 so the session is re-read, `Session.isDenied` becomes true and
+      // the router moves to the access-denied screen, rather than every screen printing
+      // "Not an administrator." until the page is reloaded. Still thrown below for the caller that
+      // asked. The only other 403 in the API is agent enrolment, which this client never calls.
+      _unauthorized?.notify();
     }
 
     if (response.statusCode < 200 || response.statusCode >= 300) {

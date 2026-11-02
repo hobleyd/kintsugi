@@ -8,6 +8,7 @@ import '../../presentation/clients/clients_screen.dart';
 import '../../presentation/hosts/hosts_screen.dart';
 import '../../presentation/remote_control/remote_control_screen.dart';
 import '../../presentation/session/session_bloc.dart';
+import '../../presentation/session/access_denied_screen.dart';
 import '../../presentation/session/sign_in_screen.dart';
 import '../../presentation/session/startup_screens.dart';
 import '../../presentation/settings/ai_agent_screen.dart';
@@ -77,6 +78,9 @@ abstract final class Routes {
   static const settingsVanta = '/settings/vanta';
   static const settingsVulnerabilities = '/settings/vulnerabilities';
   static const signIn = '/login';
+
+  /// Signed in, but the account is not on the administrators list.
+  static const accessDenied = '/access-denied';
   static const starting = '/starting';
   static const unavailable = '/unavailable';
 }
@@ -119,9 +123,18 @@ GoRouter createRouter(SessionBloc sessionBloc) {
         return path == Routes.signIn ? null : Routes.signIn;
       }
 
-      // Signed in, or sign-in is off. The three gate routes are no longer where this browser
+      // Signed in with an account that is not an administrator: every API route would answer 403,
+      // so show why rather than a UI full of failed requests.
+      if (ready.session.isDenied) {
+        return path == Routes.accessDenied ? null : Routes.accessDenied;
+      }
+
+      // Signed in and allowed, or sign-in is off. The gate routes are no longer where this browser
       // should be sitting.
-      if (path == Routes.signIn || path == Routes.starting || path == Routes.unavailable) {
+      if (path == Routes.signIn ||
+          path == Routes.accessDenied ||
+          path == Routes.starting ||
+          path == Routes.unavailable) {
         return Routes.hosts;
       }
 
@@ -132,6 +145,7 @@ GoRouter createRouter(SessionBloc sessionBloc) {
       GoRoute(path: Routes.starting, builder: (_, _) => const StartingScreen()),
       GoRoute(path: Routes.unavailable, builder: (_, _) => const ServerUnavailableScreen()),
       GoRoute(path: Routes.signIn, builder: (_, _) => const SignInScreen()),
+      GoRoute(path: Routes.accessDenied, builder: (_, _) => const AccessDeniedScreen()),
       ShellRoute(
         builder: (context, state, child) => AppShell(
           location: state.uri.path,

@@ -241,6 +241,7 @@ class AuthenticationSettings extends Equatable {
     required this.hostedDomain,
     required this.isEnabled,
     required this.hasClientSecret,
+    required this.adminEmails,
   });
 
   final AuthProvider provider;
@@ -251,9 +252,21 @@ class AuthenticationSettings extends Equatable {
   final bool isEnabled;
   final bool hasClientSecret;
 
+  /// Who may use the site once sign-in is required. Empty means every signed-in user is an
+  /// administrator, which is also what a server that predates the list reports.
+  final List<String> adminEmails;
+
   @override
-  List<Object?> get props =>
-      [provider, clientId, authority, tenantId, hostedDomain, isEnabled, hasClientSecret];
+  List<Object?> get props => [
+        provider,
+        clientId,
+        authority,
+        tenantId,
+        hostedDomain,
+        isEnabled,
+        hasClientSecret,
+        adminEmails,
+      ];
 }
 
 /// Mirrors `AuditSettingsDto`.

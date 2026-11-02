@@ -144,9 +144,16 @@ builder.Services.AddHealthChecks()
 
 var app = builder.Build();
 
-await ApplyMigrationsAsync(app);
-EnsureAgentFleetCaExists(app);
-await SeedGitHubSettingsFromEnvironmentAsync(app);
+// Skipped under the "Testing" environment, which only ControllerRouteGateTests selects (through
+// WebApplicationFactory): it needs the real route table, not a database or a CA, and none of these
+// three can run without the container's Postgres and volumes. Never set that environment on a
+// deployment — it would start the API with an unmigrated database and no fleet CA.
+if (!app.Environment.IsEnvironment("Testing"))
+{
+    await ApplyMigrationsAsync(app);
+    EnsureAgentFleetCaExists(app);
+    await SeedGitHubSettingsFromEnvironmentAsync(app);
+}
 
 // Before anything that reads the scheme or host — the OIDC handler in UseAuthentication, and the
 // routes that build a URL of their own: the callback URLs in GET /api/session and the fallback
@@ -387,3 +394,6 @@ static async Task SeedGitHubSettingsFromEnvironmentAsync(WebApplication app)
         + "and GITHUB_API_TOKEN / AGENT_PACKAGE_GITHUB_REPO / SCRIPT_APPROVAL_GITHUB_REPO / "
         + "SCRIPT_APPROVAL_GITHUB_TOKEN can be removed from this deployment's .env.");
 }
+
+/// <summary>Makes the top-level-statements entry point nameable, for <c>WebApplicationFactory&lt;Program&gt;</c>.</summary>
+public partial class Program;

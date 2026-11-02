@@ -5,11 +5,13 @@ Session session({
   required bool saved,
   required bool enabled,
   required bool signedIn,
+  bool authorized = true,
 }) =>
     Session(
       authenticationSettingsSaved: saved,
       authenticationEnabled: enabled,
       signedIn: signedIn,
+      authorized: authorized,
       userName: signedIn ? 'admin@example.com' : null,
       providerDisplayName: 'Google Workspace',
       canSignIn: saved && enabled,
@@ -39,6 +41,30 @@ void main() {
     test('requires a signed-in caller once sign-in is enabled', () {
       expect(session(saved: true, enabled: true, signedIn: false).canUseApp, isFalse);
       expect(session(saved: true, enabled: true, signedIn: true).canUseApp, isTrue);
+    });
+  });
+
+  group('Session.isDenied', () {
+    test('is true only for a signed-in account that is not authorised', () {
+      expect(
+        session(saved: true, enabled: true, signedIn: true, authorized: false).isDenied,
+        isTrue,
+      );
+      expect(session(saved: true, enabled: true, signedIn: true).isDenied, isFalse);
+    });
+
+    test('is false when nobody is signed in: that is the sign-in screen, not "access denied"', () {
+      expect(
+        session(saved: true, enabled: true, signedIn: false, authorized: false).isDenied,
+        isFalse,
+      );
+    });
+
+    test('is false when sign-in is off, whatever authorized says', () {
+      expect(
+        session(saved: true, enabled: false, signedIn: true, authorized: false).isDenied,
+        isFalse,
+      );
     });
   });
 }

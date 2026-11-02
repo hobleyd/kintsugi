@@ -27,6 +27,7 @@ final class AuthenticationSettingsSaveRequested extends AuthenticationSettingsEv
     required this.tenantId,
     required this.hostedDomain,
     required this.isEnabled,
+    required this.adminEmails,
   });
 
   final AuthProvider provider;
@@ -42,9 +43,21 @@ final class AuthenticationSettingsSaveRequested extends AuthenticationSettingsEv
   final String? hostedDomain;
   final bool isEnabled;
 
+  /// One address per entry, already trimmed and without blanks. Empty clears the list; null keeps
+  /// the server's, which is what the screen sends when it never loaded or edited the field.
+  final List<String>? adminEmails;
+
   @override
-  List<Object?> get props =>
-      [provider, clientId, clientSecret, authority, tenantId, hostedDomain, isEnabled];
+  List<Object?> get props => [
+        provider,
+        clientId,
+        clientSecret,
+        authority,
+        tenantId,
+        hostedDomain,
+        isEnabled,
+        adminEmails,
+      ];
 }
 
 final class AuthenticationSettingsEdited extends AuthenticationSettingsEvent {
@@ -95,6 +108,7 @@ class AuthenticationSettingsBloc
         tenantId: event.tenantId,
         hostedDomain: event.hostedDomain,
         isEnabled: event.isEnabled,
+        adminEmails: event.adminEmails,
       );
       emit(state.copyWith(value: saved, saving: false, saved: true));
     } on ApiException catch (error) {

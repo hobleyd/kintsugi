@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Filters;
+using Kintsugi.Application.Authentication;
 using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Domain.Entities;
 
@@ -61,8 +62,22 @@ public class RequireAdminSessionAttribute : ActionFilterAttribute
     /// controller, is what stops the two drifting — the whole point of mirroring <c>Program.cs</c>'s
     /// gate was that a second shape would eventually disagree with the first.
     /// </remarks>
-    public static bool IsAdministrator(AuthenticationSettings? settings, ClaimsPrincipal? user) =>
-        settings?.IsEnabled != true || user?.Identity?.IsAuthenticated == true;
+    public static bool IsAdministrator(AuthenticationSettings? settings, ClaimsPrincipal? user)
+    {
+        if (settings?.IsEnabled != true)
+        {
+            return true;
+        }
+
+        if (user?.Identity?.IsAuthenticated != true)
+        {
+            return false;
+        }
+
+        // Signed in. With an allowlist saved, only a listed, verified email is an administrator;
+        // an empty list keeps "every signed-in user", so deploying this cannot lock anyone out.
+        return settings.IsAdminEmail(AdminIdentity.VerifiedEmailOf(user));
+    }
 
     public override async Task OnActionExecutionAsync(ActionExecutingContext context, ActionExecutionDelegate next)
     {
@@ -71,14 +86,20 @@ public class RequireAdminSessionAttribute : ActionFilterAttribute
 
         if (!IsAdministrator(settings, context.HttpContext.User))
         {
+            // 401 for "not signed in", 403 for "signed in but not on the administrators list" —
+            // the client signs in again for the first and shows "access denied" for the second.
+            var signedIn = context.HttpContext.User.Identity?.IsAuthenticated == true;
+            var status = signedIn ? StatusCodes.Status403Forbidden : StatusCodes.Status401Unauthorized;
             context.Result = new ObjectResult(new ProblemDetails
             {
-                Status = StatusCodes.Status401Unauthorized,
-                Title = "Not signed in.",
-                Detail = "This action changes what agents will execute and requires a signed-in administrator."
+                Status = status,
+                Title = signedIn ? "Not an administrator." : "Not signed in.",
+                Detail = signedIn
+                    ? "This account is not on the administrators list."
+                    : "This action changes what agents will execute and requires a signed-in administrator."
             })
             {
-                StatusCode = StatusCodes.Status401Unauthorized
+                StatusCode = status
             };
             return;
         }

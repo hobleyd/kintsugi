@@ -22,13 +22,13 @@ public class UpdateAuthenticationSettingsCommandHandler : IRequestHandler<Update
         if (settings is null)
         {
             settings = AuthenticationSettings.Create(
-                request.Provider, request.ClientId, request.ClientSecret, request.Authority, request.TenantId, request.HostedDomain, request.IsEnabled);
+                request.Provider, request.ClientId, request.ClientSecret, request.Authority, request.TenantId, request.HostedDomain, request.IsEnabled, request.AdminEmails);
             await _repository.AddAsync(settings, cancellationToken);
         }
         else
         {
             settings.Update(
-                request.Provider, request.ClientId, request.ClientSecret, request.Authority, request.TenantId, request.HostedDomain, request.IsEnabled);
+                request.Provider, request.ClientId, request.ClientSecret, request.Authority, request.TenantId, request.HostedDomain, request.IsEnabled, request.AdminEmails);
         }
 
         await _unitOfWork.SaveChangesAsync(cancellationToken);

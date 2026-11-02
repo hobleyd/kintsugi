@@ -77,4 +77,53 @@ public class UpdateAuthenticationSettingsCommandValidatorTests
 
         result.ShouldHaveValidationErrorFor(c => c.ClientSecret);
     }
+
+    private static UpdateAuthenticationSettingsCommand WithAdmins(params string[] admins) =>
+        new(AuthProvider.GoogleWorkspace, "client-id", "secret", null, null, null, true, admins);
+
+    // Surrounding whitespace is trimmed (and trimmed again on save); a blank entry is dropped on save.
+    [Theory]
+    [InlineData("alice.admin@example.invalid")]
+    [InlineData("first.last+tag@sub.example.invalid")]
+    [InlineData("  alice.admin@example.invalid  ")]
+    [InlineData("")]
+    public void AdminEmail_PlainAddress_IsAccepted(string email)
+    {
+        _validator.TestValidate(WithAdmins(email)).ShouldNotHaveAnyValidationErrors();
+    }
+
+    // Each of these would be saved and then never match a sign-in, so the administrator would only
+    // find out from "Access denied" — the Outlook-style ones being what #30's paste-a-list can produce.
+    // Non-ASCII is refused because ToLowerInvariant folds the Kelvin sign (U+212A) into 'k'.
+    [Theory]
+    [InlineData("Alice Admin <alice.admin@example.invalid>")]
+    [InlineData("<alice.admin@example.invalid>")]
+    [InlineData("alice admin@example.invalid")]
+    [InlineData("a@example.invalid; b@example.invalid")]
+    [InlineData("\"alice\"@example.invalid")]
+    [InlineData("\u212Aelvin@example.invalid")]
+    [InlineData("josé@example.invalid")]
+    [InlineData("alice@admin@example.invalid")]
+    [InlineData("@example.invalid")]
+    [InlineData("alice.admin@")]
+    public void AdminEmail_NotAPlainAddress_IsRejected(string email)
+    {
+        _validator.TestValidate(WithAdmins(email)).ShouldHaveValidationErrorFor("AdminEmails[0]");
+    }
+
+    [Fact]
+    public void AdminEmails_UpToTheCap_AreAccepted()
+    {
+        var admins = Enumerable.Range(0, UpdateAuthenticationSettingsCommandValidator.MaxAdminEmails).Select(i => $"admin{i}@example.invalid").ToArray();
+
+        _validator.TestValidate(WithAdmins(admins)).ShouldNotHaveAnyValidationErrors();
+    }
+
+    [Fact]
+    public void AdminEmails_OverTheCap_AreRejected()
+    {
+        var admins = Enumerable.Range(0, UpdateAuthenticationSettingsCommandValidator.MaxAdminEmails + 1).Select(i => $"admin{i}@example.invalid").ToArray();
+
+        _validator.TestValidate(WithAdmins(admins)).ShouldHaveValidationErrorFor(c => c.AdminEmails!.Count);
+    }
 }

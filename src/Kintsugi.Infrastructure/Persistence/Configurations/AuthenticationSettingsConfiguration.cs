@@ -19,5 +19,8 @@ public class AuthenticationSettingsConfiguration : IEntityTypeConfiguration<Auth
         builder.Property(s => s.TenantId).HasMaxLength(128);
         builder.Property(s => s.HostedDomain).HasMaxLength(255);
         builder.Property(s => s.IsEnabled).IsRequired();
+        // A Postgres text[]; an empty array is the "no allowlist, every signed-in user is an
+        // administrator" state, so existing rows migrate to today's behaviour.
+        builder.Property(s => s.AdminEmails).HasColumnType("text[]").HasDefaultValueSql("'{}'").IsRequired();
     }
 }

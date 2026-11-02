@@ -118,6 +118,7 @@ AuthenticationSettings authenticationSettingsFromJson(Map<String, dynamic> json)
       hostedDomain: json['hostedDomain'] as String?,
       isEnabled: json['isEnabled'] as bool? ?? false,
       hasClientSecret: json['hasClientSecret'] as bool? ?? false,
+      adminEmails: (json['adminEmails'] as List<dynamic>? ?? const []).cast<String>(),
     );
 
 /// Reads an `AuditSettingsDto`.

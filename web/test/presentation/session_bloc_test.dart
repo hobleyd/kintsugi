@@ -1,5 +1,8 @@
 import 'package:bloc_test/bloc_test.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:kintsugi_web/core/network/api_client.dart';
 import 'package:kintsugi_web/core/network/api_exception.dart';
 import 'package:kintsugi_web/core/network/unauthorized_notifier.dart';
 import 'package:kintsugi_web/domain/entities/session.dart';
@@ -34,6 +37,7 @@ Session readySession() => const Session(
       authenticationSettingsSaved: true,
       authenticationEnabled: true,
       signedIn: true,
+      authorized: true,
       userName: 'admin@example.com',
       providerDisplayName: 'Google Workspace',
       canSignIn: true,
@@ -122,6 +126,46 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 10));
 
       expect(repository.reads, 0);
+      await notifier.dispose();
+    });
+  });
+
+  group('a 403 mid-session', () {
+    test('moves an administrator removed from the list to the access-denied state', () async {
+      // The whole chain: the server answers 403 to a still-valid cookie, ApiClient announces it,
+      // the bloc re-reads, and Session.isDenied is what the router redirects on.
+      final notifier = UnauthorizedNotifier();
+      final repository = FakeSessionRepository(session: readySession());
+      final bloc = blocFor(repository, notifier: notifier);
+      final api = ApiClient(
+        httpClient: MockClient((_) async => http.Response('', 403)),
+        unauthorizedNotifier: notifier,
+      );
+
+      bloc.add(const SessionRequested());
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect((bloc.state as SessionReady).session.isDenied, isFalse);
+
+      // Someone else edited the list, so the next read says this account is no longer allowed.
+      repository.session = const Session(
+        authenticationSettingsSaved: true,
+        authenticationEnabled: true,
+        signedIn: true,
+        authorized: false,
+        userName: 'admin',
+        email: 'admin@example.com',
+        providerDisplayName: 'Google Workspace',
+        canSignIn: true,
+        callbackUrl: '',
+        signOutCallbackUrl: '',
+      );
+      await expectLater(api.getJson('/api/admin/hosts'), throwsA(isA<ApiException>()));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(repository.reads, 2);
+      expect((bloc.state as SessionReady).session.isDenied, isTrue);
+
+      await bloc.close();
       await notifier.dispose();
     });
   });

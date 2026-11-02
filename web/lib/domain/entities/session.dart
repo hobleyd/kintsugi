@@ -10,11 +10,13 @@ class Session extends Equatable {
     required this.authenticationSettingsSaved,
     required this.authenticationEnabled,
     required this.signedIn,
+    required this.authorized,
     required this.userName,
     required this.providerDisplayName,
     required this.canSignIn,
     required this.callbackUrl,
     required this.signOutCallbackUrl,
+    this.email,
   });
 
   /// False on a fresh deploy. The app then locks itself to the Authentication settings screen,
@@ -25,7 +27,19 @@ class Session extends Equatable {
 
   final bool authenticationEnabled;
   final bool signedIn;
+
+  /// Whether this caller may use the site: false when sign-in is required and they are either not
+  /// signed in or signed in but not on the administrators list. Mirrors the server's own rule
+  /// (`RequireAdminSessionAttribute.IsAdministrator`) rather than being a second opinion.
+  final bool authorized;
+
   final String? userName;
+
+  /// This caller's own verified email in full, where [userName] is only the part before the `@`.
+  /// Null when nobody is signed in, when the provider has not verified it, or on a server that
+  /// predates the field. The access-denied screen prefers it, because the commonest reason to land
+  /// there is the wrong account, and `jake` does not show that.
+  final String? email;
   final String providerDisplayName;
 
   /// Whether the sign-in button should do anything: sign-in is both enabled and configured
@@ -49,12 +63,19 @@ class Session extends Equatable {
   bool get canUseApp =>
       authenticationSettingsSaved && (!authenticationEnabled || signedIn);
 
+  /// Signed in with an account that is not on the administrators list. Distinct from "not signed
+  /// in": signing in again would change nothing, so the client shows "access denied" with a
+  /// sign-out button instead of the sign-in screen.
+  bool get isDenied => authenticationEnabled && signedIn && !authorized;
+
   @override
   List<Object?> get props => [
         authenticationSettingsSaved,
         authenticationEnabled,
         signedIn,
+        authorized,
         userName,
+        email,
         providerDisplayName,
         canSignIn,
         callbackUrl,

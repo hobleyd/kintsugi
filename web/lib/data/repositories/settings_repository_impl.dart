@@ -68,6 +68,7 @@ class AuthenticationSettingsRepositoryImpl implements AuthenticationSettingsRepo
     required String? tenantId,
     required String? hostedDomain,
     required bool isEnabled,
+    required List<String>? adminEmails,
   }) async =>
       authenticationSettingsFromJson(
         await _api.putJson('/api/admin/settings/authentication', body: {
@@ -78,6 +79,7 @@ class AuthenticationSettingsRepositoryImpl implements AuthenticationSettingsRepo
           'tenantId': tenantId,
           'hostedDomain': hostedDomain,
           'isEnabled': isEnabled,
+          'adminEmails': adminEmails,
         }) as Map<String, dynamic>,
       );
 }

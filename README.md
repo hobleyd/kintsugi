@@ -320,4 +320,13 @@ deployment from a stale one.
   automatically.
 * **The relay is in-memory and single-process.** Remote control pairs two sockets that must land in
   the same process, so a second API replica behind a load balancer would break it.
+* **On Microsoft Entra, the administrators list is only as strong as the `mail` attribute.** The
+  list matches the email the identity provider vouches for: Google must send `email_verified` and,
+  being a Workspace account, `hd`; other providers must send `email_verified`. Entra sends neither,
+  and its `email` claim is the user's `mail` attribute, which Microsoft does not verify and which
+  anyone with User Administrator or Exchange Administrator in the tenant (or write access to
+  on-premises AD synced through Entra Connect) can set to an address on the list. That is no weaker
+  than having no list, where every user in the tenant is an administrator, but treat those roles as
+  Kintsugi administrators too. Matching Entra administrators on their object ID instead is tracked
+  in #33.
 * `/swagger` is reachable without signing in — route disclosure only, but worth knowing.

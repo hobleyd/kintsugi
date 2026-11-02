@@ -70,6 +70,7 @@ class UpdateAuthenticationSettings {
     required String? tenantId,
     required String? hostedDomain,
     required bool isEnabled,
+    required List<String>? adminEmails,
   }) =>
       _repository.update(
         provider: provider,
@@ -79,6 +80,7 @@ class UpdateAuthenticationSettings {
         tenantId: tenantId,
         hostedDomain: hostedDomain,
         isEnabled: isEnabled,
+        adminEmails: adminEmails,
       );
 }
 
