@@ -57,9 +57,9 @@
       "path": "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System",
       "valueName": "NoConnectedUser",
       "valueType": "dword",
-      "data": "1",
+      "data": "3",
       "mode": "audit",
-      "reason": "Master Daily section 3: users can't add Microsoft accounts (Accounts: Block Microsoft accounts)."
+      "reason": "Master Daily section 3: users can't add or sign in with Microsoft accounts (Accounts: Block Microsoft accounts). 3, not the 1 that section 3 writes: the separate block-Microsoft-account script sets 3, and that is what devices hold. Section 3 should change to 3 so the two scripts stop overwriting each other."
     },
     {
       "key": "onedrive.disable-file-sync",
