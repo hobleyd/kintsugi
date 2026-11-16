@@ -63,7 +63,7 @@ abstract final class Routes {
   /// machine's screen" are different things to be sent to.
   static String remoteShell(String hostId) => '/hosts/${Uri.encodeComponent(hostId)}/shell';
 
-  /// Device baselines, audit only: the list, one baseline, and one device against it.
+  /// Device baselines: the list, one baseline, and one device against it.
   static const baselines = '/baselines';
   static String baseline(String baselineId) => '/baselines/${Uri.encodeComponent(baselineId)}';
   static String baselineHost(String baselineId, String hostId) =>

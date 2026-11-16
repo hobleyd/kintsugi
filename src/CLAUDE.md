@@ -207,12 +207,22 @@ API at all. It is now a Flutter web application in `web/`, compiled by `nginx/Do
 as static files by nginx — see web/CLAUDE.md.
 
 
-## Device baselines: audit only
+## Device baselines: audit, plus an enforce pilot
 
 A baseline (`Kintsugi.Application/Baselines/`) is a named list of registry settings and facts that
 should hold on a device, held as `BaselineVersion`s. The design is "Kintsugi device configuration
-design" (IP-841); this step is its rollout step 2, **audit only**: the Windows agent reads and
-reports, and nothing anywhere writes to a device.
+design" (IP-841). Rollout step 2 made it **audit only**: the Windows agent reads and reports. The
+first slice of step 3 adds `enforce`: a drifted setting in that mode is set back by the agent.
+
+**Only a value on `BaselineItemRules.EnforceableValues` can be enforced, and the agent compiles in the
+same list (`baseline::ENFORCEABLE`).** The agent writes as SYSTEM, and the wrong value is code
+execution (Run, a service's ImagePath, Image File Execution Options, a COM server) or a quieter
+weakening even under `SOFTWARE\Policies` (an extension force-install list, a WSUS server). So the list
+names exact values, not prefixes, and it is what limits a write: a stolen signing key can sign any
+document, but the agent still writes nothing outside its list. The validator refuses `enforce`
+anywhere else before a version can exist, and `BaselineEnforceTests` reads `baseline.rs` and fails if
+the two lists differ. Widening either is a reviewed code change, never a signature. Rings, the
+failure-rate hold and exemptions are still to come.
 
 **A version is a canonical JSON document, signed like a script and bound to the bytes reviewed.**
 `BaselineDocument.ToCanonicalJson` sorts items by key, omits nulls and escapes everything outside

@@ -330,13 +330,18 @@ backend only.
 
 **Real-machine tests.** `log_collection::real_windows` and `health::real_windows` run the real PowerShell scripts through `run_powershell` and parse what `Get-WinEvent` really returns. They are `cfg(windows)`, so they run on CI's Windows runner but not under Wine (Wine has no PowerShell: use `-- --skip real_windows` there). They check the format, not failures.
 
-## Device baselines (audit only)
+## Device baselines (audit, plus an enforce pilot)
 
 `baseline.rs` fetches `GET /api/baseline` on each check-in, right after the health report, caches it
 like `policy.json` (`baseline.json`), verifies each document against the pinned artifact-signing key
 before reading anything (the cache included), reads each machine-scope item from HKLM's 64-bit view
-with `KEY_READ`, and posts only what differs from the states the server sent back. **It has no write
-path**: nothing in it creates, sets or deletes a key or a value, and enforcement is a later step.
+with `KEY_READ`, and posts only what differs from the states the server sent back, plus every
+correction. **Its one write path is `write_machine_value`, and `ENFORCEABLE` bounds it**: a drifted
+item in `enforce` mode is set back only when its exact path, value name and type are in that
+compiled-in list, then read again and reported with "set back by Kintsugi (was …)". Nothing else is
+ever created, set or deleted, whatever a signed document says, so the list, not the signing key, is
+what limits a SYSTEM write. Widening it is a reviewed change here and in the server's
+`BaselineItemRules.EnforceableValues`; `BaselineEnforceTests` fails if the two differ.
 User-scope items and items whose value is a secret are reported not-applicable without being read,
 and anything under `HKLM\SAM` or `HKLM\SECURITY` is refused as an error without being read
 (`is_protected_path`, the second check behind the server's `BaselineItemRules.ProtectedRoots`).

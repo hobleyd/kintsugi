@@ -18,6 +18,34 @@ public static class BaselineItemRules
     public const string HiveMachine = "HKLM";
     public const string HiveUser = "HKCU";
     public const string ModeAudit = "audit";
+    public const string ModeEnforce = "enforce";
+
+    /// <summary>
+    /// The only registry values a baseline may <c>enforce</c>, each named exactly: path, value name and
+    /// type. Everything else can be audited, never written.
+    /// </summary>
+    /// <remarks>
+    /// A list rather than a rule because the agent writes as SYSTEM, and the wrong value is code
+    /// execution (Run, a service's ImagePath, Image File Execution Options, Winlogon, a COM server's
+    /// InprocServer32) or quieter harm even under <c>SOFTWARE\Policies</c> (an extension force-install
+    /// list, a WSUS server, Defender switched off). Signing decides what a baseline says; this list
+    /// decides what any signed baseline can ever write, so a stolen signing key cannot reach further.
+    /// Widening it is a reviewed change here and in the agent's copy (<c>baseline::ENFORCEABLE</c>),
+    /// never a signature; <c>BaselineEnforceTests</c> holds the two copies together.
+    /// </remarks>
+    public static readonly IReadOnlyList<EnforceableValue> EnforceableValues = new[]
+    {
+        // Master Daily section 17, the enforce pilot: Chrome keeps its file and folder pickers open.
+        new EnforceableValue(@"SOFTWARE\Policies\Google\Chrome", "WindowOcclusionEnabled", "dword"),
+    };
+
+    /// <summary>Whether <paramref name="item"/> names a value on <see cref="EnforceableValues"/>.</summary>
+    public static bool IsEnforceable(BaselineItem item) =>
+        item.Kind == KindSetting && item.Scope == ScopeMachine && item.Hive == HiveMachine
+        && EnforceableValues.Any(v =>
+            string.Equals(v.Path, item.Path, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(v.ValueName, item.ValueName, StringComparison.OrdinalIgnoreCase)
+            && v.ValueType == item.ValueType);
 
     public static readonly IReadOnlyList<string> ValueTypes = new[] { "dword", "qword", "string", "expandString", "multiString", "binary" };
 
@@ -59,6 +87,9 @@ public static class BaselineItemRules
     };
 }
 
+/// <summary>One registry value a baseline may enforce (<see cref="BaselineItemRules.EnforceableValues"/>).</summary>
+public record EnforceableValue(string Path, string ValueName, string ValueType);
+
 public class BaselineItemValidator : AbstractValidator<BaselineItem>
 {
     public BaselineItemValidator()
@@ -84,9 +115,14 @@ public class BaselineItemValidator : AbstractValidator<BaselineItem>
         {
             RuleFor(i => i.ValueType).Must(t => t is not null && BaselineItemRules.ValueTypes.Contains(t))
                 .WithMessage("A setting's valueType is one of: " + string.Join(", ", BaselineItemRules.ValueTypes) + ".");
-            // No write path exists in this step, so a setting that claims to be enforced would be a
-            // promise nothing keeps.
-            RuleFor(i => i.Mode).Equal(BaselineItemRules.ModeAudit).WithMessage("Only 'audit' mode exists in this step.");
+            RuleFor(i => i.Mode).Must(m => m is BaselineItemRules.ModeAudit or BaselineItemRules.ModeEnforce)
+                .WithMessage("A setting's mode is 'audit' or 'enforce'.");
+            RuleFor(i => i).Must(BaselineItemRules.IsEnforceable).When(i => i.Mode == BaselineItemRules.ModeEnforce)
+                .WithName("Mode")
+                .WithMessage(i => $@"Only the values in BaselineItemRules.EnforceableValues can be enforced, and {i.Hive}\{i.Path}\{i.ValueName} ({i.ValueType}) is not one of them. Audit it, or add it to that list in a reviewed change.");
+            // The agent never receives a secret's value in this step, so it has nothing to write.
+            RuleFor(i => i.Secret).Null().When(i => i.Mode == BaselineItemRules.ModeEnforce)
+                .WithMessage("A setting whose value is a secret cannot be enforced yet: agents do not receive secrets.");
             RuleFor(i => i.Secret).Matches(BaselineItemRules.SecretPattern).When(i => i.Secret is not null)
                 .WithMessage("A secret is named in UPPER_SNAKE_CASE.");
             RuleFor(i => i.Data).Null().When(i => i.Secret is not null)
