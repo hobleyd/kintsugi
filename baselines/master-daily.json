@@ -396,6 +396,18 @@
       "data": "1",
       "mode": "audit",
       "reason": "Master Daily section 12: PIN sign-in for domain users."
+    },
+    {
+      "key": "chrome.window-occlusion-off",
+      "kind": "setting",
+      "scope": "machine",
+      "hive": "HKLM",
+      "path": "SOFTWARE\\Policies\\Google\\Chrome",
+      "valueName": "WindowOcclusionEnabled",
+      "valueType": "dword",
+      "data": "0",
+      "mode": "audit",
+      "reason": "Master Daily section 17: Chrome's window-occlusion detection off. With it on, Chrome cancels its own file and folder picker when the Windows file dialog covers the browser window (small high-DPI screens), so web apps that ask for a folder never get one."
     }
   ]
 }
