@@ -6,7 +6,7 @@ namespace Kintsugi.Tests.Application.Baselines;
 
 /// <summary>
 /// <c>baselines/master-daily.json</c> is pasted into the Baselines screen as-is, so it has to be exactly
-/// what <c>POST /api/admin/baselines</c> accepts: Master Daily sections 1–12, machine scope only, audit.
+/// what <c>POST /api/admin/baselines</c> accepts: Master Daily sections 1–12 and 17, machine scope only, audit.
 /// </summary>
 public class MasterDailyFixtureTests
 {
@@ -23,11 +23,11 @@ public class MasterDailyFixtureTests
     }
 
     [Fact]
-    public void HoldsMasterDailys33MachineSettings_InAudit_AndPassesTheCreateValidator()
+    public void HoldsMasterDailys34MachineSettings_InAudit_AndPassesTheCreateValidator()
     {
         var fixture = Load();
 
-        Assert.Equal(33, fixture.Items.Count);
+        Assert.Equal(34, fixture.Items.Count);
         Assert.All(fixture.Items, i =>
         {
             Assert.Equal("setting", i.Kind);
