@@ -566,6 +566,9 @@ struct BrewInstalledInfo {
     /// them whether or not [`forget_cask`] managed to remove the record, so the report's shape
     /// never depends on that `rm` — the bundle is reported standalone by the folder scan instead.
     casks_left: HashSet<String>,
+    /// `cask_bundle_paths` per token rather than merged — what [`homebrew_cask_bundles`] hands
+    /// `running_apps`, which has to know *which* cask's bundle a running process belongs to.
+    cask_bundles: HashMap<String, Vec<PathBuf>>,
 }
 
 impl BrewInstalledInfo {
@@ -947,6 +950,7 @@ fn parse_brew_installed_info(json_text: &str) -> Result<BrewInstalledInfo> {
     let mut cask_bundle_paths = HashSet::new();
     let mut root_required_casks = HashSet::new();
     let mut pkg_casks = HashMap::new();
+    let mut cask_bundles = HashMap::new();
 
     for cask in json["casks"].as_array().into_iter().flatten() {
         let mut declared_bundle_paths = Vec::new();
@@ -970,6 +974,7 @@ fn parse_brew_installed_info(json_text: &str) -> Result<BrewInstalledInfo> {
         cask_bundle_paths.extend(declared_bundle_paths.iter().cloned());
 
         let Some(token) = cask["token"].as_str() else { continue };
+        cask_bundles.insert(token.to_string(), declared_bundle_paths.clone());
         let latest_version = cask["version"].as_str();
         if let Some(latest) = latest_version {
             latest_versions.insert(token.to_string(), latest.to_string());
@@ -990,7 +995,34 @@ fn parse_brew_installed_info(json_text: &str) -> Result<BrewInstalledInfo> {
         root_required_casks,
         pkg_casks,
         casks_left: HashSet::new(),
+        cask_bundles,
     })
+}
+
+/// The bundles each installed cask places where the scan looks, keyed by token, or `None` when
+/// Homebrew is absent or `brew info` could not be read. Only for `running_apps`, run from the
+/// per-user process — Homebrew's owner, so no `sudo -u` — at patch time rather than inventory
+/// time. `None` is not "no casks": it is what makes every Homebrew cask row read as possibly
+/// running, which is the safe reading when nothing says otherwise.
+pub fn homebrew_cask_bundles() -> Option<HashMap<String, Vec<PathBuf>>> {
+    let brew = find_brew_binary()?;
+    let output = brew_command(&brew, None).args(["info", "--json=v2", "--installed"]).output().ok()?;
+    if !output.status.success() {
+        crate::logging::warn(&format!(
+            "`brew info --json=v2 --installed` failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+        return None;
+    }
+    parse_brew_installed_info(&String::from_utf8_lossy(&output.stdout)).ok().map(|info| info.cask_bundles)
+}
+
+/// The name and `CFBundleIdentifier` the inventory reports for the bundle at `path` — through
+/// [`read_app_bundle`] itself, so `running_apps` compares a running bundle against an upgrade row
+/// in exactly the terms the row was reported in. `None` for a bundle the inventory skips (Apple's
+/// own) or cannot read.
+pub fn bundle_name_and_identifier(path: &Path) -> Option<(String, Option<String>)> {
+    read_app_bundle(path).ok().flatten().map(|app| (app.name, app.application_identifier))
 }
 
 /// `ids`, plus each of them with the installed version's parts in place of the catalog's.

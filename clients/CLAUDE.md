@@ -86,7 +86,9 @@ original — then the others for what each platform forced to differ. The differ
 | Inventory | `/Applications` bundles + Homebrew + App Store (by receipt) | uninstall registry (3 views) + winget + Chocolatey | Flatpak + Snap as *applications*; dpkg/rpm reported separately as packages (see below) |
 | OS updates | `softwareupdate` | Windows Update Agent COM API, via PowerShell | apt / dnf / yum / zypper / pacman / apk |
 | Host identity | hardware serial, always present | SMBIOS serial, **often a placeholder** | DMI serial, **often a placeholder** |
-| Nobody logged in | nothing patches | nothing patches | root service patches unattended — see below |
+| Nobody logged in | nothing patches | the service's silent pass patches applications nobody has open; nothing else | root service patches unattended — see below |
+| Silent pass (see "Patching what nobody has open") | per-user process, `SILENT_PASS_DELAY` after each predicted check-in | the service's hourly loop, after `check_in` | the timer's `run_daemon`, after `check_in`, under the lock |
+| "Is it open?" | executable inside the row's bundle, keg or cask bundle | image under the uninstall entry's `InstallLocation` / `DisplayIcon` folder | `/.flatpak-info` in the process's root; `snap.<name>.` cgroup or `/snap/<name>/` |
 | Remote control | per-user process, consent + capture + input | service holds the socket, a **SYSTEM session helper** does the rest, named pipe between | resident root unit holds the socket, per-user process does the rest, unix socket between; X11 via XTEST, Wayland via a separate portal/PipeWire binary |
 | Choosing a display | restarts the ScreenCaptureKit stream on another `SCDisplay` | a source rectangle of the whole virtual desktop, plus "All displays" | X11: a crop of the root window, plus "All displays". Wayland: whichever outputs the portal's picker granted, re-linked to a different PipeWire node |
 | Remote shell | a third root LaunchDaemon, as **root**, asked by the per-user process through its own queue | the service itself, as **SYSTEM**, over ConPTY — no helper | the resident root unit, as **root** — nothing crosses `remote_ipc` |
@@ -286,7 +288,9 @@ override, and the queue's own property (a request names a thing, the privileged 
 verifies it) is the same one.
 
 
-**Only the Linux agent patches with nobody logged in, and it has to.** Both other agents put the
+**Only the Linux agent runs a whole cycle with nobody logged in, and it has to.** (The Windows
+service's silent pass also patches with nobody logged on, but only applications, and only ones
+nothing is running from — see "Patching what nobody has open".) Both other agents put the
 patching schedule in the per-user process, which costs nothing when every managed host is somebody's
 desktop. Most of a Linux fleet is servers with no graphical session at all, so the same design would
 mean the majority of hosts silently never patched. The per-user process writes a heartbeat into the
@@ -345,6 +349,54 @@ the path empty would break the agent permanently. Linux also has nothing to rest
 side: it is a oneshot that is about to exit, and the next timer firing execs whatever is at the path
 by then — only the long-running per-user units get restarted.
 
+
+## Patching what nobody has open
+
+**An application nobody has open is patched without asking anybody; the prompt is only for what
+is open.** Upgrading an application quits it (an AI-researched script is told to; Homebrew's
+`start_upgrade` does it to a cask; Windows installers close or refuse), and done to a closed one
+that costs the person at the desk nothing. So there are two places it happens, both in all three
+agents:
+
+- **The silent pass, after each hourly check-in.** `patch_cycle::run_silent` on macOS and Linux,
+  `service::Agent::patch_shut_applications_silently` on Windows. No dialog, no notification, no
+  progress window; failures are reported to the server exactly as a prompted cycle's are, and shown
+  nowhere. It never installs the OS update (a restart, and on Apple silicon a password, is never
+  "won't affect anybody" — that was put to the owner and decided), never calls
+  `register_completed` (it patched what happened to be shut, not the host, and counting it would
+  push the prompt for what *is* open a whole interval out), and on macOS is not held by
+  `prompt_can_be_seen` (a locked Mac is the best time for it).
+- **The front of a due cycle.** `patch_cycle::run` patches the shut ones first
+  (`patch_shut_applications`, reporting `AgentStatus::PatchingInBackground`, which greys the menu
+  but keeps the progress window shut), and only then asks about what is left — the open
+  applications and the OS update. When that is nothing, the cycle completes with no dialog at all.
+  `run_now` and `run_forced` are unchanged: somebody has already decided.
+
+**"Could not tell" is "open"** — `running_apps::partition`, identical in all three, and the rule the
+whole feature rests on. A process table that would not list, a Homebrew cask `brew info` would not
+describe, a Windows row with no uninstall entry or only a folder too broad to mean one application
+(`running_apps::is_specific`): each leaves the row to the prompt, which is where every row went
+before. Wrong in that direction costs a dialog; wrong in the other quits somebody's open work with
+no warning. Each application is asked about again **immediately before its turn** wherever the
+asker can see every process (the macOS per-user process; the Windows and Linux privileged halves),
+because one upgrade takes minutes and the next application may be opened meanwhile. The Windows
+and Linux per-user cycles cannot — a standard user cannot read an elevated process's image or
+another user's `/proc/<pid>/root` — so they go by `PlannedApp::open`, which the privileged half
+fills in when it answers the plan (`serde(default)`, so an older privileged half's plan reads as
+"could not tell").
+
+**Where the pass runs follows who can patch, which is the table's usual reason.** macOS runs it in
+the per-user process because `brew` refuses root and `runs_as_root` routing already lives there;
+it runs `SILENT_PASS_DELAY` (five minutes) *after* the predicted check-in, not at it, because the
+check-in may self-update and restart that process mid-`brew upgrade`, and because the daemon
+defers a self-update for any invocation that served an `AppPatch` — requests landing on the
+hourly invocation would put the agent's own update off hour after hour. Windows and Linux run it in
+the privileged half, after `check_in` and **not inside it**, because `check_in` also answers "Check
+In Now", whose asker gives up after `CHECK_IN_TIMEOUT` (ten minutes), and a pass over a dozen
+upgrades can take longer. On Windows it is skipped while a self-update's restart marker exists
+(the restart helper is waiting for the service to stop) and checks the shutdown flag between
+applications, since the queue is not drained while it runs. A tray `Plan` request that lands
+during a long pass times out and is retried on the next tick, which is harmless.
 
 ## Reporting a failed upgrade
 

@@ -141,10 +141,23 @@ pub struct RequestResult {
 /// One application the server says is patchable on this host, reduced to just what the per-user
 /// process needs to show progress. Deliberately not the full `UpgradeStatus`: that process never
 /// sees a script, a command, or a signature, because it never runs one.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlannedApp {
     pub application_name: String,
     pub latest_version: Option<String>,
+    /// The Flatpak id or snap name, for the root side's own re-check of whether the application
+    /// is open (`running_apps::is_open_now`) just before a silent patch. An identifier, not
+    /// anything runnable, so the per-user process still never sees a script.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_identifier: Option<String>,
+    /// Whether the root service found the application open when it made this plan — `None` when it
+    /// could not tell, which `running_apps::partition` reads as open. A per-user process cannot
+    /// read another user's `/proc/<pid>/root`, so it takes the root side's word for it.
+    /// `serde(default)` because a per-user process can briefly be newer than the root service it
+    /// asks (a self-update restarts both); an older service's plan then reads as "could not tell",
+    /// which is the prompt every row got before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open: Option<bool>,
 }
 
 /// The answer to a [`RequestKind::Plan`] request — the Linux equivalent of what
@@ -670,7 +683,7 @@ mod tests {
         fn plan(&mut self) -> Result<Plan> {
             self.plans_requested += 1;
             Ok(Plan {
-                apps: vec![PlannedApp { application_name: "Firefox".to_string(), latest_version: Some("126.0".to_string()) }],
+                apps: vec![PlannedApp { application_name: "Firefox".to_string(), latest_version: Some("126.0".to_string()), ..Default::default() }],
                 os_update_available: true,
             })
         }
@@ -798,8 +811,8 @@ mod tests {
     fn narrowing_keeps_only_the_named_applications_and_drops_the_os_update() {
         let plan = Plan {
             apps: vec![
-                PlannedApp { application_name: "Firefox".to_string(), latest_version: Some("2.0".to_string()) },
-                PlannedApp { application_name: "GIMP".to_string(), latest_version: Some("3.0".to_string()) },
+                PlannedApp { application_name: "Firefox".to_string(), latest_version: Some("2.0".to_string()), ..Default::default() },
+                PlannedApp { application_name: "GIMP".to_string(), latest_version: Some("3.0".to_string()), ..Default::default() },
             ],
             os_update_available: true,
         };
@@ -814,7 +827,7 @@ mod tests {
     #[test]
     fn narrowing_to_something_this_host_cannot_patch_leaves_nothing_to_do() {
         let plan = Plan {
-            apps: vec![PlannedApp { application_name: "Firefox".to_string(), latest_version: None }],
+            apps: vec![PlannedApp { application_name: "Firefox".to_string(), latest_version: None, ..Default::default() }],
             os_update_available: true,
         };
 

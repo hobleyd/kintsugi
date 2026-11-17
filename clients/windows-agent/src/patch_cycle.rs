@@ -7,6 +7,7 @@ use crate::os_update;
 use crate::presence;
 use crate::policy::PatchingPolicy;
 use crate::queue::{self, Plan, RequestKind};
+use crate::running_apps;
 use crate::schedule::{self, ScheduleState};
 use crate::status::{AgentStatus, StatusReporter};
 
@@ -88,8 +89,13 @@ pub fn run(policy: &PatchingPolicy, state: &mut ScheduleState, report: &StatusRe
         }
     };
 
+    // Whatever nobody has open is patched before anybody is asked anything — see `running_apps`.
+    // Only what is open, and the Windows update (which can want a restart), is left for the
+    // prompt; when that is nothing, the cycle completes without one.
+    let work = patch_shut_applications(work, report);
+
     if work.is_empty() {
-        logging::info("nothing to patch at this check");
+        logging::info("nothing left to patch that needs asking about at this check");
         state.register_completed(policy);
         report(AgentStatus::Idle { next_due_epoch: state.next_due_epoch() });
         return;
@@ -109,6 +115,32 @@ pub fn run(policy: &PatchingPolicy, state: &mut ScheduleState, report: &StatusRe
     };
 
     execute(policy, state, work, report, warning, true, false);
+}
+
+/// Patches every application in `work` the service found shut, silently, and returns `work` with
+/// only what is left: the applications that were open (or might have been — `running_apps` answers
+/// "could not tell" as open) and the Windows update, untouched.
+///
+/// Goes by the service's answer in the plan (`PlannedApp::open`), since this process cannot see
+/// every process on the host; the service's own silent pass is the one that re-checks before each
+/// application. The menu is told, as `PatchingInBackground`, but the progress window stays shut and
+/// no notification is posted. Kept identical in the other two agents.
+fn patch_shut_applications(work: Plan, report: &StatusReporter) -> Plan {
+    let Plan { apps, os_update_available } = work;
+    let (shut, open) = running_apps::partition(apps, |app| app.open);
+    let queue_dir = config::queue_dir();
+
+    for app in shut {
+        report(AgentStatus::PatchingInBackground { current: app.application_name.clone() });
+        logging::info(&format!("{} is not open, so asking the agent service to patch it without asking", app.application_name));
+        match queue::submit(&queue_dir, RequestKind::AppPatch, &app.application_name, APP_PATCH_TIMEOUT) {
+            Ok(result) if result.success => logging::info(&format!("patched {} successfully", app.application_name)),
+            Ok(result) => logging::error(&format!("failed to patch {}: {}", app.application_name, result.output)),
+            Err(err) => logging::error(&format!("failed to patch {}: {err:#}", app.application_name)),
+        }
+    }
+
+    Plan { apps: open, os_update_available }
 }
 
 /// The menu's "Patch Now" item: skips the confirm/delay decision altogether, since asking whether to

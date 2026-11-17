@@ -235,10 +235,18 @@ pub struct RequestResult {
 /// One application the server says is patchable on this host, reduced to just what the tray process
 /// needs to show progress. Deliberately not the full `UpgradeStatus`: the tray never sees a script,
 /// a command, or a signature, because it never runs one.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlannedApp {
     pub application_name: String,
     pub latest_version: Option<String>,
+    /// Whether the service found the application open when it made this plan — `None` when it
+    /// could not tell, which `running_apps::partition` reads as open. The tray cannot read the
+    /// image path of an elevated process or another session's, so it takes the service's word.
+    /// `serde(default)` because a tray can briefly be newer than the service it asks (a self-update
+    /// restarts both, separately); an older service's plan then reads as "could not tell", which is
+    /// the prompt every row got before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open: Option<bool>,
 }
 
 /// The answer to a [`RequestKind::Plan`] request — the Windows equivalent of what
@@ -528,7 +536,7 @@ mod tests {
         fn plan(&mut self) -> Result<Plan> {
             self.plans_requested += 1;
             Ok(Plan {
-                apps: vec![PlannedApp { application_name: "Firefox".to_string(), latest_version: Some("154.0.1".to_string()) }],
+                apps: vec![PlannedApp { application_name: "Firefox".to_string(), latest_version: Some("154.0.1".to_string()), ..Default::default() }],
                 os_update_available: true,
             })
         }
@@ -617,8 +625,8 @@ mod tests {
     fn narrowing_keeps_only_the_named_applications_and_drops_the_os_update() {
         let plan = Plan {
             apps: vec![
-                PlannedApp { application_name: "Firefox".to_string(), latest_version: Some("2.0".to_string()) },
-                PlannedApp { application_name: "GIMP".to_string(), latest_version: Some("3.0".to_string()) },
+                PlannedApp { application_name: "Firefox".to_string(), latest_version: Some("2.0".to_string()), ..Default::default() },
+                PlannedApp { application_name: "GIMP".to_string(), latest_version: Some("3.0".to_string()), ..Default::default() },
             ],
             os_update_available: true,
         };
@@ -633,7 +641,7 @@ mod tests {
     #[test]
     fn narrowing_to_something_this_host_cannot_patch_leaves_nothing_to_do() {
         let plan = Plan {
-            apps: vec![PlannedApp { application_name: "Firefox".to_string(), latest_version: None }],
+            apps: vec![PlannedApp { application_name: "Firefox".to_string(), latest_version: None, ..Default::default() }],
             os_update_available: true,
         };
 

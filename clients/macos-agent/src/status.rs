@@ -31,6 +31,17 @@ pub enum AgentStatus {
         completed: usize,
         total: usize,
     },
+    /// An application nobody has open is being patched without asking — the check-in's silent
+    /// pass, or the front of a due cycle (see `patch_cycle::patch_shut_applications`).
+    ///
+    /// Greys the menu like `Patching`, because the schedule state is with the cycle and a click
+    /// could not be served, but leaves the progress window shut like `PreFetching`: the window is
+    /// for holding somebody's attention through a run they agreed to, and the whole point of this
+    /// one is that nobody needed to be asked. Kept in step with the Windows and Linux agents.
+    PatchingInBackground {
+        /// The application being patched.
+        current: String,
+    },
     /// The root daemon is fetching a pending macOS update in the background — see
     /// `main::prefetch_os_updates`. Reported by the scheduler tick from the progress record the
     /// daemon writes (`os_update::DownloadProgress`), because the download happens in the *other*

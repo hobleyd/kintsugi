@@ -17,6 +17,7 @@ mod queue;
 mod remote_control;
 mod remote_protocol;
 mod remote_shell;
+mod running_apps;
 mod schedule;
 mod screen_capture;
 mod self_removal;
@@ -47,6 +48,15 @@ const AGENT_POLL_INTERVAL: Duration = Duration::from_secs(60);
 /// How long a cached patching policy is trusted before the `--agent` loop bothers re-fetching it
 /// — the policy changes rarely, so there's no need to hit the server every poll tick.
 const POLICY_REFRESH_INTERVAL: u64 = 60 * 60;
+
+/// How long after each hourly check-in the silent pass (`patch_cycle::run_silent`) starts. After,
+/// rather than at, for two reasons. The check-in may apply an agent self-update, which restarts
+/// this process — and a restart in the middle of a `brew upgrade` leaves Homebrew half way through
+/// one. And the root daemon defers a self-update for any invocation that served something other
+/// than a check-in (see `queue::process_queue`); the silent pass's `AppPatch` requests arriving on
+/// the hourly invocation itself would put the agent's own update off hour after hour, where
+/// arriving minutes later they wake a separate invocation and the hourly one stays clean.
+const SILENT_PASS_DELAY: u64 = 5 * 60;
 
 /// The `--agent` process's HTTP client timeout — named because the client is built in two places:
 /// at startup, and again by `refresh_identity` whenever the root daemon (re-)enrolls.
@@ -1087,6 +1097,11 @@ fn run_scheduler(
     let os_download_progress_path = config::os_download_progress_path();
     let mut shown_prefetch: Option<AgentStatus> = None;
 
+    // When the check-in's silent pass next runs — `SILENT_PASS_DELAY` after the next check-in, as
+    // the daemon's schedule predicts it. `None` until the schedule is known, and again right after
+    // a pass starts, so the next tick sets it from the check-in after that.
+    let mut silent_pass_epoch: Option<u64> = None;
+
     loop {
         // Takes the schedule state back from a cycle that has finished, and says so. Reporting
         // here rather than trusting the cycle to is what covers its early returns — an
@@ -1124,7 +1139,12 @@ fn run_scheduler(
             }
         }
 
-        let next_check_in = CheckInStatus::Scheduled { next_epoch: checkin_schedule::next_check_in_epoch(&checkin_schedule_path) };
+        let next_check_in_epoch = checkin_schedule::next_check_in_epoch(&checkin_schedule_path);
+        if silent_pass_epoch.is_none() {
+            silent_pass_epoch = next_check_in_epoch.map(|epoch| epoch + SILENT_PASS_DELAY);
+        }
+
+        let next_check_in = CheckInStatus::Scheduled { next_epoch: next_check_in_epoch };
         if shown_check_in != Some(next_check_in) {
             tray_menu::report_check_in(next_check_in);
             shown_check_in = Some(next_check_in);
@@ -1265,6 +1285,26 @@ fn run_scheduler(
                             ));
                         }
                         None => logging::warn("patch cycle due, but skipped: no enrolled agent identity yet"),
+                    }
+                } else if silent_pass_epoch.is_some_and(|epoch| schedule::now_epoch() >= epoch) {
+                    // Last of the three, and only when the state is free. A due cycle patches
+                    // everything shut before it prompts (`patch_shut_applications`), so it leaves
+                    // this nothing to do; a forced run is an emergency and goes first, and the
+                    // pass simply starts on a later tick. Not held for `prompt_can_be_seen` — it
+                    // shows nothing; see `run_silent`.
+                    if let (Some(_), Some(identity)) = (state.as_ref(), &agent_identity) {
+                        silent_pass_epoch = None;
+                        let owned = state.take().expect("just checked that the state is here");
+                        in_flight = Some(spawn_cycle(
+                            patch_cycle::run_silent,
+                            &client,
+                            &config,
+                            &current_policy,
+                            owned,
+                            &serial_number,
+                            identity,
+                            report,
+                        ));
                     }
                 }
             }

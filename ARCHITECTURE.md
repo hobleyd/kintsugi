@@ -165,9 +165,11 @@ sequenceDiagram
     Agent->>Agent: is_patchable — updateAvailable AND signature verifies<br/>against the pinned artifact-signing key
     Agent->>Agent: os_update::check_available
 
-    alt nothing patchable
+    Agent->>Agent: patch_shut_applications — every application nobody has open,<br/>patched now with no dialog (same per-application branch as below)
+
+    alt nothing left but shut applications
         Agent->>Agent: register_completed, back to Idle
-    else work exists
+    else open applications, or an OS update
         Agent->>User: confirm dialog — Patch Now / Delay
         alt Delay clicked
             Agent->>Agent: register_delay — a fresh period from now
@@ -218,6 +220,10 @@ sequenceDiagram
     end
 ```
 
+- **Only what is open is asked about.** Applications nobody has open are patched before the
+  dialog, and by a silent pass after every hourly check-in that never installs the OS update and
+  never counts as the cycle; "could not tell" counts as open. Where each agent runs that pass, and
+  why, is "Patching what nobody has open" in `clients/CLAUDE.md`.
 - **The signature is verified twice on purpose.** `is_patchable` filters the work list;
   `patch_one` re-verifies immediately before executing. The one function that actually runs
   something is the one that must never skip the check.

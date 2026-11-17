@@ -465,6 +465,11 @@ fn apply_status(status: AgentStatus) {
             },
             true,
         ),
+        AgentStatus::PatchingInBackground { current } => (
+            format!("Updating in the background: {current}"),
+            "Status: patching an application that is not open".to_string(),
+            true,
+        ),
     };
 
     if let Ok(mut text) = MENU_TEXT.lock() {
@@ -477,7 +482,10 @@ fn apply_status(status: AgentStatus) {
     // A window, unlike the menu, is visible without the user having to think to go looking for it —
     // opened the moment there's something to show, closed again once idle.
     match &status {
-        AgentStatus::Idle { .. } | AgentStatus::AwaitingAnswer | AgentStatus::WaitingForPolicy => crate::progress_window::hide(),
+        AgentStatus::Idle { .. }
+        | AgentStatus::AwaitingAnswer
+        | AgentStatus::WaitingForPolicy
+        | AgentStatus::PatchingInBackground { .. } => crate::progress_window::hide(),
         AgentStatus::Patching { current, completed, total } => crate::progress_window::show_and_update(current, *completed, *total),
     }
 }

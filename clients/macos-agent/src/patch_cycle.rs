@@ -7,6 +7,7 @@ use crate::logging;
 use crate::os_update;
 use crate::policy::PatchingPolicy;
 use crate::queue::{self, RequestKind};
+use crate::running_apps;
 use crate::schedule::{self, ScheduleState};
 use crate::status::{AgentStatus, StatusReporter};
 use crate::upgrade::{self, UpgradeStatus};
@@ -52,6 +53,7 @@ fn remaining_warning(stood_for: Duration) -> Duration {
 
 /// Everything a patch cycle would actually do, worked out up front — before showing any dialog —
 /// so a dialog only ever appears when there's real work behind it. See `plan`.
+#[derive(Default)]
 struct PendingWork {
     apps: Vec<UpgradeStatus>,
     os_update_available: bool,
@@ -105,8 +107,7 @@ impl PendingWork {
 /// acknowledgement) has no business appearing if the server can't even be reached to say whether
 /// there's anything to patch, or if it says there isn't.
 fn plan(client: &reqwest::blocking::Client, config: &Config, serial_number: &str, identity: &AgentIdentity) -> anyhow::Result<PendingWork> {
-    let statuses = upgrade::fetch_upgrade_statuses(client, config, serial_number)?;
-    let apps: Vec<_> = statuses.into_iter().filter(|status| upgrade::is_patchable(status, identity)).collect();
+    let apps = plan_applications(client, config, serial_number, identity)?;
 
     let os_update = os_update::check().unwrap_or_else(|err| {
         logging::warn(&format!("could not check for macOS updates: {err:#}"));
@@ -119,6 +120,18 @@ fn plan(client: &reqwest::blocking::Client, config: &Config, serial_number: &str
         os_update_version: os_update.latest_version,
         os_update_labels: os_update.labels,
     })
+}
+
+/// The application half of [`plan`], without the `softwareupdate -l` the silent pass has no use
+/// for — it never installs a macOS update.
+fn plan_applications(
+    client: &reqwest::blocking::Client,
+    config: &Config,
+    serial_number: &str,
+    identity: &AgentIdentity,
+) -> anyhow::Result<Vec<UpgradeStatus>> {
+    let statuses = upgrade::fetch_upgrade_statuses(client, config, serial_number)?;
+    Ok(statuses.into_iter().filter(|status| upgrade::is_patchable(status, identity)).collect())
 }
 
 /// Runs one full due patch cycle: check what's actually pending, confirm (or delay) only if
@@ -149,8 +162,13 @@ pub fn run(
         }
     };
 
+    // Whatever nobody has open is patched before anybody is asked anything — see `running_apps`.
+    // Only what is open, and the macOS update (a restart is never something that "won't affect
+    // anybody"), is left for the prompt; when that is nothing, the cycle completes without one.
+    let work = patch_shut_applications(client, config, serial_number, work, identity, report);
+
     if work.is_empty() {
-        logging::info("nothing to patch at this check");
+        logging::info("nothing left to patch that needs asking about at this check");
         state.register_completed(policy);
         report(AgentStatus::Idle { next_due_epoch: state.next_due_epoch() });
         return;
@@ -177,6 +195,98 @@ pub fn run(
     };
 
     execute(client, config, serial_number, policy, state, work, identity, report, warning, true, user_present);
+}
+
+/// The check-in's silent pass: patches every pending application nobody has open, with no dialog,
+/// no notification and no progress window, and leaves everything else for the next due cycle's
+/// prompt. Started by the scheduler a few minutes after each hourly check-in — see
+/// `main::run_scheduler` for why after rather than at it.
+///
+/// What it does not do is as deliberate as what it does:
+///
+/// - **No macOS update.** It restarts the Mac, and on Apple silicon wants a password; neither is
+///   something to do to somebody unasked, so it stays with the due cycle and its prompt.
+/// - **No `register_completed`.** This patches what happened to be shut, not the host. Counting it
+///   as the cycle would push the prompt for whatever *is* open a whole interval out.
+/// - **No presence check.** `main::prompt_can_be_seen` holds a cycle whose dialog nobody would see;
+///   this shows nothing, and a locked or sleeping Mac is the best time for it, not a reason to wait.
+/// - **Failures are reported, not shown.** To the server exactly as a prompted cycle's are, so the
+///   Failed Updates screen sees them; nothing is put on this Mac's screen about work nobody asked for.
+///
+/// Kept identical in the other two agents, though on Windows and Linux it runs in the privileged
+/// half's check-in itself — see "Patching what nobody has open" in `clients/CLAUDE.md`.
+pub fn run_silent(
+    client: &reqwest::blocking::Client,
+    config: &Config,
+    _policy: &PatchingPolicy,
+    state: &mut ScheduleState,
+    serial_number: &str,
+    identity: &AgentIdentity,
+    report: &StatusReporter,
+) {
+    let work = match plan_applications(client, config, serial_number, identity) {
+        Ok(apps) => PendingWork { apps, ..PendingWork::default() },
+        Err(err) => {
+            logging::warn(&format!("could not check for pending patches for the check-in's silent pass: {err:#}"));
+            return;
+        }
+    };
+    if work.is_empty() {
+        return;
+    }
+
+    let left = patch_shut_applications(client, config, serial_number, work, identity, report);
+    if !left.apps.is_empty() {
+        logging::info(&format!(
+            "left for the next patch cycle because they are open: {}",
+            left.app_names().join(", ")
+        ));
+    }
+    report(AgentStatus::Idle { next_due_epoch: state.next_due_epoch() });
+}
+
+/// Patches every application in `work` that nobody has open, silently, and returns `work` with
+/// only what is left: the applications that were open (or might have been — `running_apps`
+/// answers "could not tell" as open) and the macOS update, untouched.
+///
+/// Each application is asked about again immediately before its turn rather than once for the
+/// list, because one upgrade can take minutes and the next application may have been opened in
+/// the meantime. The menu is told, as `PatchingInBackground`, so its actions grey while this owns
+/// the schedule state — but the progress window stays shut and no notification is posted, which is
+/// what makes this silent.
+fn patch_shut_applications(
+    client: &reqwest::blocking::Client,
+    config: &Config,
+    serial_number: &str,
+    work: PendingWork,
+    identity: &AgentIdentity,
+    report: &StatusReporter,
+) -> PendingWork {
+    if work.apps.is_empty() {
+        return work;
+    }
+
+    let PendingWork { apps, os_update_available, os_update_version, os_update_labels } = work;
+    let probe = running_apps::Probe::new(&apps);
+    let (shut, mut open) = running_apps::partition(apps, |app| probe.is_open(app));
+
+    for app in shut {
+        // Asked again now, for the reason above. An application opened since the split goes to
+        // the prompt with the ones that were open all along.
+        if probe.is_open(&app) != Some(false) {
+            logging::info(&format!("{} was opened while other applications were patching; leaving it for the prompt", app.application_name));
+            open.push(app);
+            continue;
+        }
+        report(AgentStatus::PatchingInBackground { current: app.application_name.clone() });
+        logging::info(&format!("{} is not open, so patching it without asking", app.application_name));
+        match patch_one_application(client, config, serial_number, &app, identity) {
+            Ok(()) => logging::info(&format!("patched {} successfully", app.application_name)),
+            Err(err) => logging::error(&format!("failed to patch {}: {err:#}", app.application_name)),
+        }
+    }
+
+    PendingWork { apps: open, os_update_available, os_update_version, os_update_labels }
 }
 
 /// The menu bar's "Patch Now" button: skips the confirm/delay decision altogether, since asking
@@ -468,30 +578,7 @@ fn run_patches(
         dialogs::notify("Kintsugi Patching", &format!("Patching {target}\n{}", dialogs::progress_bar(completed, total)));
         report(AgentStatus::Patching { current: target, completed, total });
 
-        // Which side reports this row's result to the server, success or failure: whichever one
-        // actually runs the script. See `upgrade::report_patch_failure`.
-        let ran_by_the_daemon = upgrade::runs_as_root(app);
-
-        let outcome = if ran_by_the_daemon {
-            logging::info(&format!(
-                "attempting to patch {} (method {:?}) via the root daemon",
-                app.application_name, app.method
-            ));
-            patch_via_daemon(app)
-        } else {
-            logging::info(&format!("attempting to patch {} (method {:?})", app.application_name, app.method));
-            upgrade::patch_one(app, identity).map(|()| {
-                match &app.latest_version {
-                    Some(new_version) => upgrade::report_patch_result(client, config, serial_number, &app.application_name, new_version),
-                    None => logging::warn(&format!(
-                        "patched {} successfully, but no latest_version was known to report to the server",
-                        app.application_name
-                    )),
-                }
-            })
-        };
-
-        match outcome {
+        match patch_one_application(client, config, serial_number, app, identity) {
             Ok(()) => {
                 succeeded += 1;
                 logging::info(&format!("patched {} successfully", app.application_name));
@@ -499,14 +586,6 @@ fn run_patches(
             Err(err) => {
                 failed += 1;
                 logging::error(&format!("failed to patch {}: {err:#}", app.application_name));
-
-                // Only for what this process ran itself. A daemon-run row's failure is reported by
-                // the daemon (see `main::DaemonRequestHandler::patch_application`), which is the
-                // side that saw the script fail and holds its full output; reporting it here as
-                // well would record every root-run failure twice.
-                if !ran_by_the_daemon {
-                    upgrade::report_patch_failure(client, config, serial_number, app, &err);
-                }
             }
         }
         completed += 1;
@@ -520,6 +599,49 @@ fn run_patches(
     }
 
     (succeeded, failed)
+}
+
+/// Runs one application's upgrade in whichever process owns it, and reports the outcome to the
+/// server from whichever side ran it. Shared by the prompted cycle (`run_patches`) and the silent
+/// one (`patch_shut_applications`), so the two cannot drift on who reports what.
+fn patch_one_application(
+    client: &reqwest::blocking::Client,
+    config: &Config,
+    serial_number: &str,
+    app: &UpgradeStatus,
+    identity: &AgentIdentity,
+) -> anyhow::Result<()> {
+    // Which side reports this row's result to the server, success or failure: whichever one
+    // actually runs the script. See `upgrade::report_patch_failure`.
+    let ran_by_the_daemon = upgrade::runs_as_root(app);
+
+    let outcome = if ran_by_the_daemon {
+        logging::info(&format!(
+            "attempting to patch {} (method {:?}) via the root daemon",
+            app.application_name, app.method
+        ));
+        patch_via_daemon(app)
+    } else {
+        logging::info(&format!("attempting to patch {} (method {:?})", app.application_name, app.method));
+        upgrade::patch_one(app, identity).map(|()| match &app.latest_version {
+            Some(new_version) => upgrade::report_patch_result(client, config, serial_number, &app.application_name, new_version),
+            None => logging::warn(&format!(
+                "patched {} successfully, but no latest_version was known to report to the server",
+                app.application_name
+            )),
+        })
+    };
+
+    // Only for what this process ran itself. A daemon-run row's failure is reported by the daemon
+    // (see `main::DaemonRequestHandler::patch_application`), which is the side that saw the script
+    // fail and holds its full output; reporting it here as well would record every root-run
+    // failure twice.
+    if let Err(err) = &outcome {
+        if !ran_by_the_daemon {
+            upgrade::report_patch_failure(client, config, serial_number, app, err);
+        }
+    }
+    outcome
 }
 
 /// How long the "you still need to restart" notice stands before dismissing itself. It is

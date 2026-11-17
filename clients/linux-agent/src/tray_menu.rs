@@ -303,6 +303,11 @@ pub fn report_status(status: AgentStatus) {
             },
             true,
         ),
+        AgentStatus::PatchingInBackground { current } => (
+            format!("Updating in the background: {current}"),
+            "Status: patching an application that is not open".to_string(),
+            true,
+        ),
     };
 
     let awaiting_policy = matches!(&status, AgentStatus::WaitingForPolicy);
@@ -332,7 +337,10 @@ pub fn report_status(status: AgentStatus) {
     // the tray check: a host with no notification area may still have a display, and this is the
     // only progress the user would otherwise see.
     match &status {
-        AgentStatus::Idle { .. } | AgentStatus::AwaitingAnswer | AgentStatus::WaitingForPolicy => crate::progress_window::hide(),
+        AgentStatus::Idle { .. }
+        | AgentStatus::AwaitingAnswer
+        | AgentStatus::WaitingForPolicy
+        | AgentStatus::PatchingInBackground { .. } => crate::progress_window::hide(),
         AgentStatus::Patching { current, completed, total } => crate::progress_window::show_and_update(current, *completed, *total),
     }
 }

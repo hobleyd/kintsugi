@@ -16,6 +16,7 @@ use crate::logging;
 use crate::os_update;
 use crate::policy;
 use crate::queue::{self, Plan, PlannedApp, RequestHandler};
+use crate::running_apps;
 use crate::self_removal;
 use crate::self_update;
 use crate::system_info::{self, InstalledApp};
@@ -290,6 +291,69 @@ impl Agent {
         Ok(())
     }
 
+    /// The hourly check-in's silent pass: patches every pending application nobody has open, with
+    /// nothing shown in any session, and leaves everything else for the tray's next due cycle and
+    /// its prompt. Run by `run_loop` after each scheduled check-in — whether or not anybody is
+    /// logged on, which is the one thing a Windows host does with nobody logged on (every other
+    /// patch is started by the tray).
+    ///
+    /// What it does not do is as deliberate as what it does:
+    ///
+    /// - **No Windows update.** It can want a restart; it stays with the due cycle and its prompt.
+    /// - **No schedule change.** The schedule is the tray's, and this patches what happened to be
+    ///   shut, not the host; the next due cycle prompts for whatever is open.
+    /// - **Failures are reported, not shown.** `patch_application` reports to the server exactly as
+    ///   for a prompted cycle.
+    ///
+    /// Not part of `check_in` itself, because `check_in` also answers the tray's "Check In Now",
+    /// whose asker gives up after `checkin_schedule::CHECK_IN_TIMEOUT` — and a pass over a dozen
+    /// upgrades can take longer. `keep_going` is the service's shutdown flag: the queue is not
+    /// drained while this runs, so a stop has to be noticed between applications rather than after
+    /// them all. Kept identical in the other two agents — see "Patching what nobody has open" in
+    /// `clients/CLAUDE.md`.
+    pub fn patch_shut_applications_silently(&mut self, keep_going: &dyn Fn() -> bool) {
+        if self.identity.is_none() {
+            return;
+        }
+        // A self-update has just handed off to `--restart-service`, which is waiting for this
+        // service to stop; patching now would hold that restart up for the length of the pass.
+        if config::self_update_restart_marker_path().exists() {
+            logging::info("skipping the check-in's silent pass: a self-update is waiting for this service to restart");
+            return;
+        }
+        let apps = match self.patchable() {
+            Ok(apps) => apps,
+            Err(err) => {
+                logging::warn(&format!("could not check for pending patches for the check-in's silent pass: {err:#}"));
+                return;
+            }
+        };
+
+        let (shut, mut open) = running_apps::partition(apps, running_apps::is_open);
+        for app in shut {
+            if !keep_going() {
+                return;
+            }
+            // Asked again now: an upgrade can take minutes, and the next application may have been
+            // opened in the meantime.
+            if running_apps::is_open(&app) != Some(false) {
+                open.push(app);
+                continue;
+            }
+            logging::info(&format!("{} is not open, so patching it without asking", app.application_name));
+            // `patch_application` re-fetches and re-verifies, and reports either outcome itself.
+            if let Err(err) = RequestHandler::patch_application(self, &app.application_name) {
+                logging::error(&format!("failed to patch {}: {err:#}", app.application_name));
+            }
+        }
+        if !open.is_empty() {
+            logging::info(&format!(
+                "left for the next patch cycle because they are open: {}",
+                open.iter().map(|app| app.application_name.as_str()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+    }
+
     pub fn was_removed(&self) -> bool {
         self.removed
     }
@@ -312,6 +376,7 @@ impl RequestHandler for Agent {
             .patchable()?
             .into_iter()
             .map(|status| PlannedApp {
+                open: running_apps::is_open(&status),
                 application_name: status.application_name,
                 latest_version: status.latest_version,
             })
@@ -608,6 +673,11 @@ pub fn run_loop(shutdown: Arc<AtomicBool>) {
                     failures += 1;
                     logging::warn(&format!("check-in failed ({failures}): {err:#}"));
                 }
+            }
+            // Whether or not the check-in succeeded, as on Linux: the pass fetches its own work
+            // list, and a server that cannot be reached simply leaves it nothing to do.
+            if !agent.was_removed() {
+                agent.patch_shut_applications_silently(&|| !shutdown.load(Ordering::SeqCst));
             }
 
             next_check_in_at = now_epoch()

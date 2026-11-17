@@ -31,6 +31,16 @@ pub enum AgentStatus {
         completed: usize,
         total: usize,
     },
+    /// An application nobody has open is being patched without asking, at the front of a due
+    /// cycle (see `patch_cycle::patch_shut_applications`). Greys the menu like `Patching`, because
+    /// the schedule state is with the cycle and a click could not be served, but leaves the
+    /// progress window shut: the window is for holding somebody's attention through a run they
+    /// agreed to, and the point of this one is that nobody needed to be asked. Kept in step with
+    /// the macOS and Linux agents.
+    PatchingInBackground {
+        /// The application being patched.
+        current: String,
+    },
 }
 
 pub type StatusReporter<'a> = dyn Fn(AgentStatus) + Send + Sync + 'a;

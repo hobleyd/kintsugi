@@ -20,6 +20,7 @@ mod remote_control;
 mod remote_ipc;
 mod remote_protocol;
 mod remote_session;
+mod running_apps;
 mod wayland_backend;
 mod schedule;
 mod screen_capture;
@@ -243,7 +244,9 @@ fn run_daemon() -> Result<()> {
                 logging::info("another kintsugi-agent invocation is already running; skipping this check-in");
                 return Ok(());
             };
-            check_in(&config)
+            let outcome = check_in(&config);
+            patch_shut_applications_silently(&config);
+            outcome
         };
 
         // The condition is deliberately "a policy is now on disk", not "that attempt succeeded".
@@ -275,6 +278,37 @@ fn run_daemon() -> Result<()> {
         ));
         std::thread::sleep(delay);
     }
+}
+
+/// The hourly check-in's silent pass — see `patch_cycle::run_silent`. Whatever nobody has open is
+/// patched now, with nothing shown, whether or not anybody is logged in; only what is open waits
+/// for a prompt (or, with nobody logged in, for `run_unattended` at the next due cycle).
+///
+/// Here, after `check_in` and under the same lock, rather than inside it, because `check_in` also
+/// answers the menu's "Check In Now" (`ServiceHandler::check_in`), whose asker gives up after
+/// `checkin_schedule::CHECK_IN_TIMEOUT` — and a pass over a dozen upgrades can take longer than
+/// that. A failed check-in does not stop it: it fetches the work list for itself, and a server that
+/// cannot be reached simply leaves it nothing to do.
+fn patch_shut_applications_silently(config: &Config) {
+    let Some(identity) = identity::load(&config::identity_dir()) else {
+        logging::info("skipping the check-in's silent pass: no enrolled agent identity yet");
+        return;
+    };
+    let serial_number = match system_info::serial_number() {
+        Ok(serial_number) => serial_number,
+        Err(err) => {
+            logging::warn(&format!("skipping the check-in's silent pass: {err:#}"));
+            return;
+        }
+    };
+    let client = match identity::build_client(Duration::from_secs(30), Some(&identity)) {
+        Ok(client) => client,
+        Err(err) => {
+            logging::warn(&format!("skipping the check-in's silent pass: could not build an HTTP client: {err:#}"));
+            return;
+        }
+    };
+    patch_cycle::run_silent(&mut ServiceHandler::new(&client, config, &serial_number, &identity));
 }
 
 /// How long to wait before retrying a check-in that left this host with no patching policy, given
@@ -599,12 +633,19 @@ impl<'a> ServiceHandler<'a> {
 impl RequestHandler for ServiceHandler<'_> {
     fn plan(&mut self) -> Result<Plan> {
         let statuses = upgrade::fetch_upgrade_statuses(self.client, self.config, self.serial_number)?;
+        // One pass over /proc for the whole plan; each silent patch re-checks its own row
+        // immediately before running (see `patch_cycle::run_silent`).
+        let running = running_apps::Snapshot::take()
+            .inspect_err(|err| logging::warn(&format!("could not read /proc, so every application is treated as open: {err:#}")))
+            .ok();
         let apps = statuses
             .into_iter()
             .filter(|status| upgrade::is_patchable(status, self.identity))
             .map(|status| PlannedApp {
+                open: running.as_ref().and_then(|running| running.is_open(status.application_identifier.as_deref())),
                 application_name: status.application_name,
                 latest_version: status.latest_version,
+                application_identifier: status.application_identifier,
             })
             .collect();
 

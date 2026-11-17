@@ -1,6 +1,6 @@
 [package]
 name = "kintsugi-agent"
-version = "0.14.0"
+version = "0.15.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Background agent that registers this PC with the patching system's host inventory."
@@ -96,6 +96,9 @@ features = [
     # the secure desktop when a UAC prompt appears. See remote_desktop.rs.
     "Win32_System_StationsAndDesktops",
     "Win32_System_Threading",
+    # K32EnumProcesses: the process table `running_apps` reads to tell whether an application with
+    # a patch waiting is open.
+    "Win32_System_ProcessStatus",
     # PIPE_ACCESS_DUPLEX and WRITE_DAC.
     "Win32_Storage_FileSystem",
     "Win32_UI_Controls",
