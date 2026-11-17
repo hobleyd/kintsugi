@@ -1286,12 +1286,19 @@ fn run_scheduler(
                         }
                         None => logging::warn("patch cycle due, but skipped: no enrolled agent identity yet"),
                     }
-                } else if silent_pass_epoch.is_some_and(|epoch| schedule::now_epoch() >= epoch) {
+                } else if silent_pass_epoch.is_some_and(|epoch| schedule::now_epoch() >= epoch) && shown_prefetch.is_none() {
                     // Last of the three, and only when the state is free. A due cycle patches
                     // everything shut before it prompts (`patch_shut_applications`), so it leaves
                     // this nothing to do; a forced run is an emergency and goes first, and the
                     // pass simply starts on a later tick. Not held for `prompt_can_be_seen` — it
                     // shows nothing; see `run_silent`.
+                    //
+                    // Held while the daemon pre-fetches a macOS update, though. A daemon-run row is
+                    // an `AppPatch` request, launchd will not start a second daemon while the one
+                    // downloading is still running, and `PatchingInBackground` greys the menu — so
+                    // starting now would put back the menu left dead for hours behind a download
+                    // that `prefetch_os_updates` was moved out of the cycle to remove. The epoch is
+                    // left set, so the pass starts on the first tick after the fetch ends.
                     if let (Some(_), Some(identity)) = (state.as_ref(), &agent_identity) {
                         silent_pass_epoch = None;
                         let owned = state.take().expect("just checked that the state is here");

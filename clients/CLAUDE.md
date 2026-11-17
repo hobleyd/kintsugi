@@ -398,6 +398,22 @@ upgrades can take longer. On Windows it is skipped while a self-update's restart
 applications, since the queue is not drained while it runs. A tray `Plan` request that lands
 during a long pass times out and is retried on the next tick, which is harmless.
 
+**A row the pass has tried is not tried again until its target moves**
+(`running_apps::SilentAttempts`, identical in all three, saved before each attempt in
+`silent-attempts.json` beside each half's other state). The pass runs hourly and a prompted cycle
+once per interval, so without it a failing upgrade — or a row the server keeps counting behind
+while its script correctly finds nothing to do, like the `openssl@3` keg and JDK-version cases
+elsewhere in this file — would be retried, re-reported to Failed Updates and, for anything the
+upgrade quits first, re-quit every hour. The row stays with the due cycle, which tries it once per
+cycle as it always did; this is the macOS pre-fetch's "a failed attempt is recorded too" lesson,
+learned again. Three more guards, each for a regression the platform's own notes describe: the
+macOS pass is **held while the daemon pre-fetches** (`shown_prefetch`), because a daemon-run row's
+`AppPatch` waits behind the download and `PatchingInBackground` greys the menu — the nine-hour dead
+menu all over again; the Linux pass runs only **once a policy is cached**, so `run_daemon`'s retry
+loop still cannot repeat a check-in that patched anything; and a Windows install folder **not on
+disk** is dropped, since a stale `InstallLocation` would read as shut while the application runs
+from somewhere new.
+
 ## Reporting a failed upgrade
 
 A patch that *works* is reported by `upgrade::report_patch_result`; one that runs and **fails** is

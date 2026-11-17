@@ -195,6 +195,52 @@ impl Probe {
     }
 }
 
+/// What the silent pass has already tried, so a row it cannot patch is not retried every hour.
+///
+/// The silent pass runs hourly; the prompted cycle runs once per patching interval. Without this, an
+/// upgrade that fails — or a row the server keeps counting behind while its script correctly finds
+/// nothing to do — would be retried, re-reported and (for anything an upgrade quits before failing)
+/// re-quit every hour rather than once per cycle. So each `(application, target version)` the pass
+/// attempts is written down, and later passes skip it; the row stays with the due cycle, which goes
+/// on trying it once per cycle exactly as before. A new target version is a new attempt, and an
+/// entry whose row is no longer pending is dropped. Kept identical in the other two agents.
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SilentAttempts {
+    attempted: Vec<(String, Option<String>)>,
+}
+
+impl SilentAttempts {
+    /// What is on disk, or nothing tried yet when the file is missing or unreadable — which costs at
+    /// most one extra attempt per row.
+    pub fn load(path: &std::path::Path) -> Self {
+        std::fs::read_to_string(path).ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default()
+    }
+
+    pub fn save(&self, path: &std::path::Path) {
+        let written = serde_json::to_string(self).map_err(anyhow::Error::from).and_then(|text| Ok(std::fs::write(path, text)?));
+        if let Err(err) = written {
+            crate::logging::warn(&format!("could not record the silent pass's attempts at {}: {err:#}", path.display()));
+        }
+    }
+
+    /// Forgets every attempt whose `(name, version)` is not among `pending` — patched since, or
+    /// moved on to a newer target.
+    pub fn retain_pending<'a>(&mut self, pending: impl IntoIterator<Item = (&'a str, Option<&'a str>)>) {
+        let pending: Vec<(&str, Option<&str>)> = pending.into_iter().collect();
+        self.attempted.retain(|(name, version)| pending.iter().any(|(n, v)| n.eq_ignore_ascii_case(name) && *v == version.as_deref()));
+    }
+
+    pub fn already_tried(&self, name: &str, version: Option<&str>) -> bool {
+        self.attempted.iter().any(|(n, v)| n.eq_ignore_ascii_case(name) && v.as_deref() == version)
+    }
+
+    pub fn record(&mut self, name: &str, version: Option<&str>) {
+        if !self.already_tried(name, version) {
+            self.attempted.push((name.to_string(), version.map(str::to_string)));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +318,22 @@ mod tests {
             Some(PathBuf::from("/Library/Java/JavaVirtualMachines/temurin-26.jdk"))
         );
         assert_eq!(outermost_bundle(Path::new("/usr/bin/ssh")), None);
+    }
+
+    #[test]
+    fn an_attempt_is_skipped_until_its_target_moves_on_or_it_stops_being_pending() {
+        let mut attempts = SilentAttempts::default();
+        attempts.record("Firefox", Some("2.0"));
+        attempts.record("GIMP", None);
+        assert!(attempts.already_tried("firefox", Some("2.0")));
+        assert!(!attempts.already_tried("Firefox", Some("3.0")), "a new target version is a new attempt");
+
+        attempts.retain_pending([("Firefox", Some("3.0")), ("GIMP", None)]);
+        assert!(!attempts.already_tried("Firefox", Some("2.0")), "the old target is forgotten");
+        assert!(attempts.already_tried("GIMP", None), "still pending, still skipped");
+
+        attempts.retain_pending(std::iter::empty());
+        assert_eq!(attempts, SilentAttempts::default(), "nothing pending, nothing remembered");
     }
 
     #[test]

@@ -380,6 +380,11 @@ pub fn policy_cache_path() -> PathBuf {
     state_dir().join("policy.json")
 }
 
+/// What the check-in's silent pass has already tried — see `running_apps::SilentAttempts`.
+pub fn silent_attempts_path() -> PathBuf {
+    state_dir().join("silent-attempts.json")
+}
+
 /// Re-asserts the two directory modes `packaging/install.sh` sets, and the config file's, on every
 /// root check-in.
 ///

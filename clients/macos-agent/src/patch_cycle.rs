@@ -165,7 +165,7 @@ pub fn run(
     // Whatever nobody has open is patched before anybody is asked anything — see `running_apps`.
     // Only what is open, and the macOS update (a restart is never something that "won't affect
     // anybody"), is left for the prompt; when that is nothing, the cycle completes without one.
-    let work = patch_shut_applications(client, config, serial_number, work, identity, report);
+    let work = patch_shut_applications(client, config, serial_number, work, identity, report, &mut |_| {});
 
     if work.is_empty() {
         logging::info("nothing left to patch that needs asking about at this check");
@@ -224,18 +224,46 @@ pub fn run_silent(
     identity: &AgentIdentity,
     report: &StatusReporter,
 ) {
-    let work = match plan_applications(client, config, serial_number, identity) {
-        Ok(apps) => PendingWork { apps, ..PendingWork::default() },
+    let apps = match plan_applications(client, config, serial_number, identity) {
+        Ok(apps) => apps,
         Err(err) => {
             logging::warn(&format!("could not check for pending patches for the check-in's silent pass: {err:#}"));
             return;
         }
     };
+
+    // Per-user rather than in the root-owned state directory, because this process is the one that
+    // runs the pass. A row already tried at this target is the due cycle's — see `SilentAttempts`.
+    let attempts_path = match config::user_state_dir() {
+        Ok(dir) => dir.join("silent-attempts.json"),
+        Err(err) => {
+            logging::warn(&format!("skipping the check-in's silent pass: no state directory to record its attempts in: {err:#}"));
+            return;
+        }
+    };
+    let mut attempts = running_apps::SilentAttempts::load(&attempts_path);
+    attempts.retain_pending(apps.iter().map(|app| (app.application_name.as_str(), app.latest_version.as_deref())));
+    let (tried, apps): (Vec<_>, Vec<_>) =
+        apps.into_iter().partition(|app| attempts.already_tried(&app.application_name, app.latest_version.as_deref()));
+    if !tried.is_empty() {
+        logging::info(&format!(
+            "already tried by an earlier silent pass, so left for the next patch cycle: {}",
+            tried.iter().map(|app| app.application_name.as_str()).collect::<Vec<_>>().join(", ")
+        ));
+    }
+    let work = PendingWork { apps, ..PendingWork::default() };
     if work.is_empty() {
+        attempts.save(&attempts_path);
         return;
     }
 
-    let left = patch_shut_applications(client, config, serial_number, work, identity, report);
+    // Saved before each attempt rather than once at the end, so a pass cut short — a self-update
+    // restarting this process, a logout — still remembers what it started.
+    let left = patch_shut_applications(client, config, serial_number, work, identity, report, &mut |app| {
+        attempts.record(&app.application_name, app.latest_version.as_deref());
+        attempts.save(&attempts_path);
+    });
+    attempts.save(&attempts_path);
     if !left.apps.is_empty() {
         logging::info(&format!(
             "left for the next patch cycle because they are open: {}",
@@ -261,6 +289,8 @@ fn patch_shut_applications(
     work: PendingWork,
     identity: &AgentIdentity,
     report: &StatusReporter,
+    // Told of every application about to be attempted — the silent pass's `SilentAttempts::record`.
+    attempted: &mut dyn FnMut(&UpgradeStatus),
 ) -> PendingWork {
     if work.apps.is_empty() {
         return work;
@@ -280,6 +310,7 @@ fn patch_shut_applications(
         }
         report(AgentStatus::PatchingInBackground { current: app.application_name.clone() });
         logging::info(&format!("{} is not open, so patching it without asking", app.application_name));
+        attempted(&app);
         match patch_one_application(client, config, serial_number, &app, identity) {
             Ok(()) => logging::info(&format!("patched {} successfully", app.application_name)),
             Err(err) => logging::error(&format!("failed to patch {}: {err:#}", app.application_name)),

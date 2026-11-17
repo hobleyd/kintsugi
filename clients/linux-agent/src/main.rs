@@ -245,7 +245,13 @@ fn run_daemon() -> Result<()> {
                 return Ok(());
             };
             let outcome = check_in(&config);
-            patch_shut_applications_silently(&config);
+            // Only once a policy is cached, which makes it the iteration that leaves the loop
+            // below: the retry exists to get the per-user process a schedule, and its safety rests
+            // on a check-in without a policy patching nothing. The unattended cycle already no-ops
+            // without one; this needs no policy, so the gate has to be stated.
+            if policy::load_cached(&policy_cache_path).is_some() {
+                patch_shut_applications_silently(&config);
+            }
             outcome
         };
 
@@ -308,7 +314,7 @@ fn patch_shut_applications_silently(config: &Config) {
             return;
         }
     };
-    patch_cycle::run_silent(&mut ServiceHandler::new(&client, config, &serial_number, &identity));
+    patch_cycle::run_silent(&mut ServiceHandler::new(&client, config, &serial_number, &identity), &config::silent_attempts_path());
 }
 
 /// How long to wait before retrying a check-in that left this host with no patching policy, given

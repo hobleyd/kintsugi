@@ -291,6 +291,11 @@ pub fn health_state_path() -> PathBuf {
     program_data_root().join("health-reported")
 }
 
+/// What the check-in's silent pass has already tried — see `running_apps::SilentAttempts`.
+pub fn silent_attempts_path() -> PathBuf {
+    program_data_root().join("silent-attempts.json")
+}
+
 
 pub fn installed_binary_path() -> PathBuf {
     program_files_root().join("kintsugi-agent.exe")

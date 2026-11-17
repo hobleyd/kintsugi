@@ -329,10 +329,23 @@ impl Agent {
             }
         };
 
+        // A row already tried at this target is the due cycle's — see `running_apps::SilentAttempts`.
+        let attempts_path = config::silent_attempts_path();
+        let mut attempts = running_apps::SilentAttempts::load(&attempts_path);
+        attempts.retain_pending(apps.iter().map(|app| (app.application_name.as_str(), app.latest_version.as_deref())));
+        let (tried, apps): (Vec<_>, Vec<_>) =
+            apps.into_iter().partition(|app| attempts.already_tried(&app.application_name, app.latest_version.as_deref()));
+        if !tried.is_empty() {
+            logging::info(&format!(
+                "already tried by an earlier silent pass, so left for the next patch cycle: {}",
+                tried.iter().map(|app| app.application_name.as_str()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+
         let (shut, mut open) = running_apps::partition(apps, running_apps::is_open);
         for app in shut {
             if !keep_going() {
-                return;
+                break;
             }
             // Asked again now: an upgrade can take minutes, and the next application may have been
             // opened in the meantime.
@@ -341,11 +354,14 @@ impl Agent {
                 continue;
             }
             logging::info(&format!("{} is not open, so patching it without asking", app.application_name));
+            attempts.record(&app.application_name, app.latest_version.as_deref());
+            attempts.save(&attempts_path);
             // `patch_application` re-fetches and re-verifies, and reports either outcome itself.
             if let Err(err) = RequestHandler::patch_application(self, &app.application_name) {
                 logging::error(&format!("failed to patch {}: {err:#}", app.application_name));
             }
         }
+        attempts.save(&attempts_path);
         if !open.is_empty() {
             logging::info(&format!(
                 "left for the next patch cycle because they are open: {}",
