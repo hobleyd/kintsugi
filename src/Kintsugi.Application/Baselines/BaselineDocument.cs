@@ -30,7 +30,8 @@ namespace Kintsugi.Application.Baselines;
 /// <paramref name="Secret"/> names the value instead.</param>
 /// <param name="Secret">Settings only: the name of a secret that supplies the value. Secrets arrive in a
 /// later step, so in this one the agent reports such an item not-applicable and never reads it.</param>
-/// <param name="Mode">Settings only: <c>audit</c>, the only mode this step accepts.</param>
+/// <param name="Mode">Settings only: <c>audit</c> (read and report) or <c>enforce</c> (also set it when it
+/// has drifted), the second only for a value on <see cref="BaselineItemRules.EnforceableValues"/>.</param>
 /// <param name="Reason">Why this item exists: its source and the control it evidences.</param>
 public sealed record BaselineItem(
     string Key,

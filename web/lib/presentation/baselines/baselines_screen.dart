@@ -19,8 +19,8 @@ import '../../domain/entities/baseline.dart';
 import '../../domain/usecases/baseline_usecases.dart';
 import 'baselines_bloc.dart';
 
-/// Every device baseline, with how many hosts comply. Audit only in this step: a baseline is read
-/// and reported by the Windows agent and nothing on a device is written.
+/// Every device baseline, with how many hosts comply. The Windows agent reads and reports each item,
+/// and sets back only an `enforce` item on the server's write allowlist.
 class BaselinesScreen extends StatelessWidget {
   const BaselinesScreen({super.key});
 
@@ -43,8 +43,8 @@ class _BaselinesView extends StatelessWidget {
           final baselines = state.data ?? const <BaselineSummary>[];
           return PageScaffold(
             title: 'Baselines',
-            subtitle: 'What should be true on a device, read by its agent every hour. Audit only: '
-                'nothing on a device is changed.',
+            subtitle: 'What should be true on a device, read by its agent every hour. Items are audited; '
+                'only an item marked enforce, on the write allowlist, is set back when it drifts.',
             children: [
               if (state.error != null) AlertBox.error(state.error!),
               if (state.notice != null) AlertBox.success(state.notice!),

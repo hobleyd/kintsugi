@@ -1,10 +1,15 @@
-//! Device baselines, **audit only**: what the server says should be true on this PC (Master Daily's
-//! registry settings, to begin with), read and reported, and never written.
+//! Device baselines: what the server says should be true on this PC (Master Daily's registry
+//! settings, to begin with), read and reported — and, for an item in `enforce` mode, set back when it
+//! has drifted.
 //!
-//! **There is no write path in this module, and that is the point of this step.** Every registry call
-//! here opens a key with `KEY_READ` and reads a value; nothing creates, sets or deletes anything. A
-//! later step adds enforcement (see "Kintsugi device configuration design", IP-841); until then the
-//! worst a bad baseline can do is make the compliance numbers wrong.
+//! **The only write path is `write_machine_value`, and `ENFORCEABLE` decides what it may touch.** An
+//! item is written only when all of these hold: its signature verified, it is a machine setting in
+//! `enforce` mode, it has drifted, and its exact path, value name and type are in `ENFORCEABLE`, a list
+//! compiled into this agent. Whatever a signed document says, nothing else is created, set or
+//! deleted, so a stolen signing key cannot write a Run key or a service's ImagePath through here. The
+//! server's `BaselineItemRules.EnforceableValues` refuses anything else before signing and a server
+//! test keeps the two lists equal. Rings and exemptions come later (see "Kintsugi device
+//! configuration design", IP-841).
 //!
 //! The shape mirrors `policy`: the service fetches `GET /api/baseline` at each hourly check-in and
 //! caches it, falling back to the cache when the server cannot be reached. Before any item is read,
@@ -29,7 +34,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use winreg::enums::{RegType, HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
+use winreg::enums::{RegType, HKEY_LOCAL_MACHINE, KEY_READ, KEY_SET_VALUE, KEY_WOW64_64KEY};
 use winreg::RegKey;
 
 use crate::config::{self, Config};
@@ -52,6 +57,25 @@ const PROTECTED_ROOTS: [&str; 2] = ["SAM", "SECURITY"];
 
 /// The one document schema this agent understands — `BaselineDocument.CurrentSchema` on the server.
 const SCHEMA: u32 = 1;
+
+/// Every HKLM value this agent may write, as (path, value name, type), compared ignoring case for the
+/// path and name. The SYSTEM service writing the wrong value is code execution (Run, a service's
+/// ImagePath, Image File Execution Options, a COM server) or a quieter weakening even under
+/// `SOFTWARE\Policies`, so this is a list of exact values, not a prefix. Widening it is a reviewed
+/// change here and in the server's `BaselineItemRules.EnforceableValues`, whose test reads this block,
+/// so keep each entry on the `(r"…", "…", "…")` shape.
+const ENFORCEABLE: [(&str, &str, &str); 1] = [
+    // Master Daily section 17, the enforce pilot: Chrome keeps its file and folder pickers open.
+    (r"SOFTWARE\Policies\Google\Chrome", "WindowOcclusionEnabled", "dword"),
+];
+
+const ENFORCE: &str = "enforce";
+
+/// Reads one HKLM value: `read_machine_value` for real, a fake in tests.
+pub(crate) type ReadValue<'a> = &'a dyn Fn(&str, &str) -> std::io::Result<Option<Observed>>;
+
+/// Sets one HKLM value: `write_machine_value` for real, a fake in tests.
+pub(crate) type WriteValue<'a> = &'a dyn Fn(&str, &str, &ValueKind, &str) -> std::io::Result<()>;
 
 /// Mirrors `AgentBaselinesDto`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,8 +125,7 @@ struct Document {
     items: Vec<Item>,
 }
 
-/// Mirrors `BaselineItem`. `mode` is deliberately not read: whatever a later document says, this
-/// agent has no write path, so every item is audited.
+/// Mirrors `BaselineItem`. `mode` is `enforce` or anything else, which is audited.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Item {
@@ -115,6 +138,8 @@ struct Item {
     value_type: Option<String>,
     data: Option<String>,
     secret: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 /// Mirrors `ReportBaselineResultsCommand`.
@@ -142,6 +167,10 @@ pub struct ItemResult {
     pub state: &'static str,
     pub observed: Option<String>,
     pub detail: Option<String>,
+    /// This check wrote the value. Never sent; it makes the item reported even when the server
+    /// already holds the corrected state, so a correction is never invisible.
+    #[serde(skip)]
+    pub corrected: bool,
 }
 
 /// Mirrors `FactResultInput`.
@@ -225,7 +254,7 @@ fn try_check_and_report(
 
     let mut results = Vec::new();
     for served in &response.baselines {
-        match evaluate(identity, served, &read_machine_value) {
+        match evaluate(identity, served, &read_machine_value, &write_machine_value) {
             Ok(result) => results.push(result),
             // One refused baseline must not cost the others their report.
             Err(err) => logging::warn(&format!("refusing baseline version {}: {err:#}", served.version_id)),
@@ -286,13 +315,10 @@ pub fn load_cached(cache_path: &Path) -> Option<BaselineResponse> {
     serde_json::from_str(&fs::read_to_string(cache_path).ok()?).ok()
 }
 
-/// Verifies one served baseline, reads every item, and returns only what differs from what the
-/// server already holds. `read` reads one HKLM value — `read_machine_value` for real, a fake in tests.
-pub(crate) fn evaluate(
-    identity: &AgentIdentity,
-    served: &ServedBaseline,
-    read: &dyn Fn(&str, &str) -> std::io::Result<Option<Observed>>,
-) -> Result<BaselineResult> {
+/// Verifies one served baseline, reads every item, sets back each drifted enforceable one, and
+/// returns only what differs from what the server already holds, plus every correction.
+pub(crate) fn evaluate(identity: &AgentIdentity, served: &ServedBaseline, read: ReadValue<'_>, write: WriteValue<'_>) -> Result<BaselineResult> {
+    // Before anything is parsed, read or written.
     identity::verify_artifact_signature(identity, &served.document, &served.signature)?;
 
     let document: Document = serde_json::from_str(&served.document).context("the signed document could not be parsed")?;
@@ -310,9 +336,9 @@ pub(crate) fn evaluate(
     for item in &document.items {
         match item.kind.as_str() {
             "setting" => {
-                let result = judge(item, read);
+                let result = judge(item, read, write);
                 let known = served.states.iter().find(|s| s.key == item.key);
-                if known.is_none_or(|k| k.state != result.state || k.observed != result.observed) {
+                if result.corrected || known.is_none_or(|k| k.state != result.state || k.observed != result.observed) {
                     items.push(result);
                 }
             }
@@ -332,13 +358,53 @@ pub(crate) fn evaluate(
     Ok(BaselineResult { version_id: document.version_id, items, facts })
 }
 
-/// What one setting is on this PC.
-fn judge(item: &Item, read: &dyn Fn(&str, &str) -> std::io::Result<Option<Observed>>) -> ItemResult {
+/// What one setting is on this PC, after setting it back if it is an enforceable item that drifted.
+fn judge(item: &Item, read: ReadValue<'_>, write: WriteValue<'_>) -> ItemResult {
+    let found = audit(item, read);
+    if item.mode.as_deref() != Some(ENFORCE) || found.state != DRIFTED {
+        return found;
+    }
+    let detail = |text: String| Some(truncate(&text, MAX_DETAIL_CHARS));
+    let was = found.observed.clone().unwrap_or_else(|| "absent".into());
+    if !is_enforceable(item) {
+        return ItemResult { detail: detail(format!("not set back (was {was}): this agent writes only its ENFORCEABLE values")), ..found };
+    }
+    // audit() reports Drifted only once it has understood both, so neither is ever missing here.
+    let (Some(kind), Some(data)) = (item.value_type.as_deref().and_then(ValueKind::from_document), item.data.as_deref()) else {
+        return found;
+    };
+
+    if let Err(err) = write(&item.path, &item.value_name, &kind, data) {
+        return ItemResult { state: ERROR, detail: detail(format!("drifted (was {was}) and could not be set back: {err}")), ..found };
+    }
+
+    let after = audit(item, read);
+    if after.state != COMPLIANT {
+        return ItemResult { state: ERROR, detail: detail(format!("set back, but it reads as {} (was {was})", after.state)), corrected: true, ..after };
+    }
+    logging::info(&format!("baseline: set {} back to {data} (was {was})", item.key));
+    ItemResult { detail: detail(format!("set back by Kintsugi (was {was})")), corrected: true, ..after }
+}
+
+/// Whether `item` is a machine setting whose exact path, value name and type are in `ENFORCEABLE`.
+fn is_enforceable(item: &Item) -> bool {
+    item.kind == "setting"
+        && item.scope == "machine"
+        && item.hive == "HKLM"
+        && item.secret.is_none()
+        && ENFORCEABLE.iter().any(|(path, name, value_type)| {
+            item.path.eq_ignore_ascii_case(path) && item.value_name.eq_ignore_ascii_case(name) && item.value_type.as_deref() == Some(*value_type)
+        })
+}
+
+/// What one setting is on this PC, read only.
+fn audit(item: &Item, read: ReadValue<'_>) -> ItemResult {
     let result = |state, observed: Option<String>, detail: Option<&str>| ItemResult {
         key: item.key.clone(),
         state,
         observed: observed.map(|o| truncate(&o, MAX_OBSERVED_CHARS)),
         detail: detail.map(|d| truncate(d, MAX_DETAIL_CHARS)),
+        corrected: false,
     };
 
     // The tray process reads user-scope items, as the signed-in user, in a later step. The service
@@ -424,6 +490,27 @@ fn read_machine_value(path: &str, value_name: &str) -> std::io::Result<Option<Ob
         Ok(value) => Ok(Some(observe(kind_of(&value.vtype), &value.bytes))),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err),
+    }
+}
+
+/// Sets one value under HKLM, in the same 64-bit view `read_machine_value` reads, creating the key if
+/// it is missing. Called only from `judge`, for an item `is_enforceable` accepted, after its baseline's
+/// signature verified. Writes the types `ENFORCEABLE` names today; anything else is refused, not guessed.
+fn write_machine_value(path: &str, value_name: &str, kind: &ValueKind, data: &str) -> std::io::Result<()> {
+    let invalid = |what: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("'{data}' is not {what}"));
+    // Opened only once the data has parsed, so a refused write leaves no empty key behind.
+    let key = || RegKey::predef(HKEY_LOCAL_MACHINE).create_subkey_with_flags(path, KEY_SET_VALUE | KEY_WOW64_64KEY).map(|(key, _)| key);
+    match kind {
+        ValueKind::Dword => {
+            let value = data.parse::<u32>().map_err(|_| invalid("a dword"))?;
+            key()?.set_value(value_name, &value)
+        }
+        ValueKind::Qword => {
+            let value = data.parse::<u64>().map_err(|_| invalid("a qword"))?;
+            key()?.set_value(value_name, &value)
+        }
+        ValueKind::String => key()?.set_value(value_name, &data.to_string()),
+        other => Err(std::io::Error::new(std::io::ErrorKind::Unsupported, format!("this agent does not write {} values", other.name()))),
     }
 }
 
@@ -527,6 +614,65 @@ mod tests {
         result.items.iter().find(|i| i.key == key).unwrap().state
     }
 
+    fn item_of<'r>(result: &'r BaselineResult, key: &str) -> &'r ItemResult {
+        result.items.iter().find(|i| i.key == key).unwrap()
+    }
+
+    /// Passed wherever nothing may be written.
+    fn never_write(_: &str, _: &str, _: &ValueKind, _: &str) -> std::io::Result<()> {
+        panic!("a value was written")
+    }
+
+    const CHROME: &str = r"SOFTWARE\Policies\Google\Chrome";
+    const OCCLUSION: &str = "WindowOcclusionEnabled";
+
+    fn item(key: &str, path: &str, name: &str, value_type: &str, data: &str, mode: &str) -> String {
+        let path = path.replace('\\', r"\\");
+        format!(
+            r#"{{"key":"{key}","kind":"setting","scope":"machine","hive":"HKLM","path":"{path}","valueName":"{name}","valueType":"{value_type}","data":"{data}","mode":"{mode}"}}"#
+        )
+    }
+
+    /// The pilot's item: Chrome's occlusion policy, enforced at 0.
+    fn occlusion() -> String {
+        item("occlusion", CHROME, OCCLUSION, "dword", "0", ENFORCE)
+    }
+
+    /// A registry that remembers what is written, so a value set back reads back as set.
+    #[derive(Default)]
+    struct FakeRegistry {
+        values: std::cell::RefCell<std::collections::HashMap<String, Observed>>,
+        writes: std::cell::RefCell<Vec<String>>,
+        refuse_writes: bool,
+    }
+
+    impl FakeRegistry {
+        fn holding(path: &str, name: &str, value: Observed) -> Self {
+            let registry = Self::default();
+            registry.values.borrow_mut().insert(format!(r"{path}\{name}"), value);
+            registry
+        }
+
+        fn read(&self, path: &str, name: &str) -> std::io::Result<Option<Observed>> {
+            Ok(self.values.borrow().get(&format!(r"{path}\{name}")).cloned())
+        }
+
+        fn write(&self, path: &str, name: &str, kind: &ValueKind, data: &str) -> std::io::Result<()> {
+            if self.refuse_writes {
+                return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+            }
+            self.writes.borrow_mut().push(format!(r"{path}\{name}={data}"));
+            self.values.borrow_mut().insert(format!(r"{path}\{name}"), Observed { kind: kind.clone(), text: data.to_string() });
+            Ok(())
+        }
+
+        fn check(&self, items: &[String], known: Vec<KnownState>) -> BaselineResult {
+            let read = |path: &str, name: &str| self.read(path, name);
+            let write = |path: &str, name: &str, kind: &ValueKind, data: &str| self.write(path, name, kind, data);
+            evaluate(&identity(), &served(document(&items.join(",")), known), &read, &write).unwrap()
+        }
+    }
+
     #[test]
     fn each_setting_is_judged_against_what_the_registry_holds() {
         let items = [
@@ -539,7 +685,7 @@ mod tests {
         ]
         .join(",");
 
-        let result = evaluate(&identity(), &served(document(&items), Vec::new()), &registry).unwrap();
+        let result = evaluate(&identity(), &served(document(&items), Vec::new()), &registry, &never_write).unwrap();
 
         assert_eq!(result.version_id, VERSION);
         assert_eq!(state_of(&result, "compliant"), COMPLIANT);
@@ -556,7 +702,7 @@ mod tests {
         baseline.document = baseline.document.replace(r#""data":"1""#, r#""data":"0""#);
 
         let read_nothing = |_: &str, _: &str| -> std::io::Result<Option<Observed>> { panic!("read before the signature was checked") };
-        assert!(evaluate(&identity(), &baseline, &read_nothing).is_err());
+        assert!(evaluate(&identity(), &baseline, &read_nothing, &never_write).is_err());
     }
 
     #[test]
@@ -564,7 +710,7 @@ mod tests {
         let mut baseline = served(document(&setting("a", "on", "dword", "1")), Vec::new());
         baseline.version_id = "00000000-0000-0000-0000-000000000000".to_string();
 
-        assert!(evaluate(&identity(), &baseline, &registry).is_err());
+        assert!(evaluate(&identity(), &baseline, &registry, &never_write).is_err());
     }
 
     #[test]
@@ -575,7 +721,7 @@ mod tests {
             KnownState { key: "changed".into(), state: COMPLIANT.into(), observed: Some("1".into()) },
         ];
 
-        let result = evaluate(&identity(), &served(document(&items), known), &registry).unwrap();
+        let result = evaluate(&identity(), &served(document(&items), known), &registry, &never_write).unwrap();
 
         assert_eq!(result.items.iter().map(|i| i.key.as_str()).collect::<Vec<_>>(), vec!["changed"]);
     }
@@ -589,7 +735,7 @@ mod tests {
         .join(",");
         let read_nothing = |_: &str, _: &str| -> std::io::Result<Option<Observed>> { panic!("a not-applicable item was read") };
 
-        let result = evaluate(&identity(), &served(document(&items), Vec::new()), &read_nothing).unwrap();
+        let result = evaluate(&identity(), &served(document(&items), Vec::new()), &read_nothing, &never_write).unwrap();
 
         assert_eq!(state_of(&result, "user"), NOT_APPLICABLE);
         assert_eq!(state_of(&result, "secret"), NOT_APPLICABLE);
@@ -605,7 +751,7 @@ mod tests {
         .join(",");
         let read_nothing = |_: &str, _: &str| -> std::io::Result<Option<Observed>> { panic!("a protected hive was read") };
 
-        let result = evaluate(&identity(), &served(document(&items), Vec::new()), &read_nothing).unwrap();
+        let result = evaluate(&identity(), &served(document(&items), Vec::new()), &read_nothing, &never_write).unwrap();
 
         assert_eq!(state_of(&result, "hashes"), ERROR);
         assert!(result.facts.is_empty());
@@ -618,11 +764,11 @@ mod tests {
         let items = r#"{"key":"edition","kind":"fact","scope":"machine","hive":"HKLM","path":"text","valueName":"EditionID"}"#;
         let mut baseline = served(document(items), Vec::new());
 
-        let first = evaluate(&identity(), &baseline, &registry).unwrap();
+        let first = evaluate(&identity(), &baseline, &registry, &never_write).unwrap();
         assert_eq!(first.facts, vec![FactResult { key: "edition".into(), value: Some("abc".into()) }]);
 
         baseline.facts = vec![KnownFact { key: "edition".into(), value: Some("abc".into()) }];
-        assert!(evaluate(&identity(), &baseline, &registry).unwrap().facts.is_empty());
+        assert!(evaluate(&identity(), &baseline, &registry, &never_write).unwrap().facts.is_empty());
     }
 
     #[test]
@@ -652,5 +798,106 @@ mod tests {
         assert_eq!(loaded.baselines[0].document, response.baselines[0].document);
 
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_drifted_enforced_value_is_set_back_and_says_so() {
+        let registry = FakeRegistry::holding(CHROME, OCCLUSION, observe(ValueKind::Dword, &1u32.to_le_bytes()));
+
+        let result = registry.check(&[occlusion()], Vec::new());
+
+        let item = item_of(&result, "occlusion");
+        assert_eq!(item.state, COMPLIANT);
+        assert_eq!(item.observed.as_deref(), Some("0"));
+        assert_eq!(item.detail.as_deref(), Some("set back by Kintsugi (was 1)"));
+        assert_eq!(*registry.writes.borrow(), vec![format!(r"{CHROME}\{OCCLUSION}=0")]);
+    }
+
+    #[test]
+    fn an_absent_enforced_value_is_created_whatever_the_case_of_its_path() {
+        let registry = FakeRegistry::default();
+
+        let result = registry.check(&[item("occlusion", &CHROME.to_lowercase(), &OCCLUSION.to_uppercase(), "dword", "0", ENFORCE)], Vec::new());
+
+        assert_eq!(state_of(&result, "occlusion"), COMPLIANT);
+        assert_eq!(item_of(&result, "occlusion").detail.as_deref(), Some("set back by Kintsugi (was absent)"));
+        assert_eq!(registry.writes.borrow().len(), 1);
+    }
+
+    /// Each of these is something a signed document could ask for, and none is in ENFORCEABLE.
+    #[test]
+    fn nothing_outside_the_allowlist_is_ever_written() {
+        let items = [
+            item("run", r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "Updater", "string", "evil.exe", ENFORCE),
+            item("forcelist", &format!(r"{CHROME}\ExtensionInstallForcelist"), "1", "string", "abc", ENFORCE),
+            item("wrong-type", CHROME, OCCLUSION, "string", "0", ENFORCE),
+            item("audited", CHROME, OCCLUSION, "dword", "0", "audit"),
+        ];
+        let empty = FakeRegistry::default();
+        let read = |path: &str, name: &str| empty.read(path, name);
+
+        let result = evaluate(&identity(), &served(document(&items.join(",")), Vec::new()), &read, &never_write).unwrap();
+
+        assert!(result.items.iter().all(|i| i.state == DRIFTED && !i.corrected));
+        for key in ["run", "forcelist", "wrong-type"] {
+            assert!(item_of(&result, key).detail.as_deref().unwrap().starts_with("not set back (was absent)"), "{key}");
+        }
+        assert_eq!(item_of(&result, "audited").detail.as_deref(), Some("absent"));
+    }
+
+    #[test]
+    fn a_compliant_enforced_value_is_left_alone() {
+        let registry = FakeRegistry::holding(CHROME, OCCLUSION, observe(ValueKind::Dword, &0u32.to_le_bytes()));
+        let read = |path: &str, name: &str| registry.read(path, name);
+
+        let result = evaluate(&identity(), &served(document(&occlusion()), Vec::new()), &read, &never_write).unwrap();
+
+        assert_eq!(state_of(&result, "occlusion"), COMPLIANT);
+        assert_eq!(item_of(&result, "occlusion").detail, None);
+    }
+
+    #[test]
+    fn a_write_that_fails_is_an_error_naming_what_was_there() {
+        let registry = FakeRegistry { refuse_writes: true, ..FakeRegistry::default() };
+
+        let result = registry.check(&[occlusion()], Vec::new());
+
+        let item = item_of(&result, "occlusion");
+        assert_eq!(item.state, ERROR);
+        assert!(item.detail.as_deref().unwrap().starts_with("drifted (was absent) and could not be set back"));
+    }
+
+    #[test]
+    fn a_correction_is_reported_even_when_the_server_already_holds_the_corrected_state() {
+        let registry = FakeRegistry::default();
+        let known = vec![KnownState { key: "occlusion".into(), state: COMPLIANT.into(), observed: Some("0".into()) }];
+
+        assert_eq!(registry.check(&[occlusion()], known.clone()).items.len(), 1);
+        // Set back now, so the next check has nothing to write and nothing to report.
+        assert!(registry.check(&[occlusion()], known).items.is_empty());
+        assert_eq!(registry.writes.borrow().len(), 1);
+    }
+
+    /// The real write path against the real registry: what it writes is what `read_machine_value` reads.
+    /// A developer's unelevated shell skips rather than fails. CI (which sets `CI`) never skips: its
+    /// runner is elevated, and a passing test's output is hidden, so a skip there would look like a pass.
+    #[test]
+    fn write_machine_value_round_trips_through_the_registry() {
+        let path = format!(r"SOFTWARE\Kintsugi-agent-test-{}", std::process::id());
+        match write_machine_value(&path, "D", &ValueKind::Dword, "0") {
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied && std::env::var_os("CI").is_none() => {
+                eprintln!("skipped: writing under HKLM needs an elevated shell");
+                return;
+            }
+            other => other.expect("the dword could not be written"),
+        }
+        write_machine_value(&path, "S", &ValueKind::String, "abc").unwrap();
+
+        assert_eq!(read_machine_value(&path, "D").unwrap(), Some(observe(ValueKind::Dword, &0u32.to_le_bytes())));
+        assert_eq!(read_machine_value(&path, "S").unwrap().map(|o| o.text), Some("abc".to_string()));
+        assert!(write_machine_value(&path, "B", &ValueKind::Binary, "00").is_err());
+        assert!(write_machine_value(&path, "D", &ValueKind::Dword, "x").is_err());
+
+        let _ = RegKey::predef(HKEY_LOCAL_MACHINE).delete_subkey_all(&path);
     }
 }

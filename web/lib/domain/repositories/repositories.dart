@@ -220,7 +220,7 @@ abstract interface class DeviceReportRepository {
   Future<List<DeviceSearchResult>> search(String text, {int take = 10});
 }
 
-/// The Baselines screens — reads and writes `/api/admin/baselines`. Audit only: nothing here writes to a
+/// The Baselines screens — reads and writes `/api/admin/baselines`. Nothing here writes to a
 /// device, and nothing reaches one until a person signs a version.
 abstract interface class BaselineRepository {
   Future<List<BaselineSummary>> list();

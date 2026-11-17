@@ -51,7 +51,8 @@ class _BaselineView extends StatelessWidget {
             title: detail?.name ?? 'Baseline',
             subtitle: detail?.signedVersion == null
                 ? 'Nothing signed yet, so no device has this baseline.'
-                : 'Agents read version ${detail!.signedVersion!.number}. Audit only: nothing on a device is changed.',
+                : 'Agents read version ${detail!.signedVersion!.number}. Enforce items are set back when they drift; '
+                    'everything else is only reported.',
             children: [
               if (state.error != null) AlertBox.error(state.error!),
               if (state.notice != null) AlertBox.success(state.notice!),
@@ -162,8 +163,9 @@ class _Versions extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const HintText(
-                'Signing makes this document what every assigned device reads within the hour. It is '
-                'audit only in this release: devices report against it and nothing is written.',
+                'Signing makes this document what every assigned device reads within the hour. Items in '
+                'audit mode are only reported; an item in enforce mode is also set on the device when it '
+                'has drifted.',
               ),
               const SizedBox(height: 8),
               CodeText('SHA-256 ${SignBaselineVersion.documentSha256(version.document)}'),

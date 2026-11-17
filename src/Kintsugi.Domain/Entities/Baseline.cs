@@ -10,9 +10,11 @@ namespace Kintsugi.Domain.Entities;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <strong>Audit only in this step.</strong> An agent fetches the latest signed version, reads each
-/// item and reports what it found; nothing on a device is written. The design that adds enforcement,
-/// rings and exemptions is "Kintsugi device configuration design" (see IP-841).
+/// <strong>Audit, plus an enforce pilot.</strong> An agent fetches the latest signed version, reads each
+/// item and reports what it found. An item in <c>enforce</c> mode is also set when it has drifted, and
+/// only a value on the application layer's write allowlist can be in that mode, so nothing else on a
+/// device is ever written. Rings and exemptions are still to come; the design is "Kintsugi device
+/// configuration design" (see IP-841).
 /// </para>
 /// <para>
 /// <strong>Assignment is "every Windows host" or a list of hosts</strong>, the two targets this step
