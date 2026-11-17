@@ -38,6 +38,16 @@ Nothing in CI cross-checks them, because the client and the agents are compiled 
   takes that host's applications down with it and leaves the Applications screen quietly wrong,
   with nothing but a log line to say so. Raise the server's figure first, never the agent's. Same
   asymmetry, same direction, as `MaxDetailsLength` against `MAX_REPORTED_FAILURE_BYTES`.
+- **The device-baseline DTOs are a third exception to "all three", and a temporary one.**
+  `AgentBaselinesDto`, `BaselineDocument`/`BaselineItem` and `ReportBaselineResultsCommand`
+  (`Kintsugi.Application/Baselines/`) are mirrored only by `clients/windows-agent/src/baseline.rs`,
+  because baselines hold registry items in this step and only the Windows agent fetches them. The
+  macOS and Linux agents gain the same structs when they gain a checker; until then they simply
+  never call `GET /api/baseline`. The item state crosses the agent's wire as a *name*
+  (`"Drifted"`) and the admin UI's as an *ordinal* (`web/lib/domain/entities/enums.dart`), so a
+  reordered `BaselineItemState` breaks only the second, which `baseline_mapper_test.dart` pins.
+  `baseline::MAX_OBSERVED_CHARS` (2000) stays below `HostBaselineItemState.MaxObservedLength`
+  (2048), same direction as the other size couplings here: raise the server's first.
 - **The package entries are source-package names, and that is a contract not a convention.** The
   server hands them straight to OSV, which keys on source packages: `libssl3` answers 0
   vulnerabilities on Ubuntu 22.04 where `openssl` answers 48. An agent "helpfully" switched to

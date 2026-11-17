@@ -52,7 +52,7 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
     public async Task Handle_PackageManagerManaged_ForHomebrew_ResolvesToADeterministicScript_WithoutCallingAi()
     {
         _researchClient
-            .Setup(c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string>(), "Firefox", "Firefox", It.IsAny<CancellationToken>()))
+            .Setup(c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<string>(), "Firefox", "Firefox", It.IsAny<CancellationToken>()))
             .ReturnsAsync("128.0");
 
         var result = await CreateHandler().Handle(Command(UpgradePathWorkKind.PackageManagerManaged, "Homebrew"), CancellationToken.None);
@@ -79,7 +79,7 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
     public async Task Handle_PackageManagerManaged_ProducesTheIdenticalScript_RegardlessOfApplicationName()
     {
         _researchClient
-            .Setup(c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Setup(c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync("1.0");
 
         var firefoxResult = await CreateHandler().Handle(Command(UpgradePathWorkKind.PackageManagerManaged, "Homebrew"), CancellationToken.None);
@@ -187,7 +187,7 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
             It.Is<UpgradePath>(p => p.Script == reviewed && p.ScriptSignature == "signed:over-the-reviewed-revision"),
             It.IsAny<CancellationToken>()), Times.Once);
         // The version check ran against the script the row actually holds.
-        _researchClient.Verify(c => c.CheckScriptVersionAsync(reviewed, It.IsAny<string>(), "Firefox", "Firefox", It.IsAny<CancellationToken>()), Times.Once);
+        _researchClient.Verify(c => c.CheckScriptVersionAsync(reviewed, "signed:over-the-reviewed-revision", It.IsAny<string>(), "Firefox", "Firefox", It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
@@ -253,9 +253,6 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
         _researchClient
             .Setup(c => c.GenerateScriptAsync(It.IsAny<AiProviderSettings>(), It.IsAny<UpgradePathScriptGenerationRequest>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new UpgradePathScriptResult(UpgradePathStatus.Found, "Set-StrictMode -Version Latest\n...", null));
-        _researchClient
-            .Setup(c => c.CheckScriptVersionAsync(It.IsAny<string>(), PlatformBucket.Windows, "Firefox", "Mozilla Firefox", It.IsAny<CancellationToken>()))
-            .ReturnsAsync("129.0");
 
         var result = await CreateHandler().Handle(
             Command(UpgradePathWorkKind.Research, platform: PlatformBucket.Windows, applicationIdentifier: "Mozilla Firefox"),
@@ -263,20 +260,15 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
 
         Assert.Equal(UpgradePathStatus.Found, result.Status);
         Assert.Equal(UpgradeMethod.Script, result.Method);
-        Assert.Equal("129.0", result.LatestVersion);
-        // The platform is what picks the interpreter the version check runs the script under — a
-        // PowerShell script handed to bash would fail every time, silently leaving LatestVersion
-        // null and so making the application permanently unpatchable.
-        _researchClient.Verify(
-            c => c.CheckScriptVersionAsync(It.IsAny<string>(), PlatformBucket.Windows, "Firefox", "Mozilla Firefox", It.IsAny<CancellationToken>()),
-            Times.Once);
+        Assert.Equal("Set-StrictMode -Version Latest\n...", result.Script);
+        _repository.Verify(r => r.AddAsync(It.Is<UpgradePath>(p => p.Platform == PlatformBucket.Windows && p.ScriptSignature == null), It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
     public async Task Handle_PackageManagerManaged_ForWinget_ResolvesToAPowerShellScript_AddressedByPackageId()
     {
         _researchClient
-            .Setup(c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string>(), "Firefox", "Mozilla.Firefox", It.IsAny<CancellationToken>()))
+            .Setup(c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<string>(), "Firefox", "Mozilla.Firefox", It.IsAny<CancellationToken>()))
             .ReturnsAsync("129.0");
 
         var result = await CreateHandler().Handle(
@@ -325,21 +317,23 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
     }
 
     [Fact]
-    public async Task Handle_Research_OnMacOs_WhenAiFindsAReliableMethod_PersistsTheGeneratedScriptAndChecksItsVersion()
+    public async Task Handle_Research_OnMacOs_WhenAiFindsAReliableMethod_PersistsTheGeneratedScript_WithoutRunningIt()
     {
+        // htw-secops/kintsugi#8: an unreviewed AI script must never run on the server, whose user can
+        // read the signing key. The version is learned when a human signs it, not here.
         _researchClient
             .Setup(c => c.GenerateScriptAsync(Settings, It.IsAny<UpgradePathScriptGenerationRequest>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new UpgradePathScriptResult(UpgradePathStatus.Found, "#!/bin/bash\n...", null));
-        _researchClient
-            .Setup(c => c.CheckScriptVersionAsync("#!/bin/bash\n...", PlatformBucket.MacOs, "Firefox", "org.mozilla.firefox", It.IsAny<CancellationToken>()))
-            .ReturnsAsync("129.0");
 
         var result = await CreateHandler().Handle(Command(UpgradePathWorkKind.Research, applicationIdentifier: "org.mozilla.firefox"), CancellationToken.None);
 
         Assert.Equal(UpgradePathStatus.Found, result.Status);
         Assert.Equal(UpgradeMethod.Script, result.Method);
-        Assert.Equal("129.0", result.LatestVersion);
+        Assert.Null(result.LatestVersion);
         _repository.Verify(r => r.AddAsync(It.Is<UpgradePath>(p => p.ScriptSignature == null), It.IsAny<CancellationToken>()), Times.Once);
+        _researchClient.Verify(
+            c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()),
+            Times.Never);
     }
 
     [Fact]
@@ -351,7 +345,7 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
             .Setup(c => c.GenerateScriptAsync(Settings, It.IsAny<UpgradePathScriptGenerationRequest>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new UpgradePathScriptResult(UpgradePathStatus.Found, "#!/bin/bash\n...", null));
         _researchClient
-            .Setup(c => c.CheckScriptVersionAsync("#!/bin/bash\n...", PlatformBucket.MacOs, "Firefox", "org.mozilla.firefox", It.IsAny<CancellationToken>()))
+            .Setup(c => c.CheckScriptVersionAsync("#!/bin/bash\n...", It.IsAny<string?>(), PlatformBucket.MacOs, "Firefox", "org.mozilla.firefox", It.IsAny<CancellationToken>()))
             .ReturnsAsync("129.0");
 
         await CreateHandler().Handle(Command(UpgradePathWorkKind.Research, applicationIdentifier: "org.mozilla.firefox"), CancellationToken.None);
@@ -370,7 +364,7 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
 
         Assert.Equal(UpgradePathStatus.NotFound, result.Status);
         Assert.Equal(UpgradeMethod.Unknown, result.Method);
-        _researchClient.Verify(c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        _researchClient.Verify(c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
@@ -385,6 +379,96 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
         Assert.Equal(UpgradePathStatus.Failed, result.Status);
         Assert.False(result.Skipped);
         Assert.Contains("network is down", result.Note);
+    }
+
+    /// <summary>A reviewed, signed, AI-generated script — what a per-application Refresh normally
+    /// force-rechecks.</summary>
+    private UpgradePath ArrangeSignedScript()
+    {
+        var existing = UpgradePath.Create(
+            "Firefox", PlatformBucket.MacOs, UpgradePathStatus.Found, "128.0", UpgradeMethod.Script,
+            null, null, null, null, "Researched.", "#!/bin/bash\necho reviewed", "org.mozilla.firefox");
+        existing.SetSignatures("signed:#!/bin/bash\necho reviewed", null);
+        _repository.Setup(r => r.GetAsync("Firefox", PlatformBucket.MacOs, It.IsAny<CancellationToken>())).ReturnsAsync(existing);
+        return existing;
+    }
+
+    private static void AssertUntouched(UpgradePath existing)
+    {
+        Assert.Equal(UpgradePathStatus.Found, existing.Status);
+        Assert.Equal(UpgradeMethod.Script, existing.Method);
+        Assert.Equal("#!/bin/bash\necho reviewed", existing.Script);
+        Assert.Equal("signed:#!/bin/bash\necho reviewed", existing.ScriptSignature);
+        Assert.Equal("128.0", existing.LatestVersion);
+        Assert.Equal("Researched.", existing.Notes);
+    }
+
+    [Fact]
+    public async Task Handle_Refresh_WhenTheAiBudgetRefusesTheCall_KeepsTheExistingSignedScript()
+    {
+        // The bug: Refresh at the limit wrote a Failed row with no script over the signed one.
+        var existing = ArrangeSignedScript();
+        _researchClient
+            .Setup(c => c.GenerateScriptAsync(Settings, It.IsAny<UpgradePathScriptGenerationRequest>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new Kintsugi.Application.Common.Exceptions.AiBudgetReachedException("AI budget reached: $5.00 of $5.00 has been spent this month."));
+
+        var result = await CreateHandler().Handle(
+            Command(UpgradePathWorkKind.Research, applicationIdentifier: "org.mozilla.firefox", forceRecheck: true), CancellationToken.None);
+
+        AssertUntouched(existing);
+        Assert.Equal(UpgradePathStatus.Found, result.Status);
+        Assert.Equal("#!/bin/bash\necho reviewed", result.Script);
+        Assert.Contains("AI budget reached", result.Note);
+        Assert.Contains("existing script was kept", result.Note);
+        _unitOfWork.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Handle_Refresh_WhenGenerationFails_KeepsTheExistingSignedScript()
+    {
+        var existing = ArrangeSignedScript();
+        _researchClient
+            .Setup(c => c.GenerateScriptAsync(Settings, It.IsAny<UpgradePathScriptGenerationRequest>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new HttpRequestException("network is down"));
+
+        var result = await CreateHandler().Handle(
+            Command(UpgradePathWorkKind.Research, applicationIdentifier: "org.mozilla.firefox", forceRecheck: true), CancellationToken.None);
+
+        AssertUntouched(existing);
+        Assert.Contains("network is down", result.Note);
+        _unitOfWork.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Handle_Refresh_WhenTheAiFindsNoMethodThisTime_KeepsTheExistingSignedScript()
+    {
+        var existing = ArrangeSignedScript();
+        _researchClient
+            .Setup(c => c.GenerateScriptAsync(Settings, It.IsAny<UpgradePathScriptGenerationRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new UpgradePathScriptResult(UpgradePathStatus.NotFound, null, "No reliable update mechanism found."));
+
+        var result = await CreateHandler().Handle(
+            Command(UpgradePathWorkKind.Research, applicationIdentifier: "org.mozilla.firefox", forceRecheck: true), CancellationToken.None);
+
+        AssertUntouched(existing);
+        Assert.Contains("No reliable update mechanism found", result.Note);
+        _unitOfWork.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Handle_Refresh_WhenGenerationSucceeds_StillReplacesTheScriptUnsigned()
+    {
+        // The other half of the contract: a new script does replace the old, and waits for review.
+        var existing = ArrangeSignedScript();
+        _researchClient
+            .Setup(c => c.GenerateScriptAsync(Settings, It.IsAny<UpgradePathScriptGenerationRequest>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new UpgradePathScriptResult(UpgradePathStatus.Found, "#!/bin/bash\necho new", "Re-researched."));
+
+        await CreateHandler().Handle(
+            Command(UpgradePathWorkKind.Research, applicationIdentifier: "org.mozilla.firefox", forceRecheck: true), CancellationToken.None);
+
+        Assert.Equal("#!/bin/bash\necho new", existing.Script);
+        Assert.Null(existing.ScriptSignature);
     }
 
     [Fact]
@@ -442,7 +526,7 @@ public class ResearchApplicationUpgradePathCommandHandlerTests
         // a human to sign it via the "Sign Script" action.
         Assert.Null(existing.ScriptSignature);
         _unitOfWork.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Never);
-        _researchClient.Verify(c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        _researchClient.Verify(c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
         _researchClient.Verify(c => c.GenerateScriptAsync(It.IsAny<AiProviderSettings>(), It.IsAny<UpgradePathScriptGenerationRequest>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 

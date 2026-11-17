@@ -37,10 +37,15 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient, ICpeSugge
     private readonly IGitHubSettingsProvider _gitHubSettingsProvider;
     private readonly IGooseCliClient _gooseCliClient;
     private readonly IClaudeAgentSdkClient _claudeAgentSdkClient;
+    private readonly IArtifactSigningService _artifactSigningService;
     private readonly ILogger<AiUpgradePathResearchClient> _logger;
 
-    public AiUpgradePathResearchClient(HttpClient httpClient, AiEngine engine, IGitHubSettingsProvider gitHubSettingsProvider, IGooseCliClient gooseCliClient, IClaudeAgentSdkClient claudeAgentSdkClient, ILogger<AiUpgradePathResearchClient> logger)
+    private readonly IAiBudgetService _budget;
+
+    public AiUpgradePathResearchClient(HttpClient httpClient, AiEngine engine, IGitHubSettingsProvider gitHubSettingsProvider, IGooseCliClient gooseCliClient, IClaudeAgentSdkClient claudeAgentSdkClient, IAiBudgetService budget, IArtifactSigningService artifactSigningService, ILogger<AiUpgradePathResearchClient> logger)
     {
+        _budget = budget;
+        _artifactSigningService = artifactSigningService;
         _httpClient = httpClient;
         _httpClient.Timeout = TimeSpan.FromSeconds(300);
         _engine = engine;
@@ -112,7 +117,7 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient, ICpeSugge
 
         _logger.LogWarning("Script generated for {ApplicationName} ({Platform}) failed validation, retrying once: {Errors}", request.ApplicationName, request.Platform, errors);
 
-        var fixedScript = CleanScriptText(await AskProviderRawAsync(settings, AiFeature.ScriptRepair, BuildScriptFixPrompt(request, script, errors!), cancellationToken))
+        var fixedScript = CleanScriptText(await AskProviderRawAsync(settings, AiFeature.ScriptRepair, BuildScriptFixPrompt(request, script, errors!), request.ApplicationName, cancellationToken))
             ?? throw new ExternalServiceException("The model's fix attempt did not contain a usable script.");
 
         // Same check on the repair: a model that disputes the findings answers in prose too, and the
@@ -140,8 +145,19 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient, ICpeSugge
     /// non-zero exit, a timeout, or unexpected output — callers should treat null as "the script
     /// broke" and fall back to regenerating it via <see cref="GenerateScriptAsync"/>.
     /// </summary>
-    public async Task<string?> CheckScriptVersionAsync(string script, string platform, string applicationName, string applicationIdentifier, CancellationToken cancellationToken)
+    public async Task<string?> CheckScriptVersionAsync(string script, string? scriptSignature, string platform, string applicationName, string applicationIdentifier, CancellationToken cancellationToken)
     {
+        // The one place the server executes a script, so the one place the trust check lives — see
+        // the interface's remarks and htw-secops/kintsugi#8. Every caller passes what it has; none
+        // decides for itself.
+        if (!MayRunOnServer(script, scriptSignature, applicationName, platform))
+        {
+            _logger.LogWarning(
+                "Refused to run --update-version for {ApplicationName} ({Platform}): the script is not signed by this server and is not a script this server writes",
+                applicationName, platform);
+            return null;
+        }
+
         // A PowerShell script runs here under pwsh, on this same Linux server — the prompt requires
         // --update-version to make only HTTP calls precisely so a Windows application's version
         // check needs no Windows host to run on. See the runtime image's pwsh install.
@@ -233,6 +249,12 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient, ICpeSugge
         }
     }
 
+    /// <summary>A package manager's own server-written text, or bytes this server signed: nothing
+    /// else reaches a process here. The signature is verified, not just present.</summary>
+    private bool MayRunOnServer(string script, string? scriptSignature, string applicationName, string platform) =>
+        script == PackageManagerCatalog.CurrentScriptFor(applicationName, platform)
+        || (scriptSignature is not null && _artifactSigningService.Verify(script, scriptSignature));
+
     private static void TryKill(Process process)
     {
         try
@@ -245,7 +267,53 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient, ICpeSugge
         }
     }
 
-    private Task<string> AskProviderWithSearchAsync(AiProviderSettings settings, UpgradePathScriptGenerationRequest request, string? hostingSiteContext, CancellationToken cancellationToken) => settings.Provider switch
+    /// <summary>
+    /// Research, inside the AI budget: refused outright once the month's limit is reached, and
+    /// otherwise counted — every model call it makes is added to the ledger against this
+    /// application, even when the call goes on to fail, because the tokens were spent either way.
+    /// </summary>
+    private async Task<string> AskProviderWithSearchAsync(AiProviderSettings settings, UpgradePathScriptGenerationRequest request, string? hostingSiteContext, CancellationToken cancellationToken)
+    {
+        if (IsMetered(settings, AiFeature.ScriptResearch))
+        {
+            await _budget.EnsureWithinBudgetAsync(cancellationToken);
+        }
+
+        using var usage = AiUsageScope.Begin();
+        try
+        {
+            return await AskProviderWithSearchCoreAsync(settings, request, hostingSiteContext, cancellationToken);
+        }
+        finally
+        {
+            await _budget.RecordAsync(AiFeature.ScriptResearch, request.ApplicationName, usage.Entries, CancellationToken.None);
+        }
+    }
+
+    /// <summary>
+    /// Whether a feature's calls are billed per call and so count against the budget. The Claude
+    /// Agent SDK and Goose run on a subscription and report nothing, and Ollama is local, so
+    /// stopping them at a spending limit would stop nothing that costs anything.
+    /// </summary>
+    private static bool IsMetered(AiProviderSettings settings, AiFeature feature)
+    {
+        if (settings.Provider is AiProvider.GooseCli or AiProvider.ClaudeAgentSdk)
+        {
+            return false;
+        }
+
+        try
+        {
+            return RouteFor(settings, feature).Connection.Protocol != AiWireProtocol.Ollama;
+        }
+        catch (ExternalServiceException)
+        {
+            // No route configured: the call is about to fail with its own, better message.
+            return false;
+        }
+    }
+
+    private Task<string> AskProviderWithSearchCoreAsync(AiProviderSettings settings, UpgradePathScriptGenerationRequest request, string? hostingSiteContext, CancellationToken cancellationToken) => settings.Provider switch
     {
         // No hosting-site context is stitched in for the two agent providers and no web-search
         // tool is declared: both drive an agent that does its own searching, so the prompt is
@@ -259,7 +327,25 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient, ICpeSugge
         _ => _engine.ResearchAsync(RouteFor(settings, AiFeature.ScriptResearch), settings.WebSearch, ResolvePrompt(request, hostingSiteContext), ResearchMaxTokens, cancellationToken),
     };
 
-    private Task<string> AskProviderRawAsync(AiProviderSettings settings, AiFeature feature, string prompt, CancellationToken cancellationToken) => settings.Provider switch
+    private async Task<string> AskProviderRawAsync(AiProviderSettings settings, AiFeature feature, string prompt, string? subject, CancellationToken cancellationToken)
+    {
+        if (IsMetered(settings, feature))
+        {
+            await _budget.EnsureWithinBudgetAsync(cancellationToken);
+        }
+
+        using var usage = AiUsageScope.Begin();
+        try
+        {
+            return await AskProviderRawCoreAsync(settings, feature, prompt, cancellationToken);
+        }
+        finally
+        {
+            await _budget.RecordAsync(feature, subject, usage.Entries, CancellationToken.None);
+        }
+    }
+
+    private Task<string> AskProviderRawCoreAsync(AiProviderSettings settings, AiFeature feature, string prompt, CancellationToken cancellationToken) => settings.Provider switch
     {
         AiProvider.GooseCli => _gooseCliClient.RunAsync(prompt, settings.Model, settings.BaseUrl, cancellationToken),
         AiProvider.ClaudeAgentSdk => _claudeAgentSdkClient.RunAsync(prompt, settings.Model, settings.ApiKey, cancellationToken),
@@ -755,7 +841,7 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient, ICpeSugge
                 an unsigned download where the installed copy was signed is a fatal error — never
                 something to install anyway. The Kintsugi signature on this script covers the script's
                 text, not what the script downloads; this step is the only thing that does.
-              - For a .dmg: mount with `hdiutil attach -nobrowse -quiet`, copy the .app bundle into
+              - For a .dmg: mount with `hdiutil attach -nobrowse`, copy the .app bundle into
                 /Applications (replacing any existing install), detach the volume, then — only once the
                 signature check above has passed — remove the quarantine attribute
                 (`xattr -dr com.apple.quarantine "/Applications/<appName>.app"`) so Gatekeeper does not
@@ -892,6 +978,8 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient, ICpeSugge
 
             {{updateSection}}
 
+            {{UpdateOutputAndVerificationRules(target)}}
+
             General requirements:
             {{generalRequirements}}
             - If you have any caveat about your confidence in this script (e.g. you lacked live web
@@ -900,6 +988,54 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient, ICpeSugge
               that gets kept.
             - Output ONLY the script itself — no explanation before or after it, and no markdown
               code fences.
+            """;
+    }
+
+    /// <summary>
+    /// What `--update` must print and when it must stop, so a failed patch can be diagnosed from its
+    /// log. The agent reports the last 4000 bytes of the script's stderr as the failure and keeps
+    /// stdout and stderr in full in its own log, so these rules decide what an administrator can
+    /// read: installer output goes to stderr (the failure), and what was verified goes to stdout.
+    /// </summary>
+    /// <remarks>
+    /// Without the first rule the model hides installer output on its own (`>/dev/null 2>&1`),
+    /// leaving "exit 1" and nothing else. The third restates, as an ordering, what the per-platform
+    /// verify bullets already call fatal: a check that fails has to stop the script before the
+    /// installer is reached, not be reported alongside an install that went ahead.
+    /// </remarks>
+    private static string UpdateOutputAndVerificationRules(TargetPlatform target)
+    {
+        var (hiddenOutput, hidingExamples, checks, promptSwitches) = target switch
+        {
+            TargetPlatform.Windows => (
+                "the installer's output, or `msiexec`'s (add `/l*v <logfile>` to `msiexec` and write the log's tail)",
+                "`| Out-Null`, `*> $null`, or a hidden window with no log",
+                "`checksum OK`, `Authenticode signature OK (<publisher>)`",
+                "`/qn`, `/S`, `/VERYSILENT /NORESTART`"),
+            TargetPlatform.Linux => (
+                "the package manager's or installer's output (`apt-get`, `dnf`, `zypper`, `pacman`, `apk`, `dpkg`, `rpm`)",
+                "`>/dev/null`, `2>&1` into nothing, or `-qq`",
+                "`checksum OK`, `signature OK`",
+                "`-y`, `--non-interactive`, `DEBIAN_FRONTEND=noninteractive`"),
+            _ => (
+                "the output of `installer` and `hdiutil`",
+                "`>/dev/null`, `2>&1` into nothing, or `-quiet`",
+                "`checksum OK`, `signature OK`, `Team ID OK`",
+                "`installer -pkg ... -target /`, `hdiutil attach -nobrowse`")
+        };
+        var toStderr = target == TargetPlatform.Windows ? "`[Console]::Error.WriteLine`" : "`>&2`";
+
+        return $$"""
+            `--update` mode, output and verification — this is what an administrator reads when a patch fails:
+            - Never hide {{hiddenOutput}}: no {{hidingExamples}}. Send it to stderr ({{toStderr}}) so a failure
+              shows why. The switches that stop prompts ({{promptSwitches}}) are still
+              required — they stop prompts, not output.
+            - Print one line to stdout for each verification as it passes: {{checks}}. When a check cannot apply,
+              say so — for example `checksum SKIPPED (vendor publishes none)` — and never print an OK for a check
+              that was not run.
+            - Every verification must finish and pass BEFORE the installer or package manager is run, and before
+              anything already installed is replaced. If one fails, write the reason to stderr and exit non-zero
+              at once; a warning is not enough.
             """;
     }
 
@@ -1299,7 +1435,7 @@ public class AiUpgradePathResearchClient : IUpgradePathResearchClient, ICpeSugge
         // it invites a confident guess assembled from a vendor's marketing page. And a wrong guess
         // costs nothing anyway, because NvdClient.CpeExistsAsync throws it away before a reviewer
         // ever sees it.
-        var answer = await AskProviderRawAsync(settings, AiFeature.CpeSuggestion, BuildCpeSuggestionPrompt(displayName, part), cancellationToken);
+        var answer = await AskProviderRawAsync(settings, AiFeature.CpeSuggestion, BuildCpeSuggestionPrompt(displayName, part), displayName, cancellationToken);
 
         var json = CleanScriptText(answer);
         if (json is null)

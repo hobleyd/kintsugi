@@ -45,7 +45,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    // "jake is not an administrator" would not say it was jake@gmail.com rather than jake@htw.com.au.
+    // "jake is not an administrator" would not say it was jake@gmail.com rather than jake@corp.example.com.
     expect(find.textContaining('jake@gmail.com is not an administrator'), findsOneWidget);
   });
 

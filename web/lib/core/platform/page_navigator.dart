@@ -22,4 +22,11 @@ abstract interface class PageNavigator {
   /// site — NVD's page for a CVE, say — where navigating away would lose whatever the
   /// administrator was in the middle of reading.
   void openInNewTab(String url);
+
+  /// Opens a screen of *this* app in a new tab, at [route] — `/diagnostics`, say.
+  ///
+  /// Distinct from [openInNewTab], which takes a finished address: how a route becomes one depends on
+  /// the URL strategy the app runs with, and that is the browser implementation's to know, not the
+  /// caller's. This app uses Flutter's default, hash URLs, where `/diagnostics` is `/#/diagnostics`.
+  void openAppRouteInNewTab(String route);
 }

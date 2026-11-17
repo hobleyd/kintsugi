@@ -108,7 +108,7 @@ Both halves of this are invisible from the C# you are editing, and each has ship
 
 **Agent authentication is two layers, and adding a route needs both.** nginx requires a client
 certificate signed by the fleet CA on an *exact-match*, case-insensitive regex —
-`~* ^/api/(host|applications|patching-policy|upgrade-paths|patch-results|os-patch-results|patch-failures|forced-patch-runs|host-removed)/?$`
+`~* ^/api/(host|applications|patching-policy|upgrade-paths|patch-results|os-patch-results|patch-failures|forced-patch-runs|host-health-events|log-collection-requests|log-collection-results|log-collection-failures|host-removed|baseline|baseline-results)/?$`
 — and forwards the verified Subject CN as `X-Agent-Cert-Cn` and `$ssl_client_verify` as
 `X-Agent-Cert-Verified`. `[RequireAgentIdentity]` then requires `Verified == SUCCESS` and compares
 that CN against the `serialNumber` the request body claims (via `IAgentScopedRequest`), so a valid

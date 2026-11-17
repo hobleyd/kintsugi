@@ -378,7 +378,7 @@ sequenceDiagram
             else standalone application
                 Bg->>Ai: one call — research and author the script
                 Ai-->>Bg: script + notes
-                Bg->>Bg: run its --update-version on the server
+                Note over Bg: NOT run on the server — unreviewed.<br/>Its version is checked when a human signs it (5b).
             end
             Bg->>Db: upsert the upgrade_paths row, UNSIGNED
             Bg->>Coord: ReportItem
@@ -420,7 +420,8 @@ sequenceDiagram
     end
 
     Human->>Ui: read the script, press Sign Script
-    Ui->>Api: POST /api/upgrade-paths/sign-script {applicationName, platform, patchFailureId?}
+    Ui->>Api: POST /api/upgrade-paths/sign-script {applicationName, platform, scriptSha256, patchFailureId?}
+    Note over Api: 409 unless SHA-256(stored script) == scriptSha256 — the bytes the reviewer was shown
     Api->>Sign: sign the script bytes
     Sign-->>Api: signature
     Api->>Db: store it on this row

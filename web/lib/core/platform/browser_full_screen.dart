@@ -5,7 +5,7 @@ import 'package:web/web.dart' as web;
 
 import 'full_screen.dart';
 
-/// The real [FullScreenController]. One of the two files in this app that touches the DOM.
+/// The real [FullScreenController]. One of the few files in this app that touch the DOM.
 class BrowserFullScreenController implements FullScreenController {
   BrowserFullScreenController();
 

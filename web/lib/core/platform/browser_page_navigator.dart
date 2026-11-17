@@ -15,6 +15,15 @@ class BrowserPageNavigator implements PageNavigator {
   void openInNewTab(String url) => web.window.open(url, '_blank', 'noopener,noreferrer');
 
   @override
+  void openAppRouteInNewTab(String route) {
+    // Hash URLs, because main.dart never sets another strategy: the route goes after a `#`, on the
+    // page this one was loaded from. The new tab shares this origin's `localStorage`, which is what
+    // lets the Diagnostics page open there with the runs already in it.
+    final here = web.window.location;
+    web.window.open('${here.origin}${here.pathname}#$route', '_blank', 'noopener,noreferrer');
+  }
+
+  @override
   void post(String url, {Map<String, String> fields = const {}}) {
     // A form rather than a request, for the same reason [go] exists: what comes back is a redirect
     // chain through the identity provider's end-session endpoint and then back to this origin, and

@@ -41,12 +41,24 @@ public interface IUpgradePathResearchClient
     /// so callers can treat that as "the script broke" and fall back to asking the AI to regenerate
     /// it, per the reason this method exists.
     /// </summary>
+    /// <remarks>
+    /// <strong>Only reviewed content runs here.</strong> The script runs as the API's own user, which
+    /// can read the artifact-signing key, the Data Protection keys, the database credentials and the
+    /// pod's cloud token. So it runs only when <paramref name="scriptSignature"/> is this server's
+    /// signature over exactly these bytes, or the script is the one this build writes itself for a
+    /// package manager (<see cref="Kintsugi.Application.UpgradePaths.PackageManagerCatalog.CurrentScriptFor"/>).
+    /// Anything else, a freshly generated AI script above all, returns null without starting a
+    /// process: a page the model read can steer what it writes, and a generated script calls
+    /// <c>curl</c> itself, outside <c>SafeWebFetcher</c> (htw-secops/kintsugi#8).
+    /// </remarks>
+    /// <param name="scriptSignature">The row's stored <c>ScriptSignature</c>, verified here rather
+    /// than trusted.</param>
     /// <param name="platform">The <see cref="Kintsugi.Application.UpgradePaths.PlatformBucket"/>
     /// the script is stored under — what decides whether it runs under bash or <c>pwsh</c> (see
     /// <see cref="Kintsugi.Application.UpgradePaths.ScriptLanguages.For"/>). Passed explicitly
     /// rather than sniffed from the script text so the interpreter that runs a script is always the
     /// one the prompt that generated it, and the validator that checked it, both assumed.</param>
-    Task<string?> CheckScriptVersionAsync(string script, string platform, string applicationName, string applicationIdentifier, CancellationToken cancellationToken);
+    Task<string?> CheckScriptVersionAsync(string script, string? scriptSignature, string platform,string applicationName, string applicationIdentifier, CancellationToken cancellationToken);
 }
 
 /// <param name="KnownInstalledVersions">Distinct versions currently seen installed across managed

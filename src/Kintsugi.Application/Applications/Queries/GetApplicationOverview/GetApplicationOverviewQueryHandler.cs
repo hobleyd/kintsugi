@@ -1,5 +1,6 @@
 using MediatR;
 using Kintsugi.Application.Applications.Queries.GetApplicationSummaries;
+using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Application.UpgradePaths;
 using Kintsugi.Application.UpgradePaths.Queries.GetUpgradePathSummaries;
 
@@ -8,10 +9,12 @@ namespace Kintsugi.Application.Applications.Queries.GetApplicationOverview;
 public class GetApplicationOverviewQueryHandler : IRequestHandler<GetApplicationOverviewQuery, ApplicationOverviewDto>
 {
     private readonly ISender _sender;
+    private readonly IManagedApplicationRepository _managedApplicationRepository;
 
-    public GetApplicationOverviewQueryHandler(ISender sender)
+    public GetApplicationOverviewQueryHandler(ISender sender, IManagedApplicationRepository managedApplicationRepository)
     {
         _sender = sender;
+        _managedApplicationRepository = managedApplicationRepository;
     }
 
     public async Task<ApplicationOverviewDto> Handle(GetApplicationOverviewQuery request, CancellationToken cancellationToken)
@@ -21,7 +24,10 @@ public class GetApplicationOverviewQueryHandler : IRequestHandler<GetApplication
 
         var upgradePathsByApplicationName = upgradePaths.ToLookup(p => p.ApplicationName, StringComparer.OrdinalIgnoreCase);
 
-        var rows = applications.Select(a => ToRow(a, upgradePathsByApplicationName)).ToList();
+        // Who patches the applications that another tool does, so each row can say so.
+        var managedBy = await _managedApplicationRepository.GetOwnersByNameAsync(cancellationToken);
+
+        var rows = applications.Select(a => ToRow(a, upgradePathsByApplicationName, managedBy)).ToList();
 
         return new ApplicationOverviewDto(
             rows,
@@ -41,11 +47,13 @@ public class GetApplicationOverviewQueryHandler : IRequestHandler<GetApplication
 
     private static ApplicationRowDto ToRow(
         ApplicationSummaryDto application,
-        ILookup<string, UpgradePathSummaryDto> upgradePathsByApplicationName) =>
+        ILookup<string, UpgradePathSummaryDto> upgradePathsByApplicationName,
+        IReadOnlyDictionary<string, string> managedBy) =>
         new(
             application.Name,
             application.HostCount,
             application.HostNames,
             upgradePathsByApplicationName[application.Name].OrderBy(p => p.Platform, StringComparer.OrdinalIgnoreCase).ToList(),
-            application.Children.Select(c => ToRow(c, upgradePathsByApplicationName)).ToList());
+            application.Children.Select(c => ToRow(c, upgradePathsByApplicationName, managedBy)).ToList(),
+            managedBy.GetValueOrDefault(application.Name));
 }

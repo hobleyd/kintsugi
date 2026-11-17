@@ -1,4 +1,5 @@
 using Moq;
+using Kintsugi.Application.HostActivity;
 using Kintsugi.Application.Common.Exceptions;
 using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Application.PatchFailures.Commands.ReportPatchFailure;
@@ -24,7 +25,7 @@ public class ReportPatchFailureCommandHandlerTests
     }
 
     private ReportPatchFailureCommandHandler CreateHandler() =>
-        new(_hostRepository.Object, _patchFailureRepository.Object, _upgradePathRepository.Object, _unitOfWork.Object);
+        new(_hostRepository.Object, _patchFailureRepository.Object, _upgradePathRepository.Object, _unitOfWork.Object, new Mock<IHostEventRecorder>().Object);
 
     private static ReportPatchFailureCommand Command(DateTimeOffset failedUtc, string details = "exited with 1: Permission denied") =>
         new("SERIAL-1", "Ollama", "0.32.14", "0.33.3", failedUtc, details);

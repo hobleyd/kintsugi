@@ -35,12 +35,18 @@ public static class DependencyInjection
         services.AddScoped<IPatchDeploymentRepository, PatchDeploymentRepository>();
         services.AddScoped<IPatchFailureRepository, PatchFailureRepository>();
         services.AddScoped<IForcedPatchRunRepository, ForcedPatchRunRepository>();
+        services.AddScoped<IBaselineRepository, BaselineRepository>();
+        services.AddScoped<IHostEventRepository, HostEventRepository>();
+        services.AddScoped<ILogCollectionRepository, LogCollectionRepository>();
+        services.AddScoped<IKpiSnapshotRepository, KpiSnapshotRepository>();
+        services.AddScoped<IHostActivitySettingsRepository, HostActivitySettingsRepository>();
         services.AddScoped<IInstalledApplicationRepository, InstalledApplicationRepository>();
         services.AddScoped<IAiAgentSettingsRepository, AiAgentSettingsRepository>();
         services.AddScoped<IUpgradePathRepository, UpgradePathRepository>();
         services.AddScoped<IPatchingPolicySettingsRepository, PatchingPolicySettingsRepository>();
         services.AddScoped<IAgentPackageRepository, AgentPackageRepository>();
         services.AddScoped<IApprovedScriptRepository, ApprovedScriptRepository>();
+        services.AddScoped<IManagedApplicationRepository, ManagedApplicationRepository>();
         services.AddScoped<IGitHubSettingsRepository, GitHubSettingsRepository>();
         // Scoped, and read per call by every GitHub client — see GitHubSettings for why none of them
         // may capture these values in a constructor any more.
@@ -53,6 +59,9 @@ public static class DependencyInjection
         services.AddSingleton<GitHubAppTokenProvider>();
         services.AddScoped<IAuthenticationSettingsRepository, AuthenticationSettingsRepository>();
         services.AddScoped<IAuditSettingsRepository, AuditSettingsRepository>();
+        services.AddScoped<IAiUsageRepository, AiUsageRepository>();
+        // A singleton because its callers are not request-scoped; it opens a scope per call.
+        services.AddSingleton<IAiBudgetService, AiBudgetService>();
         services.AddScoped<IVantaSettingsRepository, VantaSettingsRepository>();
         services.AddScoped<IRemoteControlSessionRepository, RemoteControlSessionRepository>();
         // Scoped and read per call, for the same reason IGitHubSettingsProvider is: these values are

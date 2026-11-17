@@ -131,7 +131,14 @@ public class AnthropicAdapter : IAiProtocolAdapter
         }
 
         var joined = string.Join("\n", text);
-        return new AiChatResult(joined, toolCalls, new AiChatMessage(AiChatRole.Assistant, joined, toolCalls, ProviderContent: content.DeepClone()));
+        // Cache writes and reads are input the call was billed for, at their own rates; they are
+        // counted as input here, which slightly overstates a cached read. The cost is an estimate.
+        var usage = response["usage"];
+        var inputTokens = AiTokenUsage.Count(usage?["input_tokens"])
+            + AiTokenUsage.Count(usage?["cache_creation_input_tokens"])
+            + AiTokenUsage.Count(usage?["cache_read_input_tokens"]);
+        return new AiChatResult(joined, toolCalls, new AiChatMessage(AiChatRole.Assistant, joined, toolCalls, ProviderContent: content.DeepClone()),
+            AiTokenUsage.Of(inputTokens, AiTokenUsage.Count(usage?["output_tokens"])));
     }
 
     private static readonly IReadOnlyDictionary<string, string> AnthropicVersionHeader =

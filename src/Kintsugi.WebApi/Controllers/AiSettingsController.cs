@@ -7,6 +7,8 @@ using Kintsugi.Application.AiSettings.Commands.SaveAiConnection;
 using Kintsugi.Application.AiSettings.Commands.SetAiFeatureRoute;
 using Kintsugi.Application.AiSettings.Commands.TestAiConnection;
 using Kintsugi.Application.AiSettings.Commands.UpdateAiAgentSettings;
+using Kintsugi.Application.AiSettings.Commands.UpdateAiBudget;
+using Kintsugi.Application.AiSettings.Queries.GetAiUsage;
 using Kintsugi.Application.AiSettings.Commands.UpdateWebSearchSettings;
 using Kintsugi.Application.AiSettings.Queries.GetAiCatalog;
 using Kintsugi.Application.AiSettings.Queries.GetAiConnections;
@@ -51,6 +53,22 @@ public class AiSettingsController : ControllerBase
     [ProducesResponseType(typeof(AiAgentSettingsDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<ActionResult<AiAgentSettingsDto>> Update(UpdateAiAgentSettingsCommand command, CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(command, cancellationToken));
+
+    /// <summary>
+    /// This month's AI spending against the limit, the limit's settings, and the breakdowns the AI
+    /// Usage screen shows. Costs are estimates from the tokens each provider reported.
+    /// </summary>
+    [HttpGet("usage")]
+    [ProducesResponseType(typeof(AiUsageDto), StatusCodes.Status200OK)]
+    public async Task<ActionResult<AiUsageDto>> GetUsage(CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(new GetAiUsageQuery(), cancellationToken));
+
+    /// <summary>Sets the monthly AI budget, its warning level, the exchange rate and whether to stop at the limit.</summary>
+    [HttpPut("budget")]
+    [ProducesResponseType(typeof(AiBudgetSettingsDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<AiBudgetSettingsDto>> UpdateBudget(UpdateAiBudgetCommand command, CancellationToken cancellationToken) =>
         Ok(await _sender.Send(command, cancellationToken));
 
     /// <summary>Lists the model names installed on a local Ollama endpoint, to populate the model dropdown in Settings.</summary>

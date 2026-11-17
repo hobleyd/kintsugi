@@ -21,6 +21,9 @@ class FakeUpgradePathRepository implements UpgradePathRepository {
   String? signedApplication;
   String? signedPlatform;
 
+  /// The hash the sign request named — what binds the signature to the text the reviewer saw.
+  String? signedScriptSha256;
+
   /// What marks a signature as a repair rather than an ordinary review — the server clears the
   /// failures that script was causing only when this is set.
   String? signedPatchFailureId;
@@ -55,10 +58,12 @@ class FakeUpgradePathRepository implements UpgradePathRepository {
   Future<UpgradePathResult> signScript({
     required String applicationName,
     required String platform,
+    required String scriptSha256,
     String? patchFailureId,
   }) async {
     signedApplication = applicationName;
     signedPlatform = platform;
+    signedScriptSha256 = scriptSha256;
     signedPatchFailureId = patchFailureId;
     return result(
       applicationName: applicationName,
@@ -100,6 +105,12 @@ class FakeUpgradePathRepository implements UpgradePathRepository {
 
   @override
   Future<UpdateCheckStatus> updateCheckStatus() async => const UpdateCheckStatus.idle();
+
+  @override
+  Future<RunResults> scanResults() async => const RunResults(rows: [], unlisted: 0);
+
+  @override
+  Future<RunResults> updateCheckResults() async => const RunResults(rows: [], unlisted: 0);
 
   @override
   Future<UpdateCheckResult> checkUpdate({
@@ -249,7 +260,7 @@ void main() {
     );
 
     blocTest<InstructionsPanelBloc, InstructionsPanelState>(
-      'sends no script content, only the row it applies to',
+      'sends no script content, only the row it applies to and the hash of what was shown',
       build: () => blocFor(repository),
       act: (bloc) async {
         bloc.add(const PanelOpened());
@@ -262,8 +273,28 @@ void main() {
         // going to execute, which is the whole property the signing model rests on.
         expect(repository.signedApplication, 'Nextcloud');
         expect(repository.signedPlatform, 'macOS');
+        // The server signs only if what it holds still hashes to this — SHA-256 of '#!/bin/bash',
+        // the same lowercase hex ScriptContentHash.Of produces.
+        expect(repository.signedScriptSha256, InstructionsPanelBloc.scriptSha256('#!/bin/bash'));
       },
     );
+
+    test('hashes exactly the UTF-8 bytes, as the server does', () {
+      // Known vectors, so a change of encoding or case on either side fails here rather than as a
+      // 409 on every sign.
+      expect(
+        InstructionsPanelBloc.scriptSha256(''),
+        'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+      );
+      expect(
+        InstructionsPanelBloc.scriptSha256('abc'),
+        'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+      );
+      expect(
+        InstructionsPanelBloc.scriptSha256('a\r\n'),
+        isNot(InstructionsPanelBloc.scriptSha256('a\n')),
+      );
+    });
 
     test('the in-flight state announces itself rather than only disabling the button', () {
       // `_onSign` clears the previous outcome and sets "Signing..." in one copyWith. The clear used

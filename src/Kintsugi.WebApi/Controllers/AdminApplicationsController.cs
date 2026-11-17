@@ -67,5 +67,7 @@ public class AdminApplicationsController : ControllerBase
     public async Task<ActionResult<RequestForcedPatchRunsResult>> ForcePatchRuns(
         RequestForcedPatchRunsCommand command,
         CancellationToken cancellationToken) =>
-        Ok(await _sender.Send(command, cancellationToken));
+        // RequestedBy is the signed-in administrator, set here and not read from the body, so the
+        // name on the host's timeline cannot be chosen by the caller.
+        Ok(await _sender.Send(command with { RequestedBy = AdminRemoteControlController.DescribeRequester(User) }, cancellationToken));
 }

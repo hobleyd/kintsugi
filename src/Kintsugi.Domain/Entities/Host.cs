@@ -56,6 +56,18 @@ public class Host : BaseEntity
     /// Null until a release that reports one has checked in; older agents omit the field.</summary>
     public string? AgentVersion { get; private set; }
 
+    /// <summary>When this host first reported that it needs a restart for updates it has already
+    /// installed, or null when it does not (or has never said). Cleared when the host reports that it
+    /// no longer does — which is how the Hosts screen learns that somebody restarted it.</summary>
+    public DateTimeOffset? RestartRequiredSinceUtc { get; private set; }
+
+    /// <summary>What asked for the restart, as the host names it ("linux-image-6.8.0-52-generic").
+    /// Null when the host did not say, or when no restart is needed.</summary>
+    public string? RestartRequiredBecause { get; private set; }
+
+    /// <summary>Longest <see cref="RestartRequiredBecause"/> kept, matching its column.</summary>
+    public const int MaxRestartBecauseLength = 500;
+
     /// <summary>Set once an admin has asked for this host to be removed — the next check-in's
     /// response tells the agent to uninstall itself completely from the host machine. See
     /// <see cref="RequestRemoval"/> and <see cref="DeletedAtUtc"/>.</summary>
@@ -145,7 +157,9 @@ public class Host : BaseEntity
         string? operatingSystemLatestVersion = null,
         string? agentVersion = null,
         string? operatingSystemId = null,
-        string? operatingSystemVersionId = null)
+        string? operatingSystemVersionId = null,
+        bool? restartRequired = null,
+        string? restartBecause = null)
     {
         if (string.IsNullOrWhiteSpace(hostname))
         {
@@ -203,7 +217,52 @@ public class Host : BaseEntity
             OperatingSystemVersionId = operatingSystemVersionId;
         }
 
+        RecordRestartState(restartRequired, restartBecause, DateTimeOffset.UtcNow);
+
         RecordHeartbeat(HostStatus.Online);
+    }
+
+    /// <summary>
+    /// Records what the host says about needing a restart. Null means "not reported" — an agent that
+    /// cannot tell (every agent but the Linux one today, and any Linux agent that predates the field) —
+    /// and leaves what is stored alone, the same rule as every other optional field here. An explicit
+    /// true starts the clock once and keeps it, so "since" is when it was first needed and not the
+    /// last check-in; an explicit false clears both.
+    /// </summary>
+    public void RecordRestartState(bool? restartRequired, string? restartBecause, DateTimeOffset now)
+    {
+        if (restartRequired is null)
+        {
+            return;
+        }
+
+        if (restartRequired == true)
+        {
+            RestartRequiredSinceUtc ??= now;
+            RestartRequiredBecause = TruncateRestartBecause(restartBecause);
+            return;
+        }
+
+        RestartRequiredSinceUtc = null;
+        RestartRequiredBecause = null;
+    }
+
+    /// <summary>
+    /// Cuts a restart cause to the column width. This is the only length check it gets — the
+    /// validators no longer refuse a long one, because refusing it refused the whole check-in — so it
+    /// never leaves half of a surrogate pair at the end.
+    /// </summary>
+    private static string? TruncateRestartBecause(string? restartBecause)
+    {
+        if (restartBecause is not { Length: > MaxRestartBecauseLength })
+        {
+            return restartBecause;
+        }
+
+        var length = char.IsHighSurrogate(restartBecause[MaxRestartBecauseLength - 1])
+            ? MaxRestartBecauseLength - 1
+            : MaxRestartBecauseLength;
+        return restartBecause[..length];
     }
 
     /// <summary>

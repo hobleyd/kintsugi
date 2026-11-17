@@ -269,6 +269,23 @@ class AuthenticationSettings extends Equatable {
       ];
 }
 
+/// Mirrors `AdministratorDto`: one entry of the administrators list, with who added it and when.
+class Administrator extends Equatable {
+  const Administrator({required this.email, required this.addedBy, required this.addedUtc});
+
+  final String email;
+
+  /// The email of whoever added this one. Null when that is not known: the entry predates tracking,
+  /// or was typed into the Authentication screen's list, which does not know who is saving.
+  final String? addedBy;
+
+  /// When it was added; null when that is not known.
+  final DateTime? addedUtc;
+
+  @override
+  List<Object?> get props => [email, addedBy, addedUtc];
+}
+
 /// Mirrors `AuditSettingsDto`.
 ///
 /// Which field a provider reads is documented on the C# entity `AuditSettings`; the ones the

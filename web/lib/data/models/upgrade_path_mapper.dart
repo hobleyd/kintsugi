@@ -1,3 +1,4 @@
+import '../../core/diagnostics/diagnostics_category.dart';
 import '../../core/network/json_reader.dart';
 import '../../domain/entities/enums.dart';
 import '../../domain/entities/upgrade_path.dart';
@@ -116,6 +117,23 @@ UpgradePathScanStatus scanStatusFromJson(Map<String, dynamic> json) => UpgradePa
       completedUtc: dateTimeFromJson(json['completedUtc']),
       faultReason: json['faultReason'] as String?,
       notes: stringListFromJson(json['notes']),
+      aiBudgetMessage: json['aiBudgetMessage'] as String?,
+    );
+
+/// Reads an `UpgradePathRunResultsDto`. A row it cannot read as a map is skipped, and an outcome it
+/// does not know leaves that row uncategorised.
+RunResults runResultsFromJson(Map<String, dynamic> json) => RunResults(
+      rows: [
+        for (final raw in (json['rows'] as List<dynamic>? ?? const []))
+          if (raw is Map<String, dynamic>)
+            RunRow(
+              applicationName: raw['applicationName'] as String? ?? '',
+              platform: raw['platform'] as String? ?? '',
+              outcome: diagnosticsCategoryKey(raw['outcome'] as String?),
+              note: raw['note'] as String?,
+            ),
+      ],
+      unlisted: (json['unlisted'] as num?)?.toInt() ?? 0,
     );
 
 /// Reads a `UpdateCheckStatusDto`.

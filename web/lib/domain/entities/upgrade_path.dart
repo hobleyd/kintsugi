@@ -219,6 +219,7 @@ class UpgradePathScanStatus extends Equatable {
     required this.completedUtc,
     required this.faultReason,
     required this.notes,
+    this.aiBudgetMessage,
   });
 
   const UpgradePathScanStatus.idle()
@@ -232,7 +233,11 @@ class UpgradePathScanStatus extends Equatable {
         startedUtc = null,
         completedUtc = null,
         faultReason = null,
-        notes = const [];
+        notes = const [],
+        aiBudgetMessage = null;
+
+  /// Why no scan can start: the month's AI budget is spent and the stop is on. Null otherwise.
+  final String? aiBudgetMessage;
 
   final bool isRunning;
   final int total;
@@ -428,4 +433,38 @@ class RunStarted<T> extends Equatable {
 
   @override
   List<Object?> get props => [started, status];
+}
+
+/// Mirrors `RunRowDto`: one application a fleet-wide run reported on, with what it concluded.
+class RunRow extends Equatable {
+  const RunRow({
+    required this.applicationName,
+    required this.platform,
+    required this.outcome,
+    required this.note,
+  });
+
+  final String applicationName;
+  final String platform;
+
+  /// A key from `diagnostics_category.dart`, or null for an outcome this client does not know.
+  final String? outcome;
+
+  /// The reason, where the run had one. A successful row usually has none.
+  final String? note;
+
+  @override
+  List<Object?> get props => [applicationName, platform, outcome, note];
+}
+
+/// Mirrors `UpgradePathRunResultsDto`: every row of a run, and how many past the server's bound it
+/// counted without keeping.
+class RunResults extends Equatable {
+  const RunResults({required this.rows, required this.unlisted});
+
+  final List<RunRow> rows;
+  final int unlisted;
+
+  @override
+  List<Object?> get props => [rows, unlisted];
 }

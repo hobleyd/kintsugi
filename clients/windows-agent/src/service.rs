@@ -6,9 +6,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::baseline;
 use crate::config::{self, Config};
 use crate::forced_patch_run::{self, ForcedPatchRun};
+use crate::health;
 use crate::identity::{self, AgentIdentity};
+use crate::log_collection;
 use crate::logging;
 use crate::os_update;
 use crate::policy;
@@ -263,6 +266,17 @@ impl Agent {
             policy::refresh(&self.client, &self.config, &cache_path);
         }
 
+        // What this PC's own event log says about it shutting down by itself or logging hardware errors.
+        // Best-effort and read-only: it never fails the check-in.
+        health::report_new_events(&self.client, &self.config, &self.serial_number);
+
+        // An administrator's request for this PC's event log, if one is waiting. Best-effort and
+        // read-only: it never fails the check-in, and with nothing pending it is one cheap GET.
+        log_collection::collect_and_upload_if_requested(&self.client, &self.config, &self.serial_number);
+        // The device baselines assigned to this host, read and reported — audit only, so nothing on
+        // the machine is written. Best-effort like the health report: it never fails the check-in.
+        baseline::check_and_report(&self.client, &self.config, self.identity.as_ref(), &self.serial_number);
+
         // Last, and only after everything above has already succeeded: check whether a newer build
         // of this agent itself has been published, and install it in place if so — see
         // `self_update`. There's no policy/schedule governing the agent's own updates.
@@ -384,12 +398,31 @@ impl RequestHandler for Agent {
         Ok(())
     }
 
-    fn install_os_updates(&mut self) -> Result<()> {
-        os_update::install()?;
+    fn restart_host(&mut self, delay_seconds: u64) -> Result<()> {
+        os_update::restart(delay_seconds)
+    }
+
+    /// Every session on the host, read from session 0 — the service is the one place that can see
+    /// them all, which is why the restart decision is made here and not by the tray that asked.
+    fn logged_on_sessions(&mut self) -> Result<Vec<crate::presence::LogonState>> {
+        crate::presence::logged_on_sessions()
+    }
+
+    fn install_os_updates(&mut self) -> Result<os_update::InstallOutcome> {
+        let outcome = match os_update::install() {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                // Reported from here, the one place the install runs, so the admin UI can say why a
+                // host is not updating rather than showing it as merely waiting. See
+                // `os_update::report_failed`.
+                os_update::report_failed(&self.client, &self.config, &self.serial_number, &err);
+                return Err(err);
+            }
+        };
         // Reported from here, not from the tray process, for the same reason the patch result above
         // is: this is the side holding the identity every agent-only route requires.
         os_update::report_patched(&self.client, &self.config, &self.serial_number);
-        Ok(())
+        Ok(outcome)
     }
 
     /// Answers a [`queue::RequestKind::CheckIn`]: the same check-in `run_loop` runs on the hour,
@@ -523,6 +556,9 @@ pub fn run_loop(shutdown: Arc<AtomicBool>) {
     // Anything left from before a restart or a reboot has an owner that is long gone; acting on it
     // would start an unannounced patch cycle with nothing showing progress.
     queue::discard_stale(&config::queue_dir());
+    // In memory only, so a service restart forgets any install that would have authorised a restart
+    // — see `queue::RestartAuthorisation`.
+    let mut restart_authorisation = queue::RestartAuthorisation::default();
     // The first moment nothing can still be running the copy a previous self-update displaced — and
     // the proof that the restart that update was waiting for has happened.
     self_update::clean_up_previous_update();
@@ -591,7 +627,7 @@ pub fn run_loop(shutdown: Arc<AtomicBool>) {
                 };
         }
 
-        queue::process_queue(&config::queue_dir(), &mut agent);
+        queue::process_queue(&config::queue_dir(), &mut agent, &mut restart_authorisation);
 
         // After the queue rather than only after the hourly check-in: a queue-triggered check-in
         // (see `RequestHandler::check_in`) can learn of a removal too. A drain against the directory

@@ -3,6 +3,7 @@ import 'package:equatable/equatable.dart';
 
 import '../../core/bloc/polling.dart';
 import '../../core/network/api_exception.dart';
+import '../../domain/entities/enums.dart';
 import '../../domain/entities/host.dart';
 import '../../domain/usecases/host_usecases.dart';
 
@@ -45,10 +46,29 @@ final class HostsSearchChanged extends HostsEvent {
   List<Object?> get props => [search];
 }
 
+final class HostsAgentFilterChanged extends HostsEvent {
+  const HostsAgentFilterChanged(this.filter);
+
+  /// One of [hostsAgentFilterOptions]'s keys.
+  final String filter;
+
+  @override
+  List<Object?> get props => [filter];
+}
+
+/// The Agent filter's choices: every host, those behind the newest agent for their platform, and
+/// those the server thinks are stuck there.
+const hostsAgentFilterOptions = <String, String>{
+  'all': 'All hosts',
+  'behind': 'Behind the latest',
+  'stuck': 'Probably stuck',
+};
+
 final class HostsState extends Equatable {
   const HostsState({
     this.hosts = const [],
     this.search = '',
+    this.agentFilter = 'all',
     this.loading = true,
     this.error,
     this.notice,
@@ -63,6 +83,9 @@ final class HostsState extends Equatable {
   /// replaces [hosts] without touching this.
   final String search;
 
+  /// One of [hostsAgentFilterOptions]'s keys.
+  final String agentFilter;
+
   final bool loading;
   final String? error;
   final String? notice;
@@ -75,10 +98,11 @@ final class HostsState extends Equatable {
   /// host by — its name, its serial number and its address — case-insensitively, as a substring, so
   /// a fragment of a hostname or the tail of a serial is enough to find one machine in a fleet.
   List<HostSummary> get visibleHosts {
-    if (search.isEmpty) return hosts;
+    final byAgent = [for (final host in hosts) if (_matchesAgent(host)) host];
+    if (search.isEmpty) return byAgent;
     final needle = search.toLowerCase();
     return [
-      for (final host in hosts)
+      for (final host in byAgent)
         if (host.hostname.toLowerCase().contains(needle) ||
             host.serialNumber.toLowerCase().contains(needle) ||
             (host.ipAddress?.toLowerCase().contains(needle) ?? false))
@@ -86,9 +110,22 @@ final class HostsState extends Equatable {
     ];
   }
 
+  bool _matchesAgent(HostSummary host) => switch (agentFilter) {
+        'behind' => host.agentUpdateState.isBehind,
+        'stuck' => host.agentUpdateState == AgentUpdateState.notUpdating,
+        _ => true,
+      };
+
+  /// Hosts behind the newest agent for their platform, and of those the ones that look stuck — the
+  /// banner above the table. Counted over every host, not the filtered ones, so choosing a filter
+  /// never changes the number it was chosen from.
+  int get behindCount => hosts.where((h) => h.agentUpdateState.isBehind).length;
+  int get stuckCount => hosts.where((h) => h.agentUpdateState == AgentUpdateState.notUpdating).length;
+
   HostsState copyWith({
     List<HostSummary>? hosts,
     String? search,
+    String? agentFilter,
     bool? loading,
     String? error,
     String? notice,
@@ -100,6 +137,7 @@ final class HostsState extends Equatable {
       HostsState(
         hosts: hosts ?? this.hosts,
         search: search ?? this.search,
+        agentFilter: agentFilter ?? this.agentFilter,
         loading: loading ?? this.loading,
         error: clearError ? null : (error ?? this.error),
         notice: clearNotice ? null : (notice ?? this.notice),
@@ -107,7 +145,7 @@ final class HostsState extends Equatable {
       );
 
   @override
-  List<Object?> get props => [hosts, search, loading, error, notice, removingId];
+  List<Object?> get props => [hosts, search, agentFilter, loading, error, notice, removingId];
 }
 
 /// The Hosts screen.
@@ -128,6 +166,7 @@ class HostsBloc extends Bloc<HostsEvent, HostsState> with Polling<HostsEvent, Ho
       (_, emit) => emit(state.copyWith(clearError: true, clearNotice: true)),
     );
     on<HostsSearchChanged>((event, emit) => emit(state.copyWith(search: event.search)));
+    on<HostsAgentFilterChanged>((event, emit) => emit(state.copyWith(agentFilter: event.filter)));
 
     startPolling(const Duration(seconds: 30), const HostsRequested(showSpinner: false));
   }

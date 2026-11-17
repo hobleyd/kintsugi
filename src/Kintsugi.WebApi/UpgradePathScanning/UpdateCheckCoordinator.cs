@@ -24,6 +24,13 @@ public class UpdateCheckCoordinator : IUpdateCheckCoordinator
     /// </remarks>
     private const int MaxNotes = 50;
 
+    /// <summary>
+    /// How many rows <see cref="GetResults"/> keeps. A run reports every application, and one row is
+    /// a name, a platform and a sentence, so thousands are cheap — but not unbounded, and the
+    /// overflow is counted rather than dropped for the reason <see cref="MaxNotes"/> states.
+    /// </summary>
+    private const int MaxRows = 5000;
+
     private readonly SemaphoreSlim _signal = new(0, 1);
     private readonly object _lock = new();
 
@@ -39,6 +46,8 @@ public class UpdateCheckCoordinator : IUpdateCheckCoordinator
     private string? _faultReason;
     private readonly List<string> _notes = new();
     private int _unlistedNotes;
+    private readonly List<RunRowDto> _rows = new();
+    private int _unlistedRows;
 
     public bool TryRequestStart()
     {
@@ -53,6 +62,8 @@ public class UpdateCheckCoordinator : IUpdateCheckCoordinator
             _total = _completed = _updated = _unchanged = _failed = _skipped = 0;
             _notes.Clear();
             _unlistedNotes = 0;
+            _rows.Clear();
+            _unlistedRows = 0;
             _faultReason = null;
             _startedUtc = DateTimeOffset.UtcNow;
             _completedUtc = null;
@@ -82,21 +93,38 @@ public class UpdateCheckCoordinator : IUpdateCheckCoordinator
         {
             _completed++;
 
+            RunRowOutcome outcome;
             if (result.Skipped)
             {
                 _skipped++;
+                outcome = RunRowOutcome.NothingToCheck;
             }
             else if (!result.Success)
             {
                 _failed++;
+                outcome = RunRowOutcome.Failed;
             }
             else if (result.VersionChanged)
             {
                 _updated++;
+                outcome = RunRowOutcome.Updated;
             }
             else
             {
                 _unchanged++;
+                outcome = RunRowOutcome.Unchanged;
+            }
+
+            // Every row, not only the ones with a note: a successful check carries none, so the
+            // notes above can never say which rows were fine — and the Diagnostics page's tabs are
+            // exactly that split.
+            if (_rows.Count < MaxRows)
+            {
+                _rows.Add(new RunRowDto(result.ApplicationName, result.Platform, outcome, result.Note));
+            }
+            else
+            {
+                _unlistedRows++;
             }
 
             // Same shape as UpgradePathScanCoordinator's: a successful check carries no note, so
@@ -132,6 +160,14 @@ public class UpdateCheckCoordinator : IUpdateCheckCoordinator
         {
             _running = false;
             _completedUtc = DateTimeOffset.UtcNow;
+        }
+    }
+
+    public UpgradePathRunResultsDto GetResults()
+    {
+        lock (_lock)
+        {
+            return new UpgradePathRunResultsDto(_rows.ToList(), _unlistedRows);
         }
     }
 

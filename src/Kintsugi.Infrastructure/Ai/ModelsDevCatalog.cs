@@ -136,7 +136,9 @@ public class ModelsDevCatalog : IAiModelCatalog
                     AsBool(model["tool_call"]),
                     AsBool(model["reasoning"]),
                     AsLong(model["limit"]?["context"]),
-                    model["release_date"]?.ToString()));
+                    model["release_date"]?.ToString(),
+                    AsDecimal(model["cost"]?["input"]),
+                    AsDecimal(model["cost"]?["output"])));
             }
 
             if (models.Count == 0)
@@ -176,6 +178,9 @@ public class ModelsDevCatalog : IAiModelCatalog
     // models.dev is community-maintained JSON; a field of an unexpected type is skipped, not fatal.
     private static bool AsBool(JsonNode? node) =>
         node is JsonValue v && v.TryGetValue<bool>(out var b) && b;
+
+    private static decimal? AsDecimal(JsonNode? node) =>
+        node is JsonValue v && v.TryGetValue<double>(out var d) && d >= 0 ? (decimal)d : null;
 
     private static long? AsLong(JsonNode? node) =>
         node is JsonValue v && v.TryGetValue<double>(out var d) ? (long)d : null;

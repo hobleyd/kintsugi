@@ -11,6 +11,10 @@ namespace Kintsugi.Application.Hosts.Commands.CreateHost;
 // agent's RegisterHostRequest). Optional only so that agents predating the field still check in;
 // current builds always send it.
 //
+// RestartRequired / RestartBecause: whether the host needs a restart for updates it has already
+// installed, and what for. Only the Linux agent sends them today; null from anything else means
+// "not reported", which leaves what the server has — see Host.RecordRestartState.
+//
 // OperatingSystemId / OperatingSystemVersionId: the machine-readable operating system facts the
 // vulnerability assessment needs, which OperatingSystem itself does not carry — os-release's ID
 // and VERSION_ID on Linux, and the build with its update revision on Windows. macOS sends
@@ -28,7 +32,9 @@ public record CreateHostCommand(
     string? OperatingSystemLatestVersion = null,
     string? AgentVersion = null,
     string? OperatingSystemId = null,
-    string? OperatingSystemVersionId = null) : IRequest<CreateHostResult>, IAgentScopedRequest;
+    string? OperatingSystemVersionId = null,
+    bool? RestartRequired = null,
+    string? RestartBecause = null) : IRequest<CreateHostResult>, IAgentScopedRequest;
 
 /// <summary>
 /// <paramref name="SuggestedCheckInMinute"/> is only ever non-null when

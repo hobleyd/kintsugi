@@ -52,7 +52,7 @@ public class AdminPatchFailuresController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Dismiss(Guid id, CancellationToken cancellationToken)
     {
-        await _sender.Send(new DismissPatchFailureCommand(id), cancellationToken);
+        await _sender.Send(new DismissPatchFailureCommand(id, AdminRemoteControlController.DescribeRequester(User)), cancellationToken);
         return NoContent();
     }
 }

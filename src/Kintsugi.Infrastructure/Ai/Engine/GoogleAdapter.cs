@@ -145,6 +145,11 @@ public class GoogleAdapter : IAiProtocolAdapter
         }
 
         var joined = string.Join("", text);
-        return new AiChatResult(joined, toolCalls, new AiChatMessage(AiChatRole.Assistant, joined, toolCalls, ProviderContent: responseParts.DeepClone()));
+        // Thinking tokens are billed as output.
+        var meta = response["usageMetadata"];
+        return new AiChatResult(joined, toolCalls, new AiChatMessage(AiChatRole.Assistant, joined, toolCalls, ProviderContent: responseParts.DeepClone()),
+            AiTokenUsage.Of(
+                AiTokenUsage.Count(meta?["promptTokenCount"]),
+                AiTokenUsage.Count(meta?["candidatesTokenCount"]) + AiTokenUsage.Count(meta?["thoughtsTokenCount"])));
     }
 }

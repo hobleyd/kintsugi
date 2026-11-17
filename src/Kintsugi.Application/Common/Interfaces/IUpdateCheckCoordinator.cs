@@ -14,4 +14,8 @@ public interface IUpdateCheckCoordinator
     bool TryRequestStart();
 
     UpdateCheckStatusDto GetStatus();
+
+    /// <summary>A row per application the run has reported on, with its outcome — what the status's
+    /// counts and notes cannot say. Fetched once, when the run finishes.</summary>
+    UpgradePathRunResultsDto GetResults();
 }

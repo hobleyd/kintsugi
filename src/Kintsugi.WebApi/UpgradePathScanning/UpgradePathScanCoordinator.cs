@@ -28,6 +28,13 @@ public class UpgradePathScanCoordinator : IUpgradePathScanCoordinator
     private string? _faultReason;
     private readonly List<string> _notes = new();
 
+    /// <summary>How many rows <see cref="GetResults"/> keeps; the same bound, and the same reason, as
+    /// <c>UpdateCheckCoordinator</c>'s.</summary>
+    private const int MaxRows = 5000;
+
+    private readonly List<RunRowDto> _rows = new();
+    private int _unlistedRows;
+
     public bool TryRequestStart()
     {
         lock (_lock)
@@ -40,6 +47,8 @@ public class UpgradePathScanCoordinator : IUpgradePathScanCoordinator
             _running = true;
             _total = _completed = _resolved = _notFound = _failed = _skipped = 0;
             _notes.Clear();
+            _rows.Clear();
+            _unlistedRows = 0;
             _faultReason = null;
             _startedUtc = DateTimeOffset.UtcNow;
             _completedUtc = null;
@@ -69,9 +78,11 @@ public class UpgradePathScanCoordinator : IUpgradePathScanCoordinator
         {
             _completed++;
 
+            RunRowOutcome outcome;
             if (result.Skipped)
             {
                 _skipped++;
+                outcome = RunRowOutcome.AlreadyKnown;
             }
             else
             {
@@ -81,6 +92,24 @@ public class UpgradePathScanCoordinator : IUpgradePathScanCoordinator
                     case UpgradePathStatus.NotFound: _notFound++; break;
                     case UpgradePathStatus.Failed: _failed++; break;
                 }
+
+                outcome = result.Status switch
+                {
+                    UpgradePathStatus.Found => RunRowOutcome.Resolved,
+                    UpgradePathStatus.NotFound => RunRowOutcome.NoKnownPath,
+                    _ => RunRowOutcome.Failed
+                };
+            }
+
+            // Every row, not only the ones with a note — a resolved row usually has none, so the
+            // notes can never say which rows were fine, and the Diagnostics page's tabs are that split.
+            if (_rows.Count < MaxRows)
+            {
+                _rows.Add(new RunRowDto(result.ApplicationName, result.Platform, outcome, result.Note));
+            }
+            else
+            {
+                _unlistedRows++;
             }
 
             if (!string.IsNullOrWhiteSpace(result.Note))
@@ -106,6 +135,14 @@ public class UpgradePathScanCoordinator : IUpgradePathScanCoordinator
         {
             _running = false;
             _completedUtc = DateTimeOffset.UtcNow;
+        }
+    }
+
+    public UpgradePathRunResultsDto GetResults()
+    {
+        lock (_lock)
+        {
+            return new UpgradePathRunResultsDto(_rows.ToList(), _unlistedRows);
         }
     }
 

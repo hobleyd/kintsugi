@@ -6,6 +6,23 @@
 /// C# definitions are in `src/Kintsugi.Domain/Enums/`.
 library;
 
+/// Mirrors `AgentUpdateState`: where a host's agent stands against the newest one published for its
+/// own platform. Computed by the server, which can see the published packages and when each appeared.
+enum AgentUpdateState {
+  /// Nothing to compare: no version reported, an operating system no agent runs on, or nothing
+  /// published for its platform.
+  unknown,
+  current,
+
+  /// Behind, for a reason that is not yet worrying: a new package, or the host is offline.
+  behind,
+
+  /// Online and still behind a day or more after the newer package was published.
+  notUpdating;
+
+  bool get isBehind => this == behind || this == notUpdating;
+}
+
 /// Mirrors `HostStatus`. Sent as an ordinal.
 enum HostStatus {
   unknown,
@@ -389,5 +406,30 @@ enum VulnerabilitySubjectKind {
         VulnerabilitySubjectKind.operatingSystemPackage =>
           'Matched against this distribution’s own security advisories, so a backported fix counts '
               'as fixed.',
+      };
+}
+
+/// What one host found when it checked one baseline item. Mirrors `BaselineItemState`, which crosses
+/// to this client as an **ordinal**, so the declaration order here is load-bearing: append, never
+/// insert. (The agent's wire carries the member *name* instead; see `baseline.rs`.)
+enum BaselineItemState {
+  compliant,
+  drifted,
+  notApplicable,
+  error;
+
+  String get label => switch (this) {
+        BaselineItemState.compliant => 'Compliant',
+        BaselineItemState.drifted => 'Drifted',
+        BaselineItemState.notApplicable => 'Not applicable',
+        BaselineItemState.error => 'Error',
+      };
+
+  /// The [StatusChip] colour key: green, amber, muted, red.
+  String get statusKey => switch (this) {
+        BaselineItemState.compliant => 'up-to-date',
+        BaselineItemState.drifted => 'update-available',
+        BaselineItemState.notApplicable => 'mapping-not-applicable',
+        BaselineItemState.error => 'patch-failed',
       };
 }

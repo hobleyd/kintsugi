@@ -36,11 +36,16 @@ class ApplicationRow extends Equatable {
     required this.hostNames,
     required this.upgradePaths,
     required this.children,
+    this.managedBy,
   });
 
   final String name;
   final int hostCount;
   final List<String> hostNames;
+
+  /// Who patches this application when another tool does — CrowdStrike, Jamf Pro — and Kintsugi
+  /// therefore neither researches nor patches it. Null for an application Kintsugi looks after.
+  final String? managedBy;
 
   /// One per platform this application is installed on. Empty means nothing has been researched
   /// for it yet.
@@ -51,7 +56,7 @@ class ApplicationRow extends Equatable {
   final List<ApplicationRow> children;
 
   @override
-  List<Object?> get props => [name, hostCount, hostNames, upgradePaths, children];
+  List<Object?> get props => [name, hostCount, hostNames, upgradePaths, children, managedBy];
 }
 
 /// What "Patch now" did. Mirrors `RequestForcedPatchRunsResult`.

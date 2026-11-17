@@ -15,6 +15,10 @@ public static class DependencyInjection
         services.AddValidatorsFromAssembly(assembly);
         services.AddTransient(typeof(MediatR.IPipelineBehavior<,>), typeof(ValidationBehaviour<,>));
 
+        services.AddScoped<HostActivity.IHostEventRecorder, HostActivity.HostEventRecorder>();
+        services.AddScoped<HostActivity.HostEventPruner>();
+        services.AddScoped<LogCollections.LogCollectionPruner>();
+
         return services;
     }
 }

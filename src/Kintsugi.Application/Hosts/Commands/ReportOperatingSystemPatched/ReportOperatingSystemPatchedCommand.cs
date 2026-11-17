@@ -9,4 +9,7 @@ namespace Kintsugi.Application.Hosts.Commands.ReportOperatingSystemPatched;
 /// flag and target version clear immediately instead of waiting on its next check-in (boot,
 /// daily, or on demand) to re-derive them from a fresh <c>softwareupdate -l</c> run.
 /// </summary>
-public record ReportOperatingSystemPatchedCommand(string SerialNumber) : IRequest<Unit>, IAgentScopedRequest;
+public record ReportOperatingSystemPatchedCommand(
+    string SerialNumber,
+    bool? RestartRequired = null,
+    string? RestartBecause = null) : IRequest<Unit>, IAgentScopedRequest;

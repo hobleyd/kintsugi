@@ -57,6 +57,129 @@ pub enum RequestKind {
     /// have — the tray process is theirs to kill, which stops patching altogether — but it is worth
     /// knowing before this kind is given a body or a second reader.
     ForcedPatchRuns,
+    /// "Restart this host to finish the Windows update you just installed." Sent only after an
+    /// administrator's forced Windows update has installed and said it needs a restart.
+    ///
+    /// The queue directory is writable by every local user, so this request is treated as a
+    /// *prompt*, never an instruction. Nothing in it is honoured: the body (a delay, which trays
+    /// before 0.12.7 needed to send and still do) is ignored, and the service decides both
+    /// *whether* and *when* for itself — see [`restart_decision`]:
+    ///
+    /// - **Only after its own install.** The service restarts only within
+    ///   [`RESTART_AUTHORISATION_WINDOW`] of a Windows update *it* installed reporting that a
+    ///   restart is required, and only once per install ([`RestartAuthorisation`]). A planted
+    ///   request at any other time restarts nothing.
+    /// - **Never under somebody's unsaved work.** The service reads every interactive session on
+    ///   the host (`presence::logged_on_sessions`), not just the requesting tray's. Anybody logged
+    ///   on but locked or disconnected defers the restart; everyone at their desk gets
+    ///   [`RESTART_DELAY_ATTENDED`] with Windows' own countdown.
+    /// - **Never instantly.** Every delay it can choose is at least [`MIN_RESTART_DELAY_SECONDS`],
+    ///   and `os_update::restart` refuses anything outside the bounds as a last line.
+    Restart,
+}
+
+/// What the service answers an [`RequestKind::OsUpdate`] with when Windows said the updates it
+/// installed need a restart to finish. The tray reads it back with [`reboot_required`]. In the output
+/// rather than a field of its own because [`RequestResult`] is built literally in a lot of places, and
+/// a tray and a service at different versions — normal for the seconds around a self-update — then
+/// still understand each other: an older service simply never says it.
+pub const REBOOT_REQUIRED_OUTPUT: &str = "installed pending Windows updates; a restart is required to finish";
+
+/// Whether the service said the Windows updates it installed need a restart.
+pub fn reboot_required(result: &RequestResult) -> bool {
+    result.output == REBOOT_REQUIRED_OUTPUT
+}
+
+/// The longest restart notice the service will start, in seconds.
+pub const MAX_RESTART_DELAY_SECONDS: u64 = 10 * 60;
+
+/// The shortest restart notice the service will start, in seconds. Zero is the dangerous value — a
+/// restart with no countdown closes every open application with no chance to save — so nothing
+/// below this reaches `shutdown.exe`, whoever asked (`os_update::restart` checks [`restart_delay_in_bounds`]).
+pub const MIN_RESTART_DELAY_SECONDS: u64 = 60;
+
+/// The notice when everybody logged on is at their desk: the same five minutes the warning before
+/// patching gives (`patch_cycle::WARNING_PERIOD`), shown by Windows' own countdown.
+pub const RESTART_DELAY_ATTENDED: u64 = 5 * 60;
+
+/// The notice when nobody at all is logged on to the host: nobody to lose work, so only long enough
+/// for the install's result to have been reported, and still the minimum.
+pub const RESTART_DELAY_NOBODY_LOGGED_ON: u64 = MIN_RESTART_DELAY_SECONDS;
+
+/// How long after the service's own Windows update install a [`RequestKind::Restart`] is still
+/// honoured. The tray asks within seconds of reading the install's result; this is generous slack
+/// for a slow tray, and short enough that an install from hours ago cannot be used to restart the
+/// host later.
+pub const RESTART_AUTHORISATION_WINDOW: Duration = Duration::from_secs(10 * 60);
+
+/// The start of what the service answers a [`RequestKind::Restart`] with when it decided not to
+/// restart. Read back by the tray with [`restart_deferred`]; an older service never says it.
+pub const RESTART_DEFERRED_OUTPUT: &str = "not restarting";
+
+/// Whether the service declined a restart request rather than starting one.
+pub fn restart_deferred(result: &RequestResult) -> bool {
+    result.output.starts_with(RESTART_DEFERRED_OUTPUT)
+}
+
+/// Whether `seconds` is a restart notice the service may start.
+pub fn restart_delay_in_bounds(seconds: u64) -> bool {
+    (MIN_RESTART_DELAY_SECONDS..=MAX_RESTART_DELAY_SECONDS).contains(&seconds)
+}
+
+/// Remembers that the service itself just installed a Windows update that needs a restart, which is
+/// the only thing that makes a [`RequestKind::Restart`] worth acting on. Held in the service's memory
+/// only — never on disk, where the same local users who can write the queue could write it too — so
+/// a service restart forgets it, which is the safe direction.
+#[derive(Debug, Default)]
+pub struct RestartAuthorisation {
+    granted_at: Option<Instant>,
+}
+
+impl RestartAuthorisation {
+    fn grant(&mut self, now: Instant) {
+        self.granted_at = Some(now);
+    }
+
+    /// Whether a restart is authorised at `now`, consuming the authorisation either way: one
+    /// install buys at most one restart request, honoured or deferred.
+    fn take(&mut self, now: Instant) -> bool {
+        self.granted_at
+            .take()
+            .is_some_and(|granted| now.saturating_duration_since(granted) <= RESTART_AUTHORISATION_WINDOW)
+    }
+}
+
+/// What the service does with a [`RequestKind::Restart`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestartDecision {
+    /// Start `shutdown.exe /r` with this many seconds' notice.
+    RestartIn(u64),
+    /// Restart nothing; the reason is logged and returned to the tray.
+    Defer(String),
+}
+
+/// The whole restart rule, pure so it is pinned by tests. `sessions` is every interactive logon
+/// on the host (`presence::logged_on_sessions`), read when the request arrives — i.e. after the
+/// install, right before the restart, not once before an install that can take an hour.
+pub fn restart_decision(authorised: bool, sessions: &anyhow::Result<Vec<crate::presence::LogonState>>) -> RestartDecision {
+    use crate::presence::LogonState;
+
+    if !authorised {
+        return RestartDecision::Defer(format!(
+            "{RESTART_DEFERRED_OUTPUT}: this service has not just installed a Windows update that needs a restart"
+        ));
+    }
+    match sessions {
+        Err(err) => RestartDecision::Defer(format!(
+            "{RESTART_DEFERRED_OUTPUT}: could not tell who is logged on ({err:#}), so somebody may have unsaved work"
+        )),
+        Ok(sessions) if sessions.is_empty() => RestartDecision::RestartIn(RESTART_DELAY_NOBODY_LOGGED_ON),
+        Ok(sessions) if sessions.iter().any(|s| *s == LogonState::Away) => RestartDecision::Defer(format!(
+            "{RESTART_DEFERRED_OUTPUT}: somebody is logged on but locked or disconnected and could lose unsaved work; \
+             Windows will finish the update at the next restart"
+        )),
+        Ok(_) => RestartDecision::RestartIn(RESTART_DELAY_ATTENDED),
+    }
 }
 
 impl RequestKind {
@@ -70,11 +193,19 @@ impl RequestKind {
             RequestKind::OsUpdate => "os-update.request",
             RequestKind::CheckIn => "check-in.request",
             RequestKind::ForcedPatchRuns => "forced-patch-runs.request",
+            RequestKind::Restart => "restart.request",
         }
     }
 
     fn from_file_name(file_name: &str) -> Option<Self> {
-        for kind in [RequestKind::Plan, RequestKind::AppPatch, RequestKind::OsUpdate, RequestKind::CheckIn, RequestKind::ForcedPatchRuns] {
+        for kind in [
+            RequestKind::Plan,
+            RequestKind::AppPatch,
+            RequestKind::OsUpdate,
+            RequestKind::CheckIn,
+            RequestKind::ForcedPatchRuns,
+            RequestKind::Restart,
+        ] {
             if file_name.ends_with(kind.extension()) {
                 return Some(kind);
             }
@@ -220,7 +351,12 @@ pub trait RequestHandler {
     /// the service's implementation calls.
     fn forced_patch_runs(&mut self) -> Result<Vec<ForcedPatchRun>>;
     fn patch_application(&mut self, application_name: &str) -> Result<()>;
-    fn install_os_updates(&mut self) -> Result<()>;
+    fn install_os_updates(&mut self) -> Result<crate::os_update::InstallOutcome>;
+    /// Starts a restart of this host in `delay_seconds`, with Windows' own on-screen countdown.
+    /// Called only once [`restart_decision`] has said so.
+    fn restart_host(&mut self, delay_seconds: u64) -> Result<()>;
+    /// Every interactive logon on this host — `presence::logged_on_sessions` in the service.
+    fn logged_on_sessions(&mut self) -> Result<Vec<crate::presence::LogonState>>;
     /// Answers a [`RequestKind::CheckIn`]. Returns the message the tray process shows.
     fn check_in(&mut self) -> Result<String>;
 }
@@ -231,7 +367,10 @@ pub trait RequestHandler {
 /// Runs to completion for each request before moving on, deliberately: two `winget upgrade`
 /// invocations at once would fight over the same package cache, and the tray process asks for one
 /// application at a time anyway.
-pub fn process_queue(queue_dir: &Path, handler: &mut impl RequestHandler) {
+///
+/// `restart` is the service's memory of its own last install, carried across calls — see
+/// [`RestartAuthorisation`].
+pub fn process_queue(queue_dir: &Path, handler: &mut impl RequestHandler, restart: &mut RestartAuthorisation) {
     let Ok(entries) = fs::read_dir(queue_dir) else {
         return;
     };
@@ -261,7 +400,7 @@ pub fn process_queue(queue_dir: &Path, handler: &mut impl RequestHandler) {
         crate::logging::info(&format!("processing {kind:?} request: {}", request_path.display()));
 
         let body = fs::read_to_string(&request_path).unwrap_or_default();
-        let result = run_request(kind, body.trim(), handler);
+        let result = run_request(kind, body.trim(), handler, restart);
 
         crate::logging::info(&format!(
             "{kind:?} request finished: success={} {}",
@@ -281,7 +420,7 @@ pub fn process_queue(queue_dir: &Path, handler: &mut impl RequestHandler) {
     }
 }
 
-fn run_request(kind: RequestKind, body: &str, handler: &mut impl RequestHandler) -> RequestResult {
+fn run_request(kind: RequestKind, body: &str, handler: &mut impl RequestHandler, restart: &mut RestartAuthorisation) -> RequestResult {
     match kind {
         RequestKind::Plan => match handler.plan() {
             Ok(plan) => RequestResult {
@@ -302,9 +441,33 @@ fn run_request(kind: RequestKind, body: &str, handler: &mut impl RequestHandler)
             }
         }
         RequestKind::OsUpdate => match handler.install_os_updates() {
-            Ok(()) => RequestResult { success: true, output: "installed pending Windows updates".to_string(), data: None, forced: Vec::new() },
+            Ok(outcome) => {
+                if outcome.reboot_required {
+                    restart.grant(Instant::now());
+                }
+                RequestResult {
+                    success: true,
+                    output: if outcome.reboot_required { REBOOT_REQUIRED_OUTPUT.to_string() } else { "installed pending Windows updates".to_string() },
+                    data: None,
+                    forced: Vec::new(),
+                }
+            }
             Err(err) => RequestResult { success: false, output: format!("{err:#}"), data: None, forced: Vec::new() },
         },
+        // The body is deliberately not read — see `RequestKind::Restart`.
+        RequestKind::Restart => {
+            let authorised = restart.take(Instant::now());
+            let sessions = if authorised { handler.logged_on_sessions() } else { Ok(Vec::new()) };
+            match restart_decision(authorised, &sessions) {
+                RestartDecision::RestartIn(seconds) => match handler.restart_host(seconds) {
+                    Ok(()) => RequestResult { success: true, output: format!("restarting in {seconds} second(s)"), data: None, forced: Vec::new() },
+                    Err(err) => RequestResult { success: false, output: format!("{err:#}"), data: None, forced: Vec::new() },
+                },
+                // Success, not failure: declining is the service doing its job, and the tray tells
+                // the person to restart when convenient rather than logging an error.
+                RestartDecision::Defer(reason) => RequestResult { success: true, output: reason, data: None, forced: Vec::new() },
+            }
+        }
         RequestKind::CheckIn => match handler.check_in() {
             Ok(output) => RequestResult { success: true, output, data: None, forced: Vec::new() },
             Err(err) => RequestResult { success: false, output: format!("{err:#}"), data: None, forced: Vec::new() },
@@ -356,6 +519,9 @@ mod tests {
         check_ins: usize,
         forced_collections: usize,
         fail_patches: bool,
+        restarts: Vec<u64>,
+        reboot_required: bool,
+        sessions: Vec<crate::presence::LogonState>,
     }
 
     impl RequestHandler for RecordingHandler {
@@ -375,9 +541,18 @@ mod tests {
             Ok(())
         }
 
-        fn install_os_updates(&mut self) -> Result<()> {
+        fn install_os_updates(&mut self) -> Result<crate::os_update::InstallOutcome> {
             self.os_updates_installed += 1;
+            Ok(crate::os_update::InstallOutcome { reboot_required: self.reboot_required })
+        }
+
+        fn restart_host(&mut self, delay_seconds: u64) -> Result<()> {
+            self.restarts.push(delay_seconds);
             Ok(())
+        }
+
+        fn logged_on_sessions(&mut self) -> Result<Vec<crate::presence::LogonState>> {
+            Ok(self.sessions.clone())
         }
 
         fn check_in(&mut self) -> Result<String> {
@@ -404,7 +579,7 @@ mod tests {
 
     #[test]
     fn request_kind_round_trips_through_its_file_name() {
-        for kind in [RequestKind::Plan, RequestKind::AppPatch, RequestKind::OsUpdate, RequestKind::CheckIn] {
+        for kind in [RequestKind::Plan, RequestKind::AppPatch, RequestKind::OsUpdate, RequestKind::CheckIn, RequestKind::Restart] {
             let name = format!("1700000000-42-0.{}", kind.extension());
             assert_eq!(RequestKind::from_file_name(&name), Some(kind));
         }
@@ -424,7 +599,7 @@ mod tests {
         let request = write_request(&dir, RequestKind::Plan, "").unwrap();
         let mut handler = RecordingHandler::default();
 
-        process_queue(&dir, &mut handler);
+        process_queue(&dir, &mut handler, &mut RestartAuthorisation::default());
 
         let result: RequestResult = serde_json::from_str(&fs::read_to_string(result_path_for(&request)).unwrap()).unwrap();
         assert!(result.success);
@@ -471,7 +646,7 @@ mod tests {
         let request = write_request(&dir, RequestKind::ForcedPatchRuns, "").unwrap();
         let mut handler = RecordingHandler::default();
 
-        process_queue(&dir, &mut handler);
+        process_queue(&dir, &mut handler, &mut RestartAuthorisation::default());
 
         let result: RequestResult = serde_json::from_str(&fs::read_to_string(result_path_for(&request)).unwrap()).unwrap();
         assert!(result.success);
@@ -489,7 +664,7 @@ mod tests {
         write_request(&dir, RequestKind::AppPatch, "Mozilla Firefox").unwrap();
         let mut handler = RecordingHandler::default();
 
-        process_queue(&dir, &mut handler);
+        process_queue(&dir, &mut handler, &mut RestartAuthorisation::default());
 
         assert_eq!(handler.patched, vec!["Mozilla Firefox".to_string()]);
     }
@@ -500,7 +675,7 @@ mod tests {
         let request = write_request(&dir, RequestKind::AppPatch, "Firefox").unwrap();
         let mut handler = RecordingHandler { fail_patches: true, ..Default::default() };
 
-        process_queue(&dir, &mut handler);
+        process_queue(&dir, &mut handler, &mut RestartAuthorisation::default());
 
         let result: RequestResult = serde_json::from_str(&fs::read_to_string(result_path_for(&request)).unwrap()).unwrap();
         assert!(!result.success);
@@ -513,7 +688,7 @@ mod tests {
         let request = write_request(&dir, RequestKind::AppPatch, "  ").unwrap();
         let mut handler = RecordingHandler::default();
 
-        process_queue(&dir, &mut handler);
+        process_queue(&dir, &mut handler, &mut RestartAuthorisation::default());
 
         let result: RequestResult = serde_json::from_str(&fs::read_to_string(result_path_for(&request)).unwrap()).unwrap();
         assert!(!result.success);
@@ -526,13 +701,156 @@ mod tests {
         let request = write_request(&dir, RequestKind::CheckIn, "").unwrap();
         let mut handler = RecordingHandler::default();
 
-        process_queue(&dir, &mut handler);
+        process_queue(&dir, &mut handler, &mut RestartAuthorisation::default());
 
         assert_eq!(handler.check_ins, 1);
         let result: RequestResult = serde_json::from_str(&fs::read_to_string(result_path_for(&request)).unwrap()).unwrap();
         assert!(result.success);
         assert_eq!(result.output, "checked in");
         assert!(result.data.is_none());
+    }
+
+    /// The tray's real sequence: an OS update the service installs says it needs a restart, then the
+    /// tray asks for one. Everybody at their desk gets the full five minutes, whatever the body says.
+    #[test]
+    fn a_restart_after_the_services_own_install_gets_the_full_notice_whatever_the_request_says() {
+        use crate::presence::LogonState;
+        let dir = scratch_dir("restart");
+        let mut handler = RecordingHandler { reboot_required: true, sessions: vec![LogonState::AtTheDesk], ..Default::default() };
+        let mut authorisation = RestartAuthorisation::default();
+
+        write_request(&dir, RequestKind::OsUpdate, "").unwrap();
+        process_queue(&dir, &mut handler, &mut authorisation);
+        let request = write_request(&dir, RequestKind::Restart, "0").unwrap();
+        process_queue(&dir, &mut handler, &mut authorisation);
+
+        assert_eq!(handler.restarts, vec![RESTART_DELAY_ATTENDED], "a requested 0 is not honoured");
+        let result: RequestResult = serde_json::from_str(&fs::read_to_string(result_path_for(&request)).unwrap()).unwrap();
+        assert!(result.success);
+        assert!(!restart_deferred(&result));
+    }
+
+    /// Finding: the queue is writable by every local user, so a planted request must not restart
+    /// anything — instantly or otherwise — unless the service has just installed an update that
+    /// needs it.
+    #[test]
+    fn a_planted_restart_request_restarts_nothing() {
+        use crate::presence::LogonState;
+        let dir = scratch_dir("restart-planted");
+        let too_long = (MAX_RESTART_DELAY_SECONDS + 1).to_string();
+        for body in ["0", "", "not a number", "300", too_long.as_str()] {
+            write_request(&dir, RequestKind::Restart, body).unwrap();
+        }
+        let mut handler = RecordingHandler { sessions: vec![LogonState::AtTheDesk], ..Default::default() };
+
+        process_queue(&dir, &mut handler, &mut RestartAuthorisation::default());
+
+        assert!(handler.restarts.is_empty(), "a forged request must not restart the host");
+    }
+
+    #[test]
+    fn an_install_that_needed_no_restart_authorises_none() {
+        use crate::presence::LogonState;
+        let dir = scratch_dir("restart-not-needed");
+        let mut handler = RecordingHandler { reboot_required: false, sessions: vec![LogonState::AtTheDesk], ..Default::default() };
+        let mut authorisation = RestartAuthorisation::default();
+
+        write_request(&dir, RequestKind::OsUpdate, "").unwrap();
+        process_queue(&dir, &mut handler, &mut authorisation);
+        write_request(&dir, RequestKind::Restart, "300").unwrap();
+        process_queue(&dir, &mut handler, &mut authorisation);
+
+        assert!(handler.restarts.is_empty());
+    }
+
+    #[test]
+    fn one_install_buys_at_most_one_restart() {
+        use crate::presence::LogonState;
+        let dir = scratch_dir("restart-once");
+        let mut handler = RecordingHandler { reboot_required: true, sessions: vec![LogonState::AtTheDesk], ..Default::default() };
+        let mut authorisation = RestartAuthorisation::default();
+
+        write_request(&dir, RequestKind::OsUpdate, "").unwrap();
+        process_queue(&dir, &mut handler, &mut authorisation);
+        write_request(&dir, RequestKind::Restart, "300").unwrap();
+        process_queue(&dir, &mut handler, &mut authorisation);
+        write_request(&dir, RequestKind::Restart, "300").unwrap();
+        process_queue(&dir, &mut handler, &mut authorisation);
+
+        assert_eq!(handler.restarts.len(), 1);
+    }
+
+    #[test]
+    fn an_authorisation_expires() {
+        let mut authorisation = RestartAuthorisation::default();
+        let granted = Instant::now();
+        authorisation.grant(granted);
+
+        assert!(!authorisation.take(granted + RESTART_AUTHORISATION_WINDOW + Duration::from_secs(1)));
+    }
+
+    /// Findings: a locked screen is somebody with possibly unsaved work, and on a shared machine any
+    /// other logged-on user counts — not only the session of the tray that asked.
+    #[test]
+    fn anybody_logged_on_but_away_defers_the_restart() {
+        use crate::presence::LogonState::{AtTheDesk, Away};
+        for sessions in [vec![Away], vec![AtTheDesk, Away], vec![Away, AtTheDesk]] {
+            assert!(
+                matches!(restart_decision(true, &Ok(sessions.clone())), RestartDecision::Defer(_)),
+                "{sessions:?} must not be restarted"
+            );
+        }
+    }
+
+    #[test]
+    fn not_knowing_who_is_logged_on_defers_the_restart() {
+        assert!(matches!(restart_decision(true, &Err(anyhow::anyhow!("WTS failed"))), RestartDecision::Defer(_)));
+    }
+
+    #[test]
+    fn a_deferred_restart_is_reported_as_deferred_and_restarts_nothing() {
+        use crate::presence::LogonState;
+        let dir = scratch_dir("restart-deferred");
+        let mut handler = RecordingHandler { reboot_required: true, sessions: vec![LogonState::Away], ..Default::default() };
+        let mut authorisation = RestartAuthorisation::default();
+
+        write_request(&dir, RequestKind::OsUpdate, "").unwrap();
+        process_queue(&dir, &mut handler, &mut authorisation);
+        let request = write_request(&dir, RequestKind::Restart, "300").unwrap();
+        process_queue(&dir, &mut handler, &mut authorisation);
+
+        assert!(handler.restarts.is_empty());
+        let result: RequestResult = serde_json::from_str(&fs::read_to_string(result_path_for(&request)).unwrap()).unwrap();
+        assert!(restart_deferred(&result));
+    }
+
+    #[test]
+    fn every_delay_the_service_can_choose_is_within_bounds_and_never_instant() {
+        use crate::presence::LogonState::AtTheDesk;
+        for sessions in [vec![], vec![AtTheDesk], vec![AtTheDesk, AtTheDesk]] {
+            match restart_decision(true, &Ok(sessions)) {
+                RestartDecision::RestartIn(seconds) => assert!(restart_delay_in_bounds(seconds), "{seconds}"),
+                RestartDecision::Defer(reason) => panic!("unexpected deferral: {reason}"),
+            }
+        }
+        assert!(!restart_delay_in_bounds(0));
+        assert!(!restart_delay_in_bounds(MIN_RESTART_DELAY_SECONDS - 1));
+        assert!(!restart_delay_in_bounds(MAX_RESTART_DELAY_SECONDS + 1));
+    }
+
+    #[test]
+    fn an_os_update_that_needs_a_restart_says_so_and_one_that_does_not_stays_quiet() {
+        for (needs, expected) in [(true, true), (false, false)] {
+            let dir = scratch_dir(&format!("os-reboot-{needs}"));
+            let request = write_request(&dir, RequestKind::OsUpdate, "").unwrap();
+            let mut handler = RecordingHandler { reboot_required: needs, ..Default::default() };
+
+            process_queue(&dir, &mut handler, &mut RestartAuthorisation::default());
+
+            let result: RequestResult = serde_json::from_str(&fs::read_to_string(result_path_for(&request)).unwrap()).unwrap();
+            assert!(result.success);
+            assert_eq!(reboot_required(&result), expected);
+        }
     }
 
     #[test]
@@ -543,8 +861,8 @@ mod tests {
         write_request(&dir, RequestKind::OsUpdate, "").unwrap();
         let mut handler = RecordingHandler::default();
 
-        process_queue(&dir, &mut handler);
-        process_queue(&dir, &mut handler);
+        process_queue(&dir, &mut handler, &mut RestartAuthorisation::default());
+        process_queue(&dir, &mut handler, &mut RestartAuthorisation::default());
 
         assert_eq!(handler.os_updates_installed, 1);
     }
@@ -558,7 +876,7 @@ mod tests {
         fs::write(dir.join("1700000001-1-0.app-patch.request"), "Second").unwrap();
         let mut handler = RecordingHandler::default();
 
-        process_queue(&dir, &mut handler);
+        process_queue(&dir, &mut handler, &mut RestartAuthorisation::default());
 
         assert_eq!(handler.patched, vec!["First".to_string(), "Second".to_string(), "Third".to_string()]);
     }

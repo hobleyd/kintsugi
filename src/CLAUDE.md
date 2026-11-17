@@ -16,6 +16,13 @@ starts **unsigned** — a human must sign it via `POST /api/upgrade-paths/sign-s
 verifies against the signing pubkey it pinned at enrollment before executing anything. Do not make
 generation sign automatically.
 
+**A signature is bound to the bytes the reviewer was shown, not to the row.** The sign request
+carries `scriptSha256`, the SHA-256 of the exact text the panel displayed, and
+`SignUpgradePathScriptCommandHandler` refuses (409) unless the stored script still hashes to it —
+because another administrator's save or an AI run can replace the script between the panel showing
+it and Sign being pressed, and the (application, platform) key alone would happily sign the new one.
+The hash is required with no fallback to "whatever is stored"; that fallback is the bug.
+
 
 Every anonymous route is now closed. `AiSettingsController`, `DeploymentsController` and
 `PatchesController` carry the attribute **on the class**, because nothing on them is an agent route
@@ -200,6 +207,57 @@ API at all. It is now a Flutter web application in `web/`, compiled by `nginx/Do
 as static files by nginx — see web/CLAUDE.md.
 
 
+## Device baselines: audit, plus an enforce pilot
+
+A baseline (`Kintsugi.Application/Baselines/`) is a named list of registry settings and facts that
+should hold on a device, held as `BaselineVersion`s. The design is "Kintsugi device configuration
+design" (IP-841). Rollout step 2 made it **audit only**: the Windows agent reads and reports. The
+first slice of step 3 adds `enforce`: a drifted setting in that mode is set back by the agent.
+
+**Only a value on `BaselineItemRules.EnforceableValues` can be enforced, and the agent compiles in the
+same list (`baseline::ENFORCEABLE`).** The agent writes as SYSTEM, and the wrong value is code
+execution (Run, a service's ImagePath, Image File Execution Options, a COM server) or a quieter
+weakening even under `SOFTWARE\Policies` (an extension force-install list, a WSUS server). So the list
+names exact values, not prefixes, and it is what limits a write: a stolen signing key can sign any
+document, but the agent still writes nothing outside its list. The validator refuses `enforce`
+anywhere else before a version can exist, and `BaselineEnforceTests` reads `baseline.rs` and fails if
+the two lists differ. Widening either is a reviewed code change, never a signature. Rings, the
+failure-rate hold and exemptions are still to come.
+
+**A version is a canonical JSON document, signed like a script and bound to the bytes reviewed.**
+`BaselineDocument.ToCanonicalJson` sorts items by key, omits nulls and escapes everything outside
+ASCII, so the same items always hash the same. `SignBaselineVersionCommandHandler` is
+`SignUpgradePathScriptCommandHandler`'s shape: the request carries the SHA-256 of the document the
+screen displayed, 400 without it, 409 when the stored document no longer hashes to it. The document
+names its own baseline id, version id and number, and the agent reports under the ids it read from
+inside the signed bytes. Versions are never edited — a change is a new version — and agents run the
+highest-numbered *signed* one, so a newer draft changes nothing until it is signed.
+
+**The agent reports only changes, against the server's copy rather than its own.** `GET
+/api/baseline` returns, with each signed baseline, the states and facts the server already holds
+for that host; the agent posts only what differs, and posts even when nothing does, because that
+empty report is what moves `LastCheckedUtc`. Comparing against the server rather than a local file
+means a lost report, a re-enrolled host or a restored database all heal at the next check.
+
+**Results are trusted no further than the signed document.** `ReportBaselineResultsCommandHandler`
+records a state only for a setting key in the version *currently served* for a baseline assigned to
+that host, and a fact only for a fact key in it; anything else in a report is dropped rather than
+failing it. "Currently served" matters: an agent whose fetch failed reports on its cached copy, and
+accepting an older version there would delete the current one's rows, since a host's rows for every
+other version of the baseline are removed when it reports. Both agent routes read versions through
+`GetServedVersionsAsync`, which loads only the served documents — every version's document is the
+admin screen's need, not something to read on each host's hourly check-in.
+
+**`SAM` and `SECURITY` are never read.** The agent reads as SYSTEM, which can open both — the local
+password hashes and the LSA secrets — and a value read would be reported, shown and cached in a
+Users-readable file. `BaselineItemRules.ProtectedRoots` refuses them before a version can exist, and
+the agent's `baseline::is_protected_path` refuses them again. Assignment refuses a non-Windows host by
+name too: only the Windows agent fetches baselines, so one would sit in every count as not reported.
+
+Secrets are named, never held: an item with `secret` set is reported not-applicable and never read,
+because its observed value would be the secret. User-scope (HKCU) items are not-applicable too; the
+service runs as SYSTEM, whose HKCU is its own, which is why Ninja's HKCU writes never reached anyone.
+
 ## AI providers: protocols, not providers
 
 **A provider is configuration; a protocol is code.** `AiProvider.Routed` routes each `AiFeature`
@@ -225,7 +283,16 @@ are load-bearing:
   the mixture — and with no backend no tools at all are sent, because a local model without tool
   support errors on a request that carries any. `OLLAMA_WEB_API_KEY` is still honoured as the
   backend when none is configured.
-- **`web_fetch` is an SSRF surface, and `SafeWebFetcher` is the whole defence.** The URL comes from
+- **The server never runs a script it has not signed, and that is the defence `SafeWebFetcher`
+  cannot be.** A generated script calls `curl` itself, so nothing it fetches goes through
+  `SafeWebFetcher`; run on the server, a script steered by a page the model read could read the
+  signing key and sign anything. `CheckScriptVersionAsync` is the one place a script runs here, and
+  it runs one only if this server's signature verifies over its bytes or it is a package manager's
+  server-written text (htw-secops/kintsugi#8). So a fresh AI script has no `LatestVersion` until
+  someone signs it, and "Check for Updates" skips unsigned rows. Do not add a second place that
+  starts a script.
+- **`web_fetch` is an SSRF surface, and `SafeWebFetcher` is the defence for the model's own
+  fetches.** The URL comes from
   a model whose input includes pages it has read, so a page can ask for
   `http://169.254.169.254/…` — on GKE, the pod's Google credentials. The address is checked in the
   socket's `ConnectCallback`, against the address actually dialled, so DNS rebinding cannot swap it
@@ -849,7 +916,88 @@ The agents' half — the third `patch_cycle` entry point, why it keeps the five-
 `run_now` skips, and why it does not register a completed cycle — is in `clients/CLAUDE.md`.
 
 
+## AI usage and the monthly budget
+
+Every metered AI call is recorded (`ai_usage`: feature, connection, model, the application it was
+about, tokens in and out, and an estimated cost) and a monthly limit can stop new calls
+(`ai_budget_settings`, one row).
+
+**Where it is recorded.** `AiUpgradePathResearchClient` has two choke points, `AskProviderWithSearchAsync`
+(research) and `AskProviderRawAsync` (repair and CPE suggestions). Each opens an `AiUsageScope`
+(ambient, async-local), the engine adds one `AiUsageEntry` per model call from the tokens the adapter
+read off the provider's reply (`AiChatResult.Usage`), and the client writes the ledger rows in a
+`finally` — so a call that went on to fail is still counted, because the tokens were spent. The
+`IAiBudgetService` is a singleton that opens its own scope per call, since its callers are not
+request-scoped, and recording never throws.
+
+**The cost is an estimate, fixed at the time.** Tokens times the per-million prices models.dev lists
+(`AiCatalogModelDto.InputPerMillion`/`OutputPerMillion`, matched by model id ignoring a Vertex
+`@version`). A model the catalogue does not price records a null cost, which the screen shows as "no
+price" rather than free; Ollama records zero, which is a known price. **The budget does not count a
+null cost as nothing**: it charges those calls' tokens at `AiPricing.FallbackInputPerMillion` /
+`FallbackOutputPerMillion` ($15/$75, deliberately high), because counting them as zero let anyone
+route around the cap by picking an unlisted model or by models.dev being down. Refusing unpriced
+models outright was the alternative, and would stop all AI whenever the catalogue fetch fails.
+`AiSpendTotals` is the one rule, used by both the budget service's query and the AI Usage screen,
+and `AiBudgetStatusDto.UnpricedCalls`/`UnpricedEstimateUsd` let the screen say how much of the total
+is that guess. The Claude Agent SDK and Goose
+report no tokens and so never appear. AUD is a display conversion with an exchange rate an
+administrator sets; it is never fetched, so a limit does not move because a rate service did.
+
+**What the stop covers.** At the limit, with `StopAtLimit` on, `EnsureWithinBudgetAsync` throws
+`AiBudgetReachedException` (an `ExternalServiceException`, so every caller that already reports a
+failed AI call reports this one) before research, repair or a CPE suggestion. A scan is refused at
+start with the same message and `UpgradePathScanStatusDto.AiBudgetMessage` carries it to the
+Applications screen, which greys out Find Upgrade Paths. **Patching is untouched**: no patch cycle
+calls the AI, agents run only scripts that are already signed. Calls that cost nothing per call
+(Ollama, a subscription agent) are never stopped.
+
+**A refused or failed refresh never touches the row.** A per-application Refresh is a force-recheck
+of a row that is usually Found with a signed script. `ResearchApplicationUpgradePathCommandHandler`
+used to write the failure — the budget refusal included — as a Failed row with no script, deleting
+the reviewed one. Now any failure, refusal or no-method answer against a row that already has a
+Found script reports the note through the result and saves nothing (`KeepExistingScriptAsync`).
+Only a successful generation replaces the script, unsigned, as before.
+
+**The budget is stored to the cent.** `ai_budget_settings.BudgetAmount` is `numeric(18,2)`, so the
+entity, `UpdateAiBudgetCommandValidator` and the AI Usage screen all refuse amounts under 0.01 or
+with more than two decimal places (`AiBudgetSettings.IsStorableBudget`) instead of letting the column
+round 0.004 to a zero limit that divided by zero in every budget check. `AiBudgetStatusBuilder`
+reads a zero limit already in the database as reached.
+
+**The cap is a check, not a reservation.** `EnsureWithinBudgetAsync` reads the ledger, and a call is
+only written to it once it finishes, so calls already in flight — a scan's concurrent workers —
+each pass the check and the month can overshoot the limit by up to one call per worker. Closing that
+needs an in-flight reservation per metered call; it is a known gap, not an oversight.
+
+## Which hosts are behind the newest agent
+
+`AgentVersionDrift` decides it, and `HostDto` carries the answer (`LatestAgentVersion`,
+`AgentUpdateState`) so the Hosts screen shows a tag, a banner and a filter without a rule of its own.
+
+**Per platform, never across them.** The three agents are separate builds with their own version
+numbers, so a host is compared with the newest package for *its* platform. The package namespace
+(`macos`, `windows`, `linux`) is not `PlatformBucket`'s, and `AgentVersionDrift.AgentPlatform` is the
+one place that converts. A host whose OS has no agent, that never reported a version, or whose
+platform has nothing published is `Unknown`, not behind.
+
+**"Not updating" is derived, not tracked.** An online host still behind a package that appeared a day
+or more ago (`NotUpdatingAfter`, from the package's own `CreatedAtUtc`) has had a day of hourly
+check-ins to update in, so something is stopping it. An offline host is only ever `Behind`. The
+agents' own `needs_update` is "the published version differs", not "is newer", which is why a
+hand-installed newer build is downgraded at its next check-in; this rule uses `AgentPackageVersion`'s
+"is newer" so a newer-than-published host reads as `Current`.
+
 ## When a script fails on a host: the Failed Updates queue
+
+**Failed operating system updates are rows in the same queue.** The three agents file them under the
+application name `macOS`, `Windows` or `Linux`. `OperatingSystemUpdateFailure` is the one place those
+names live on the server: it makes `PatchFailureDto.IsOperatingSystemUpdate` and `DisplayName`
+("Windows Update"), and it reads the captured output for a plain-words cause, an explanation and a
+suggested fix (`CauseTitle`, `CauseExplanation`, `SuggestedFix`). The rules are the messages actually
+seen on hosts; anything unmatched gets an honest "the update ran and failed" rather than a guessed
+cause. `ReportOperatingSystemPatchedCommandHandler` closes the rows under all three names when a
+success is reported.
 
 **A success and a failure are different kinds of fact, and they are stored differently.**
 `ReportPatchResultCommand` records that an application reached a version — the server folds it into
@@ -927,6 +1075,188 @@ ordinary install that reboots the Mac from inside `softwareupdate`, the agent se
 (see `clients/macos-agent/CLAUDE.md`). Before it did, a macOS failure had no way off the screen but
 the dismiss button. `DismissPatchFailureCommand` is for the ones that cannot recur.
 
+
+## Host activity: what happened on a host, and who did it
+
+`HostEvent` (`host_events`) is an append-only timeline per host, shown by the Hosts screen's host
+page (`GET /api/admin/host-activity/{hostId}`, admin session). It exists because everything else is
+current state: `InstalledApplication` keeps the version it has now, `PatchFailure` is one row per
+application with a counter, and a forced run did not say who asked for it.
+
+**Written in the same transaction as the change it describes.** `IHostEventRecorder` only adds to
+the unit of work; the calling handler saves. Six places write: `RequestForcedPatchRunsCommandHandler`
+(Patch now, with the administrator), `ClaimForcedPatchRunsCommandHandler` (the host picked it up),
+`ReportPatchResultCommandHandler`, `ReportOperatingSystemPatchedCommandHandler`,
+`ReportPatchFailureCommandHandler` and `DismissPatchFailureCommandHandler`. A new place that changes
+patch state should record an event too, or the page tells a story with a hole in it.
+
+**The name on an event comes from the session, never the request body.** `RequestedBy` and
+`DismissedBy` are set by the controller from `AdminRemoteControlController.DescribeRequester(User)`,
+overriding anything the caller sent, because the timeline is the record of who pressed what.
+
+**A failure that keeps happening is one event.** `PatchFailedAsync` folds into the latest event for
+that host and subject when that event is also a failure (`RecordRepeat`: count up, newest time and
+output). A success or a dismissal in between ends the run, so the next failure starts a new event. A
+host failing every cycle therefore writes one row, not one per cycle. `Detail` is cut to
+`HostEvent.MaxDetailLength` keeping the start and the end.
+
+**Retention** is `HostActivitySettings.RetentionMonths` (default 6, 1 to 60), changed from the
+Activity tab. `HostEventPruneBackgroundService` deletes older rows once a day, five minutes after
+start.
+
+**What it does not hold.** Only what the server saw. What the person at the host did (the warning
+appearing, a Delay click, a held cycle) is not here because no agent reports it. That would be new
+`HostEventKind` values and agent changes, in all three agents, with a privacy check first.
+
+## Device health: a device that is failing, noticed early
+
+`POST /api/host-health-events` (`HostHealthController`, `[RequireAgentIdentity]`, inside nginx's agent
+regex) takes what a host's own OS log says about it shutting down by itself or failing in hardware:
+`UnexpectedShutdown`, `HardwareErrorFatal`, `HardwareErrorCorrected` (`HostEventKind`, so they are on the
+host's Activity timeline too). Only a short source and excerpt travel, never a log. A restart somebody or
+Kintsugi asked for is not an event; the agents leave those out.
+
+**One rule, per device, never a fleet count.** `HostHealthAssessor` (pure): Unstable = three or more
+unexpected shutdowns in 7 days, or any fatal hardware error in 30 days; Watch = one or two shutdowns in 30
+days, or a corrected hardware error. `Why` says in words which rule fired. It is shown only on the
+Autonomy page (the Device health panel and, if chosen, a report section); Hosts has no health tab, and
+there are no groups. The KPI `health.unstable_devices` is kept in the daily snapshots like the others.
+
+**Same kind within two minutes is one event.** An agent re-sending a window, or a panic written down as
+both a report and a boot cause, must not count twice: `ReportHostHealthEventsCommandHandler` drops a
+duplicate of the same kind within +-2 minutes.
+
+**A flood is reported, not hidden.** A device with 100 or more health events in 30 days is Unstable whatever
+the kinds, and its "why" says it sent far more than a device normally logs (a crash loop, or something
+sending false reports). The server keeps at most 500 health events per host in 30 days and stores nothing
+past that, and refuses events older than 35 days or a report with no events list.
+
+**Local users can write to the logs the agents read**, so each agent reads only what the system wrote:
+macOS asks `log show` for `process == "kernel"` lines only and opens a panic report only if it is a regular
+file (never a link or a pipe, `O_NOFOLLOW | O_NONBLOCK`); Linux accepts a "clean shutdown" marker only from
+root-owned systemd entries or the kernel (`SYSTEM_ENTRY_MATCHES`).
+
+**What each OS can and cannot see** (the agents' `health.rs`, read on every check-in, best-effort, the time
+reached is stored only after the server accepted the report):
+- Windows: System event log (Kernel-Power 41, EventLog 6008, WER 1001, WHEA-Logger 1/18 fatal and 19/20
+  corrected) through PowerShell JSON.
+- Linux: journald previous boots with no shutdown marker (needs a persistent journal,
+  `/var/log/journal`); with no journal history it falls back to `last -x` (wtmp: a boot after no recorded
+  shutdown). Hardware: kernel machine-check/EDAC lines, plus the memory controller's cumulative EDAC
+  counters (only an increase since the last report is an event; no EDAC in most VMs, so nothing is read
+  there), plus kernel panic records (`/sys/fs/pstore`, `/var/lib/systemd/pstore`) as unexpected shutdowns.
+- macOS: the unified log's "Previous shutdown cause" line and kernel panic reports. A panic report that
+  names a hardware part (NVMe/SSD, SMC, thermal, uncorrectable memory) is also a fatal hardware error. The
+  internal disk's S.M.A.R.T. status "Failing" is fatal and a battery condition other than Normal is to
+  watch; both are states, reported when they appear and every 7 days while they last. Corrected memory/CPU
+  errors are not exposed to a process. Apple's cause codes are undocumented, so only `0`, `3` and negative
+  codes are reported and other positive codes are left alone. The `system_profiler` and panic-report text
+  is Apple's and changes between macOS versions; what does not match is ignored.
+- None of them records what application is in front. That needs a per-user process change in all three
+  agents and a privacy note, and is not built.
+
+## The device report and log collection: one device, what happened and why
+
+Opened from a device in Autonomy > Device health (`/autonomy/device/:hostId`), behind `[RequireAdminSession]` at
+`api/admin/device-report` (`AdminDeviceReportController`). **One device at a time, never a group.**
+
+**The report** (`GetDeviceReportQuery`) puts together what the server already has: the device's health events
+(see "Device health"), what Kintsugi installed (`ApplicationPatched`, `OperatingSystemPatched`), failed installs with
+their output, and the latest collected log. `DeviceReportAnalyzer` (pure) lists what the problem could be, ranked,
+with the evidence for each and what to check next: a fatal hardware error, a failing disk (S.M.A.R.T., a panic that
+names the SSD, or storage warnings in the collected log), the battery, a software crash, and Kintsugi patching. It is
+a **hint with its evidence, never a verdict**: it reads the 30-day window whatever window the page shows, some
+evidence only exists once a log is collected, and where Kintsugi cannot see something (battery and power on Windows
+and Linux) it says so instead of ruling it out. Kintsugi is **possibly involved** only when it installed something
+in the 30 minutes before a shutdown (`InvolvementWindow`); a restart Kintsugi asked for is never an unexpected
+shutdown. Kintsugi does not record its own restarts, so a system update (`OsUpdate`) is shown as one that can restart.
+
+**Log collection** (`LogCollection`, migration `AddLogCollections`). An administrator asks, from the report, for one
+device's agent to read the operating system's own log (7 or 30 days, warnings and errors or everything). Like a
+forced patch run, **the server never pushes**: the agent finds the request at its next check-in, so the page says
+"waiting for the device to check in" (about an hour) rather than implying it is instant.
+- Agent routes, **all three in nginx's exact-match regex**: `GET /api/log-collection-requests` (claims: moves the row to
+  Collecting, so the log is not read twice), `POST /api/log-collection-results?serialNumber&collectionId` (raw gzip of
+  JSON, not a JSON body), `POST /api/log-collection-failures`. `[RequireAgentIdentity]` ties each to the certificate's
+  host, and the handlers refuse a collection that belongs to another host.
+- **What is stored is rewritten, never the upload** (`LogPayload.Sanitise`): at most 5 MB gzip in and 64 MB expanded
+  (so a small upload cannot become a huge one in memory), bad severities and impossible times dropped, text cut to
+  120/2,000 characters, the newest 20,000 entries kept.
+- **Effective status is worked out when read** (`LogCollection.EffectiveStatus`): a request nobody picked up in 24
+  hours, or a pick-up that never answered in 30 minutes, is Failed with a plain reason, so nothing has to run to
+  expire it. One open request per device (a second is a 409).
+- **Kept 30 days** then deleted by the daily job that prunes the host timeline (`LogCollectionPruner`). Only
+  administrators read or download it, and **every request, download and deletion is a `Logs*` event on the device's
+  timeline with the administrator's name** (`LogsRequested`, `LogsCollected`, `LogsDownloaded`, `LogsDeleted`,
+  `LogsFailed`).
+- Reading the log filters on the server (`GetLogEntriesQuery`: severity, text, around a moment, paged), so the
+  browser never receives a whole log. The status poll uses a projection without the content.
+- The agents' half (what each OS reads, the 5-minute budget, the caps) is in each agent's `CLAUDE.md`.
+
+## A host that needs a restart
+
+`Host.RestartRequiredSinceUtc` and `RestartRequiredBecause` record that a host has installed updates
+that are not all in effect until it restarts. Only the Linux agent reports it today
+(`CreateHostCommand.RestartRequired` / `RestartBecause`, on every check-in, and the same two fields on
+`ReportOperatingSystemPatchedCommand`). `Host.RecordRestartState` is the one place the rules live:
+**null means "not reported" and changes nothing**, so macOS, Windows and an older Linux agent never clear a
+restart a host reported; an explicit true starts the clock once and keeps the first time (so "since" is
+when it was first needed, not the last check-in); an explicit false clears both, which is how the server
+learns somebody restarted the host. `RestartRequiredBecause` is cut to 500 characters, the column width,
+by `RecordRestartState` (never inside a surrogate pair), and the validators deliberately do **not** refuse
+longer: they used to, and since the field rides on the check-in, a Linux host that had gone months without
+a reboot named enough packages to have every check-in refused and went stale. The Linux agent also keeps it
+under 400 bytes itself (`os_update::summarise_packages`, "pkgA, pkgB and N more"). The Hosts screen shows a "Restart Needed" chip in the OS update column
+and the host page shows a card; nothing restarts the host.
+
+## The Autonomy page: why patching is slow, and who started each patch
+
+`GET /api/admin/autonomy?period=7d|30d|month&month=yyyy-MM` (admin session, under `api/admin`, so outside
+nginx's agent regex) builds the page from `host_events`, the hosts, the open failures and the daily KPI
+snapshots. It reads what the server already records, so it covers macOS, Linux and Windows hosts alike.
+
+**Causes, not device lists.** `AutonomyCauseAnalyzer` (pure) decides what is holding patching up: devices
+that have not checked in with an update waiting (`disconnected`), installed-but-not-restarted
+(`restart`), `maintenance` (returned with `Measured = false`: there is no such mode, and an empty row must
+not read as good news), and one `failure:<slug>` per cause from the open failures. The page gets counts and
+cost per cause; the devices in a cause are read a page at a time (`GET .../causes/{key}/devices`, take
+capped at 200), so a fleet of 1,200 or 12,000 costs the same to show.
+
+**Cost is device-days.** For each device in a cause, the days it has been held up (days since last
+check-in, since the restart was first needed, since the failure first happened), added up. It ranks causes
+by how much they slow patching, which the device count does not. Disconnected counts days since last
+check-in, not since the update appeared, because Kintsugi does not record when an update became available.
+
+**Patch now by cause** (`POST .../causes/{key}/patch-now`). Resolved on the server, so a cause of a thousand
+devices is one request and the browser never carries the list. It sends the existing
+`RequestForcedPatchRunsCommand` ("Windows"), so each device gets the same instruction, the same 24-hour
+lifetime and a timeline event with the administrator's name (from the session, never the body). Eligible are
+Windows hosts held up by a failed Windows update, or offline with a Windows update waiting. **Never** a
+restart-pending host (Patch now installs and restarts only if its own install says Windows needs one, so it
+would not restart a host that already installed everything) and never an application failure.
+`ExpectedConnected` is the count the administrator was shown: a different current count is refused with a
+409 rather than acted on, because the list moves while the dialog is open. Offline devices are queued only
+when `IncludeOffline` is set. The web asks for the number to be typed above 50 devices.
+
+**Who started a patch is inferred, and the rule is exact.** A patch result does not say whether the run
+was scheduled or forced, so `AutonomyPatchClassifier` decides from the Patch now records: admin-started
+when the same host collected a Patch now request for the same thing before it, it is the next patch for
+that host and subject, and it came within 24 hours of the request. The next patch consumes the request.
+Everything else is "on the host's own schedule"; the page never says "the host decided". If agents ever
+report a trigger, replace the inference with it rather than layering on top.
+
+**KPIs are defined once, with fixed bands.** `AutonomyKpis` has stable ids (`failures.open_failure_devices`,
+...), the definition text, the direction and the green/amber bands. The bands are not editable on purpose:
+changing one changes what every past report meant. `KpiSnapshotBackgroundService` records every KPI once a
+day (`kpi_snapshots`, unique per day and id; the command does nothing if today already has them), because
+history before the first snapshot cannot be rebuilt. "Prior" is the snapshot a week or more old; the trend
+lines need two days. This is also how Kintsugi is prepared, but not wired, to feed another report: the ids
+and the read are stable. There is deliberately no machine-to-machine token.
+
+The report (general) is built in the browser (`autonomy_report.dart`) and written to PDF by `autonomy_pdf.dart`
+with the `pdf` package: tables, stacked columns, bars and lines are drawn from the same `ReportDocument` the
+preview shows. Built-in Helvetica is Latin-1 only, so `pdfSafe` replaces the few characters outside it. The
+report names no devices. Nothing is sent to a server.
 
 ## Verifying a server-written upgrade script
 

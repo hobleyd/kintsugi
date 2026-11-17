@@ -73,6 +73,7 @@ public class OllamaAdapter : IAiProtocolAdapter
         }
 
         var text = message["content"]?.GetValue<string>() ?? string.Empty;
-        return new AiChatResult(text, toolCalls, new AiChatMessage(AiChatRole.Assistant, text, toolCalls, ProviderContent: message.DeepClone()));
+        return new AiChatResult(text, toolCalls, new AiChatMessage(AiChatRole.Assistant, text, toolCalls, ProviderContent: message.DeepClone()),
+            AiTokenUsage.Of(AiTokenUsage.Count(response["prompt_eval_count"]), AiTokenUsage.Count(response["eval_count"])));
     }
 }

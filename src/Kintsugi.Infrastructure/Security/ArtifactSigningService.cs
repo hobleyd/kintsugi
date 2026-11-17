@@ -53,6 +53,19 @@ public class ArtifactSigningService : IArtifactSigningService
         return Convert.ToBase64String(signature);
     }
 
+    public bool Verify(string content, string signature)
+    {
+        try
+        {
+            return LoadOrCreateKey().VerifyData(
+                Encoding.UTF8.GetBytes(content), Convert.FromBase64String(signature), HashAlgorithmName.SHA256, DSASignatureFormat.Rfc3279DerSequence);
+        }
+        catch (Exception ex) when (ex is FormatException or CryptographicException)
+        {
+            return false;
+        }
+    }
+
     private ECDsa LoadOrCreateKey()
     {
         if (_key is not null)

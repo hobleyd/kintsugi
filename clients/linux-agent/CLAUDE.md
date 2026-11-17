@@ -123,6 +123,43 @@ being the only long-running one, or it would go on executing the previous binary
 Writing units only when absent is what keeps it from ever clobbering a file an administrator edited.
 
 
+## Installing OS updates on apt hosts, and the restart state
+
+`os_update::install` is fixed Rust, not a signed script: it takes no input and runs only the package
+manager's own upgrade verb, so there is nothing to sign and nothing an AI could change. On apt it does
+four things beyond the upgrade itself, all in `os_update.rs`:
+
+- **Waits for the dpkg lock** (`-o DPkg::Lock::Timeout=300` on `update` and `upgrade`). Without it a host
+  busy with `unattended-upgrades` failed at once with "Could not get lock" and filed a failed update
+  for something that cleared itself in a minute. It is a `-o` option, so an `apt` older than 1.9.11
+  ignores it and behaves as before.
+- **Repairs an interrupted install** (`dpkg --configure -a`, with the same `--force-conf*` options)
+  before anything else, **waiting for the dpkg lock first**. dpkg has no `Lock::Timeout` of its own, so
+  `run_waiting_for_dpkg_lock` retries it every 5 s for the same 300 s while — and only while — dpkg says
+  the lock is held; it never removes a lock file or signals the holder. It used to run once, before
+  anything waited, so a busy host skipped the repair. Best-effort; a failure is logged and the install
+  then fails with dpkg's own message, which the server turns into "dpkg was interrupted".
+- **Clears the download cache** (`apt-get clean`) after a successful install. Best-effort, but a
+  non-zero exit is logged.
+- **Never runs `autoremove`.** That is the one apt command that uninstalls software, and an unattended
+  agent does not do that unasked. The cost is that old kernels can slowly fill `/boot`; a full disk is a
+  failure Patch Health already explains.
+
+**The restart state** (`restart_state`) is `None` on anything but apt, and the server reads "not
+reported" as "leave what you have", never as "no restart needed". On apt it is the flag file
+`/var/run/reboot-required` (named packages from `.pkgs`, cut to 400 bytes as whole names plus "and N
+more" — joined whole, a host months from a reboot went past the server's 500, which used to refuse the
+check-in). Where `update-notifier-common` is not installed
+(plain Debian), a missing flag proves nothing, so it compares the newest `/boot/vmlinuz-*` with the
+running kernel instead. That comparison is used **only when the notify hook script is absent**: on
+Ubuntu a person may have booted an older kernel on purpose, and "a newer one exists" would nag forever.
+Kernel versions compare as numbers (`6.1.0-9` is older than `6.1.0-10`), and **only against kernels of the
+running one's flavour** (`split_kernel_release`): Raspberry Pi OS installs `rpi-v8` and `rpi-2712` side by
+side, and reading "2712" as a version told every Pi 4 it needed a restart that never cleared. It is sent on every check-in
+(`restartRequired`, `restartBecause` on `RegisterHostRequest`, so the server learns when the host has
+restarted) and straight after an install (`ReportOsPatchResultRequest`, so a new kernel shows at once).
+The agent only reports it; it does not restart the host.
+
 ## Couplings nothing enforces
 
 - `x11rb`'s `randr` feature is what `describe_displays` needs for `GetMonitors`. It is pure Rust like
@@ -143,3 +180,26 @@ Writing units only when absent is what keeps it from ever clobbering a file an a
   `rustix`/`linux-raw-sys`) and that is why it was chosen over the `x11`/`libxcb` bindings; the
   check that matters is CI's own, that the musl artifact is not dynamically linked. Adding anything
   that pulls a `-sys` crate here breaks the release for the whole fleet, not just remote control.
+
+## Device health
+
+`health.rs` reads the systemd journal on every check-in and reports unexpected shutdowns (a previous boot
+whose journal ends with no shutdown marker) and kernel machine-check/EDAC lines to
+`/api/host-health-events` — see "Device health" in `src/CLAUDE.md`. Read-only; sends a one-line excerpt per
+event. With a volatile journal (no `/var/log/journal`, the Debian default) there is no earlier boot, so it falls
+back to `last -x` (wtmp). It also reads the memory controller's EDAC counters (increase since the last
+report; state in `health-reported.edac`) and kernel panic records in pstore. The time reached is kept in `/var/lib/kintsugi-agent/health-reported`, written only
+after the server accepted the report.
+
+## Log collection
+
+`log_collection.rs` runs on every check-in, root side, right after the health report. One cheap GET to
+`/api/log-collection-requests` (which consumes the request server-side); if an administrator asked for a log
+it runs `journalctl --since @<epoch> -o json -n 25000 -r -p warning` (WarningsAndErrors) or `-p info`
+(Everything, no debug) and POSTs a gzip of `{entries, truncatedBefore}` to `/api/log-collection-results`; if
+reading fails, or the log was read but the upload did not arrive (one plain sentence, no URL), it POSTs
+`/api/log-collection-failures`. Read-only: only `journalctl` is run (`LC_ALL=C`).
+Caps: 20,000 entries (newest kept) and a 5 MiB gzip body; dropping oldest sets `truncatedBefore`. Best-effort:
+never fails the check-in, and reading has a hard 5 minute budget (the child is killed, failure reported). No
+`journalctl` or an empty journal is a valid empty result. Latency is up to the hourly check-in, and a
+collection can only reach as far back as the host's journal retention (a volatile journal keeps little).

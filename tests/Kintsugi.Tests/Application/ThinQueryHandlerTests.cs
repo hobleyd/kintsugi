@@ -4,6 +4,7 @@ using Kintsugi.Application.AgentPackages.Queries.GetLatestAgentPackage;
 using Kintsugi.Application.Applications;
 using Kintsugi.Application.Applications.Queries.GetApplicationSummaries;
 using Kintsugi.Application.Common.Interfaces;
+using Kintsugi.Application.Hosts;
 using Kintsugi.Application.Hosts.Queries.GetHostById;
 using Kintsugi.Application.Hosts.Queries.GetHosts;
 using Kintsugi.Application.UpgradePaths;
@@ -42,10 +43,42 @@ public class ThinQueryHandlerTests
         var installedPackageRepository = new Mock<IInstalledPackageRepository>();
 
         var result = await new GetHostsQueryHandler(
-                repository.Object, upgradePathRepository.Object, vulnerabilityRepository.Object, installedPackageRepository.Object)
+                repository.Object, upgradePathRepository.Object, vulnerabilityRepository.Object, installedPackageRepository.Object, new Mock<IAgentPackageRepository>().Object)
             .Handle(new GetHostsQuery(), CancellationToken.None);
 
         Assert.Equal(2, result.Count);
+    }
+
+    [Fact]
+    public async Task GetHostsQueryHandler_SaysWhichAgentEachHostShouldBeOn_AndWhetherItIs()
+    {
+        var behind = new Host("old", "SERIAL-1", "Windows 11 Pro", agentVersion: "0.12.3");
+        var current = new Host("new", "SERIAL-2", "Windows 11 Pro", agentVersion: "0.12.5");
+        var repository = new Mock<IHostRepository>();
+        repository.Setup(r => r.GetAllAsync(It.IsAny<CancellationToken>())).ReturnsAsync(new[] { behind, current });
+        var upgradePathRepository = new Mock<IUpgradePathRepository>();
+        upgradePathRepository.Setup(r => r.GetInstallationPatchStatusesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<InstallationPatchStatus>());
+        var vulnerabilityRepository = new Mock<IVulnerabilityRepository>();
+        vulnerabilityRepository.Setup(r => r.GetApplicationCveMatchesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<ApplicationCveMatch>());
+        vulnerabilityRepository.Setup(r => r.GetOperatingSystemCveMatchesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<OperatingSystemCveMatch>());
+        vulnerabilityRepository.Setup(r => r.GetPackageCveMatchesAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(Array.Empty<PackageCveMatch>());
+        var agentPackages = new Mock<IAgentPackageRepository>();
+        agentPackages.Setup(r => r.GetLatestPerPlatformAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new[] { AgentPackage.Create("windows", "0.12.5", "agent.tar.gz", 1, "sha", "sig", null) });
+
+        var result = await new GetHostsQueryHandler(
+                repository.Object, upgradePathRepository.Object, vulnerabilityRepository.Object,
+                new Mock<IInstalledPackageRepository>().Object, agentPackages.Object)
+            .Handle(new GetHostsQuery(), CancellationToken.None);
+
+        var old = result.Single(h => h.Hostname == "old");
+        Assert.Equal("0.12.5", old.LatestAgentVersion);
+        Assert.Equal(AgentUpdateState.Behind, old.AgentUpdateState);
+        Assert.Equal(AgentUpdateState.Current, result.Single(h => h.Hostname == "new").AgentUpdateState);
     }
 
     [Fact]
@@ -75,7 +108,7 @@ public class ThinQueryHandlerTests
         var installedPackageRepository = new Mock<IInstalledPackageRepository>();
 
         var result = await new GetHostsQueryHandler(
-                repository.Object, upgradePathRepository.Object, vulnerabilityRepository.Object, installedPackageRepository.Object)
+                repository.Object, upgradePathRepository.Object, vulnerabilityRepository.Object, installedPackageRepository.Object, new Mock<IAgentPackageRepository>().Object)
             .Handle(new GetHostsQuery(), CancellationToken.None);
 
         Assert.Equal(3, result.Single(h => h.Id == hostWithUpdates.Id).AppUpdatesAvailableCount);
@@ -117,7 +150,7 @@ public class ThinQueryHandlerTests
         var installedPackageRepository = new Mock<IInstalledPackageRepository>();
 
         var result = await new GetHostsQueryHandler(
-                repository.Object, upgradePathRepository.Object, vulnerabilityRepository.Object, installedPackageRepository.Object)
+                repository.Object, upgradePathRepository.Object, vulnerabilityRepository.Object, installedPackageRepository.Object, new Mock<IAgentPackageRepository>().Object)
             .Handle(new GetHostsQuery(), CancellationToken.None);
 
         var dto = Assert.Single(result);
@@ -149,7 +182,7 @@ public class ThinQueryHandlerTests
         var installedPackageRepository = new Mock<IInstalledPackageRepository>();
 
         var result = await new GetHostsQueryHandler(
-                repository.Object, upgradePathRepository.Object, vulnerabilityRepository.Object, installedPackageRepository.Object)
+                repository.Object, upgradePathRepository.Object, vulnerabilityRepository.Object, installedPackageRepository.Object, new Mock<IAgentPackageRepository>().Object)
             .Handle(new GetHostsQuery(), CancellationToken.None);
 
         Assert.Equal(1, result.Single(h => h.Id == hostBehind.Id).UnpatchedCveCount);
@@ -194,7 +227,7 @@ public class ThinQueryHandlerTests
             });
 
         var result = await new GetHostsQueryHandler(
-                repository.Object, upgradePathRepository.Object, vulnerabilityRepository.Object, installedPackageRepository.Object)
+                repository.Object, upgradePathRepository.Object, vulnerabilityRepository.Object, installedPackageRepository.Object, new Mock<IAgentPackageRepository>().Object)
             .Handle(new GetHostsQuery(), CancellationToken.None);
 
         Assert.Equal(1, result.Single(h => h.Id == hostOsPending.Id).UnpatchedCveCount);
@@ -240,7 +273,7 @@ public class ThinQueryHandlerTests
             });
 
         var result = await new GetHostsQueryHandler(
-                repository.Object, upgradePathRepository.Object, vulnerabilityRepository.Object, installedPackageRepository.Object)
+                repository.Object, upgradePathRepository.Object, vulnerabilityRepository.Object, installedPackageRepository.Object, new Mock<IAgentPackageRepository>().Object)
             .Handle(new GetHostsQuery(), CancellationToken.None);
 
         Assert.Equal(0, result.Single(h => h.Id == hostWithUnrelatedUpdatePending.Id).UnpatchedCveCount);

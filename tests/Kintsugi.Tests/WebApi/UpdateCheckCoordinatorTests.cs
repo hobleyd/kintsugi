@@ -1,3 +1,4 @@
+using Kintsugi.Application.UpgradePaths;
 using Kintsugi.Application.UpgradePaths.Commands.CheckApplicationUpdate;
 using Kintsugi.WebApi.UpgradePathScanning;
 
@@ -122,5 +123,84 @@ public class UpdateCheckCoordinatorTests
         coordinator.Complete();
 
         Assert.True(coordinator.TryRequestStart());
+    }
+    // The Diagnostics page's tabs are a split by outcome, and the status can only give counts: a
+    // successful check carries no note, so the notes can never say which rows were fine.
+    [Fact]
+    public void GetResults_HasARowPerApplication_WithWhatTheCheckConcludedAboutIt()
+    {
+        var coordinator = new UpdateCheckCoordinator();
+        coordinator.TryRequestStart();
+
+        coordinator.ReportItem(Checked(versionChanged: true));
+        coordinator.ReportItem(Checked(versionChanged: false));
+        coordinator.ReportItem(Failed("The script did not report a version."));
+        coordinator.ReportItem(Skipped());
+
+        var rows = coordinator.GetResults().Rows;
+
+        Assert.Equal(
+            new[] { RunRowOutcome.Updated, RunRowOutcome.Unchanged, RunRowOutcome.Failed, RunRowOutcome.NothingToCheck },
+            rows.Select(r => r.Outcome));
+        Assert.Equal("The script did not report a version.", rows[2].Note);
+        Assert.Null(rows[0].Note);
+    }
+
+    [Fact]
+    public void GetResults_AgreesWithTheStatusCounts()
+    {
+        var coordinator = new UpdateCheckCoordinator();
+        coordinator.TryRequestStart();
+        coordinator.ReportItem(Checked(versionChanged: true));
+        coordinator.ReportItem(Failed("x"));
+        coordinator.ReportItem(Failed("y"));
+        coordinator.ReportItem(Skipped());
+
+        var status = coordinator.GetStatus();
+        var rows = coordinator.GetResults().Rows;
+
+        Assert.Equal(status.Updated, rows.Count(r => r.Outcome == RunRowOutcome.Updated));
+        Assert.Equal(status.Unchanged, rows.Count(r => r.Outcome == RunRowOutcome.Unchanged));
+        Assert.Equal(status.Failed, rows.Count(r => r.Outcome == RunRowOutcome.Failed));
+        Assert.Equal(status.Skipped, rows.Count(r => r.Outcome == RunRowOutcome.NothingToCheck));
+    }
+
+    [Fact]
+    public void GetResults_IsClearedWhenANewRunStarts()
+    {
+        var coordinator = new UpdateCheckCoordinator();
+        coordinator.TryRequestStart();
+        coordinator.ReportItem(Checked(versionChanged: false));
+        coordinator.Complete();
+
+        coordinator.TryRequestStart();
+
+        Assert.Empty(coordinator.GetResults().Rows);
+        Assert.Equal(0, coordinator.GetResults().Unlisted);
+    }
+
+    [Fact]
+    public void GetResults_KeepsAtMostFiveThousandRows_AndCountsTheRest()
+    {
+        var coordinator = new UpdateCheckCoordinator();
+        coordinator.TryRequestStart();
+
+        for (var i = 0; i < 5003; i++)
+        {
+            coordinator.ReportItem(Checked(versionChanged: false));
+        }
+
+        var results = coordinator.GetResults();
+
+        Assert.Equal(5000, results.Rows.Count);
+        Assert.Equal(3, results.Unlisted);
+        // The status counts still cover every row, which is what "Unlisted" is the difference of.
+        Assert.Equal(5003, coordinator.GetStatus().Unchanged);
+    }
+
+    [Fact]
+    public void GetResults_BeforeAnyRun_IsEmpty()
+    {
+        Assert.Empty(new UpdateCheckCoordinator().GetResults().Rows);
     }
 }

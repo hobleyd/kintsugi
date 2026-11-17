@@ -90,7 +90,11 @@ class AppShell extends StatelessWidget {
               // being read while moving between the screens its output names. A row child rather
               // than an overlay: it takes width from the page instead of covering it. Suppressed
               // in full screen along with the sidebar, because that screen asked for the window.
-              if (withSidebar && diagnostics != null) DiagnosticsPanel(log: diagnostics),
+              //
+              // Not on the Diagnostics page itself, which shows the same entries with room to read
+              // them: a strip beside a page of the same thing would be the thing twice.
+              if (withSidebar && diagnostics != null && location != Routes.diagnostics)
+                DiagnosticsPanel(log: diagnostics),
             ],
           ),
         ),
@@ -176,6 +180,22 @@ class _Sidebar extends StatelessWidget {
                   selected: location == Routes.hosts || location.startsWith('${Routes.hosts}/'),
                 ),
                 const SizedBox(height: 8),
+                // Beside Hosts rather than under Applications: it answers "which machines are in
+                // trouble", which spans operating system and application failures alike.
+                _NavLink(
+                  label: 'Patch Health',
+                  path: Routes.patchHealth,
+                  selected: location == Routes.patchHealth,
+                ),
+                const SizedBox(height: 8),
+                // Who started each patch, and what is wrong with which devices: the view across
+                // hosts that Patch Health (failures only) and the host page (one host) do not give.
+                _NavLink(
+                  label: 'Autonomy',
+                  path: Routes.autonomy,
+                  selected: location == Routes.autonomy || location.startsWith('${Routes.autonomy}/'),
+                ),
+                const SizedBox(height: 8),
                 // The parent goes to Currently Installed, the same way Sync's goes to Clients:
                 // a menu heading that led nowhere would be the only dead entry in the sidebar.
                 _NavLink(
@@ -196,6 +216,11 @@ class _Sidebar extends StatelessWidget {
                       label: 'Failed Updates',
                       path: Routes.applicationsFailed,
                       selected: location == Routes.applicationsFailed,
+                    ),
+                    _SubNavLink(
+                      label: 'Managed Elsewhere',
+                      path: Routes.applicationsManaged,
+                      selected: location == Routes.applicationsManaged,
                     ),
                   ],
                 ),
@@ -227,6 +252,14 @@ class _Sidebar extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 8),
+                // What should be true on a device, and how many comply. Its own entry because it is
+                // about device configuration, which none of the menus above it are.
+                _NavLink(
+                  label: 'Baselines',
+                  path: Routes.baselines,
+                  selected: location.startsWith(Routes.baselines),
+                ),
+                const SizedBox(height: 8),
                 _NavLink(label: 'Sync', path: Routes.clients, selected: inSync),
                 // Alphabetical by label. Keep it that way when adding one — the list is a lookup,
                 // not a workflow, so there is no order to it a reader could otherwise predict.
@@ -245,9 +278,19 @@ class _Sidebar extends StatelessWidget {
                 _SubNav(
                   children: [
                     _SubNavLink(
+                      label: 'Administrators',
+                      path: Routes.settingsAdministrators,
+                      selected: location == Routes.settingsAdministrators,
+                    ),
+                    _SubNavLink(
                       label: 'AI Agent',
                       path: Routes.settingsAiAgent,
                       selected: location == Routes.settingsAiAgent,
+                    ),
+                    _SubNavLink(
+                      label: 'AI Usage',
+                      path: Routes.settingsAiUsage,
+                      selected: location == Routes.settingsAiUsage,
                     ),
                     _SubNavLink(
                       label: 'Auditing',
@@ -285,7 +328,10 @@ class _Sidebar extends StatelessWidget {
                   ],
                 ),
                 const Expanded(child: SizedBox(height: 24)),
-                _SidebarFooter(diagnostics: diagnostics),
+                _SidebarFooter(
+                  diagnostics: diagnostics,
+                  onDiagnosticsPage: location == Routes.diagnostics,
+                ),
               ],
             ),
           ),
@@ -472,9 +518,13 @@ class _HoverTargetState extends State<_HoverTarget> {
 
 /// The diagnostics toggle, the theme toggle and, when there is one, the signed-in account.
 class _SidebarFooter extends StatelessWidget {
-  const _SidebarFooter({this.diagnostics});
+  const _SidebarFooter({this.diagnostics, this.onDiagnosticsPage = false});
 
   final DiagnosticsLog? diagnostics;
+
+  /// On the Diagnostics page the button has nothing to toggle — the panel is not drawn there — so it
+  /// is not drawn either, rather than opening a panel that would appear on the next screen.
+  final bool onDiagnosticsPage;
 
   @override
   Widget build(BuildContext context) {
@@ -492,7 +542,7 @@ class _SidebarFooter extends StatelessWidget {
           // The way back to output that has been hidden. Without it, closing the panel would be
           // the one irreversible action in the app: the entries survive, and nothing else on any
           // screen would offer to show them again.
-          if (diagnostics != null)
+          if (diagnostics != null && !onDiagnosticsPage)
             AnimatedBuilder(
               animation: diagnostics,
               builder: (context, _) => diagnostics.isEmpty

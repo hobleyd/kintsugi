@@ -1,6 +1,6 @@
 [package]
 name = "kintsugi-agent"
-version = "0.12.3"
+version = "0.14.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Background agent that registers this PC with the patching system's host inventory."
@@ -32,7 +32,7 @@ base64 = "0.22"
 # every Script/Command it's handed before ever executing one (p256) — see identity.rs.
 rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
-time = { version = "0.3", features = ["formatting", "macros"] }
+time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 # Verifying a downloaded self-update package's checksum. The macOS agent shells out to `shasum`
 # (a macOS builtin); Windows' nearest equivalent, `certutil -hashfile`, prints a multi-line report
 # that has to be scraped, so hashing in-process is both simpler and less brittle here.
@@ -40,6 +40,9 @@ sha2 = "0.10"
 # The Windows registry is where installed applications are actually enumerated from — see
 # system_info::scan_installed_programs.
 winreg = "0.52"
+# Compressing a collected event log (log_collection.rs). Pure-Rust backend only, so it builds for
+# x86_64-pc-windows-gnu without a C toolchain; it is already in the tree through `image`/png.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 # Remote control's transport, and its dependencies are the macOS agent's for the same reasons.
 # Blocking, because this agent is threads-and-blocking-calls throughout; rustls rather than

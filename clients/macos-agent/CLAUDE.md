@@ -521,3 +521,58 @@ Mac — once, rather than once per release — and Accessibility specifically **
 its prompt at all**: macOS only offers to open System Settings, where someone then has to find the
 binary in a list (`/usr` is hidden in the file picker; ⌘⇧G and type `/usr/local/bin`).
 
+## Device health
+
+`health.rs` reads the unified log's "Previous shutdown cause" line (`/usr/bin/log show`) and the kernel
+panic reports in `/Library/Logs/DiagnosticReports`, and reports them to `/api/host-health-events` — see
+"Device health" in `src/CLAUDE.md`. Hardware comes from panic reports that name a part, the internal
+disk's S.M.A.R.T. status and the battery condition (`system_profiler`), the last two reported when they
+appear and every 7 days (state in `health-reported.conditions`); corrected errors are not exposed. Only
+cause codes `0`, `3` and negative ones are reported (Apple does not document the codes). The unified log
+keeps days, not months, so the first report may reach back less than 30 days. The module's logic is tested
+without a Mac; the `log` call itself only runs on one, so CI's macOS runner is what compiles it.
+Needs the `time` crate's `parsing` feature.
+
+## Log collection
+
+`log_collection.rs` answers an administrator's "collect this Mac's log" request. On every root-daemon
+check-in, right after the health report, it does one `GET /api/log-collection-requests` (the server
+consumes the request as it answers); with nothing pending that is all. With one, it reads
+`/usr/bin/log show --style ndjson --start <t> --end <t>` **backwards in windows** (predicate: `error`/`fault`,
+plus `default`/`info` for "Everything", which also passes `--info`; never debug) and adds the kernel panic reports in `/Library/Logs/DiagnosticReports` newer
+than the period (one Critical entry each, file name plus the first ~1000 characters), then POSTs gzipped
+JSON to `/api/log-collection-results` (`serialNumber`, `collectionId`; `Content-Type: application/gzip`).
+If the log cannot be read it POSTs `/api/log-collection-failures` with one plain sentence.
+Severity: fault = Critical, error = Error, default/info = Info; the unified log has no warning level, so
+"Warning" is never produced.
+
+- **Why backwards.** `log show --last Nd` streams oldest first, and the newest-20,000 cut can only be made when
+  the stream ends. Timed on a real Mac, "Everything" for an hour is about 700,000 lines in seconds and errors
+  for a day about 700,000 in 25 s, so a week of "Everything" or a month of errors needed 10 to 20 minutes and
+  failed every time. Now `read_backwards` reads the newest hour (`log_time` writes the `--start/--end` values
+  as `YYYY-MM-DD HH:MM:SS+0000`, UTC), then the hour before it, and stops at 20,000 entries, at the start of
+  the period or when the time is up. A quiet window (fewer than 1,000 entries) doubles the next one, up to a
+  day, so a month on a quiet Mac is a few dozen runs, not 720. If time runs out after at least one window,
+  what was read is sent with `truncatedBefore` set; only a first window that cannot finish is a failure.
+- **Caps:** newest 20,000 entries and a gzip body of at most 5 MiB; the oldest are dropped first and
+  `truncatedBefore` is the time of the oldest entry kept. Messages are cut at 2000 characters, sources
+  at 120.
+- **Best-effort:** never fails a check-in, every error is only logged. Reading has a hard 5 minute budget;
+  then the `log` process is killed and what was read is sent (see above). Not even the newest hour finishing
+  sends a failure ("Reading the log took longer than 5 minutes."). A log that was read but did not reach the
+  server (the upload is its own 120 s timeout, not the daemon's 15 s) is also reported as a failure, in one
+  plain sentence with no URL, so the page does not wait out its 30-minute general error. A claimed request
+  that could not be answered is not retried; the administrator asks again.
+- **Read-only:** runs only `/usr/bin/log show` and reads panic report text (regular files, no links, no pipes).
+- **Latency:** the check-in is hourly, so a request is answered up to an hour after it is raised, and a
+  long request can use the whole 5 minute budget (so that check-in is long).
+- **History:** the persistent log keeps a limited history (days on most Macs), so a long period may
+  return less than asked for.
+- **Real-Mac coverage.** The parsing, severity, caps, gzip and window logic is tested without a Mac (isolated
+  stub crate, as for `health.rs`). The real `log show` and its ndjson field names (`timestamp`,
+  `messageType`, `processImagePath`, `subsystem`, `eventMessage`) are exercised by the `real_macos` tests,
+  which ran on CI's macOS runner and passed (344 tests on this PR's last CI run). The `--start/--end`
+  window arguments, `--info` and a week of "Everything" are new and covered by `real_macos` tests that have
+  not run on a Mac yet: the first CI run on this change is their first run.
+
+**Real-machine tests.** `log_collection::real_macos` and `health::real_macos` run the real `/usr/bin/log` and `/usr/sbin/system_profiler` and check that the reader understands what they print. They are `cfg(target_os = "macos")`, so in practice they run only on CI's macOS runner (nobody needs a Mac to get them). A fresh runner has little to say about faults, so they check the *format* (fields, timestamps, the system_profiler type names), not detection of failures; a failure there means Apple's output differs from what the parsers expect.

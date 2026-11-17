@@ -91,6 +91,12 @@ public class ResearchApplicationUpgradePathCommandHandler : IRequestHandler<Rese
             var note = $"Unexpected error: {ex.Message}";
             try
             {
+                var kept = await KeepExistingScriptAsync(request, note, cancellationToken);
+                if (kept is not null)
+                {
+                    return kept;
+                }
+
                 var entity = await UpsertAsync(request.ApplicationName, request.Platform, UpgradePathStatus.Failed, null, UpgradeMethod.Unknown, null, null, null, null, note, null, request.ApplicationIdentifier, cancellationToken);
                 return ToResult(entity, Skipped: false, note);
             }
@@ -186,10 +192,10 @@ public class ResearchApplicationUpgradePathCommandHandler : IRequestHandler<Rese
 
         // Runs right here on the server (bash or pwsh, per the script's own platform bucket) against
         // the manager's public catalog — never on the managed host — so the Applications page shows
-        // a real latest version immediately, the same way a freshly generated Research-kind script's
-        // version gets checked once it exists.
+        // a real latest version immediately. Allowed because this text is either the bucket's signed
+        // script or the one this build writes itself; CheckScriptVersionAsync checks which.
         var latestVersion = await _researchClient.CheckScriptVersionAsync(
-            script, request.Platform, request.ApplicationName, applicationIdentifier, cancellationToken);
+            script, bucketScript.Signature, request.Platform, request.ApplicationName, applicationIdentifier, cancellationToken);
 
         var entity = await UpsertAsync(
             request.ApplicationName, request.Platform, UpgradePathStatus.Found, latestVersion, UpgradeMethod.Script,
@@ -200,10 +206,11 @@ public class ResearchApplicationUpgradePathCommandHandler : IRequestHandler<Rese
 
     /// <summary>
     /// The single AI call per application — asks the AI to research and produce the durable
-    /// upgrade script in one step (see <see cref="AiUpgradePathResearchClient"/>), then, once a
-    /// script exists, runs its own `--update-version` mode right here on the server to populate
-    /// <see cref="UpgradePath.LatestVersion"/> — no second AI call, ever, just to learn a version
-    /// number.
+    /// upgrade script in one step (see <see cref="AiUpgradePathResearchClient"/>), and stores it
+    /// unsigned. Its `--update-version` mode is not run here: the script is unreviewed, and running
+    /// it on the server would hand whatever steered the model the server's own secrets
+    /// (htw-secops/kintsugi#8). <see cref="UpgradePath.LatestVersion"/> is filled in when a human
+    /// signs it — <c>SignUpgradePathScriptCommandHandler</c> runs the check then.
     /// </summary>
     private async Task<ResearchApplicationUpgradePathResult> GenerateScriptViaAiAsync(ResearchApplicationUpgradePathCommand request, CancellationToken cancellationToken)
     {
@@ -235,27 +242,66 @@ public class ResearchApplicationUpgradePathCommandHandler : IRequestHandler<Rese
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
+            // AiBudgetReachedException lands here too: the client refuses before any AI call is
+            // made, and a refusal must leave the row exactly as it was — see KeepExistingScriptAsync.
             var note = $"Could not generate an upgrade script — {ex.Message}";
+            var kept = await KeepExistingScriptAsync(request, note, cancellationToken);
+            if (kept is not null)
+            {
+                return kept;
+            }
+
             var failedEntity = await UpsertAsync(request.ApplicationName, request.Platform, UpgradePathStatus.Failed, null, UpgradeMethod.Unknown, null, null, null, null, note, null, request.ApplicationIdentifier, cancellationToken);
             return ToResult(failedEntity, Skipped: false, note);
         }
 
-        // The version shown in the table comes from actually running the script's own
-        // --update-version mode, not from anything the AI said — that's the whole point of the
-        // redesign. Best-effort: a failure here just leaves LatestVersion unset for now, rather
-        // than demoting an otherwise-successfully-generated script to Failed.
-        string? latestVersion = null;
-        if (result.Status == UpgradePathStatus.Found && result.Script is not null && !string.IsNullOrWhiteSpace(request.ApplicationIdentifier))
+        // An answer with no script is not a reason to throw away one that exists: "the AI could not
+        // find a method this time" says nothing about whether the reviewed script still works.
+        if (result.Status != UpgradePathStatus.Found || result.Script is null)
         {
-            latestVersion = await _researchClient.CheckScriptVersionAsync(result.Script, request.Platform, request.ApplicationName, request.ApplicationIdentifier, cancellationToken);
+            var kept = await KeepExistingScriptAsync(
+                request, $"No new upgrade script was produced — {result.Notes ?? "the AI found no reliable method"}", cancellationToken);
+            if (kept is not null)
+            {
+                return kept;
+            }
         }
 
+        // LatestVersion stays empty until a human signs the script: the version shown still comes
+        // from running the script's own --update-version, never from anything the AI said, but only
+        // once someone has read it (see this method's summary).
         var entity = await UpsertAsync(
-            request.ApplicationName, request.Platform, result.Status, latestVersion,
+            request.ApplicationName, request.Platform, result.Status, latestVersion: null,
             result.Status == UpgradePathStatus.Found ? UpgradeMethod.Script : UpgradeMethod.Unknown,
             null, null, null, null, result.Notes, result.Script, request.ApplicationIdentifier, cancellationToken);
 
         return ToResult(entity, Skipped: false, result.Notes);
+    }
+
+    /// <summary>
+    /// When the row already holds a resolved script, reports <paramref name="note"/> against it and
+    /// changes nothing; otherwise null, and the caller records the failure as it always has.
+    /// </summary>
+    /// <remarks>
+    /// A per-application Refresh is a force-recheck of a row that is normally Found, and often
+    /// carries a script a human has reviewed and signed — content agents are running. Writing a
+    /// Failed or NotFound outcome over it (Update replaces Script, and SetSignatures clears the
+    /// signature) deleted that script whenever the call failed or was refused, the AI budget's stop
+    /// included: pressing Refresh once the month's limit was reached cost the application its
+    /// working upgrade path. Nothing is saved here, so the row — script, signature, notes, version —
+    /// is exactly what it was, and the note reaches the screen through the result only. A successful
+    /// generation still replaces the script, unsigned, which is the review-before-run contract.
+    /// </remarks>
+    private async Task<ResearchApplicationUpgradePathResult?> KeepExistingScriptAsync(
+        ResearchApplicationUpgradePathCommand request, string note, CancellationToken cancellationToken)
+    {
+        var existing = await _upgradePathRepository.GetAsync(request.ApplicationName, request.Platform, cancellationToken);
+        if (existing is null || existing.Status != UpgradePathStatus.Found || existing.Script is null)
+        {
+            return null;
+        }
+
+        return ToResult(existing, Skipped: false, $"{note.TrimEnd().TrimEnd('.')}. The existing script was kept unchanged.");
     }
 
     private async Task<UpgradePath> UpsertAsync(

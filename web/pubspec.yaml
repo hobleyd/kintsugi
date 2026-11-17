@@ -47,6 +47,11 @@ dependencies:
 
   intl: ^0.20.2
 
+  # SHA-256 of the script the reviewer was shown, sent with "Sign Script" so the server signs only
+  # those exact bytes (see instructions_panel_bloc.dart and SignUpgradePathScriptCommandHandler).
+  # Already in the lock as a transitive dependency; declared because lib/ now imports it.
+  crypto: ^3.0.6
+
   # Not used directly anywhere in lib/. It is here because Flutter's own text-selection controls
   # reference CupertinoIcons, so every build of a page containing a TextField warns that it cannot
   # find that font family without it — and this app is mostly forms.
@@ -57,6 +62,7 @@ dependencies:
   # as a transitive dependency of the framework, since this app does import it itself.
   web: ^1.1.1
   xterm: ^4.0.0
+  pdf: ^3.13.1
 
 dev_dependencies:
   flutter_test:

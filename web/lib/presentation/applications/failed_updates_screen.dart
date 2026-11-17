@@ -70,6 +70,12 @@ class _FailedUpdatesView extends StatelessWidget {
               'somebody reviews and signs it, so no host runs it before then.',
             ),
             HintText(
+              'A row tagged "OS update" is the operating system itself failing to update (Windows Update, '
+              'macOS software update, or the Linux package manager), not an application. There is no '
+              'script to repair, so expanding it says why it failed and what to do instead. Use '
+              '"Operating system updates" in the filter above the table to see only those.',
+            ),
+            HintText(
               'A row clears itself when that host next reports the application patched successfully. '
               '"Dismiss" is for the ones that cannot recur — a rebuilt host, an application since '
               'uninstalled — and it sits inside the expanded row, under the output, so it takes '
@@ -181,6 +187,20 @@ class _FailuresTable extends StatelessWidget {
           toolbar: Row(
             children: [
               const Expanded(child: HintText('Search and filter from the column headers below.')),
+              // Between the hint and Clear Filters: the one filter that is not a column, because
+              // "is this the operating system or an application" is a different question from any
+              // column's. It is how somebody finds why a host is not updating without reading rows.
+              SizedBox(
+                width: 250,
+                child: KintsugiDropdown<String>(
+                  value: state.filters.kindKey,
+                  items: failedUpdateKindOptions.keys.toList(),
+                  labelOf: (value) => failedUpdateKindOptions[value]!,
+                  onChanged: (value) =>
+                      bloc.add(FailedUpdatesFiltersChanged(state.filters.copyWith(kindKey: value))),
+                ),
+              ),
+              const SizedBox(width: 12),
               if (state.filters.isActive)
                 SecondaryButton(
                   label: 'Clear Filters',
@@ -230,9 +250,11 @@ class _FailuresTable extends StatelessWidget {
         children: [
           IconActionButton(
             icon: expanded ? Icons.expand_less : Icons.expand_more,
-            tooltip: failure.canFix
-                ? 'Repair this script'
-                : 'Show the failure (no stored script to repair)',
+            tooltip: failure.isOperatingSystemUpdate
+                ? 'Why this failed and what to do'
+                : failure.canFix
+                    ? 'Repair this script'
+                    : 'Show the failure (no stored script to repair)',
             onPressed: () => bloc.add(FailedUpdateRowExpansionToggled(failure.id)),
           ),
         ],
@@ -257,14 +279,35 @@ class _ApplicationCell extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Text(failure.applicationName),
-          const SizedBox(height: 2),
-          Text(
-            _firstLine(failure.details),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: AppTheme.mono(color: context.palette.muted, size: 11.5),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(child: Text(failure.title)),
+              // Says so on the row itself: "Windows" under Application does not tell a reader it is
+              // the operating system and not a program of that name.
+              if (failure.isOperatingSystemUpdate) ...[
+                const SizedBox(width: 8),
+                const StatusChip('OS update', statusKey: 'os-update'),
+              ],
+            ],
           ),
+          const SizedBox(height: 2),
+          // For an operating system update, the reason in plain words rather than the installer's
+          // first line of output, which is rarely the one that says what happened.
+          if (failure.causeTitle case final cause?)
+            Text(
+              cause,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(color: context.palette.neon),
+            )
+          else
+            Text(
+              _firstLine(failure.details),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppTheme.mono(color: context.palette.muted, size: 11.5),
+            ),
         ],
       );
 
@@ -334,6 +377,10 @@ class _FixPanel extends StatelessWidget {
   Widget build(BuildContext context) => Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          if (failure.isOperatingSystemUpdate) ...[
+            _OsFailureWhy(failure: failure),
+            const SizedBox(height: 16),
+          ],
           _FailureDetails(failure: failure, dismissing: dismissing),
           const SizedBox(height: 20),
           if (failure.canFix && failure.isPackageManagerManaged)
@@ -366,13 +413,58 @@ class _FixPanel extends StatelessWidget {
                   .read<FailedUpdatesBloc>()
                   .add(FailedUpdateScriptSigned(failure.id, outcome)),
             )
-          else
+          else if (!failure.isOperatingSystemUpdate)
             const AlertBox.info(
               'There is no stored upgrade script for this application any more, so there is nothing '
               'to repair here. Research a path for it on the Currently Installed screen first.',
             ),
         ],
       );
+}
+
+/// Why an operating system update failed and what to do, above the raw output. The reason is read
+/// from that output by the server, so the same wording reaches every screen that shows the failure.
+class _OsFailureWhy extends StatelessWidget {
+  const _OsFailureWhy({required this.failure});
+
+  final PatchFailure failure;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    final style = Theme.of(context).textTheme.bodyMedium;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: palette.accentWash(0.06),
+        border: Border.all(color: palette.neon),
+        borderRadius: BorderRadius.circular(3),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SubHeadingTight('Why ${failure.title} failed on ${failure.hostname}'),
+          const SizedBox(height: 6),
+          Text(
+            failure.causeTitle ?? 'The update ran and failed',
+            style: style?.copyWith(fontWeight: FontWeight.w700, color: palette.neon),
+          ),
+          if (failure.causeExplanation case final explanation?) ...[
+            const SizedBox(height: 4),
+            Text(explanation, style: style),
+          ],
+          if (failure.suggestedFix case final fix?) ...[
+            const SizedBox(height: 10),
+            const SubHeadingTight('What to do'),
+            const SizedBox(height: 4),
+            Text(fix, style: style),
+          ],
+        ],
+      ),
+    );
+  }
 }
 
 class _FailureDetails extends StatelessWidget {

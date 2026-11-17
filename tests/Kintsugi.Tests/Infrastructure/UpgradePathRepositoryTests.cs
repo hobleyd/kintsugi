@@ -226,6 +226,67 @@ public class UpgradePathRepositoryTests
         Assert.Equal("Firefox", result[0].ApplicationName);
     }
 
+    // What this returns is what an agent is told to patch, so leaving a marked application out is
+    // what makes "another tool patches it" true on the host.
+    [Fact]
+    public async Task GetStatusesAsync_LeavesOutAnApplicationAnotherToolPatches()
+    {
+        await using var context = CreateContext();
+        var host = new Host("host-1", "SERIAL-1", "macOS 15.0");
+        context.Hosts.Add(host);
+        context.InstalledApplications.Add(new InstalledApplication(host.Id, "Firefox", "128.0"));
+        context.InstalledApplications.Add(new InstalledApplication(host.Id, "Falcon Sensor", "7.0"));
+        context.UpgradePaths.Add(UpgradePath.Create("Firefox", "macOS", UpgradePathStatus.Found, "129.0", UpgradeMethod.Script, null, null, null, null, null));
+        context.UpgradePaths.Add(UpgradePath.Create("Falcon Sensor", "macOS", UpgradePathStatus.Found, "7.1", UpgradeMethod.Script, null, null, null, null, null));
+        context.ManagedApplications.Add(ManagedApplication.Create("falcon sensor", "CrowdStrike"));
+        await context.SaveChangesAsync();
+        var repository = new UpgradePathRepository(context);
+
+        var result = await repository.GetStatusesAsync("SERIAL-1", CancellationToken.None);
+
+        Assert.Equal("Firefox", Assert.Single(result).ApplicationName);
+    }
+
+    [Fact]
+    public async Task GetStatusesAsync_GivesTheApplicationBackOnceItIsNoLongerMarked()
+    {
+        await using var context = CreateContext();
+        var host = new Host("host-1", "SERIAL-1", "macOS 15.0");
+        context.Hosts.Add(host);
+        context.InstalledApplications.Add(new InstalledApplication(host.Id, "Falcon Sensor", "7.0"));
+        context.UpgradePaths.Add(UpgradePath.Create("Falcon Sensor", "macOS", UpgradePathStatus.Found, "7.1", UpgradeMethod.Script, null, null, null, null, null));
+        var marked = ManagedApplication.Create("Falcon Sensor", "CrowdStrike");
+        context.ManagedApplications.Add(marked);
+        await context.SaveChangesAsync();
+        var repository = new UpgradePathRepository(context);
+        Assert.Empty(await repository.GetStatusesAsync("SERIAL-1", CancellationToken.None));
+
+        context.ManagedApplications.Remove(marked);
+        await context.SaveChangesAsync();
+
+        Assert.Single(await repository.GetStatusesAsync("SERIAL-1", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task GetInstallationPatchStatusesAsync_GivesAMarkedApplicationNoVerdict_SoItIsNotCountedAsWaitingForAnUpdate()
+    {
+        await using var context = CreateContext();
+        var host = new Host("host-1", "SERIAL-1", "macOS 15.0");
+        context.Hosts.Add(host);
+        context.InstalledApplications.Add(new InstalledApplication(host.Id, "Firefox", "128.0"));
+        context.InstalledApplications.Add(new InstalledApplication(host.Id, "Falcon Sensor", "7.0"));
+        context.UpgradePaths.Add(UpgradePath.Create("Firefox", "macOS", UpgradePathStatus.Found, "129.0", UpgradeMethod.Script, null, null, null, null, null));
+        context.UpgradePaths.Add(UpgradePath.Create("Falcon Sensor", "macOS", UpgradePathStatus.Found, "7.1", UpgradeMethod.Script, null, null, null, null, null));
+        context.ManagedApplications.Add(ManagedApplication.Create("Falcon Sensor", "CrowdStrike"));
+        await context.SaveChangesAsync();
+        var repository = new UpgradePathRepository(context);
+
+        var statuses = await repository.GetInstallationPatchStatusesAsync(CancellationToken.None);
+
+        Assert.True(statuses.Single(s => s.ApplicationName == "Firefox").UpdateAvailable);
+        Assert.Null(statuses.Single(s => s.ApplicationName == "Falcon Sensor").UpdateAvailable);
+    }
+
     [Fact]
     public async Task GetStatusesAsync_ReportsUpdateAvailable_WhenTheLatestVersionIsNewer()
     {

@@ -11,17 +11,20 @@ public class GetHostsQueryHandler : IRequestHandler<GetHostsQuery, IReadOnlyList
     private readonly IUpgradePathRepository _upgradePathRepository;
     private readonly IVulnerabilityRepository _vulnerabilityRepository;
     private readonly IInstalledPackageRepository _installedPackageRepository;
+    private readonly IAgentPackageRepository _agentPackageRepository;
 
     public GetHostsQueryHandler(
         IHostRepository hostRepository,
         IUpgradePathRepository upgradePathRepository,
         IVulnerabilityRepository vulnerabilityRepository,
-        IInstalledPackageRepository installedPackageRepository)
+        IInstalledPackageRepository installedPackageRepository,
+        IAgentPackageRepository agentPackageRepository)
     {
         _hostRepository = hostRepository;
         _upgradePathRepository = upgradePathRepository;
         _vulnerabilityRepository = vulnerabilityRepository;
         _installedPackageRepository = installedPackageRepository;
+        _agentPackageRepository = agentPackageRepository;
     }
 
     public async Task<IReadOnlyList<HostDto>> Handle(GetHostsQuery request, CancellationToken cancellationToken)
@@ -42,12 +45,25 @@ public class GetHostsQueryHandler : IRequestHandler<GetHostsQuery, IReadOnlyList
         AddOperatingSystemCveCounts(hosts, osCveMatches, unpatched, patched);
         await AddPackageCveCountsAsync(hosts, packageCveMatches, unpatched, patched, cancellationToken);
 
+        // One read of the newest package per platform, then a comparison per host — see
+        // AgentVersionDrift for why it is per platform and where "not updating" comes from.
+        var latestByPlatform = (await _agentPackageRepository.GetLatestPerPlatformAsync(cancellationToken)
+                ?? Array.Empty<AgentPackage>())
+            .ToDictionary(p => p.Platform, p => new PublishedAgent(p.Version, p.CreatedAtUtc), StringComparer.OrdinalIgnoreCase);
+        var now = DateTimeOffset.UtcNow;
+
         return hosts
-            .Select(host => HostDto.FromEntity(
-                host,
-                appUpdateCounts.GetValueOrDefault(host.Id),
-                unpatched.GetValueOrDefault(host.Id)?.Count ?? 0,
-                patched.GetValueOrDefault(host.Id)?.Count ?? 0))
+            .Select(host =>
+            {
+                var (agentState, latestAgent) = AgentVersionDrift.Evaluate(host, latestByPlatform, now);
+                return HostDto.FromEntity(
+                    host,
+                    appUpdateCounts.GetValueOrDefault(host.Id),
+                    unpatched.GetValueOrDefault(host.Id)?.Count ?? 0,
+                    patched.GetValueOrDefault(host.Id)?.Count ?? 0,
+                    latestAgent,
+                    agentState);
+            })
             .ToList();
     }
 

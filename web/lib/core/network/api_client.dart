@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
@@ -45,9 +46,44 @@ class ApiClient {
   /// most of this app's deletes answer 204 and a caller that ignored a null would read the same
   /// either way — but the assessment cancel answers 202 with the run's new status, and throwing
   /// that away would make the screen wait a poll interval to learn what it had just been told.
-  Future<Object?> deleteJson(String path) => _send('DELETE', path);
+  Future<Object?> deleteJson(String path, {Map<String, String?>? query}) =>
+      _send('DELETE', path, query: query);
+
+  /// A GET whose answer is a file rather than JSON (the collected-log zip). The same 401 and 403
+  /// announcements and the same error messages as every other call, because it goes through the same
+  /// [_request]; only the success path differs.
+  Future<Uint8List> getBytes(String path, {Map<String, String?>? query}) async {
+    final response = await _request('GET', path, query: query, accept: '*/*');
+    return response.bodyBytes;
+  }
 
   Future<Object?> _send(String method, String path, {Object? body, Map<String, String?>? query}) async {
+    final response = await _request(method, path, body: body, query: query);
+
+    if (response.body.isEmpty) return null;
+
+    // A non-JSON body on a 2xx is almost always an nginx or proxy page rather than anything the
+    // API returned — reported as such, because letting a jsonDecode failure bubble up presents a
+    // parser error where the real answer is "something in front of the API answered this".
+    if (!_isJson(response)) {
+      throw ApiException(
+        'The server answered $method $path with ${response.headers['content-type'] ?? 'no content type'} '
+        'rather than JSON. Something in front of the API is most likely answering instead of it.',
+        statusCode: response.statusCode,
+      );
+    }
+
+    return jsonDecode(utf8.decode(response.bodyBytes));
+  }
+
+  /// Sends the request and returns the response if it was a 2xx; raises otherwise.
+  Future<http.Response> _request(
+    String method,
+    String path, {
+    Object? body,
+    Map<String, String?>? query,
+    String accept = 'application/json',
+  }) async {
     final uri = Uri.parse(path).replace(
       queryParameters: query == null
           ? null
@@ -58,7 +94,7 @@ class ApiClient {
     );
 
     final request = http.Request(method, uri)
-      ..headers['Accept'] = 'application/json';
+      ..headers['Accept'] = accept;
     if (body != null) {
       request.headers['Content-Type'] = 'application/json';
       request.body = jsonEncode(body);
@@ -101,20 +137,7 @@ class ApiClient {
       );
     }
 
-    if (response.body.isEmpty) return null;
-
-    // A non-JSON body on a 2xx is almost always an nginx or proxy page rather than anything the
-    // API returned — reported as such, because letting a jsonDecode failure bubble up presents a
-    // parser error where the real answer is "something in front of the API answered this".
-    if (!_isJson(response)) {
-      throw ApiException(
-        'The server answered $method $path with ${response.headers['content-type'] ?? 'no content type'} '
-        'rather than JSON. Something in front of the API is most likely answering instead of it.',
-        statusCode: response.statusCode,
-      );
-    }
-
-    return jsonDecode(utf8.decode(response.bodyBytes));
+    return response;
   }
 
   static bool _isJson(http.Response response) =>

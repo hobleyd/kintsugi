@@ -1194,13 +1194,14 @@ dependencies = [
 
 [[package]]
 name = "kintsugi-agent"
-version = "0.17.3"
+version = "0.17.8"
 dependencies = [
  "anyhow",
  "base64",
  "block2",
  "dispatch",
  "dispatch2",
+ "flate2",
  "gethostname",
  "image",
  "libc",

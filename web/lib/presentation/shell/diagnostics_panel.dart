@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/diagnostics/diagnostics_log.dart';
+import '../../core/router/app_router.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/theme/kintsugi_palette.dart';
 
@@ -131,6 +132,15 @@ class _Header extends StatelessWidget {
               style: AppTheme.display(color: palette.neon, size: 11.5, letterSpacing: 1.38),
             ),
           ),
+          // Null off the app, where there is no router to go to; a button that does nothing is not
+          // shown, the way the panel's lines are not drawn as links there.
+          if (GoRouter.maybeOf(context) case final router?)
+            IconButton(
+              icon: const Icon(Icons.open_in_full, size: 16),
+              color: palette.muted,
+              tooltip: 'Open on its own page, to search, copy and export',
+              onPressed: () => router.go(Routes.diagnostics),
+            ),
           if (!log.isEmpty)
             IconButton(
               icon: const Icon(Icons.delete_sweep_outlined, size: 17),
@@ -220,18 +230,25 @@ class _EntryCard extends StatelessWidget {
             const SizedBox(height: 6),
             Text(summary, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: color)),
           ],
-          if (entry.lines.isNotEmpty) ...[
+          if (entry.lines.any((line) => !line.quiet)) ...[
             const SizedBox(height: 8),
             // Monospace and one line per item, because that is what the producer meant by a list:
             // these are rows of a report, not prose, and they are read by scanning down them and
             // usually copied out. The app-wide SelectionArea in `main.dart` already covers this,
             // so nothing here adds one — nesting them misbehaves.
-            for (final line in entry.lines)
+            for (final line in entry.lines.where((line) => !line.quiet))
               Padding(
                 padding: const EdgeInsets.only(bottom: 3),
                 child: _Line(line: line),
               ),
           ],
+          // The rows with nothing to say for themselves are on the page, not here: the panel is a
+          // strip beside another screen, for the few lines that need reading.
+          if (entry.lines.where((line) => line.quiet).length case final routine when routine > 0)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: _RoutineRows(count: routine),
+            ),
         ],
       ),
     );
@@ -287,6 +304,34 @@ class _LineState extends State<_Line> {
         onTap: () => router.go(target),
         child: Semantics(button: true, label: widget.line.text, child: text),
       ),
+    );
+  }
+}
+
+/// "N more rows are on the Diagnostics page" — the rows that succeeded or were skipped, which have
+/// no line of their own here. A link where there is a router to go to, plain text where not, for the
+/// reason [_Line] states.
+class _RoutineRows extends StatelessWidget {
+  const _RoutineRows({required this.count});
+
+  final int count;
+
+  @override
+  Widget build(BuildContext context) {
+    final palette = context.palette;
+    final router = GoRouter.maybeOf(context);
+    final text = Text(
+      '+ $count more row${count == 1 ? '' : 's'} without a note, on the Diagnostics page',
+      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+            color: router == null ? palette.muted : palette.neonDim,
+            decoration: router == null ? null : TextDecoration.underline,
+            decorationColor: palette.neonDim,
+          ),
+    );
+    if (router == null) return text;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(onTap: () => router.go(Routes.diagnostics), child: text),
     );
   }
 }

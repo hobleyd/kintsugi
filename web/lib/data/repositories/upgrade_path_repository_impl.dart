@@ -42,6 +42,15 @@ class UpgradePathRepositoryImpl implements UpgradePathRepository {
       );
 
   @override
+  Future<RunResults> scanResults() async =>
+      runResultsFromJson(await _api.getJson('/api/upgrade-paths/scan-results') as Map<String, dynamic>);
+
+  @override
+  Future<RunResults> updateCheckResults() async => runResultsFromJson(
+        await _api.getJson('/api/upgrade-paths/check-updates-results') as Map<String, dynamic>,
+      );
+
+  @override
   Future<UpdateCheckResult> checkUpdate({
     required String applicationName,
     required String platform,
@@ -105,12 +114,14 @@ class UpgradePathRepositoryImpl implements UpgradePathRepository {
   Future<UpgradePathResult> signScript({
     required String applicationName,
     required String platform,
+    required String scriptSha256,
     String? patchFailureId,
   }) async =>
       upgradePathResultFromJson(
         await _api.postJson('/api/upgrade-paths/sign-script', body: {
           'applicationName': applicationName,
           'platform': platform,
+          'scriptSha256': scriptSha256,
           'patchFailureId': patchFailureId,
         }) as Map<String, dynamic>,
       );

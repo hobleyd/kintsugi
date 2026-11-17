@@ -36,4 +36,11 @@ PatchFailure patchFailureFromJson(Map<String, dynamic> json) => PatchFailure(
       // server's response usable rather than greying out every fix button.
       canFix: json['canFix'] as bool? ??
           (json['platform'] != null && (json['hasScript'] as bool? ?? false)),
+      // The server recognises an operating system update and says why it failed; an older server
+      // sends none of these and the row reads as an ordinary failure.
+      isOperatingSystemUpdate: json['isOperatingSystemUpdate'] as bool? ?? false,
+      displayName: json['displayName'] as String?,
+      causeTitle: json['causeTitle'] as String?,
+      causeExplanation: json['causeExplanation'] as String?,
+      suggestedFix: json['suggestedFix'] as String?,
     );

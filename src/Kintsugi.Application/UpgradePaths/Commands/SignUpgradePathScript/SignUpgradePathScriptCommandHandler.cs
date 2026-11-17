@@ -31,12 +31,37 @@ public class SignUpgradePathScriptCommandHandler : IRequestHandler<SignUpgradePa
 
     public async Task<UpgradePathResultDto> Handle(SignUpgradePathScriptCommand request, CancellationToken cancellationToken)
     {
+        // No hash, no signature. There is deliberately no fallback to "sign whatever is stored": that
+        // fallback is exactly the bug this parameter exists to close (see the check below), and a
+        // client old enough not to send one is a client whose review cannot be tied to any bytes.
+        if (string.IsNullOrWhiteSpace(request.ExpectedScriptSha256))
+        {
+            throw new DomainException(
+                "A signature must name the script that was reviewed: expectedScriptSha256 is required. Reload the page and try again.");
+        }
+
         var existing = await _upgradePathRepository.GetAsync(request.ApplicationName, request.Platform, cancellationToken)
             ?? throw new NotFoundException($"No upgrade path found for '{request.ApplicationName}' on '{request.Platform}'.");
 
         if (existing.Script is null)
         {
             throw new DomainException($"'{request.ApplicationName}' on '{request.Platform}' has no script to sign.");
+        }
+
+        // The review is bound to bytes, not to a row. Between the panel showing a script and the
+        // reviewer pressing Sign, another administrator can save over it or "Send to AI" can replace
+        // it — and the row's (application, platform) key still matches, so without this the
+        // signature would vouch for a script nobody on this screen read. The client hashes exactly the
+        // text it displayed (instructions_panel_bloc.dart), and the comparison is over the same UTF-8
+        // bytes Sign and the approval corpus use, so a line-ending-only or invisible-character change
+        // is a mismatch too. A conflict rather than a 400: the request was right when it was made.
+        var storedHash = ScriptContentHash.Of(existing.Script);
+        if (!string.Equals(storedHash, request.ExpectedScriptSha256.Trim(), StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ConflictException(
+                $"The stored script for '{request.ApplicationName}' on '{request.Platform}' is not the one you reviewed - " +
+                "it was changed after it was shown to you (another save, or an AI run). Nothing was signed. " +
+                "Reopen the row and review the current script.");
         }
 
         // Signed here, right before the save that makes this signature reachable by an agent at
@@ -65,7 +90,7 @@ public class SignUpgradePathScriptCommandHandler : IRequestHandler<SignUpgradePa
         if (!string.IsNullOrWhiteSpace(existing.ApplicationIdentifier))
         {
             var latestVersion = await _researchClient.CheckScriptVersionAsync(
-                existing.Script, existing.Platform, existing.ApplicationName, existing.ApplicationIdentifier, cancellationToken);
+                existing.Script, signature, existing.Platform,existing.ApplicationName, existing.ApplicationIdentifier, cancellationToken);
             existing.UpdateDiscoveredLatestVersion(latestVersion);
         }
 

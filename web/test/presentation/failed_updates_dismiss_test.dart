@@ -103,6 +103,9 @@ void main() {
     expect(button.top, greaterThan(output.bottom));
     expect(button.right, closeTo(tester.getRect(find.byType(FailedUpdatesScreen)).right, 60));
 
+    // The page is longer than the 900px window now, so scroll to the button as a person would.
+    await tester.ensureVisible(dismiss);
+    await tester.pumpAndSettle();
     await tester.tap(dismiss);
     await tester.pumpAndSettle();
     expect(repository.dismissed, ['f1']);

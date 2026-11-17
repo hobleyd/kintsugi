@@ -99,4 +99,17 @@ public class ArtifactSigningServiceTests : IDisposable
 
         Assert.Equal(firstKey, secondKey);
     }
+
+    [Fact]
+    public void Verify_AcceptsOnlyItsOwnSignatureOverTheExactBytes()
+    {
+        var service = CreateService();
+        const string script = "#!/bin/sh\necho hello\n";
+        var signature = service.Sign(script)!;
+
+        Assert.True(service.Verify(script, signature));
+        Assert.False(service.Verify(script + " ", signature));
+        Assert.False(service.Verify(script, "not base64 at all"));
+        Assert.False(service.Verify(script, Convert.ToBase64String(new byte[] { 1, 2, 3 })));
+    }
 }

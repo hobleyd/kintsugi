@@ -197,4 +197,28 @@ public class CreateHostCommandHandlerTests
         Assert.Equal("new-name", existing.Hostname);
         _hostRepository.Verify(r => r.DeleteAsync(removed, It.IsAny<CancellationToken>()), Times.Once);
     }
+
+    [Fact]
+    public async Task Handle_RecordsARestartTheNewHostReports()
+    {
+        _hostRepository.Setup(r => r.GetBySerialNumberAsync("SERIAL-1", It.IsAny<CancellationToken>())).ReturnsAsync((Host?)null);
+
+        var result = await CreateHandler().Handle(
+            new CreateHostCommand("host-1", "SERIAL-1", RestartRequired: true, RestartBecause: "linux-base"), CancellationToken.None);
+
+        Assert.Equal("linux-base", result.Host.RestartRequiredBecause);
+        Assert.NotNull(result.Host.RestartRequiredSinceUtc);
+    }
+
+    [Fact]
+    public async Task Handle_ClearsTheRestartWhenAnExistingHostReportsItNoLongerNeedsOne()
+    {
+        var existing = new Host("host-1", "SERIAL-1");
+        existing.RecordRestartState(true, "linux-base", DateTimeOffset.UtcNow.AddDays(-1));
+        _hostRepository.Setup(r => r.GetBySerialNumberAsync("SERIAL-1", It.IsAny<CancellationToken>())).ReturnsAsync(existing);
+
+        await CreateHandler().Handle(new CreateHostCommand("host-1", "SERIAL-1", RestartRequired: false), CancellationToken.None);
+
+        Assert.Null(existing.RestartRequiredSinceUtc);
+    }
 }

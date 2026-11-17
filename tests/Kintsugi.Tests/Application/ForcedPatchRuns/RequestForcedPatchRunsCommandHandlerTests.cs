@@ -1,4 +1,5 @@
 using Moq;
+using Kintsugi.Application.HostActivity;
 using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Application.ForcedPatchRuns.Commands.RequestForcedPatchRuns;
 using Kintsugi.Domain.Entities;
@@ -22,7 +23,7 @@ public class RequestForcedPatchRunsCommandHandlerTests
     }
 
     private RequestForcedPatchRunsCommandHandler CreateHandler() =>
-        new(_hostRepository.Object, _forcedPatchRunRepository.Object, _unitOfWork.Object);
+        new(_hostRepository.Object, _forcedPatchRunRepository.Object, _unitOfWork.Object, new Mock<IHostEventRecorder>().Object);
 
     private static RequestForcedPatchRunsCommand Command(params string[] hostNames) =>
         new("Firefox", "macOS", hostNames);

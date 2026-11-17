@@ -27,7 +27,10 @@ namespace Kintsugi.Application.ForcedPatchRuns.Commands.RequestForcedPatchRuns;
 /// see <see cref="RequestForcedPatchRunsResult"/>.
 /// </para>
 /// </remarks>
+/// <param name="RequestedBy">The signed-in administrator, set by the controller from the session
+/// (it replaces anything sent in the body) and recorded on the host's activity timeline.</param>
 public record RequestForcedPatchRunsCommand(
     string ApplicationName,
     string Platform,
-    IReadOnlyList<string> HostNames) : IRequest<RequestForcedPatchRunsResult>;
+    IReadOnlyList<string> HostNames,
+    string? RequestedBy = null) : IRequest<RequestForcedPatchRunsResult>;

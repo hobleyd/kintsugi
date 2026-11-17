@@ -12,4 +12,5 @@ public record UpgradePathScanStatusDto(
     DateTimeOffset? StartedUtc,
     DateTimeOffset? CompletedUtc,
     string? FaultReason,
-    IReadOnlyList<string> Notes);
+    IReadOnlyList<string> Notes,
+    string? AiBudgetMessage = null);

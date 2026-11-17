@@ -34,6 +34,46 @@ class HostsScreen extends StatelessWidget {
       );
 }
 
+/// How many hosts are behind the newest agent for their platform, and a way to see them.
+///
+/// Silent when none is, rather than a green "all current" bar on every visit: the Hosts screen is
+/// opened for everything else, and a banner that is there when nothing is wrong teaches people to
+/// stop reading it. Red when some are probably stuck, because that is the one that needs somebody.
+class _AgentDriftBanner extends StatelessWidget {
+  const _AgentDriftBanner({required this.state});
+
+  final HostsState state;
+
+  @override
+  Widget build(BuildContext context) {
+    final bloc = context.read<HostsBloc>();
+    final stuck = state.stuckCount;
+    final behind = state.behindCount;
+    if (behind == 0) return const SizedBox.shrink();
+
+    final text = stuck > 0
+        ? '$stuck host${stuck == 1 ? ' is' : 's are'} online but still on an old agent, a day or more '
+            'after the new one was published. The automatic update is probably failing there.'
+        : '$behind host${behind == 1 ? ' is' : 's are'} behind the latest agent. Online ones update '
+            'themselves at their next hourly check-in, so this usually clears on its own.';
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(child: stuck > 0 ? AlertBox.error(text) : AlertBox.info(text)),
+          const SizedBox(width: 12),
+          SecondaryButton(
+            label: 'Show them',
+            onPressed: () => bloc.add(HostsAgentFilterChanged(stuck > 0 ? 'stuck' : 'behind')),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _HostsView extends StatelessWidget {
   const _HostsView();
 
@@ -102,6 +142,7 @@ class _HostsView extends StatelessWidget {
       children: [
         if (state.error != null) AlertBox.error(state.error!),
         if (state.notice != null) AlertBox.success(state.notice!),
+        _AgentDriftBanner(state: state),
         if (state.loading && state.hosts.isEmpty)
           const _Loading()
         else if (state.hosts.isEmpty)
@@ -116,6 +157,22 @@ class _HostsView extends StatelessWidget {
           KintsugiTable(
             columns: columns,
             minWidth: 1440,
+            // Not a column filter: "is this host's agent behind" is a different question from any
+            // one column's, the same reason Failed Updates has its Type filter up here.
+            toolbar: Row(
+              children: [
+                const Expanded(child: HintText('Search from the Hostname header below.')),
+                SizedBox(
+                  width: 230,
+                  child: KintsugiDropdown<String>(
+                    value: state.agentFilter,
+                    items: hostsAgentFilterOptions.keys.toList(),
+                    labelOf: (value) => 'Agent: ${hostsAgentFilterOptions[value]!}',
+                    onChanged: (value) => bloc.add(HostsAgentFilterChanged(value)),
+                  ),
+                ),
+              ],
+            ),
             rows: [
               for (final host in visible) KintsugiTableRow(cells: _cells(context, host, state)),
             ],
@@ -131,7 +188,8 @@ class _HostsView extends StatelessWidget {
   }
 
   static List<Widget> _cells(BuildContext context, HostSummary host, HostsState state) => [
-        Text(host.hostname),
+        // The host's activity page: timeline, pending updates and install logs.
+        LinkText(label: host.hostname, onTap: () => context.go(Routes.hostActivity(host.id))),
         CodeText(host.serialNumber),
         host.operatingSystem == null ? const NoValue() : Text(host.operatingSystem!),
         _OsUpdateCell(host: host),
@@ -190,6 +248,31 @@ class _HostsView extends StatelessWidget {
               Padding(
                 padding: const EdgeInsets.only(top: 4),
                 child: HintText('(${host.agentVersion})'),
+              ),
+            // Only when it is behind. A host on the latest agent shows nothing extra, so the tag
+            // is a thing to notice rather than a column of "OK"s.
+            if (host.agentUpdateState.isBehind)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Tooltip(
+                  message: host.agentUpdateState == AgentUpdateState.notUpdating
+                      ? 'The latest agent for this host is ${host.latestAgentVersion ?? '?'}. It is online, '
+                          'and that version has been out for a day or more, so its automatic update is '
+                          'probably failing.'
+                      : host.status == HostStatus.offline
+                          ? 'The latest agent for this host is ${host.latestAgentVersion ?? '?'}. Offline '
+                              'hosts update when they next check in.'
+                          : 'The latest agent for this host is ${host.latestAgentVersion ?? '?'}. Hosts '
+                              'update themselves at their next hourly check-in.',
+                  child: StatusChip(
+                    host.agentUpdateState == AgentUpdateState.notUpdating
+                        ? 'Not updating · ${host.latestAgentVersion ?? '?'}'
+                        : 'Behind · ${host.latestAgentVersion ?? '?'}',
+                    statusKey: host.agentUpdateState == AgentUpdateState.notUpdating
+                        ? 'patch-failed'
+                        : 'update-available',
+                  ),
+                ),
               ),
           ],
         ),
@@ -280,6 +363,18 @@ class _OsUpdateCell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // A restart the host has asked for says more than "up to date": the updates are installed but
+    // not all in effect yet. It replaces the chip when nothing else is pending, and sits under it
+    // when an update is also waiting, so neither hides the other.
+    final restart = host.restartRequired
+        ? Tooltip(
+            message: host.restartRequiredBecause == null
+                ? 'Updates are installed. A restart finishes them.'
+                : 'Updates are installed. A restart finishes them: ${host.restartRequiredBecause}',
+            child: const StatusChip('Restart Needed', statusKey: 'update-available'),
+          )
+        : null;
+
     // Tri-state, and the third state is not a rounding of the other two: null means the host has
     // never reported an OS update check, which is different from being up to date.
     return switch (host.operatingSystemUpdateAvailable) {
@@ -292,10 +387,11 @@ class _OsUpdateCell extends StatelessWidget {
                 padding: const EdgeInsets.only(top: 4),
                 child: HintText(host.operatingSystemLatestVersion!),
               ),
+            if (restart != null) Padding(padding: const EdgeInsets.only(top: 4), child: restart),
           ],
         ),
-      false => const StatusChip('Up To Date', statusKey: 'up-to-date'),
-      null => const StatusChip('Not Checked', statusKey: 'unknown'),
+      false => restart ?? const StatusChip('Up To Date', statusKey: 'up-to-date'),
+      null => restart ?? const StatusChip('Not Checked', statusKey: 'unknown'),
     };
   }
 }

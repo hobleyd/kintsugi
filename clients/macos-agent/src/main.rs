@@ -2,8 +2,10 @@ mod checkin_schedule;
 mod config;
 mod dialogs;
 mod forced_patch_run;
+mod health;
 mod identity;
 mod input_injection;
+mod log_collection;
 mod logging;
 mod os_update;
 mod patch_cycle;
@@ -391,6 +393,9 @@ fn register_and_report(config: &Config, checkin_minute: u8) -> Result<CheckInOut
     } else {
         self_update::check_and_apply(&client, config, agent_identity.as_ref(), env!("CARGO_PKG_VERSION"));
     }
+
+    health::report_new_events(&client, config, &serial_number);
+    log_collection::collect_and_upload_if_requested(&client, config, &serial_number);
 
     prefetch_os_updates();
 

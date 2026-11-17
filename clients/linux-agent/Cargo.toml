@@ -1,6 +1,6 @@
 [package]
 name = "kintsugi-agent"
-version = "0.13.1"
+version = "0.13.9"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Background agent that registers this Linux host with the patching system's host inventory."
@@ -34,7 +34,7 @@ base64 = "0.22"
 # every Script/Command it's handed before ever executing one (p256) — see identity.rs.
 rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
-time = { version = "0.3", features = ["formatting", "macros"] }
+time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 # Verifying a downloaded self-update package's checksum. The macOS agent shells out to `shasum`,
 # which is part of the base system there; on Linux the equivalent (`sha256sum`, coreutils) is
 # almost always present but "almost" is doing real work in that sentence — a minimal container
@@ -42,6 +42,8 @@ time = { version = "0.3", features = ["formatting", "macros"] }
 # some hosts is exactly the failure this agent must not have. Hashing in-process removes the
 # question, the same call the Windows agent made about `certutil`.
 sha2 = "0.10"
+# Gzip for the log-collection upload (log_collection.rs). Pure-Rust backend, like the rest of the tree: no C library.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 # The notification-area icon. Not `tray-icon` (what the macOS agent uses): its Linux backend links
 # GTK 3 and libayatana-appindicator, which would make this single binary refuse to *start* on any

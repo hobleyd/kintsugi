@@ -114,6 +114,7 @@ public class OpenAiResponsesAdapter : IAiProtocolAdapter
         }
 
         var joined = string.Join("\n", text);
-        return new AiChatResult(joined, toolCalls, new AiChatMessage(AiChatRole.Assistant, joined, toolCalls, ProviderContent: output.DeepClone()));
+        return new AiChatResult(joined, toolCalls, new AiChatMessage(AiChatRole.Assistant, joined, toolCalls, ProviderContent: output.DeepClone()),
+            AiTokenUsage.Of(AiTokenUsage.Count(response["usage"]?["input_tokens"]), AiTokenUsage.Count(response["usage"]?["output_tokens"])));
     }
 }

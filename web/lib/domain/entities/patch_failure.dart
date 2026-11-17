@@ -28,6 +28,11 @@ class PatchFailure extends Equatable {
     required this.scriptSigned,
     required this.method,
     required this.canFix,
+    this.isOperatingSystemUpdate = false,
+    this.displayName,
+    this.causeTitle,
+    this.causeExplanation,
+    this.suggestedFix,
   });
 
   final String id;
@@ -64,6 +69,25 @@ class PatchFailure extends Equatable {
   /// cannot see — deriving it here would be a second copy free to disagree, exactly as with
   /// `UpgradePathSummary.statusKey`.
   final bool canFix;
+
+  /// Whether this is a failed operating system update (Windows Update, macOS `softwareupdate`, a
+  /// distribution's package manager) rather than an application. The three agents file those under
+  /// the names `Windows`, `macOS` and `Linux`; the server recognises them, so this client does not
+  /// keep a list of its own.
+  final bool isOperatingSystemUpdate;
+
+  /// "Windows Update" rather than a bare "Windows". Null for an application.
+  final String? displayName;
+
+  /// Why an operating system update failed, in a few words, read from the output by the server.
+  final String? causeTitle;
+  final String? causeExplanation;
+
+  /// What to do about it. Null for an application.
+  final String? suggestedFix;
+
+  /// What the row is called on screen.
+  String get title => displayName ?? applicationName;
 
   bool get isOutstanding => resolution == PatchFailureResolution.outstanding;
 

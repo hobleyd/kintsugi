@@ -11,10 +11,18 @@ public class PrepareUpgradePathScanQueryHandlerTests
 {
     private readonly Mock<IAiAgentSettingsRepository> _aiAgentSettingsRepository = new();
     private readonly Mock<IInstalledApplicationRepository> _installedApplicationRepository = new();
+    private readonly Mock<IManagedApplicationRepository> _managed = new();
+
+    public PrepareUpgradePathScanQueryHandlerTests()
+    {
+        // Nothing is marked as patched by another tool unless a test says so.
+        _managed.Setup(m => m.GetOwnersByNameAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
+    }
 
     // The real resolver over the mocked settings row, so these also cover what "configured" means.
     private PrepareUpgradePathScanQueryHandler CreateHandler() => new(
-        TestAiResolver.Over(_aiAgentSettingsRepository.Object), _installedApplicationRepository.Object);
+        TestAiResolver.Over(_aiAgentSettingsRepository.Object), _installedApplicationRepository.Object, _managed.Object);
 
     [Fact]
     public async Task Handle_WhenNoAiSettingsAreSaved_ReturnsAnUnconfiguredPlan_ButStillBuildsWorkItems()
@@ -201,6 +209,60 @@ public class PrepareUpgradePathScanQueryHandlerTests
         // winget addresses a package by id, not display name — losing this would make every winget
         // row's --appId the (wrong) display name.
         Assert.Equal("VideoLAN.VLC", Assert.Single(plan.WorkItems).ApplicationIdentifier);
+    }
+
+    // Marking an application as patched by another tool is what keeps it from being sent to the AI,
+    // which is where the money goes; the plan is the one place the scan, the single-row refresh and the
+    // prompt all draw their work from.
+    [Fact]
+    public async Task Handle_LeavesOutAnApplicationAnotherToolPatches_AndKeepsTheRest()
+    {
+        SetUpEnabledAiSettings();
+        _installedApplicationRepository.Setup(r => r.GetApplicationVersionVariantsAsync(It.IsAny<CancellationToken>())).ReturnsAsync(new[]
+        {
+            new ApplicationVersionVariantDto("Falcon Sensor", null, "macOS 15.0", "7.1"),
+            new ApplicationVersionVariantDto("Slack", null, "macOS 15.0", "4.38"),
+        });
+        _managed.Setup(m => m.GetOwnersByNameAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["Falcon Sensor"] = "CrowdStrike" });
+
+        var plan = await CreateHandler().Handle(new PrepareUpgradePathScanQuery(), CancellationToken.None);
+
+        Assert.Equal("Slack", Assert.Single(plan.WorkItems).ApplicationName);
+    }
+
+    [Fact]
+    public async Task Handle_LeavesOutAMarkedApplication_WhateverCaseTheAgentSpelledItIn()
+    {
+        SetUpEnabledAiSettings();
+        _installedApplicationRepository.Setup(r => r.GetApplicationVersionVariantsAsync(It.IsAny<CancellationToken>())).ReturnsAsync(new[]
+        {
+            new ApplicationVersionVariantDto("FALCON SENSOR", null, "macOS 15.0", "7.1"),
+        });
+        _managed.Setup(m => m.GetOwnersByNameAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["Falcon Sensor"] = "CrowdStrike" });
+
+        var plan = await CreateHandler().Handle(new PrepareUpgradePathScanQuery(), CancellationToken.None);
+
+        Assert.Empty(plan.WorkItems);
+    }
+
+    [Fact]
+    public async Task Handle_LeavesOutAMarkedApplicationUnderAPackageManagerToo()
+    {
+        SetUpEnabledAiSettings();
+        _installedApplicationRepository.Setup(r => r.GetApplicationVersionVariantsAsync(It.IsAny<CancellationToken>())).ReturnsAsync(new[]
+        {
+            new ApplicationVersionVariantDto("firefox", "Homebrew", "macOS 15.0", "128.0"),
+            new ApplicationVersionVariantDto("Homebrew", null, "macOS 15.0", "4.3"),
+        });
+        _managed.Setup(m => m.GetOwnersByNameAsync(It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { ["firefox"] = "Jamf Pro" });
+
+        var plan = await CreateHandler().Handle(new PrepareUpgradePathScanQuery(), CancellationToken.None);
+
+        Assert.DoesNotContain(plan.WorkItems, w => w.ApplicationName == "firefox");
+        Assert.Contains(plan.WorkItems, w => w.ApplicationName == "Homebrew");
     }
 
     private void SetUpEnabledAiSettings() =>

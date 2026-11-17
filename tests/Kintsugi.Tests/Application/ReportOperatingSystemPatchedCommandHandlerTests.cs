@@ -1,4 +1,5 @@
 using Moq;
+using Kintsugi.Application.HostActivity;
 using Kintsugi.Application.Common.Exceptions;
 using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Application.Hosts.Commands.ReportOperatingSystemPatched;
@@ -23,7 +24,7 @@ public class ReportOperatingSystemPatchedCommandHandlerTests
     }
 
     private ReportOperatingSystemPatchedCommandHandler CreateHandler() =>
-        new(_hostRepository.Object, _patchFailureRepository.Object, _unitOfWork.Object);
+        new(_hostRepository.Object, _patchFailureRepository.Object, _unitOfWork.Object, new Mock<IHostEventRecorder>().Object);
 
     [Fact]
     public async Task Handle_WhenNoHostWithThatSerialNumberIsRegistered_ThrowsNotFound()
@@ -77,6 +78,56 @@ public class ReportOperatingSystemPatchedCommandHandlerTests
         _unitOfWork.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Once);
     }
 
+    /// <summary>
+    /// The Windows agent files a failed Windows update install under "Windows" (its
+    /// <c>OS_FAILURE_APPLICATION_NAME</c>). Without this a host whose install failed once and then
+    /// succeeded would keep the failure on the Failed Updates screen for good.
+    /// </summary>
+    [Fact]
+    public async Task Handle_ClosesTheOutstandingWindowsFailureRowsForThatHost()
+    {
+        var host = new Host("host-1", "SERIAL-1", operatingSystemUpdateAvailable: true, operatingSystemLatestVersion: "KB5007651");
+        _hostRepository.Setup(r => r.GetBySerialNumberAsync("SERIAL-1", It.IsAny<CancellationToken>())).ReturnsAsync(host);
+        var failure = PatchFailure.Open(
+            host.Id,
+            ReportOperatingSystemPatchedCommandHandler.WindowsFailureApplicationName,
+            platform: null,
+            installedVersion: "Windows 11 Pro 25H2 (26300)",
+            attemptedVersion: null,
+            details: "the Windows Update install exited with exit code: 1: 0x80070643",
+            failedUtc: DateTimeOffset.UtcNow);
+        _patchFailureRepository
+            .Setup(r => r.GetOutstandingForApplicationAsync(host.Id, "Windows", It.IsAny<CancellationToken>()))
+            .ReturnsAsync([failure]);
+
+        await CreateHandler().Handle(new ReportOperatingSystemPatchedCommand("SERIAL-1"), CancellationToken.None);
+
+        Assert.Equal(PatchFailureResolution.PatchSucceeded, failure.Resolution);
+        _unitOfWork.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task Handle_ClosesTheOutstandingLinuxFailureRowsForThatHost()
+    {
+        var host = new Host("host-1", "SERIAL-1", operatingSystemUpdateAvailable: true, operatingSystemLatestVersion: null);
+        _hostRepository.Setup(r => r.GetBySerialNumberAsync("SERIAL-1", It.IsAny<CancellationToken>())).ReturnsAsync(host);
+        var failure = PatchFailure.Open(
+            host.Id,
+            ReportOperatingSystemPatchedCommandHandler.LinuxFailureApplicationName,
+            platform: null,
+            installedVersion: "Pop!_OS 22.04 LTS (Linux)",
+            attemptedVersion: null,
+            details: "E: Could not get lock /var/lib/dpkg/lock-frontend",
+            failedUtc: DateTimeOffset.UtcNow);
+        _patchFailureRepository
+            .Setup(r => r.GetOutstandingForApplicationAsync(host.Id, "Linux", It.IsAny<CancellationToken>()))
+            .ReturnsAsync([failure]);
+
+        await CreateHandler().Handle(new ReportOperatingSystemPatchedCommand("SERIAL-1"), CancellationToken.None);
+
+        Assert.Equal(PatchFailureResolution.PatchSucceeded, failure.Resolution);
+    }
+
     [Fact]
     public async Task Handle_LooksUpFailuresUnderTheNameTheMacOsAgentFilesThemUnder()
     {
@@ -87,5 +138,9 @@ public class ReportOperatingSystemPatchedCommandHandlerTests
 
         // "macOS" is OS_FAILURE_APPLICATION_NAME in clients/macos-agent/src/os_update.rs.
         _patchFailureRepository.Verify(r => r.GetOutstandingForApplicationAsync(host.Id, "macOS", It.IsAny<CancellationToken>()), Times.Once);
+        // "Windows" is OS_FAILURE_APPLICATION_NAME in clients/windows-agent/src/os_update.rs.
+        _patchFailureRepository.Verify(r => r.GetOutstandingForApplicationAsync(host.Id, "Windows", It.IsAny<CancellationToken>()), Times.Once);
+        // "Linux" is OS_FAILURE_APPLICATION_NAME in clients/linux-agent/src/os_update.rs.
+        _patchFailureRepository.Verify(r => r.GetOutstandingForApplicationAsync(host.Id, "Linux", It.IsAny<CancellationToken>()), Times.Once);
     }
 }

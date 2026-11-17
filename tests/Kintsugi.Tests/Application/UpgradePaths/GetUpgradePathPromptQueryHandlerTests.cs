@@ -16,6 +16,7 @@ public class GetUpgradePathPromptQueryHandlerTests
     private readonly Mock<IUpgradePathRepository> _upgradePathRepository = new();
     private readonly Mock<IPatchFailureRepository> _patchFailureRepository = new();
     private readonly Mock<IHostRepository> _hostRepository = new();
+    private readonly Mock<IManagedApplicationRepository> _managed = new();
 
     public GetUpgradePathPromptQueryHandlerTests()
     {
@@ -26,7 +27,22 @@ public class GetUpgradePathPromptQueryHandlerTests
     }
 
     private GetUpgradePathPromptQueryHandler CreateHandler() =>
-        new(_sender.Object, _researchClient.Object, _upgradePathRepository.Object, _patchFailureRepository.Object, _hostRepository.Object);
+        new(_sender.Object, _researchClient.Object, _upgradePathRepository.Object, _patchFailureRepository.Object, _hostRepository.Object, _managed.Object);
+
+    [Fact]
+    public async Task Handle_ForAnApplicationAnotherToolPatches_SaysWhoPatchesIt_NotThatItIsNotInstalled()
+    {
+        _managed.Setup(m => m.FindAsync("Falcon", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(ManagedApplication.Create("Falcon", "CrowdStrike"));
+
+        var dto = await CreateHandler().Handle(new GetUpgradePathPromptQuery("Falcon", "macOS"), CancellationToken.None);
+
+        Assert.False(dto.Available);
+        Assert.Contains("Managed by CrowdStrike", dto.Reason);
+        Assert.DoesNotContain("not currently installed", dto.Reason);
+        Assert.Null(dto.Prompt);
+        _sender.Verify(s => s.Send(It.IsAny<PrepareUpgradePathScanQuery>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
 
     [Fact]
     public async Task Handle_WhenTheExistingScriptIsSigned_ReportsScriptSignedTrue()

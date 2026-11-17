@@ -18,6 +18,7 @@ class RunProgress extends Equatable {
     required this.summary,
     this.faultReason,
     this.notes = const [],
+    this.blockedReason,
   });
 
   const RunProgress.idle()
@@ -26,7 +27,12 @@ class RunProgress extends Equatable {
         detail = '',
         summary = '',
         faultReason = null,
-        notes = const [];
+        notes = const [],
+        blockedReason = null;
+
+  /// Why the run cannot be started at all, when that is so: the AI budget is spent. Distinct from
+  /// [faultReason], which is about a run that happened.
+  final String? blockedReason;
 
   final bool isRunning;
   final double fraction;
@@ -44,7 +50,7 @@ class RunProgress extends Equatable {
   final List<String> notes;
 
   @override
-  List<Object?> get props => [isRunning, fraction, detail, summary, faultReason, notes];
+  List<Object?> get props => [isRunning, fraction, detail, summary, faultReason, notes, blockedReason];
 }
 
 sealed class BackgroundRunEvent extends Equatable {

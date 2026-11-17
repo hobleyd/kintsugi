@@ -1,4 +1,5 @@
 using Moq;
+using Kintsugi.Application.HostActivity;
 using Kintsugi.Application.Applications.Commands.ReportPatchResult;
 using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Domain.Entities;
@@ -24,7 +25,7 @@ public class PatchFailureResolutionTests
     }
 
     private ReportPatchResultCommandHandler CreateHandler() =>
-        new(_hostRepository.Object, _installedApplicationRepository.Object, _patchFailureRepository.Object, _unitOfWork.Object);
+        new(_hostRepository.Object, _installedApplicationRepository.Object, _patchFailureRepository.Object, _unitOfWork.Object, new Mock<IHostEventRecorder>().Object);
 
     private PatchFailure GivenAnOutstandingFailure()
     {

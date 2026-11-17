@@ -1,10 +1,12 @@
 import 'dart:convert';
 
 import 'package:bloc/bloc.dart';
+import 'package:crypto/crypto.dart';
 import 'package:equatable/equatable.dart';
 
 import '../../core/bloc/polling.dart';
 import '../../core/network/api_exception.dart';
+import '../../core/text/script_diff.dart';
 import '../../data/models/upgrade_path_mapper.dart';
 import '../../domain/entities/enums.dart';
 import '../../domain/entities/upgrade_path.dart';
@@ -67,6 +69,35 @@ final class EditorTouched extends InstructionsPanelEvent {
   const EditorTouched();
 }
 
+/// "Clear" was pressed: the box is emptied so a replacement can be pasted. [text] is what it held,
+/// kept so that "Undo clear" can put it back — emptying a long script by a misclick should cost one
+/// click, not the script.
+///
+/// Only the box is cleared. Nothing is sent: the server keeps the script it has until a save.
+final class EditorCleared extends InstructionsPanelEvent {
+  const EditorCleared(this.text);
+
+  final String text;
+
+  @override
+  List<Object?> get props => [text];
+}
+
+final class EditorClearUndone extends InstructionsPanelEvent {
+  const EditorClearUndone();
+}
+
+/// The reviewer marked one change as read, or took the mark back. [key] is
+/// [ScriptChange.key], which is about the change's content, so the mark follows the change.
+final class ChangeReviewToggled extends InstructionsPanelEvent {
+  const ChangeReviewToggled(this.key);
+
+  final String key;
+
+  @override
+  List<Object?> get props => [key];
+}
+
 final class ScriptSaveRequested extends InstructionsPanelEvent {
   const ScriptSaveRequested(this.editorText);
 
@@ -98,6 +129,12 @@ final class InstructionsPanelState extends Equatable {
     this.reloadTable = false,
     this.justSigned = false,
     this.signedOutcome,
+    this.baselineText,
+    this.baselineSigned = false,
+    this.changeKeys = const [],
+    this.reviewed = const {},
+    this.clearedText,
+    this.clearedInSync = false,
   });
 
   final bool loading;
@@ -142,7 +179,40 @@ final class InstructionsPanelState extends Equatable {
   /// Everything that signature produced which outlives this panel — set exactly when [justSigned] is.
   final SignedScriptOutcome? signedOutcome;
 
-  bool get canSign => inSyncWithServer && (result?.isSignable ?? false) && !signing && !saving;
+  /// What the box held when this row was opened, or when the script was last signed — the script
+  /// the "Changes" tab compares against. Null when the row had nothing to show then.
+  ///
+  /// Kept here because "Send to AI" and a save both overwrite the stored script, and the panel would
+  /// otherwise have nothing to say a new version differs *from*.
+  final String? baselineText;
+
+  /// Whether [baselineText] was a signed script. Only then is it something a reviewer has already
+  /// trusted, and only then does a difference from it have to be read before it is signed.
+  final bool baselineSigned;
+
+  /// [ScriptChange.key] for each change between [baselineText] and the stored script. Empty unless
+  /// [baselineSigned]: a script nobody had signed has no reviewed version to differ from.
+  final List<String> changeKeys;
+
+  /// The changes the reviewer has marked as read.
+  final Set<String> reviewed;
+
+  /// What "Clear" emptied the box of, while "Undo clear" can still put it back. Cleared by the next
+  /// edit, which makes the old text no longer the thing to restore.
+  final String? clearedText;
+
+  /// Whether the box matched the server when it was cleared. Necessary for an undo to say so again,
+  /// never sufficient: see [InstructionsPanelBloc._onUndoClear].
+  final bool clearedInSync;
+
+  /// How many changes the stored script has that nobody has marked as read.
+  int get unreviewedCount => changeKeys.where((key) => !reviewed.contains(key)).length;
+
+  /// Signing is held until every change from the signed script has been read. Signing records that a
+  /// person looked at what the fleet will run; for a script that differs from the one already
+  /// trusted, the difference is the thing to look at.
+  bool get canSign =>
+      inSyncWithServer && (result?.isSignable ?? false) && !signing && !saving && unreviewedCount == 0;
 
   InstructionsPanelState copyWith({
     bool? loading,
@@ -161,6 +231,13 @@ final class InstructionsPanelState extends Equatable {
     bool reloadTable = false,
     bool justSigned = false,
     SignedScriptOutcome? signedOutcome,
+    String? baselineText,
+    bool? baselineSigned,
+    List<String>? changeKeys,
+    Set<String>? reviewed,
+    String? clearedText,
+    bool? clearedInSync,
+    bool clearUndo = false,
     bool clearResult = false,
     bool clearMessages = false,
   }) =>
@@ -185,6 +262,12 @@ final class InstructionsPanelState extends Equatable {
         reloadTable: reloadTable,
         justSigned: justSigned,
         signedOutcome: signedOutcome,
+        baselineText: baselineText ?? this.baselineText,
+        baselineSigned: baselineSigned ?? this.baselineSigned,
+        changeKeys: changeKeys ?? this.changeKeys,
+        reviewed: reviewed ?? this.reviewed,
+        clearedText: clearUndo ? null : (clearedText ?? this.clearedText),
+        clearedInSync: clearUndo ? false : (clearedInSync ?? this.clearedInSync),
       );
 
   @override
@@ -205,6 +288,12 @@ final class InstructionsPanelState extends Equatable {
         reloadTable,
         justSigned,
         signedOutcome,
+        baselineText,
+        baselineSigned,
+        changeKeys,
+        reviewed,
+        clearedText,
+        clearedInSync,
       ];
 }
 
@@ -236,6 +325,20 @@ class InstructionsPanelBloc extends Bloc<InstructionsPanelEvent, InstructionsPan
     on<EditorTouched>((_, emit) => emit(state.copyWith(
           inSyncWithServer: false,
           signMessage: '',
+          clearUndo: true,
+        )));
+    on<EditorCleared>((event, emit) => emit(state.copyWith(
+          editorText: '',
+          inSyncWithServer: false,
+          signMessage: '',
+          clearedText: event.text,
+          clearedInSync: state.inSyncWithServer,
+        )));
+    on<EditorClearUndone>(_onUndoClear);
+    on<ChangeReviewToggled>((event, emit) => emit(state.copyWith(
+          reviewed: state.reviewed.contains(event.key)
+              ? ({...state.reviewed}..remove(event.key))
+              : {...state.reviewed, event.key},
         )));
     on<ScriptSaveRequested>(_onSave);
     on<ScriptSignRequested>(_onSign);
@@ -289,6 +392,9 @@ class InstructionsPanelBloc extends Bloc<InstructionsPanelEvent, InstructionsPan
         result: prompt.existingResult,
         editorText: _editorTextFor(prompt.existingResult),
         inSyncWithServer: prompt.existingResult != null,
+        // What the Changes tab compares against from here on. Not set when there was nothing to show.
+        baselineText: prompt.existingResult == null ? null : _editorTextFor(prompt.existingResult),
+        baselineSigned: prompt.existingResult?.scriptSigned ?? false,
       ));
 
       // A "Send to AI" started before this panel existed — the screen was navigated away from and
@@ -372,6 +478,7 @@ class InstructionsPanelBloc extends Bloc<InstructionsPanelEvent, InstructionsPan
         result: matched,
         editorText: _editorTextFor(matched),
         inSyncWithServer: true,
+        changeKeys: _changeKeys(matched),
       ));
     } on ApiException {
       // Transient. The next poll retries; blanking a panel mid-run would be worse.
@@ -389,6 +496,7 @@ class InstructionsPanelBloc extends Bloc<InstructionsPanelEvent, InstructionsPan
         result: saved,
         editorText: _editorTextFor(saved),
         inSyncWithServer: true,
+        changeKeys: _changeKeys(saved),
         reloadTable: true,
       ));
     } on ApiException catch (error) {
@@ -403,12 +511,19 @@ class InstructionsPanelBloc extends Bloc<InstructionsPanelEvent, InstructionsPan
       return;
     }
 
+    // The hash of what the box shows — not of [state.result] — because that is what the reviewer
+    // read. The server signs only if what it holds still hashes to this, so any way the two can come
+    // apart (another administrator's save, an AI run, a state bug like the old "Undo clear" one)
+    // fails closed as a 409 instead of signing a script nobody here looked at.
+    final reviewedSha256 = scriptSha256(state.editorText);
+
     emit(state.copyWith(signing: true, clearMessages: true, signMessage: 'Signing...'));
 
     try {
       final signed = await _signScript(
         applicationName: applicationName,
         platform: signPlatform,
+        scriptSha256: reviewedSha256,
         // Only set when this panel was opened from the Failed Updates screen, which is what makes
         // the signature a repair rather than an ordinary review — see [patchFailureId].
         patchFailureId: patchFailureId,
@@ -418,6 +533,11 @@ class InstructionsPanelBloc extends Bloc<InstructionsPanelEvent, InstructionsPan
         result: signed,
         editorText: _editorTextFor(signed),
         inSyncWithServer: true,
+        // What was just signed is the script the next change is read against.
+        baselineText: _editorTextFor(signed),
+        baselineSigned: true,
+        changeKeys: const [],
+        reviewed: const {},
         // Signing always stores the local signature regardless of what happens upstream, so this
         // only ever explains the publishing half and never contradicts "signed".
         signMessage: 'Signed. ${_describeApproval(signed)}',
@@ -431,9 +551,49 @@ class InstructionsPanelBloc extends Bloc<InstructionsPanelEvent, InstructionsPan
         ),
       ));
     } on ApiException catch (error) {
-      emit(state.copyWith(signing: false, signMessage: 'Failed: ${error.message}'));
+      emit(state.copyWith(
+        signing: false,
+        // A 409 here is the reviewed-bytes check refusing: the script was replaced after this panel
+        // showed it. The box can no longer be trusted to say what is stored, so Sign stays off until
+        // the row is reopened, and the message says why rather than "Failed: conflict".
+        inSyncWithServer: error.statusCode == 409 ? false : null,
+        signMessage: error.statusCode == 409
+            ? 'Not signed: the script on the server is no longer the one shown here - it was changed '
+                'after you reviewed it (another save, or an AI run). Close and reopen this row to review '
+                'the current script.'
+            : 'Failed: ${error.message}',
+      ));
     }
   }
+
+  Future<void> _onUndoClear(EditorClearUndone event, Emitter<InstructionsPanelState> emit) async {
+    final text = state.clearedText;
+    if (text == null) return;
+
+    // In step again only if it was when cleared *and* the restored text is still what this panel
+    // last knew to be stored. Remembering the old flag alone was wrong: Clear → Send to AI → Undo put
+    // script A back in the box while the server held the AI's script B, with Sign enabled — and Sign
+    // would have signed B under a review of A.
+    final stillStored = state.result != null && _editorTextFor(state.result) == text;
+    emit(state.copyWith(
+      editorText: text,
+      inSyncWithServer: state.clearedInSync && stillStored,
+      clearUndo: true,
+    ));
+  }
+
+  /// The changes between the script this panel opened with and [stored], as the keys a review is
+  /// remembered against. Empty when the opening script was not a signed one: there is then no
+  /// trusted version to differ from, and nothing a reviewer has to read before signing.
+  List<String> _changeKeys(UpgradePathResult? stored) {
+    final baseline = state.baselineText;
+    if (!state.baselineSigned || baseline == null || stored == null) return const [];
+    return [for (final change in diffScripts(baseline, _editorTextFor(stored)).changes) change.key];
+  }
+
+  /// Lowercase hex SHA-256 of [text]'s UTF-8 bytes — the same bytes, and the same encoding, as the
+  /// server's `ScriptContentHash.Of`, which is what the sign request is checked against.
+  static String scriptSha256(String text) => sha256.convert(utf8.encode(text)).toString();
 
   /// What the editor shows for a result.
   static String _editorTextFor(UpgradePathResult? result) {

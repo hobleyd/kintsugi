@@ -1,6 +1,7 @@
 using MediatR;
 using Kintsugi.Application.Common.Exceptions;
 using Kintsugi.Application.Common.Interfaces;
+using Kintsugi.Application.HostActivity;
 using Kintsugi.Domain.Entities;
 using Kintsugi.Domain.Enums;
 
@@ -12,17 +13,20 @@ public class ReportPatchFailureCommandHandler : IRequestHandler<ReportPatchFailu
     private readonly IPatchFailureRepository _patchFailureRepository;
     private readonly IUpgradePathRepository _upgradePathRepository;
     private readonly IUnitOfWork _unitOfWork;
+    private readonly IHostEventRecorder _events;
 
     public ReportPatchFailureCommandHandler(
         IHostRepository hostRepository,
         IPatchFailureRepository patchFailureRepository,
         IUpgradePathRepository upgradePathRepository,
-        IUnitOfWork unitOfWork)
+        IUnitOfWork unitOfWork,
+        IHostEventRecorder events)
     {
         _hostRepository = hostRepository;
         _patchFailureRepository = patchFailureRepository;
         _upgradePathRepository = upgradePathRepository;
         _unitOfWork = unitOfWork;
+        _events = events;
     }
 
     public async Task<Unit> Handle(ReportPatchFailureCommand request, CancellationToken cancellationToken)
@@ -55,6 +59,9 @@ public class ReportPatchFailureCommandHandler : IRequestHandler<ReportPatchFailu
         {
             existing.Reopen(path?.Platform, request.InstalledVersion, request.AttemptedVersion, request.Details, request.FailedUtc);
         }
+
+        await _events.PatchFailedAsync(
+            host.Id, request.ApplicationName, request.InstalledVersion, request.AttemptedVersion, request.Details, request.FailedUtc, cancellationToken);
 
         await _unitOfWork.SaveChangesAsync(cancellationToken);
 

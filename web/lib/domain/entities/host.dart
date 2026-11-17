@@ -19,6 +19,10 @@ class HostSummary extends Equatable {
     required this.unpatchedCveCount,
     required this.patchedCveCount,
     required this.removalRequested,
+    this.latestAgentVersion,
+    this.agentUpdateState = AgentUpdateState.unknown,
+    this.restartRequiredSinceUtc,
+    this.restartRequiredBecause,
   });
 
   final String id;
@@ -63,6 +67,21 @@ class HostSummary extends Equatable {
   /// itself.
   final bool removalRequested;
 
+  /// The newest agent published for this host's own platform (Windows, macOS and Linux agents have
+  /// separate version numbers), or null when there is none to compare with.
+  final String? latestAgentVersion;
+
+  /// Whether [agentVersion] is behind that, and whether it looks stuck. Decided by the server.
+  final AgentUpdateState agentUpdateState;
+  /// When the host first said it needs a restart for updates it has already installed, or null when
+  /// it does not (or cannot say: only the Linux agent reports it).
+  final DateTime? restartRequiredSinceUtc;
+
+  /// What asked for it, as the host names it.
+  final String? restartRequiredBecause;
+
+  bool get restartRequired => restartRequiredSinceUtc != null;
+
   @override
   List<Object?> get props => [
         id,
@@ -79,5 +98,9 @@ class HostSummary extends Equatable {
         unpatchedCveCount,
         patchedCveCount,
         removalRequested,
+        latestAgentVersion,
+        agentUpdateState,
+        restartRequiredSinceUtc,
+        restartRequiredBecause,
       ];
 }

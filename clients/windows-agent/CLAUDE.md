@@ -220,8 +220,63 @@ overlays, some layered windows missed, and the cursor has to be drawn in by hand
 does not include it.
 
 
+## "Patch now" for the operating system: a forced run named `Windows`
+
+An administrator's "Patch now" from the admin UI's Patch Health screen reaches this agent as an
+ordinary forced patch run (`forced_patch_run`), with the application name `Windows` — the same name
+a failed Windows update is filed under (`os_update::OS_FAILURE_APPLICATION_NAME`). No server change
+carries it: `RequestForcedPatchRunsCommand` takes any name. `patch_cycle::run_forced` is where the
+name means something. It is the only forced run that installs the Windows update (`Plan::narrowed_to`
+drops it for an application's run, on purpose), and the only one that restarts the host — and only
+when Windows says the update it installed needs it (`$installResult.RebootRequired`, read back from
+the install script's output as `os_update::InstallOutcome::reboot_required` and carried to the tray in
+`queue::reboot_required`). A Defender definitions update, the commonest thing Windows Update has
+pending, never needs one, and a restart for a signature file is a cost with nothing bought.
+
+**The host decides whether anybody is there, not the server — and the warning and the restart are
+two different questions.** The *warning* before the install is a tray notification in one session, so
+`presence::obstruction()` — locked workstation, display off, screen saver — is read when the run
+starts: somebody who would see it gets five minutes; a screen nobody would see it on gets none, since
+installing closes nothing (`forced_os_warning`). The *restart* closes every session's open work, so a
+locked screen there is somebody with work open, not an empty desk. It is decided after the install,
+right before restarting, never from the one check before an install that can take an hour. An
+application's forced run is unchanged: it warns whatever the screen is doing.
+
+**The restart is a queue request of its own** (`queue::RequestKind::Restart`), because the service is
+the side allowed to restart the machine and the tray is not. The queue directory is writable by every
+local user, so **the request is a prompt, never an instruction**, and the service decides whether and
+when for itself (`queue::restart_decision`, pinned by tests):
+
+- Only within `RESTART_AUTHORISATION_WINDOW` of a Windows update *the service itself* installed
+  reporting `RebootRequired`, and once per install (`queue::RestartAuthorisation`, in the service's
+  memory, never on disk). A request planted at any other time restarts nothing.
+- Across **every** interactive session, read from session 0 (`presence::logged_on_sessions`,
+  `WTSEnumerateSessionsW` + `WTSSessionInfoEx`), not just the requesting tray's — on a shared machine
+  a switched-away user's tray must not restart the machine under somebody else. Anybody logged on
+  but locked, disconnected or unreadable defers the restart (the update finishes at the next one);
+  everybody at their desk gets `RESTART_DELAY_ATTENDED` (five minutes); nobody logged on at all gets
+  `RESTART_DELAY_NOBODY_LOGGED_ON`. Failing to enumerate sessions defers.
+- The request's body (a delay, which trays before 0.12.7 needed to send, and this one still sends for
+  an older service) is ignored. No delay below `MIN_RESTART_DELAY_SECONDS` (60) or above
+  `MAX_RESTART_DELAY_SECONDS` reaches `shutdown.exe`: `os_update::restart` refuses it as a last line,
+  because `/t 0` closes every application at once with nothing saved.
+
+The tray re-reads its own session's `presence::obstruction()` right before asking too, and on either
+side's deferral tells the person to restart when convenient. The service runs a fixed
+`shutdown.exe /r /t N /c <fixed message>`, so Windows shows its own countdown to whoever is signed in.
+Whoever is at the machine can still `shutdown /a` — this is notice, not a lock. And all of this runs
+only while somebody is signed in: the tray is what collects a forced run, so a host nobody is signed
+in to keeps the request (24 hours, server-side) until someone does, which the admin UI says.
+
+The macOS and Linux agents do not act on this yet, which is why the admin UI only offers it for
+Windows hosts: a forced run named `macOS` or `Linux` would match nothing there and be dropped quietly.
+
 ## Couplings nothing enforces
 
+- `forced_patch_run`'s application name `Windows` is also `os_update::OS_FAILURE_APPLICATION_NAME`
+  and the admin UI's `windowsPatchNowName` (`web/lib/presentation/patch_health/patch_health_model.dart`).
+  Change one and "Patch now" is accepted by the server and dropped by the agent as an application it
+  cannot find.
 - Windows PowerShell 5.1 decodes a BOM-less `.ps1` using the system ANSI code page, not UTF-8. The
   Windows agent writes every script with a UTF-8 BOM for exactly that reason, and the
   server-written ones are kept ASCII-only as well.
@@ -244,3 +299,50 @@ does not include it.
   request was even sent. `PipeListener::accept` now waits for the outstanding connection to be
   dropped, and `start_session_helper` drains the channel before launching. Keep both — either alone
   leaves a window.
+
+## Device health
+
+`health.rs` reads the System event log through PowerShell (`os_update::run_powershell`) and reports
+Kernel-Power 41, EventLog 6008, WER 1001, and WHEA-Logger fatal/corrected events to
+`/api/host-health-events` — see "Device health" in `src/CLAUDE.md`. Read-only, newest 20 per kind, a
+one-line excerpt each. Called from `service.rs` on each check-in before the self-update. The time reached
+is kept beside the other state files and written only after the server accepted the report. Needs the
+`time` crate's `parsing` feature.
+
+## Log collection
+
+`log_collection.rs` answers an administrator's request for this PC's event log. On every check-in
+(`service.rs`, right after the device-health report) it does one GET to `/api/log-collection-requests`;
+nothing pending means it returns at once. A claimed request (`periodDays`, `detail`) makes it read the
+**System** and **Application** logs through PowerShell (`os_update::run_powershell`, `Get-WinEvent`,
+newest first, at most 25,000 events; Critical/Error/Warning, plus Information for "Everything") and
+POST the gzipped JSON to `/api/log-collection-results`. Only an epoch integer and fixed strings go into
+the script. Caps: 20,000 entries and 5 MiB of gzip; the oldest are dropped first and `truncatedBefore`
+carries the oldest time kept. Strictly read-only: no files, no registry writes. Best-effort: every error
+is logged and swallowed. `powershell.exe` is run by `os_update::run_powershell_within` with a 5 minute
+deadline and is **killed** when it passes (output read on threads, `try_wait` polled), then a POST to
+`/api/log-collection-failures` says so; a failed read is reported the same way, and so are output that
+is empty or not JSON (the script prints `[]` for a real empty log) and a log that was read but did not
+reach the server. The scripts start with `os_update::UTF8_OUTPUT`, because Windows PowerShell 5.1 writes
+redirected output in the OEM code page and the agent decodes it as UTF-8. The request is consumed by the
+GET, so it reaches the admin at the next hourly check-in, not instantly. Uses `flate2` with the pure-Rust
+backend only.
+
+**Real-machine tests.** `log_collection::real_windows` and `health::real_windows` run the real PowerShell scripts through `run_powershell` and parse what `Get-WinEvent` really returns. They are `cfg(windows)`, so they run on CI's Windows runner but not under Wine (Wine has no PowerShell: use `-- --skip real_windows` there). They check the format, not failures.
+
+## Device baselines (audit, plus an enforce pilot)
+
+`baseline.rs` fetches `GET /api/baseline` on each check-in, right after the health report, caches it
+like `policy.json` (`baseline.json`), verifies each document against the pinned artifact-signing key
+before reading anything (the cache included), reads each machine-scope item from HKLM's 64-bit view
+with `KEY_READ`, and posts only what differs from the states the server sent back, plus every
+correction. **Its one write path is `write_machine_value`, and `ENFORCEABLE` bounds it**: a drifted
+item in `enforce` mode is set back only when its exact path, value name and type are in that
+compiled-in list, then read again and reported with "set back by Kintsugi (was …)". Nothing else is
+ever created, set or deleted, whatever a signed document says, so the list, not the signing key, is
+what limits a SYSTEM write. Widening it is a reviewed change here and in the server's
+`BaselineItemRules.EnforceableValues`; `BaselineEnforceTests` fails if the two differ.
+User-scope items and items whose value is a secret are reported not-applicable without being read,
+and anything under `HKLM\SAM` or `HKLM\SECURITY` is refused as an error without being read
+(`is_protected_path`, the second check behind the server's `BaselineItemRules.ProtectedRoots`).
+See "Device baselines" in `src/CLAUDE.md` for the server's half.

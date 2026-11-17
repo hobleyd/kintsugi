@@ -9,10 +9,18 @@
 /// only file that names one.
 library;
 
+import 'dart:typed_data';
+
 import '../entities/agent_package.dart';
+import '../entities/ai_usage.dart';
 import '../entities/application.dart';
+import '../entities/autonomy.dart';
+import '../entities/device_report.dart';
+import '../entities/baseline.dart';
 import '../entities/enums.dart';
 import '../entities/host.dart';
+import '../entities/managed_application.dart';
+import '../entities/host_activity.dart';
 import '../entities/patch_failure.dart';
 import '../entities/remote_control_session.dart';
 import '../entities/session.dart';
@@ -66,6 +74,22 @@ abstract interface class RemoteControlRepository {
   RemoteControlStream openStream(String sessionId);
 }
 
+/// The applications another tool patches — `/api/admin/managed-applications`. Every call answers with
+/// the whole state.
+abstract interface class ManagedApplicationRepository {
+  Future<ManagedApplications> read();
+
+  /// Says that [owner] patches each of [names]. An owner not on the list is added to it.
+  Future<ManagedApplications> mark({required List<String> names, required String owner});
+
+  Future<ManagedApplications> unmark(String applicationName);
+
+  Future<ManagedApplications> addOwner(String name);
+
+  /// Refused by the server while an application is still managed by [name].
+  Future<ManagedApplications> removeOwner(String name);
+}
+
 abstract interface class ApplicationRepository {
   Future<ApplicationOverview> overview();
 
@@ -90,6 +114,13 @@ abstract interface class UpgradePathRepository {
   Future<RunStarted<UpdateCheckStatus>> startUpdateCheck();
 
   Future<UpdateCheckStatus> updateCheckStatus();
+
+  /// A row per application the last "Find Upgrade Paths" run reported on, with its outcome. Read once
+  /// when the run finishes, not polled with the status.
+  Future<RunResults> scanResults();
+
+  /// The same for the last "Check for Updates" run.
+  Future<RunResults> updateCheckResults();
 
   /// Re-runs one row's script in its `--update-version` mode, synchronously. No AI call.
   Future<UpdateCheckResult> checkUpdate({required String applicationName, required String platform});
@@ -129,6 +160,7 @@ abstract interface class UpgradePathRepository {
   Future<UpgradePathResult> signScript({
     required String applicationName,
     required String platform,
+    required String scriptSha256,
     String? patchFailureId,
   });
 }
@@ -140,6 +172,73 @@ abstract interface class PatchFailureRepository {
   /// Clears one failure by hand. Everything else closes itself when the host next reports that
   /// application patched successfully.
   Future<void> dismiss(String id);
+}
+
+/// The host activity page's data — reads `/api/admin/host-activity`.
+abstract interface class HostActivityRepository {
+  Future<HostActivity> get(String hostId);
+
+  /// Returns the retention the server stored.
+  Future<int> setRetention(int months);
+}
+
+/// The Autonomy page's data — reads `/api/admin/autonomy`.
+abstract interface class AutonomyRepository {
+  Future<Autonomy> get(AutonomyPeriod period, {String? month});
+
+  Future<AutonomyDevicesPage> devices(String key, {int skip = 0, int take = 25, String? search});
+
+  Future<AutonomyPatchNowResult> patchNow(String key, {required int expectedConnected, required bool includeOffline});
+}
+
+/// One device's report and its collected logs — reads and writes `/api/admin/device-report`.
+abstract interface class DeviceReportRepository {
+  Future<DeviceReport> get(String hostId, {int days = 7});
+
+  /// The newest collection without its content, or null when there is none (the server answers 204).
+  Future<LogCollection?> latestLogs(String hostId);
+
+  Future<LogCollection> requestLogs(String hostId, {required int periodDays, required LogDetail detail});
+
+  /// Deletes a collected log, or cancels a request nobody has picked up.
+  Future<void> deleteLogs(String hostId, String id);
+
+  Future<LogEntriesPage> entries(
+    String hostId,
+    String id, {
+    LogSeverityFilter severity,
+    String? search,
+    DateTime? around,
+    int aroundMinutes,
+    int skip,
+    int take,
+  });
+
+  Future<Uint8List> downloadLogs(String hostId, String id);
+
+  /// Devices whose name or serial number contains [text], for opening any device's report.
+  Future<List<DeviceSearchResult>> search(String text, {int take = 10});
+}
+
+/// The Baselines screens — reads and writes `/api/admin/baselines`. Nothing here writes to a
+/// device, and nothing reaches one until a person signs a version.
+abstract interface class BaselineRepository {
+  Future<List<BaselineSummary>> list();
+
+  Future<BaselineDetail> get(String baselineId);
+
+  Future<BaselineHostDetail> host(String baselineId, String hostId);
+
+  /// Creates a baseline from a `{name, items}` body — the shape of `baselines/master-daily.json`.
+  Future<void> create(Map<String, dynamic> body);
+
+  /// Adds an unsigned version from an `{items}` body (a `{name, items}` file works too; the name is ignored).
+  Future<void> addVersion(String baselineId, Map<String, dynamic> body);
+
+  /// Signs one version. [documentSha256] is the hash of the document text the reviewer was shown.
+  Future<void> sign(String versionId, String documentSha256);
+
+  Future<void> assign(String baselineId, {required bool allWindowsHosts, required List<String> hostNames});
 }
 
 abstract interface class AgentPackageRepository {
@@ -175,6 +274,13 @@ abstract interface class UpgradeScriptRepository {
     required String platform,
     required String sha256,
   });
+}
+
+/// The AI usage ledger's totals and the monthly budget — `/api/ai-settings/usage` and `/budget`.
+abstract interface class AiUsageRepository {
+  Future<AiUsage> read();
+
+  Future<AiBudgetSettings> saveBudget(AiBudgetSettings settings);
 }
 
 abstract interface class AiAgentSettingsRepository {
@@ -248,6 +354,19 @@ abstract interface class AuthenticationSettingsRepository {
     required bool isEnabled,
     required List<String>? adminEmails,
   });
+}
+
+/// The administrators list as the Administrators page edits it — `/api/admin/settings/administrators`.
+/// Every call answers with the list as it now stands, so the page never has to guess what changed.
+abstract interface class AdministratorsRepository {
+  Future<List<Administrator>> list();
+
+  /// Adds each address, recorded as added by the signed-in caller (the server decides who that is).
+  Future<List<Administrator>> add(List<String> emails);
+
+  /// Takes one address off the list. The server refuses one that would leave a non-empty list
+  /// without the caller while sign-in is required.
+  Future<List<Administrator>> remove(String email);
 }
 
 abstract interface class AuditSettingsRepository {

@@ -51,6 +51,11 @@ public partial class UpdateAuthenticationSettingsCommandValidator : AbstractVali
     // otherwise be stored and never match, and the administrator would learn that from "Access
     // denied" after a save that looked fine. Non-ASCII is refused because ToLowerInvariant folds some
     // of it into ASCII: the Kelvin sign (U+212A) becomes 'k', so a lookalike could match a real entry.
+    /// <summary>Whether <paramref name="email"/>, trimmed, is an address the list will accept — shared
+    /// with the Administrators page so the two writers of the list cannot disagree.</summary>
+    public static bool IsPlainAddress(string? email) =>
+        string.IsNullOrWhiteSpace(email) || PlainAddress().IsMatch(email.Trim());
+
     [GeneratedRegex(@"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\z")]
     private static partial Regex PlainAddress();
 }

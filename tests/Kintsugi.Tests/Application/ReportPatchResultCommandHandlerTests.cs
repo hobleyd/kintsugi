@@ -1,4 +1,5 @@
 using Moq;
+using Kintsugi.Application.HostActivity;
 using Kintsugi.Application.Applications.Commands.ReportPatchResult;
 using Kintsugi.Application.Common.Exceptions;
 using Kintsugi.Application.Common.Interfaces;
@@ -26,7 +27,7 @@ public class ReportPatchResultCommandHandlerTests
     }
 
     private ReportPatchResultCommandHandler CreateHandler() =>
-        new(_hostRepository.Object, _installedApplicationRepository.Object, _patchFailureRepository.Object, _unitOfWork.Object);
+        new(_hostRepository.Object, _installedApplicationRepository.Object, _patchFailureRepository.Object, _unitOfWork.Object, new Mock<IHostEventRecorder>().Object);
 
     [Fact]
     public async Task Handle_WhenNoHostWithThatSerialNumberIsRegistered_ThrowsNotFound()
@@ -53,7 +54,7 @@ public class ReportPatchResultCommandHandlerTests
     }
 
     [Fact]
-    public async Task Handle_DoesNothing_WhenTheHostHasNoSuchApplicationReported()
+    public async Task Handle_UpdatesNoVersion_WhenTheHostHasNoSuchApplicationReported_ButStillRecordsThePatch()
     {
         _hostRepository.Setup(r => r.GetBySerialNumberAsync("SERIAL-1", It.IsAny<CancellationToken>())).ReturnsAsync(_host);
         _installedApplicationRepository
@@ -62,6 +63,9 @@ public class ReportPatchResultCommandHandlerTests
 
         await CreateHandler().Handle(new ReportPatchResultCommand("SERIAL-1", "Firefox", "129.0"), CancellationToken.None);
 
-        _unitOfWork.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Never);
+        // No row to update, but the host did patch it: the event is written, so it is saved.
+        // (HostActivityWiringTests checks the event itself.)
+        _installedApplicationRepository.Verify(r => r.AddRangeAsync(It.IsAny<IEnumerable<InstalledApplication>>(), It.IsAny<CancellationToken>()), Times.Never);
+        _unitOfWork.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Once);
     }
 }

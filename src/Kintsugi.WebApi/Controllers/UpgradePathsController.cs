@@ -9,9 +9,11 @@ using Kintsugi.Application.UpgradePaths.Commands.SignUpgradePathScript;
 using Kintsugi.Application.UpgradePaths.Commands.StartUpdateCheck;
 using Kintsugi.Application.UpgradePaths.Commands.StartUpgradePathRefresh;
 using Kintsugi.Application.UpgradePaths.Commands.StartUpgradePathScan;
+using Kintsugi.Application.UpgradePaths.Queries.GetUpdateCheckResults;
 using Kintsugi.Application.UpgradePaths.Queries.GetUpdateCheckStatus;
 using Kintsugi.Application.UpgradePaths.Queries.GetUpgradePathPrompt;
 using Kintsugi.Application.UpgradePaths.Queries.GetUpgradePathRefreshStatus;
+using Kintsugi.Application.UpgradePaths.Queries.GetUpgradePathScanResults;
 using Kintsugi.Application.UpgradePaths.Queries.GetUpgradePathScanStatus;
 using Kintsugi.Application.UpgradePaths.Queries.GetUpgradePathSummaries;
 using Kintsugi.Application.UpgradePaths.Queries.GetUpgradeStatuses;
@@ -80,6 +82,18 @@ public class UpgradePathsController : ControllerBase
         Ok(await _sender.Send(new GetUpgradePathScanStatusQuery(), cancellationToken));
 
     /// <summary>
+    /// A row per application the current (or most recently completed) scan reported on, with its
+    /// outcome. Asked for once, when the scan finishes, by the Diagnostics page — not polled with the
+    /// status, which would carry the whole list every three seconds.
+    /// </summary>
+    // Admin-gated with the action it reports on.
+    [HttpGet("scan-results")]
+    [RequireAdminSession]
+    [ProducesResponseType(typeof(UpgradePathRunResultsDto), StatusCodes.Status200OK)]
+    public async Task<ActionResult<UpgradePathRunResultsDto>> GetScanResults(CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(new GetUpgradePathScanResultsQuery(), cancellationToken));
+
+    /// <summary>
     /// Starts a background "Check for Updates" run: re-checks every already-resolved script
     /// upgrade path by running its own <c>--update-version</c> mode — no AI call. Returns
     /// immediately — poll <c>check-updates-status</c> for progress. Backs the "Check for Updates"
@@ -100,6 +114,15 @@ public class UpgradePathsController : ControllerBase
     [ProducesResponseType(typeof(UpdateCheckStatusDto), StatusCodes.Status200OK)]
     public async Task<ActionResult<UpdateCheckStatusDto>> GetUpdateCheckStatus(CancellationToken cancellationToken) =>
         Ok(await _sender.Send(new GetUpdateCheckStatusQuery(), cancellationToken));
+
+    /// <summary>The "Check for Updates" counterpart of <see cref="GetScanResults"/>: a row per application,
+    /// with what the check concluded about it.</summary>
+    // Admin-gated with the action it reports on.
+    [HttpGet("check-updates-results")]
+    [RequireAdminSession]
+    [ProducesResponseType(typeof(UpgradePathRunResultsDto), StatusCodes.Status200OK)]
+    public async Task<ActionResult<UpgradePathRunResultsDto>> GetUpdateCheckResults(CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(new GetUpdateCheckResultsQuery(), cancellationToken));
 
     /// <summary>
     /// Re-checks one (application, platform) row by running its script's own <c>--update-version</c>
@@ -206,13 +229,15 @@ public class UpgradePathsController : ControllerBase
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
     public async Task<ActionResult<UpgradePathResultDto>> SignScript([FromBody] SignUpgradePathScriptRequest request, CancellationToken cancellationToken) =>
         Ok(await _sender.Send(
             // The reviewer's email (see AdminIdentity.SignerOf — the full address, revisable), recorded in the approval entry and shown in the pull request —
             // "a human reviewed this" is only an audit trail if it says which human. Null when the
             // site is deliberately running with authentication disabled.
             new SignUpgradePathScriptCommand(
-                request.ApplicationName, request.Platform, SignedBy: AdminIdentity.SignerOf(User), PatchFailureId: request.PatchFailureId),
+                request.ApplicationName, request.Platform, request.ScriptSha256 ?? string.Empty,
+                SignedBy: AdminIdentity.SignerOf(User), PatchFailureId: request.PatchFailureId),
             cancellationToken));
 }
 
@@ -223,7 +248,11 @@ public record CheckUpgradePathUpdateRequest(string ApplicationName, string Platf
 /// <param name="PatchFailureId">Set by the Failed Updates screen when this signature repairs a
 /// reported failure, which clears the failures that script was causing. Omitted by the Applications
 /// screen, whose signature clears nothing.</param>
-public record SignUpgradePathScriptRequest(string ApplicationName, string Platform, Guid? PatchFailureId = null);
+/// <param name="ScriptSha256">Lowercase hex SHA-256 of the exact script text the reviewer was shown.
+/// Required — the handler answers 400 without it and 409 when the stored script no longer hashes to
+/// it (see <c>SignUpgradePathScriptCommandHandler</c>). Nullable here only so a missing value reaches
+/// the handler's own message rather than a bare model-binding failure.</param>
+public record SignUpgradePathScriptRequest(string ApplicationName, string Platform, string? ScriptSha256 = null, Guid? PatchFailureId = null);
 
 public record SaveUpgradePathRequest(
     string ApplicationName,

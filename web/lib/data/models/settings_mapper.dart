@@ -121,6 +121,18 @@ AuthenticationSettings authenticationSettingsFromJson(Map<String, dynamic> json)
       adminEmails: (json['adminEmails'] as List<dynamic>? ?? const []).cast<String>(),
     );
 
+/// Reads one `AdministratorDto`.
+Administrator administratorFromJson(Map<String, dynamic> json) => Administrator(
+      email: json['email'] as String? ?? '',
+      addedBy: json['addedBy'] as String?,
+      addedUtc: dateTimeFromJson(json['addedUtc']),
+    );
+
+/// Reads the administrators list; an absent or null body is an empty list.
+List<Administrator> administratorsFromJson(Object? json) => [
+      for (final entry in (json as List<dynamic>? ?? const [])) administratorFromJson(entry as Map<String, dynamic>),
+    ];
+
 /// Reads an `AuditSettingsDto`.
 AuditSettings auditSettingsFromJson(Map<String, dynamic> json) => AuditSettings(
       provider: enumFromJson(

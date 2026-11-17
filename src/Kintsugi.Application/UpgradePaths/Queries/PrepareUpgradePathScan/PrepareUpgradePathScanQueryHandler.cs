@@ -8,13 +8,16 @@ public class PrepareUpgradePathScanQueryHandler : IRequestHandler<PrepareUpgrade
 {
     private readonly IAiProviderSettingsResolver _aiSettingsResolver;
     private readonly IInstalledApplicationRepository _installedApplicationRepository;
+    private readonly IManagedApplicationRepository _managedApplicationRepository;
 
     public PrepareUpgradePathScanQueryHandler(
         IAiProviderSettingsResolver aiSettingsResolver,
-        IInstalledApplicationRepository installedApplicationRepository)
+        IInstalledApplicationRepository installedApplicationRepository,
+        IManagedApplicationRepository managedApplicationRepository)
     {
         _aiSettingsResolver = aiSettingsResolver;
         _installedApplicationRepository = installedApplicationRepository;
+        _managedApplicationRepository = managedApplicationRepository;
     }
 
     public async Task<UpgradePathScanPlan> Handle(PrepareUpgradePathScanQuery request, CancellationToken cancellationToken)
@@ -32,11 +35,22 @@ public class PrepareUpgradePathScanQueryHandler : IRequestHandler<PrepareUpgrade
             .Select(v => v.ParentApplicationName!)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
+        // An application another tool patches gets no work item at all: not researched, not given a
+        // script, and so never sent to the AI — which is what marking it is for. The same plan feeds
+        // the single-row refresh, so a marked row cannot be researched by hand either; the prompt
+        // query says why instead of claiming it is not installed.
+        var managedElsewhere = await _managedApplicationRepository.GetOwnersByNameAsync(cancellationToken);
+
         var workItems = new List<UpgradePathWorkItem>();
 
         foreach (var group in byName)
         {
             var applicationName = group.Key;
+
+            if (managedElsewhere.ContainsKey(applicationName))
+            {
+                continue;
+            }
 
             // Split by how each *variant* is managed rather than by the application as a whole:
             // one name can legitimately be Homebrew-managed on a Mac, winget-managed on one

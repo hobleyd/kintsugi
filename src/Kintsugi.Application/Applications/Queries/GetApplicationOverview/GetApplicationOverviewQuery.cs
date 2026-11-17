@@ -41,4 +41,5 @@ public record ApplicationRowDto(
     int HostCount,
     IReadOnlyList<string> HostNames,
     IReadOnlyList<UpgradePathSummaryDto> UpgradePaths,
-    IReadOnlyList<ApplicationRowDto> Children);
+    IReadOnlyList<ApplicationRowDto> Children,
+    string? ManagedBy = null);

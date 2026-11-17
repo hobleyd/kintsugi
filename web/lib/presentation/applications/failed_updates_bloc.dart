@@ -77,6 +77,7 @@ class FailedUpdateFilters extends Equatable {
     this.search = '',
     this.hostName = 'all',
     this.resolutionKey = 'outstanding',
+    this.kindKey = 'all',
   });
 
   final String search;
@@ -85,22 +86,32 @@ class FailedUpdateFilters extends Equatable {
   /// One of `outstanding`, `settled`, `all`.
   final String resolutionKey;
 
-  bool get isActive => search.isNotEmpty || hostName != 'all' || resolutionKey != 'outstanding';
+  /// One of `all`, `os` (a failed operating system update), `apps` (everything else). Lets somebody
+  /// who came here to find out why a host is not updating see only those.
+  final String kindKey;
 
-  FailedUpdateFilters copyWith({String? search, String? hostName, String? resolutionKey}) =>
+  bool get isActive =>
+      search.isNotEmpty || hostName != 'all' || resolutionKey != 'outstanding' || kindKey != 'all';
+
+  FailedUpdateFilters copyWith({String? search, String? hostName, String? resolutionKey, String? kindKey}) =>
       FailedUpdateFilters(
         search: search ?? this.search,
         hostName: hostName ?? this.hostName,
         resolutionKey: resolutionKey ?? this.resolutionKey,
+        kindKey: kindKey ?? this.kindKey,
       );
 
   bool matches(PatchFailure failure) {
     if (!_matchesResolution(failure)) return false;
+    if (kindKey == 'os' && !failure.isOperatingSystemUpdate) return false;
+    if (kindKey == 'apps' && failure.isOperatingSystemUpdate) return false;
     if (hostName != 'all' && failure.hostname.toLowerCase() != hostName.toLowerCase()) return false;
     if (search.isEmpty) return true;
 
     final needle = search.toLowerCase();
     return failure.applicationName.toLowerCase().contains(needle) ||
+        failure.title.toLowerCase().contains(needle) ||
+        (failure.causeTitle?.toLowerCase().contains(needle) ?? false) ||
         failure.hostname.toLowerCase().contains(needle) ||
         // The output too: "Permission denied" across four hosts is one problem, and finding it that
         // way is most of what this screen is for.
@@ -114,7 +125,7 @@ class FailedUpdateFilters extends Equatable {
       };
 
   @override
-  List<Object?> get props => [search, hostName, resolutionKey];
+  List<Object?> get props => [search, hostName, resolutionKey, kindKey];
 }
 
 class FailedUpdatesState extends Equatable {
@@ -310,6 +321,12 @@ class FailedUpdatesBloc extends Bloc<FailedUpdatesEvent, FailedUpdatesState> {
 }
 
 /// The label the resolution filter offers for each option.
+const failedUpdateKindOptions = <String, String>{
+  'all': 'All failures',
+  'os': 'Operating system updates',
+  'apps': 'Applications',
+};
+
 const failedUpdateResolutionOptions = <String, String>{
   'outstanding': 'Outstanding',
   'settled': 'Settled',

@@ -182,6 +182,41 @@ impl Config {
         format!("{}/api/os-patch-results", self.api_base_url.trim_end_matches('/'))
     }
 
+    /// Tells the server what this PC's own event log says about it shutting down by itself and about
+    /// hardware errors — see `health::report_new_events` and
+    /// Kintsugi.WebApi/Controllers/HostHealthController.cs.
+    pub fn health_events_url(&self) -> String {
+        format!("{}/api/host-health-events", self.api_base_url.trim_end_matches('/'))
+    }
+
+    /// An administrator's request for this PC's event log, claimed by the GET — see
+    /// `log_collection::collect_and_upload_if_requested`.
+    pub fn log_collection_requests_url(&self) -> String {
+        format!("{}/api/log-collection-requests", self.api_base_url.trim_end_matches('/'))
+    }
+
+    /// Where the gzipped event log is uploaded — see `log_collection`.
+    pub fn log_collection_results_url(&self) -> String {
+        format!("{}/api/log-collection-results", self.api_base_url.trim_end_matches('/'))
+    }
+
+    /// Where a log that could not be read is reported — see `log_collection`.
+    pub fn log_collection_failures_url(&self) -> String {
+        format!("{}/api/log-collection-failures", self.api_base_url.trim_end_matches('/'))
+    }
+
+    /// The signed device baselines assigned to this host — see `baseline::check_and_report` and
+    /// Kintsugi.WebApi/Controllers/BaselineController.cs. Base URL only: the caller adds
+    /// `?serialNumber=` through the client's own query-building, as for `upgrade_paths_url`.
+    pub fn baseline_url(&self) -> String {
+        format!("{}/api/baseline", self.api_base_url.trim_end_matches('/'))
+    }
+
+    /// Tells the server what this PC's baseline items read as — see `baseline::check_and_report`.
+    pub fn baseline_results_url(&self) -> String {
+        format!("{}/api/baseline-results", self.api_base_url.trim_end_matches('/'))
+    }
+
     /// Tells the server this host finished uninstalling itself completely, after a check-in
     /// response marked it for removal — see `self_removal::run` and
     /// Kintsugi.WebApi/Controllers/HostsController.cs.
@@ -244,6 +279,18 @@ pub fn checkin_schedule_path() -> PathBuf {
 pub fn policy_cache_path() -> PathBuf {
     program_data_root().join("policy.json")
 }
+
+/// Where the service caches the device baselines it last fetched, as `policy_cache_path` does the
+/// policy. Every baseline in it is verified again before use, and it holds no secret values.
+pub fn baseline_cache_path() -> PathBuf {
+    program_data_root().join("baseline.json")
+}
+
+/// Where the time of the last health report is kept, so the next one reads only what is new.
+pub fn health_state_path() -> PathBuf {
+    program_data_root().join("health-reported")
+}
+
 
 pub fn installed_binary_path() -> PathBuf {
     program_files_root().join("kintsugi-agent.exe")
@@ -313,7 +360,7 @@ mod tests {
         // survive a "complete" uninstall the server asked for.
         let root = config_dir();
 
-        for path in [default_config_path(), identity_dir(), queue_dir(), service_log_path(), checkin_schedule_path(), policy_cache_path()] {
+        for path in [default_config_path(), identity_dir(), queue_dir(), service_log_path(), checkin_schedule_path(), policy_cache_path(), baseline_cache_path()] {
             assert!(path.starts_with(&root), "{} is not under {}", path.display(), root.display());
         }
     }

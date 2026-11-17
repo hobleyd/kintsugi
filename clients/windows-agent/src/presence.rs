@@ -27,6 +27,9 @@
 //! Kept identical in intent in the other two agents; what each platform can actually read differs
 //! and is described in each one's copy.
 
+//! The service half ([`logged_on_sessions`]) asks a different question, from session 0, before it
+//! restarts the host: is anybody logged on anywhere? See [`LogonState`].
+
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use windows_sys::Win32::Foundation::BOOL;
@@ -82,4 +85,135 @@ fn screen_saver_is_running() -> bool {
         SystemParametersInfoW(SPI_GETSCREENSAVERRUNNING, 0, (&mut running as *mut BOOL).cast(), 0);
     }
     running != 0
+}
+
+/// One interactive logon on this host, as the *service* sees it from outside every session.
+///
+/// [`obstruction`] above answers "would a dialog in *this* session be seen?" and only works from
+/// inside a session (it opens that session's input desktop). The decision to restart the machine
+/// needs a different question answered from session 0: "is there anybody logged on to this host,
+/// in any session, who could lose unsaved work?" — because a restart closes every session's
+/// applications, not only the session of whichever tray happened to pick up the forced run. On a
+/// shared machine a switched-away user's tray would otherwise authorise a restart under somebody
+/// else who is working at the console.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogonState {
+    /// Connected and unlocked: a person is (or can be) looking at it, and Windows' own restart
+    /// countdown will be shown to them.
+    AtTheDesk,
+    /// Logged on but locked, disconnected, or in a state the service cannot read. Nobody would see
+    /// a countdown, and whatever is open there may be unsaved — so a restart is not safe.
+    Away,
+}
+
+/// Reads one session's `WTSSessionInfoEx` into a [`LogonState`], or `None` for a session nobody is
+/// logged on to (session 0, an RDP listener, the console before anyone signs in). Split out from
+/// [`logged_on_sessions`] so the classification is pinned by tests rather than by a comment.
+///
+/// `lock_flags` is `WTSINFOEX_LEVEL1_W::SessionFlags`: 0 locked, 1 unlocked, anything else unknown.
+/// Unknown is read as away — the safe side for a question whose wrong answer closes somebody's
+/// unsaved work. (Windows 7 and Server 2008 R2 report the two flags inverted; neither is a
+/// platform this agent supports.)
+pub fn classify_session(session_id: u32, has_user: bool, connect_state: i32, lock_flags: i64) -> Option<LogonState> {
+    use windows_sys::Win32::System::RemoteDesktop::WTSActive;
+
+    if session_id == 0 || !has_user {
+        return None;
+    }
+    if connect_state == WTSActive as i32 && lock_flags == 1 {
+        Some(LogonState::AtTheDesk)
+    } else {
+        Some(LogonState::Away)
+    }
+}
+
+/// Every interactive logon on this host, read by the service with `WTSEnumerateSessionsW` and
+/// `WTSQuerySessionInformationW(WTSSessionInfoEx)`. An error means the answer is unknown, which
+/// the caller (`queue::restart_decision`) treats as "somebody may be there".
+pub fn logged_on_sessions() -> anyhow::Result<Vec<LogonState>> {
+    use windows_sys::Win32::System::RemoteDesktop::{
+        WTSEnumerateSessionsW, WTSFreeMemory, WTSQuerySessionInformationW, WTSSessionInfoEx, WTSINFOEXW,
+        WTS_CURRENT_SERVER_HANDLE, WTS_SESSION_INFOW,
+    };
+
+    let mut sessions: *mut WTS_SESSION_INFOW = std::ptr::null_mut();
+    let mut count: u32 = 0;
+    // SAFETY: documented call; on success Windows allocates `count` entries at `sessions`, which
+    // are read only within that bound and freed with WTSFreeMemory below.
+    if unsafe { WTSEnumerateSessionsW(WTS_CURRENT_SERVER_HANDLE, 0, 1, &mut sessions, &mut count) } == 0 {
+        anyhow::bail!("WTSEnumerateSessionsW failed: {}", std::io::Error::last_os_error());
+    }
+
+    let mut states = Vec::new();
+    let mut failure = None;
+    for index in 0..count as usize {
+        // SAFETY: index < count, the length Windows reported for this allocation.
+        let session_id = unsafe { (*sessions.add(index)).SessionId };
+        if session_id == 0 {
+            continue;
+        }
+
+        let mut buffer: windows_sys::core::PWSTR = std::ptr::null_mut();
+        let mut bytes: u32 = 0;
+        // SAFETY: documented call; on success `buffer` points at a WTSINFOEXW Windows allocated,
+        // read only when it is at least that large and freed with WTSFreeMemory straight after.
+        let queried = unsafe { WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, session_id, WTSSessionInfoEx, &mut buffer, &mut bytes) };
+        if queried == 0 || buffer.is_null() || (bytes as usize) < std::mem::size_of::<WTSINFOEXW>() {
+            // Any failure — even a session that logged off between the two calls — makes the whole
+            // answer unknown rather than quietly one session short: the caller defers the restart,
+            // and a deferred restart costs nothing but time.
+            failure.get_or_insert_with(|| format!("WTSQuerySessionInformationW failed for session {session_id}: {}", std::io::Error::last_os_error()));
+            if !buffer.is_null() {
+                unsafe { WTSFreeMemory(buffer.cast()) };
+            }
+            continue;
+        }
+
+        let Some(info_ptr) = std::ptr::NonNull::new(buffer.cast::<WTSINFOEXW>()) else {
+            continue;
+        };
+        // SAFETY: non-null (above) and Windows reported at least size_of::<WTSINFOEXW>() bytes, so
+        // one whole struct is readable; copied out unaligned so nothing depends on the allocation's
+        // alignment, and the buffer is freed straight after. Level 1 is the only level Windows
+        // defines, so the union's one member is the one to read.
+        let info: WTSINFOEXW = unsafe { std::ptr::read_unaligned(info_ptr.as_ptr()) };
+        unsafe { WTSFreeMemory(buffer.cast()) };
+        // SAFETY: reading the union's only defined member (Level 1), from a plain-data copy.
+        let level1 = unsafe { info.Data.WTSInfoExLevel1 };
+        let has_user = level1.UserName.first().is_some_and(|&c| c != 0);
+        states.extend(classify_session(level1.SessionId, has_user, level1.SessionState as i32, level1.SessionFlags as i64));
+    }
+    // SAFETY: allocated by WTSEnumerateSessionsW above and not used again.
+    unsafe { WTSFreeMemory(sessions.cast()) };
+
+    match failure {
+        Some(message) => Err(anyhow::anyhow!(message)),
+        None => Ok(states),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows_sys::Win32::System::RemoteDesktop::{WTSActive, WTSConnected, WTSDisconnected};
+
+    #[test]
+    fn an_unlocked_active_session_is_somebody_at_the_desk() {
+        assert_eq!(classify_session(1, true, WTSActive as i32, 1), Some(LogonState::AtTheDesk));
+    }
+
+    /// The finding this exists for: a locked screen is somebody logged on with work open, not an
+    /// empty desk.
+    #[test]
+    fn a_locked_or_disconnected_session_is_somebody_away_not_nobody() {
+        assert_eq!(classify_session(1, true, WTSActive as i32, 0), Some(LogonState::Away), "locked");
+        assert_eq!(classify_session(2, true, WTSDisconnected as i32, 1), Some(LogonState::Away), "switched away / RDP dropped");
+        assert_eq!(classify_session(3, true, WTSActive as i32, -1), Some(LogonState::Away), "lock state unknown");
+    }
+
+    #[test]
+    fn session_zero_and_sessions_without_a_user_are_nobody() {
+        assert_eq!(classify_session(0, true, WTSActive as i32, 1), None, "services");
+        assert_eq!(classify_session(1, false, WTSConnected as i32, -1), None, "the console before anyone signs in");
+    }
 }

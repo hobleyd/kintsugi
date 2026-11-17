@@ -1,9 +1,12 @@
+mod baseline;
 mod checkin_schedule;
 mod config;
 mod dialogs;
 mod forced_patch_run;
+mod health;
 mod identity;
 mod input_injection;
+mod log_collection;
 mod logging;
 mod os_update;
 mod patch_cycle;

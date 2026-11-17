@@ -1,4 +1,5 @@
 using Moq;
+using Kintsugi.Application.HostActivity;
 using Kintsugi.Application.Common.Interfaces;
 using Kintsugi.Application.ForcedPatchRuns.Commands.ClaimForcedPatchRuns;
 using Kintsugi.Domain.Entities;
@@ -20,7 +21,7 @@ public class ClaimForcedPatchRunsCommandHandlerTests
     }
 
     private ClaimForcedPatchRunsCommandHandler CreateHandler() =>
-        new(_hostRepository.Object, _forcedPatchRunRepository.Object, _unitOfWork.Object);
+        new(_hostRepository.Object, _forcedPatchRunRepository.Object, _unitOfWork.Object, new Mock<IHostEventRecorder>().Object);
 
     /// <summary>
     /// Reading is what delivers the instruction, so the read consumes it. A row left collectable

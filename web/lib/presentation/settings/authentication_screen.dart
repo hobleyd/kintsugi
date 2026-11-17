@@ -12,6 +12,7 @@ import '../../domain/entities/enums.dart';
 import '../../domain/entities/settings.dart';
 import '../../domain/usecases/settings_usecases.dart';
 import '../session/session_bloc.dart';
+import 'admin_email_parsing.dart';
 import 'authentication_bloc.dart';
 import 'settings_state.dart';
 
@@ -130,22 +131,7 @@ class _AuthenticationFormState extends State<_AuthenticationForm> {
             adminEmails: _adminEmailsKnown ? _parseAdminEmails(_adminEmails.text) : null,
           ));
 
-  /// One address per line; commas and semicolons also separate, so a pasted list works. An entry
-  /// pasted from a mail client as `Jake Uren <jake.uren@htw.com.au>` is reduced to the address
-  /// inside the angle brackets; a plain address is left as it is. Blanks are dropped here, and the
-  /// server lower-cases and de-duplicates.
-  ///
-  /// The reduction is not cosmetic. The server refuses a display name
-  /// (`UpdateAuthenticationSettingsCommandValidator`), so without it a pasted list is rejected
-  /// whole — and a display name containing a comma, which this splits on, still leaves a stray
-  /// fragment that the server then names under the field, rather than saving something that can
-  /// never match a sign-in.
-  List<String> _parseAdminEmails(String text) => text
-      .split(RegExp(r'[\n,;]'))
-      .map((entry) => RegExp(r'<([^<>]*)>').firstMatch(entry)?.group(1) ?? entry)
-      .map((entry) => entry.trim())
-      .where((entry) => entry.isNotEmpty)
-      .toList();
+  List<String> _parseAdminEmails(String text) => parseAdminEmails(text);
 
   /// Server-side validation reports a bad entry under `AdminEmails[0]`, `AdminEmails[1]`, …, which
   /// `errorFor('AdminEmails')` does not match, so the first of those is shown on the field.

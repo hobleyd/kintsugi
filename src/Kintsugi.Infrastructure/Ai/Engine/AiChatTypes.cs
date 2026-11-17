@@ -51,6 +51,27 @@ public record AiChatRequest(
     bool UseHostedWebSearch,
     int? MaxOutputTokens);
 
+/// <summary>Tokens one call used, as the provider reported them.</summary>
+public record AiTokenUsage(long InputTokens, long OutputTokens)
+{
+    /// <summary>Reads a token count a provider reported, tolerating it being absent or not a number.</summary>
+    internal static long Count(System.Text.Json.Nodes.JsonNode? node)
+    {
+        try
+        {
+            return node is null ? 0 : node.GetValue<long>();
+        }
+        catch (Exception ex) when (ex is FormatException or InvalidOperationException)
+        {
+            return 0;
+        }
+    }
+
+    /// <summary>Null when the provider reported nothing, so "no usage" is not recorded as "zero".</summary>
+    internal static AiTokenUsage? Of(long input, long output) => input == 0 && output == 0 ? null : new AiTokenUsage(input, output);
+}
+
 /// <param name="Text">The visible text of the reply — reasoning and hosted-tool chatter excluded.</param>
 /// <param name="Assistant">The reply as a message to append to the conversation.</param>
-public record AiChatResult(string Text, IReadOnlyList<AiToolCall> ToolCalls, AiChatMessage Assistant);
+/// <param name="Usage">What the provider said the call used; null when it said nothing.</param>
+public record AiChatResult(string Text, IReadOnlyList<AiToolCall> ToolCalls, AiChatMessage Assistant, AiTokenUsage? Usage = null);

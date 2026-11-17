@@ -55,6 +55,9 @@ public record AiCatalogProviderDto(
 
 /// <param name="Protocol">The model's own protocol, which differs from its provider's for Claude
 /// listed under <c>google-vertex</c>.</param>
+/// <param name="InputPerMillion">US dollars per million input tokens, as models.dev lists it; null
+/// when it lists none. Used to estimate what a call cost — see <c>AiPricing</c>.</param>
+/// <param name="OutputPerMillion">The same for output tokens.</param>
 public record AiCatalogModelDto(
     string Id,
     string Name,
@@ -62,4 +65,6 @@ public record AiCatalogModelDto(
     bool ToolCall,
     bool Reasoning,
     long? ContextLimit,
-    string? ReleaseDate);
+    string? ReleaseDate,
+    decimal? InputPerMillion = null,
+    decimal? OutputPerMillion = null);

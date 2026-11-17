@@ -84,6 +84,30 @@ class UpdateAuthenticationSettings {
       );
 }
 
+class GetAdministrators {
+  const GetAdministrators(this._repository);
+
+  final AdministratorsRepository _repository;
+
+  Future<List<Administrator>> call() => _repository.list();
+}
+
+class AddAdministrators {
+  const AddAdministrators(this._repository);
+
+  final AdministratorsRepository _repository;
+
+  Future<List<Administrator>> call(List<String> emails) => _repository.add(emails);
+}
+
+class RemoveAdministrator {
+  const RemoveAdministrator(this._repository);
+
+  final AdministratorsRepository _repository;
+
+  Future<List<Administrator>> call(String email) => _repository.remove(email);
+}
+
 class GetAuditSettings {
   const GetAuditSettings(this._repository);
 

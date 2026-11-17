@@ -84,6 +84,25 @@ class AuthenticationSettingsRepositoryImpl implements AuthenticationSettingsRepo
       );
 }
 
+class AdministratorsRepositoryImpl implements AdministratorsRepository {
+  const AdministratorsRepositoryImpl(this._api);
+
+  final ApiClient _api;
+
+  static const _path = '/api/admin/settings/administrators';
+
+  @override
+  Future<List<Administrator>> list() async => administratorsFromJson(await _api.getJson(_path));
+
+  @override
+  Future<List<Administrator>> add(List<String> emails) async =>
+      administratorsFromJson(await _api.postJson(_path, body: {'emails': emails}));
+
+  @override
+  Future<List<Administrator>> remove(String email) async =>
+      administratorsFromJson(await _api.deleteJson(_path, query: {'email': email}));
+}
+
 class AuditSettingsRepositoryImpl implements AuditSettingsRepository {
   const AuditSettingsRepositoryImpl(this._api);
 

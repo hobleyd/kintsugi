@@ -12,4 +12,6 @@ namespace Kintsugi.Application.PatchFailures.Commands.DismissPatchFailure;
 /// dismissed failure that starts happening again is *reopened* rather than duplicated, keeping its
 /// count and its "failing since" date intact (see <c>PatchFailure.Reopen</c>).
 /// </remarks>
-public record DismissPatchFailureCommand(Guid Id) : IRequest<Unit>;
+/// <param name="DismissedBy">The signed-in administrator, set by the controller from the session,
+/// recorded on the host's activity timeline.</param>
+public record DismissPatchFailureCommand(Guid Id, string? DismissedBy = null) : IRequest<Unit>;

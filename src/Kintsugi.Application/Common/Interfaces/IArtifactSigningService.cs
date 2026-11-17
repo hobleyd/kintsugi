@@ -27,4 +27,10 @@ public interface IArtifactSigningService
     /// null when <paramref name="content"/> itself is null/empty — there's nothing to sign, and no
     /// signature to check against an absent field.</summary>
     string? Sign(string? content);
+
+    /// <summary>True only when <paramref name="signature"/> is this server's own signature over
+    /// exactly <paramref name="content"/>. What the server checks before it runs a script itself
+    /// (<c>AiUpgradePathResearchClient.CheckScriptVersionAsync</c>), so a row that merely carries a
+    /// signature column — written by hand into the database, say — is not taken on trust.</summary>
+    bool Verify(string content, string signature);
 }

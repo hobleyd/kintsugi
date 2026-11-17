@@ -1,6 +1,7 @@
 using MediatR;
 using Kintsugi.Application.Common.Exceptions;
 using Kintsugi.Application.Common.Interfaces;
+using Kintsugi.Application.HostActivity;
 using Kintsugi.Domain.Enums;
 
 namespace Kintsugi.Application.Applications.Commands.ReportPatchResult;
@@ -11,17 +12,20 @@ public class ReportPatchResultCommandHandler : IRequestHandler<ReportPatchResult
     private readonly IInstalledApplicationRepository _installedApplicationRepository;
     private readonly IPatchFailureRepository _patchFailureRepository;
     private readonly IUnitOfWork _unitOfWork;
+    private readonly IHostEventRecorder _events;
 
     public ReportPatchResultCommandHandler(
         IHostRepository hostRepository,
         IInstalledApplicationRepository installedApplicationRepository,
         IPatchFailureRepository patchFailureRepository,
-        IUnitOfWork unitOfWork)
+        IUnitOfWork unitOfWork,
+        IHostEventRecorder events)
     {
         _hostRepository = hostRepository;
         _installedApplicationRepository = installedApplicationRepository;
         _patchFailureRepository = patchFailureRepository;
         _unitOfWork = unitOfWork;
+        _events = events;
     }
 
     public async Task<Unit> Handle(ReportPatchResultCommand request, CancellationToken cancellationToken)
@@ -41,6 +45,11 @@ public class ReportPatchResultCommandHandler : IRequestHandler<ReportPatchResult
         }
 
         var application = await _installedApplicationRepository.GetByHostIdAndNameAsync(host.Id, request.ApplicationName, cancellationToken);
+        // Recorded whether or not this server still tracks the application row: the host did patch
+        // it, and the timeline is the record of that.
+        await _events.ApplicationPatchedAsync(
+            host.Id, request.ApplicationName, application?.Version, request.NewVersion, DateTimeOffset.UtcNow, cancellationToken);
+
         if (application is null)
         {
             // Not an error — e.g. a report that raced this host's next full inventory report, or
@@ -48,10 +57,7 @@ public class ReportPatchResultCommandHandler : IRequestHandler<ReportPatchResult
             // written *unless* a failure was just closed above: a success is a success whether or
             // not this server still tracks the row it would have updated, and returning early
             // without saving would leave that failure open on the screen forever.
-            if (outstanding.Count > 0)
-            {
-                await _unitOfWork.SaveChangesAsync(cancellationToken);
-            }
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
 
             return Unit.Value;
         }

@@ -1,6 +1,6 @@
 [package]
 name = "kintsugi-agent"
-version = "0.17.3"
+version = "0.17.8"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Background agent that registers this Mac with the patching system's host inventory."
@@ -33,7 +33,10 @@ base64 = "0.22"
 # every Script/Command it's handed before ever executing one (p256) — see identity.rs.
 rcgen = { version = "0.14", default-features = false, features = ["pem", "ring"] }
 p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
-time = { version = "0.3", features = ["formatting", "macros"] }
+# Gzips the log sent for a log collection request (log_collection.rs). The pure-Rust backend, already in
+# the tree through the image crate's png decoder.
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 tray-icon = "0.24"
 # "jpeg" alongside "png": png is the menu bar icon, jpeg is every remote control frame. JPEG rather
 # than a video codec because the viewer is a Flutter web application — it decodes an image with the

@@ -204,16 +204,16 @@ void main() {
     }
 
     testWidgets('keeps only the address inside <...> when a mail client pasted a display name', (tester) async {
-      expect(await savedFrom(tester, 'Jake Uren <jake.uren@htw.com.au>'), ['jake.uren@htw.com.au']);
+      expect(await savedFrom(tester, 'Alex Admin <alex.admin@corp.example.com>'), ['alex.admin@corp.example.com']);
     });
 
     testWidgets('splits a pasted list on commas, semicolons and newlines, whatever each entry looks like', (tester) async {
       expect(
         await savedFrom(
           tester,
-          'Jake Uren <jake.uren@htw.com.au>, plain@example.com; <bare@example.com>\n  spaced@example.com  ',
+          'Alex Admin <alex.admin@corp.example.com>, plain@example.com; <bare@example.com>\n  spaced@example.com  ',
         ),
-        ['jake.uren@htw.com.au', 'plain@example.com', 'bare@example.com', 'spaced@example.com'],
+        ['alex.admin@corp.example.com', 'plain@example.com', 'bare@example.com', 'spaced@example.com'],
       );
     });
 

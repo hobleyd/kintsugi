@@ -70,4 +70,72 @@ void main() {
     expect(await resolve(tester, open, Routes.hosts), Routes.hosts);
     expect(await resolve(tester, open, Routes.accessDenied), Routes.hosts);
   });
+
+  group('a page load held on the splash remembers where it was headed', () {
+    /// The router for a session that has not answered yet, and where it sends [path].
+    Future<Uri> whileLoading(WidgetTester tester, String path) async {
+      final bloc = blocFor(FakeSessionRepository(session: session(signedIn: true, authorized: true)));
+      final router = createRouter(bloc);
+      await tester.pumpWidget(const SizedBox());
+      final context = tester.element(find.byType(SizedBox));
+      final matches = await router.routeInformationParser.parseRouteInformationWithDependencies(
+        RouteInformation(uri: Uri.parse(path)),
+        context,
+      );
+      return matches.uri;
+    }
+
+    /// Where an allowed caller is sent from the splash that was asked to return to [from].
+    Future<String> afterLoading(WidgetTester tester, String from, {Session? as}) =>
+        resolve(tester, as ?? session(signedIn: true, authorized: true), Routes.startingThen(from));
+
+    testWidgets('holds the address on the splash instead of forgetting it', (tester) async {
+      final uri = await whileLoading(tester, '/diagnostics');
+
+      expect(uri.path, Routes.starting);
+      expect(uri.queryParameters['from'], '/diagnostics');
+    });
+
+    testWidgets('keeps the query of the address it holds', (tester) async {
+      final uri = await whileLoading(tester, '/applications?search=Slack');
+
+      expect(uri.queryParameters['from'], '/applications?search=Slack');
+    });
+
+    testWidgets('returns to it once the session is ready', (tester) async {
+      expect(await afterLoading(tester, '/diagnostics'), '/diagnostics');
+      expect(await afterLoading(tester, '/applications?search=Slack'), '/applications');
+    });
+
+    testWidgets('goes to Hosts when it was not headed anywhere', (tester) async {
+      expect(await resolve(tester, session(signedIn: true, authorized: true), Routes.starting), Routes.hosts);
+      expect(await afterLoading(tester, '/'), Routes.hosts);
+    });
+
+    testWidgets('does not follow an address that leaves the app', (tester) async {
+      for (final from in ['//evil.example/x', 'https://evil.example/x', r'/\evil.example', 'diagnostics', '']) {
+        expect(await afterLoading(tester, from), Routes.hosts, reason: from);
+      }
+    });
+
+    testWidgets('does not return to a gate screen, which would only bounce back', (tester) async {
+      for (final from in [Routes.signIn, Routes.accessDenied, Routes.unavailable, Routes.starting]) {
+        expect(await afterLoading(tester, from), Routes.hosts, reason: from);
+      }
+    });
+
+    testWidgets('still sends someone who is not allowed in to Access denied, whatever they asked for', (tester) async {
+      expect(
+        await afterLoading(tester, '/diagnostics', as: session(signedIn: true, authorized: false)),
+        Routes.accessDenied,
+      );
+    });
+
+    testWidgets('still sends someone who is not signed in to sign-in', (tester) async {
+      expect(
+        await afterLoading(tester, '/diagnostics', as: session(signedIn: false, authorized: false)),
+        Routes.signIn,
+      );
+    });
+  });
 }

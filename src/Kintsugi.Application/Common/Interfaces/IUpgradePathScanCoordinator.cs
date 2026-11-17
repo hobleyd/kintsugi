@@ -15,4 +15,8 @@ public interface IUpgradePathScanCoordinator
     bool TryRequestStart();
 
     UpgradePathScanStatusDto GetStatus();
+
+    /// <summary>A row per application the scan has reported on, with its outcome — what the status's
+    /// counts and notes cannot say. Fetched once, when the scan finishes.</summary>
+    UpgradePathRunResultsDto GetResults();
 }

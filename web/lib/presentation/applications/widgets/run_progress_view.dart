@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../../../core/diagnostics/diagnostics_log.dart';
 import '../../../core/theme/kintsugi_palette.dart';
+import '../../../domain/entities/upgrade_path.dart';
 import '../../../core/widgets/alert_box.dart';
 import '../../../core/widgets/text_bits.dart';
 import '../background_run_bloc.dart';
@@ -20,7 +23,13 @@ import '../run_progress_mappers.dart';
 /// `DiagnosticsLog`, which lives in the shell and survives the navigation. See
 /// `core/diagnostics/diagnostics_log.dart`.
 class RunProgressView<B extends BackgroundRunBloc> extends StatelessWidget {
-  const RunProgressView({super.key, required this.title, required this.onFinished, this.source});
+  const RunProgressView({
+    super.key,
+    required this.title,
+    required this.onFinished,
+    this.source,
+    this.loadRows,
+  });
 
   /// What to call this run in the panel — "Check for Updates". The type parameter identifies the
   /// bloc, not the run, so this cannot be derived from it.
@@ -29,9 +38,46 @@ class RunProgressView<B extends BackgroundRunBloc> extends StatelessWidget {
   /// The screen the entry came from, for a panel that is read from other screens.
   final String? source;
 
+  /// Reads the run's row-by-row results, asked for once when it finishes. This is what gives the
+  /// Diagnostics page its tabs: the status carries counts and a note for the rows that have one, and
+  /// cannot say which row was resolved, had no known path or failed. Null leaves the entry as it was
+  /// — the notes only — which is also what happens when the read fails, so an older server or a
+  /// dropped request costs the tabs and nothing else.
+  final Future<RunResults> Function()? loadRows;
+
   /// Called once when a watched run finishes, so the screen can re-read the table. This is what
   /// the page this replaces did with `window.location.reload()`.
   final VoidCallback onFinished;
+
+  /// Records a clean finish with a line per row. Falls back to the notes alone when the rows cannot be
+  /// read, so a failure here never costs the entry itself.
+  Future<void> _recordWithRows(
+    DiagnosticsLog log,
+    BackgroundRunState state,
+    Future<RunResults> Function() loadRows,
+  ) async {
+    var lines = state.progress.notes.map(noteLine).toList();
+    try {
+      final results = await loadRows();
+      lines = [
+        for (final row in results.rows) runRowLine(row),
+        // Stated, like the notes' own overflow line: a list that stops at the bound with nothing to
+        // say so reads as that being all there was.
+        if (results.unlisted > 0)
+          DiagnosticsLine('...and ${results.unlisted} more rows not listed. The counts above cover all of them.'),
+      ];
+    } on Object {
+      // Keep the notes.
+    }
+
+    log.record(
+      title: title,
+      kind: DiagnosticsKind.success,
+      summary: state.progress.summary,
+      source: source,
+      lines: lines,
+    );
+  }
 
   @override
   Widget build(BuildContext context) => BlocConsumer<B, BackgroundRunState>(
@@ -58,6 +104,15 @@ class RunProgressView<B extends BackgroundRunBloc> extends StatelessWidget {
           if (!state.finished) return;
 
           final fault = state.progress.faultReason;
+          final loadRows = this.loadRows;
+          if (log != null && fault == null && loadRows != null) {
+            // Recorded once the rows arrive, which is a round trip later. `onFinished` does not wait
+            // for it: the table re-reads at once, as it always did.
+            unawaited(_recordWithRows(log, state, loadRows));
+            onFinished();
+            return;
+          }
+
           log?.record(
             title: title,
             kind: fault == null ? DiagnosticsKind.success : DiagnosticsKind.error,

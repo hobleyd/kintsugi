@@ -188,6 +188,10 @@ void main() {
       expect(find.text('DIAGNOSTICS'), findsNothing);
       expect(log.count, 1, reason: 'hidden, not cleared');
 
+      // The whole sidebar scrolls, and with every menu entry it has the footer sits below a
+      // 1200px window's fold, so scroll to it as a person would.
+      await tester.ensureVisible(find.text('DIAGNOSTICS (1)'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('DIAGNOSTICS (1)'));
       await tester.pumpAndSettle();
 

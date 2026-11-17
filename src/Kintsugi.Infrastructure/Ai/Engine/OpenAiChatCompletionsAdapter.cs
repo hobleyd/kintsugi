@@ -71,7 +71,8 @@ public class OpenAiChatCompletionsAdapter : IAiProtocolAdapter
         }
 
         var text = ReadContent(message["content"]);
-        return new AiChatResult(text, toolCalls, new AiChatMessage(AiChatRole.Assistant, text, toolCalls, ProviderContent: message.DeepClone()));
+        return new AiChatResult(text, toolCalls, new AiChatMessage(AiChatRole.Assistant, text, toolCalls, ProviderContent: message.DeepClone()),
+            AiTokenUsage.Of(AiTokenUsage.Count(response["usage"]?["prompt_tokens"]), AiTokenUsage.Count(response["usage"]?["completion_tokens"])));
     }
 
     private static JsonNode ToWire(AiChatMessage message) => message.Role switch

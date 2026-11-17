@@ -1,5 +1,6 @@
 using MediatR;
 using Kintsugi.Application.Common.Interfaces;
+using Kintsugi.Application.HostActivity;
 
 namespace Kintsugi.Application.ForcedPatchRuns.Commands.ClaimForcedPatchRuns;
 
@@ -8,15 +9,18 @@ public class ClaimForcedPatchRunsCommandHandler : IRequestHandler<ClaimForcedPat
     private readonly IHostRepository _hostRepository;
     private readonly IForcedPatchRunRepository _forcedPatchRunRepository;
     private readonly IUnitOfWork _unitOfWork;
+    private readonly IHostEventRecorder _events;
 
     public ClaimForcedPatchRunsCommandHandler(
         IHostRepository hostRepository,
         IForcedPatchRunRepository forcedPatchRunRepository,
-        IUnitOfWork unitOfWork)
+        IUnitOfWork unitOfWork,
+        IHostEventRecorder events)
     {
         _hostRepository = hostRepository;
         _forcedPatchRunRepository = forcedPatchRunRepository;
         _unitOfWork = unitOfWork;
+        _events = events;
     }
 
     public async Task<IReadOnlyList<ForcedPatchRunDto>> Handle(ClaimForcedPatchRunsCommand request, CancellationToken cancellationToken)
@@ -43,6 +47,7 @@ public class ClaimForcedPatchRunsCommandHandler : IRequestHandler<ClaimForcedPat
         foreach (var run in collectable)
         {
             run.MarkCollected(asOfUtc);
+            await _events.PatchNowPickedUpAsync(host.Id, run.ApplicationName, asOfUtc, cancellationToken);
         }
 
         await _unitOfWork.SaveChangesAsync(cancellationToken);

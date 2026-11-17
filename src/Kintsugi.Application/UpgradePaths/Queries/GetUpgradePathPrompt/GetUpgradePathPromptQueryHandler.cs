@@ -13,14 +13,17 @@ public class GetUpgradePathPromptQueryHandler : IRequestHandler<GetUpgradePathPr
     private readonly IUpgradePathRepository _upgradePathRepository;
     private readonly IPatchFailureRepository _patchFailureRepository;
     private readonly IHostRepository _hostRepository;
+    private readonly IManagedApplicationRepository _managedApplicationRepository;
 
     public GetUpgradePathPromptQueryHandler(
         ISender sender,
         IUpgradePathResearchClient researchClient,
         IUpgradePathRepository upgradePathRepository,
         IPatchFailureRepository patchFailureRepository,
-        IHostRepository hostRepository)
+        IHostRepository hostRepository,
+        IManagedApplicationRepository managedApplicationRepository)
     {
+        _managedApplicationRepository = managedApplicationRepository;
         _sender = sender;
         _researchClient = researchClient;
         _upgradePathRepository = upgradePathRepository;
@@ -37,6 +40,17 @@ public class GetUpgradePathPromptQueryHandler : IRequestHandler<GetUpgradePathPr
         var existingResult = request.Platform is not null
             ? await GetExistingResultAsync(request.ApplicationName, request.Platform, cancellationToken)
             : null;
+
+        // Before the plan, which leaves a marked application out altogether and would then say it is
+        // "not installed on any host" — true of nothing, and no help to the person who marked it.
+        var managed = await _managedApplicationRepository.FindAsync(request.ApplicationName, cancellationToken);
+        if (managed is not null)
+        {
+            return new UpgradePathPromptDto(
+                false, request.Platform, null,
+                $"Managed by {managed.Owner}: Kintsugi does not research or patch '{request.ApplicationName}'. Stop treating it as managed to bring it back.",
+                existingResult);
+        }
 
         var plan = await _sender.Send(new PrepareUpgradePathScanQuery(), cancellationToken);
 

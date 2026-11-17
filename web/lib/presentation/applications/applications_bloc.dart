@@ -40,7 +40,10 @@ class ApplicationTableRow extends Equatable {
 
   bool get isChild => parentName != null;
 
-  String get statusKey => upgradePath?.statusKey ?? 'not-checked';
+  /// 'managed-elsewhere' for an application another tool patches, whatever was ever researched for
+  /// it: that is the one thing about the row that decides what Kintsugi does with it.
+  String get statusKey =>
+      application.managedBy != null ? 'managed-elsewhere' : (upgradePath?.statusKey ?? 'not-checked');
 
   String get platform => upgradePath?.platform ?? '';
 

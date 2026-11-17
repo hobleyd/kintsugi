@@ -140,6 +140,14 @@ public class AiEngine : IAiConnectionProbe
                 new AiChatRequest(route.Model, messages, offerTools, useHosted, maxOutputTokens),
                 cancellationToken);
 
+            // Counted for the budget by whoever opened an AiUsageScope; nothing here if none is open.
+            if (result.Usage is { } usage)
+            {
+                AiUsageScope.Add(new AiUsageEntry(
+                    route.Connection.Name, route.Model, usage.InputTokens, usage.OutputTokens,
+                    Free: route.Connection.Protocol == AiWireProtocol.Ollama));
+            }
+
             if (result.ToolCalls.Count == 0 || offerTools.Count == 0)
             {
                 return result.Text;

@@ -70,6 +70,7 @@ const QUEUE_DIR: &str = "/var/lib/kintsugi-agent/queue";
 /// Linux admin looks first (`journalctl -u kintsugi-agent`); the file exists so the agent's logs
 /// are in the same place on every platform, and survive a journal that's volatile by default.
 const DAEMON_LOG_PATH: &str = "/var/lib/kintsugi-agent/daemon.log";
+const HEALTH_STATE_PATH: &str = "/var/lib/kintsugi-agent/health-reported";
 
 /// This host's assigned check-in minute-of-hour (0-59), persisted so it survives across
 /// invocations — see `checkin_schedule`. Deliberately separate from `CONFIG_PATH`: that file is
@@ -259,6 +260,26 @@ impl Config {
         format!("{}/api/os-patch-results", self.api_base_url.trim_end_matches('/'))
     }
 
+    /// Tells the server what this host's own log says about it shutting down by itself and about hardware
+    /// errors — see `health::report_new_events` and Kintsugi.WebApi/Controllers/HostHealthController.cs.
+    pub fn health_events_url(&self) -> String {
+        format!("{}/api/host-health-events", self.api_base_url.trim_end_matches('/'))
+    }
+
+    /// The three routes of on-demand log collection — see `log_collection`. Agent-gated by mTLS like
+    /// `health_events_url`; the caller adds `?serialNumber=` (and `collectionId=`) through the client.
+    pub fn log_collection_requests_url(&self) -> String {
+        format!("{}/api/log-collection-requests", self.api_base_url.trim_end_matches('/'))
+    }
+
+    pub fn log_collection_results_url(&self) -> String {
+        format!("{}/api/log-collection-results", self.api_base_url.trim_end_matches('/'))
+    }
+
+    pub fn log_collection_failures_url(&self) -> String {
+        format!("{}/api/log-collection-failures", self.api_base_url.trim_end_matches('/'))
+    }
+
     /// Tells the server this host finished uninstalling itself completely, after a check-in
     /// response marked it for removal — see `self_removal::run` and
     /// Kintsugi.WebApi/Controllers/HostsController.cs.
@@ -280,6 +301,11 @@ pub fn queue_dir() -> PathBuf {
 
 pub fn identity_dir() -> PathBuf {
     PathBuf::from(IDENTITY_DIR)
+}
+
+/// Where the time of the last health report is kept, so the next one reads only what is new.
+pub fn health_state_path() -> PathBuf {
+    PathBuf::from(HEALTH_STATE_PATH)
 }
 
 pub fn daemon_log_path() -> PathBuf {

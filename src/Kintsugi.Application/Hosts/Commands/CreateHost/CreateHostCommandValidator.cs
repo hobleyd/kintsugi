@@ -18,5 +18,10 @@ public class CreateHostCommandValidator : AbstractValidator<CreateHostCommand>
         // silently matching the wrong CVEs.
         RuleFor(x => x.OperatingSystemId).MaximumLength(64);
         RuleFor(x => x.OperatingSystemVersionId).MaximumLength(64);
+        // RestartBecause deliberately has no length rule. It is a display string, and refusing the
+        // whole check-in over it took down the one request that keeps a host from going stale: a
+        // Linux host months from its last reboot named every pending package, went past the column,
+        // and stopped checking in. Host.RecordRestartState cuts it to the column instead, and the
+        // agent (os_update::summarise_packages) keeps it well under in the first place.
     }
 }

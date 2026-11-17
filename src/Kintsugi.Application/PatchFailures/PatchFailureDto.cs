@@ -47,4 +47,25 @@ public record PatchFailureDto(
     /// second copy of it in Dart would be free to disagree.
     /// </remarks>
     public bool CanFix => Platform is not null && HasScript;
+
+    /// <summary>
+    /// Whether this row is a failed operating-system update (Windows Update, macOS
+    /// <c>softwareupdate</c>, a distribution's package manager) rather than an application. The
+    /// three agents file those under the names <c>Windows</c>, <c>macOS</c> and <c>Linux</c>; see
+    /// <see cref="OperatingSystemUpdateFailure"/>.
+    /// </summary>
+    public bool IsOperatingSystemUpdate => OperatingSystemUpdateFailure.IsOperatingSystem(ApplicationName);
+
+    /// <summary>What to call the row on screen: "Windows Update" rather than a bare "Windows".
+    /// Null for an application, which shows its own name.</summary>
+    public string? DisplayName => OperatingSystemUpdateFailure.DisplayName(ApplicationName);
+
+    /// <summary>Why an operating-system update failed, in a few words. Null for an application.</summary>
+    public string? CauseTitle => OperatingSystemUpdateFailure.Explain(ApplicationName, Details)?.Title;
+
+    /// <summary>A sentence saying why that happens. Null for an application.</summary>
+    public string? CauseExplanation => OperatingSystemUpdateFailure.Explain(ApplicationName, Details)?.Explanation;
+
+    /// <summary>What to do about it. Null for an application.</summary>
+    public string? SuggestedFix => OperatingSystemUpdateFailure.Explain(ApplicationName, Details)?.SuggestedFix;
 }

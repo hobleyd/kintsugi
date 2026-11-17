@@ -68,13 +68,82 @@ public class AiUpgradePathResearchClientTests
 
     // The engine shares the handler, so the queue sees GitHub/GitLab lookups and AI calls in the
     // order they happen — exactly as when the providers were hand-written in this class.
-    private static AiUpgradePathResearchClient CreateClient(HttpMessageHandler handler) => new(
+    private static AiUpgradePathResearchClient CreateClient(HttpMessageHandler handler, IAiBudgetService? budget = null) => new(
         new HttpClient(handler, disposeHandler: false),
         TestAiEngine.Over(handler),
         FakeGitHubSettings.Provider(),
         Mock.Of<IGooseCliClient>(),
         Mock.Of<IClaudeAgentSdkClient>(),
+        budget ?? Mock.Of<IAiBudgetService>(),
+        Signer(),
         NullLogger<AiUpgradePathResearchClient>.Instance);
+
+    // The one signature the fake signer accepts, standing in for this server's own over a reviewed script.
+    private const string ReviewedSignature = "reviewed-signature";
+
+    private static IArtifactSigningService Signer()
+    {
+        var signer = new Mock<IArtifactSigningService>();
+        signer.Setup(s => s.Verify(It.IsAny<string>(), ReviewedSignature)).Returns(true);
+        return signer.Object;
+    }
+
+    private static HttpResponseMessage AnthropicTextResponseWithUsage(string text, int input, int output) =>
+        new(HttpStatusCode.OK)
+        {
+            Content = JsonContent.Create(new { content = new[] { new { type = "text", text } }, usage = new { input_tokens = input, output_tokens = output } }),
+        };
+
+    [Fact]
+    public async Task GenerateScriptAsync_RecordsTheTokensItSpentAgainstTheApplication()
+    {
+        var budget = new Mock<IAiBudgetService>();
+        IReadOnlyList<AiUsageEntry>? recorded = null;
+        budget.Setup(b => b.RecordAsync(AiFeature.ScriptResearch, "Firefox", It.IsAny<IReadOnlyList<AiUsageEntry>>(), It.IsAny<CancellationToken>()))
+            .Callback<AiFeature, string?, IReadOnlyList<AiUsageEntry>, CancellationToken>((_, _, entries, _) => recorded = entries)
+            .Returns(Task.CompletedTask);
+        var handler = new QueueingHandler(_ => AnthropicTextResponseWithUsage(ValidScript, 1200, 300));
+
+        await CreateClient(handler, budget.Object).GenerateScriptAsync(AnthropicSettings, Request(), CancellationToken.None);
+
+        var entry = Assert.Single(recorded!);
+        Assert.Equal((1200, 300), (entry.InputTokens, entry.OutputTokens));
+        budget.Verify(b => b.EnsureWithinBudgetAsync(It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task GenerateScriptAsync_AtTheLimitMakesNoAiCallAtAll()
+    {
+        var budget = new Mock<IAiBudgetService>();
+        budget.Setup(b => b.EnsureWithinBudgetAsync(It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new AiBudgetReachedException("AI budget reached: $50.00 of $50.00."));
+        var handler = new QueueingHandler(_ => AnthropicTextResponse(ValidScript));
+
+        var error = await Assert.ThrowsAsync<AiBudgetReachedException>(
+            () => CreateClient(handler, budget.Object).GenerateScriptAsync(AnthropicSettings, Request(), CancellationToken.None));
+
+        Assert.Contains("AI budget reached", error.Message);
+        Assert.Empty(handler.Requests);
+        budget.Verify(b => b.RecordAsync(It.IsAny<AiFeature>(), It.IsAny<string?>(), It.IsAny<IReadOnlyList<AiUsageEntry>>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    [Fact]
+    public async Task GenerateScriptAsync_RecordsWhatAFailedCallSpentToo()
+    {
+        var budget = new Mock<IAiBudgetService>();
+        IReadOnlyList<AiUsageEntry>? recorded = null;
+        budget.Setup(b => b.RecordAsync(It.IsAny<AiFeature>(), It.IsAny<string?>(), It.IsAny<IReadOnlyList<AiUsageEntry>>(), It.IsAny<CancellationToken>()))
+            .Callback<AiFeature, string?, IReadOnlyList<AiUsageEntry>, CancellationToken>((_, _, entries, _) => recorded = entries)
+            .Returns(Task.CompletedTask);
+        // The model answers (tokens spent) with something that is not a script.
+        var handler = new QueueingHandler(_ => AnthropicTextResponseWithUsage("", 500, 10));
+
+        await Assert.ThrowsAnyAsync<Exception>(
+            () => CreateClient(handler, budget.Object).GenerateScriptAsync(AnthropicSettings, Request(), CancellationToken.None));
+
+        Assert.NotNull(recorded);
+        Assert.Equal(500, Assert.Single(recorded!).InputTokens);
+    }
 
     [Fact]
     public async Task GenerateScriptAsync_WithAValidScriptOnTheFirstAttempt_ReturnsFoundWithoutAnyRetry()
@@ -296,6 +365,41 @@ public class AiUpgradePathResearchClientTests
         Assert.Contains("unknown", prompt);
     }
 
+    // What an administrator can read when a patch fails depends on these three rules, and the model
+    // ignores any it is not told: it hides installer output on its own and, left alone, reports a
+    // failed signature check next to an install that went ahead.
+    [Theory]
+    [InlineData(PlatformBucket.Windows, "Authenticode signature OK")]
+    [InlineData(PlatformBucket.MacOs, "Team ID OK")]
+    [InlineData(PlatformBucket.Linux, "signature OK")]
+    public void BuildDefaultPrompt_TellsTheModelNotToHideInstallerOutput_ToLogEachCheck_AndToVerifyBeforeInstalling(
+        string platform, string platformCheck)
+    {
+        var client = CreateClient(new QueueingHandler());
+
+        var prompt = client.BuildDefaultPrompt(new UpgradePathScriptGenerationRequest("Firefox", platform, Array.Empty<string>()));
+
+        Assert.Contains("Never hide", prompt);
+        Assert.Contains("Send it to stderr", prompt);
+        Assert.Contains("`checksum OK`", prompt);
+        Assert.Contains(platformCheck, prompt);
+        Assert.Contains("never print an OK for a check", prompt);
+        Assert.Contains("BEFORE the installer or package manager is run", prompt);
+        Assert.Contains("exit non-zero", prompt);
+    }
+
+    [Fact]
+    public void BuildDefaultPrompt_ForMacOs_NoLongerSuggestsSilencingHdiutil()
+    {
+        var client = CreateClient(new QueueingHandler());
+
+        var prompt = client.BuildDefaultPrompt(new UpgradePathScriptGenerationRequest("Firefox", PlatformBucket.MacOs, Array.Empty<string>()));
+
+        // `-quiet` is still named once, in the rule that forbids it.
+        Assert.DoesNotContain("hdiutil attach -nobrowse -quiet", prompt);
+        Assert.Contains("hdiutil attach -nobrowse`", prompt);
+    }
+
     [Fact]
     public void BuildDefaultPrompt_ForWindows_AsksForAPowerShellScript_ThatStillRunsItsVersionCheckOnLinux()
     {
@@ -415,7 +519,7 @@ public class AiUpgradePathResearchClientTests
         var client = CreateClient(new QueueingHandler());
         const string script = "#!/bin/bash\necho \"129.0\"\nexit 0\n";
 
-        var result = await client.CheckScriptVersionAsync(script, PlatformBucket.MacOs, "Firefox", "org.mozilla.firefox", CancellationToken.None);
+        var result = await client.CheckScriptVersionAsync(script, ReviewedSignature, PlatformBucket.MacOs, "Firefox", "org.mozilla.firefox", CancellationToken.None);
 
         Assert.Equal("129.0", result);
     }
@@ -426,7 +530,7 @@ public class AiUpgradePathResearchClientTests
         var client = CreateClient(new QueueingHandler());
         const string script = "#!/bin/bash\necho \"broken\" >&2\nexit 1\n";
 
-        var result = await client.CheckScriptVersionAsync(script, PlatformBucket.MacOs, "Firefox", "org.mozilla.firefox", CancellationToken.None);
+        var result = await client.CheckScriptVersionAsync(script, ReviewedSignature, PlatformBucket.MacOs, "Firefox", "org.mozilla.firefox", CancellationToken.None);
 
         Assert.Null(result);
     }
@@ -437,7 +541,7 @@ public class AiUpgradePathResearchClientTests
         var client = CreateClient(new QueueingHandler());
         const string script = "#!/bin/bash\necho \"129.0\"\necho \"unexpected extra line\"\n";
 
-        var result = await client.CheckScriptVersionAsync(script, PlatformBucket.MacOs, "Firefox", "org.mozilla.firefox", CancellationToken.None);
+        var result = await client.CheckScriptVersionAsync(script, ReviewedSignature, PlatformBucket.MacOs, "Firefox", "org.mozilla.firefox", CancellationToken.None);
 
         Assert.Null(result);
     }
@@ -448,8 +552,25 @@ public class AiUpgradePathResearchClientTests
         var client = CreateClient(new QueueingHandler());
         const string script = "#!/bin/bash\nexit 0\n";
 
-        var result = await client.CheckScriptVersionAsync(script, PlatformBucket.MacOs, "Firefox", "org.mozilla.firefox", CancellationToken.None);
+        var result = await client.CheckScriptVersionAsync(script, ReviewedSignature, PlatformBucket.MacOs, "Firefox", "org.mozilla.firefox", CancellationToken.None);
 
         Assert.Null(result);
+    }
+
+    // htw-secops/kintsugi#8: the server runs a script only if it signed those exact bytes. Each script
+    // below would leave a marker file behind if it ran at all, so "null" cannot hide a run.
+    [Theory]
+    [InlineData(null)]
+    [InlineData("a-signature-this-server-never-made")]
+    public async Task CheckScriptVersionAsync_WithAScriptThisServerDidNotSign_NeverRunsIt(string? signature)
+    {
+        var client = CreateClient(new QueueingHandler());
+        var marker = Path.Combine(Path.GetTempPath(), $"kintsugi-ran-{Guid.NewGuid():N}");
+        var script = $"#!/bin/bash\ntouch '{marker}'\necho \"129.0\"\n";
+
+        var result = await client.CheckScriptVersionAsync(script, signature, PlatformBucket.MacOs, "Firefox", "org.mozilla.firefox", CancellationToken.None);
+
+        Assert.Null(result);
+        Assert.False(File.Exists(marker));
     }
 }

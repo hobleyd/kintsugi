@@ -97,11 +97,21 @@ public class UpgradePathRepository : IUpgradePathRepository
         var upgradePaths = await _context.UpgradePaths.ToListAsync(cancellationToken);
         var byNameAndPlatform = BuildByNameAndPlatformLookup(upgradePaths);
         var packageManagerNames = await LoadPackageManagerNamesAsync(installed.Select(x => x.ParentApplicationId), cancellationToken);
+        var managed = await LoadManagedNamesAsync(cancellationToken);
 
         var results = new List<UpgradeStatusDto>();
 
         foreach (var app in installed)
         {
+            // What this returns is what the agent is told to patch. An application another tool patches
+            // is left out, so the agent has no row for it and does nothing: Kintsugi stepping back is
+            // the whole meaning of marking it. (Its script, if it has one, is kept — unmark it and the
+            // agent sees it again.)
+            if (managed.Contains(app.Name))
+            {
+                continue;
+            }
+
             var packageManager = PackageManagerOf(packageManagerNames, app.ParentApplicationId);
             var path = ResolvePath(byNameAndPlatform, app.Name, app.OperatingSystem, packageManager);
             if (path is null)
@@ -165,6 +175,11 @@ public class UpgradePathRepository : IUpgradePathRepository
             app.OperatingSystem,
             PackageManagerOf(packageManagerNames, app.ParentApplicationId));
     }
+
+    /// <summary>The names of the applications another tool patches, compared without regard to case.</summary>
+    private async Task<HashSet<string>> LoadManagedNamesAsync(CancellationToken cancellationToken) =>
+        (await _context.ManagedApplications.Select(a => a.ApplicationName).ToListAsync(cancellationToken))
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
     /// <inheritdoc />
     public async Task<IReadOnlyList<UpgradeStatusDto>> GetOutdatedStatusesAsync(CancellationToken cancellationToken)
@@ -349,13 +364,22 @@ public class UpgradePathRepository : IUpgradePathRepository
         var upgradePaths = await _context.UpgradePaths.ToListAsync(cancellationToken);
         var byNameAndPlatform = BuildByNameAndPlatformLookup(upgradePaths);
         var packageManagerNames = await LoadPackageManagerNamesAsync(installed.Select(x => x.ParentApplicationId), cancellationToken);
+        var managed = await LoadManagedNamesAsync(cancellationToken);
 
         var statuses = new List<InstallationPatchStatus>(installed.Count);
 
         foreach (var app in installed)
         {
             var path = ResolvePath(byNameAndPlatform, app.Name, app.OperatingSystem, PackageManagerOf(packageManagerNames, app.ParentApplicationId));
-            var updateAvailable = path is null ? (bool?)null : ComputeUpdateAvailable(path, app.Version, app.UpdateAvailable);
+
+            // Kintsugi gives no verdict on an application another tool patches — it is not Kintsugi's
+            // to say whether it is behind — so it is "unknown", like one nothing has researched. That
+            // keeps it out of a host's "app updates" count, which would otherwise show a product
+            // CrowdStrike is about to update as waiting for Kintsugi. Unknown still counts a CVE
+            // against it as unpatched (see GetHostsQueryHandler), which is the safe reading.
+            var updateAvailable = path is null || managed.Contains(app.Name)
+                ? (bool?)null
+                : ComputeUpdateAvailable(path, app.Version, app.UpdateAvailable);
 
             statuses.Add(new InstallationPatchStatus(app.HostId, app.Name, app.Version, updateAvailable));
         }

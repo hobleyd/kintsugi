@@ -2,9 +2,11 @@ mod checkin_schedule;
 mod config;
 mod dialogs;
 mod forced_patch_run;
+mod health;
 mod identity;
 mod input_injection;
 mod lock;
+mod log_collection;
 mod logging;
 mod os_update;
 mod patch_cycle;
@@ -107,6 +109,14 @@ struct RegisterHostRequest {
     operating_system_id: Option<String>,
     #[serde(rename = "operatingSystemVersionId", skip_serializing_if = "Option::is_none")]
     operating_system_version_id: Option<String>,
+    /// Whether the host needs a restart for updates it has already installed, and what for —
+    /// mirrors `CreateHostCommand.RestartRequired` / `RestartBecause`. Sent on every check-in so the
+    /// server also learns when the host has restarted and the need has cleared. Omitted when this
+    /// host cannot say, which the server reads as "leave what you have".
+    #[serde(rename = "restartRequired", skip_serializing_if = "Option::is_none")]
+    restart_required: Option<bool>,
+    #[serde(rename = "restartBecause", skip_serializing_if = "Option::is_none")]
+    restart_because: Option<String>,
 }
 
 /// Mirrors the backend's `CreateHostResult` — see
@@ -389,6 +399,7 @@ fn register_and_report(config: &Config, checkin_minute: u8) -> Result<CheckInOut
     // package it reports, and that happens after `os_update_status` is moved into the host
     // request.
     let pending_packages = os_update_status.as_ref().and_then(|s| s.pending_package_names.clone());
+    let restart = os_update::restart_state();
 
     let host_request = RegisterHostRequest {
         hostname,
@@ -401,6 +412,8 @@ fn register_and_report(config: &Config, checkin_minute: u8) -> Result<CheckInOut
         agent_version: env!("CARGO_PKG_VERSION"),
         operating_system_id,
         operating_system_version_id,
+        restart_required: restart.as_ref().map(|r| r.required),
+        restart_because: restart.and_then(|r| r.because),
     };
     let host_response: RegisterHostResponse = post_with_retry(&client, &config.register_host_url(), &host_request)
         .context("failed to register host")?;
@@ -424,6 +437,14 @@ fn register_and_report(config: &Config, checkin_minute: u8) -> Result<CheckInOut
     };
     let _: serde_json::Value = post_with_retry(&client, &config.register_applications_url(), &applications_request)
         .context("failed to register installed applications")?;
+
+    // What this host's own log says about it shutting down by itself or logging hardware errors. Best-effort
+    // and read-only: it never fails the check-in.
+    health::report_new_events(&client, config, &serial_number);
+
+    // An administrator's on-demand request for this host's log, if one is pending. Best-effort and
+    // read-only (journalctl only), time-boxed, and never fails the check-in.
+    log_collection::collect_and_upload_if_requested(&client, config, &serial_number);
 
     patch_unattended_if_nobody_is_logged_in(&client, config, &serial_number, agent_identity.as_ref(), patching_policy.as_ref());
 
@@ -642,8 +663,15 @@ impl RequestHandler for ServiceHandler<'_> {
     }
 
     fn install_os_updates(&mut self) -> Result<()> {
-        os_update::install()?;
-        os_update::report_patched(self.client, self.config, self.serial_number);
+        if let Err(err) = os_update::install() {
+            // Reported from here, the one place the install runs, so the admin UI can say why a host
+            // is not updating rather than showing it as merely waiting. See `os_update::report_failed`.
+            os_update::report_failed(self.client, self.config, self.serial_number, &err);
+            return Err(err);
+        }
+        // Read after the install, so a kernel that was just updated is reported as needing a
+        // restart straight away rather than at the next hourly check-in.
+        os_update::report_patched(self.client, self.config, self.serial_number, os_update::restart_state().as_ref());
         Ok(())
     }
 

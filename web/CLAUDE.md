@@ -620,6 +620,20 @@ US keyboard controlling a French host types the wrong letters.
   silently lands in the proportional default, which for a terminal breaks every aligned column, box
   drawing and progress bar. Nothing in `flutter analyze` or a release build says a word about it;
   `test/presentation/remote_shell_font_test.dart` is the only check.
+- **Sign Script sends the SHA-256 of `state.editorText`, and the server compares it with
+  `ScriptContentHash.Of` over the stored script** — lowercase hex over UTF-8, on both sides. It is the
+  text the box shows, deliberately not `state.result`, so any way the box and the server can come
+  apart (another administrator's save, an AI run, a state bug like the old "Undo clear" restoring a
+  stale in-sync flag) is a 409 and not a signature over a script nobody read. Change the encoding or
+  normalise the text on either side and every sign fails; `InstructionsPanelBloc.scriptSha256`'s
+  known-vector test is the check. The Changes tab's diff compares every byte — `\r` included — and
+  draws invisible and text-direction characters as escapes (`core/text/invisible_characters.dart`),
+  because "No changes" over a change the reviewer cannot see is the diff vouching for it.
+- **Baselines' Sign sends the SHA-256 of the `document` string this client received**, and the
+  server compares it with `ScriptContentHash.Of` over the stored document — the same rule as Sign
+  Script above. The dialog shows that document re-indented for reading, but the hash is over the
+  exact string, never the server's own `documentSha256` echoed back (which would prove nothing about
+  what was reviewed). `SignBaselineVersion.documentSha256`'s known-vector test is the check.
 - `web/pubspec.yaml`'s `environment: sdk:` constraint and `FLUTTER_VERSION` in `nginx/Dockerfile`
   have to stay compatible. Bumping one without the other fails at image build time rather than at
   merge, which is the good failure but only if somebody builds the image.

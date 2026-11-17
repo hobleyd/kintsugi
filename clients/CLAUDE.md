@@ -369,7 +369,7 @@ server — is a configuration problem rather than a bug in a script, and a scree
 the ones a human or the AI can actually fix. Each call site says so in a comment; keep them saying
 it.
 
-**An OS update that *ran* and failed is reported, under the application name `macOS`.** It used to be
+**An OS update that *ran* and failed is reported, under the application name `macOS`, `Windows` or `Linux`.** It used to be
 excluded on the reasoning that there is no script to repair — true, but it meant the failure was
 logged on the host and nowhere else, so the admin UI showed a Mac that simply never updated with no
 indication why. The authorization wall in `clients/macos-agent/CLAUDE.md` sat unreported for a day
@@ -379,6 +379,14 @@ one: that route is already in nginx's agent-certificate regex and already carrie
 to no upgrade path with a null platform — which the screen renders as a failure it cannot offer a
 repair for, which is precisely right here. The rule above still holds for everything that never ran:
 an unauthorized or declined OS update is logged, not reported.
+
+The Windows agent does the same under `Windows` and the Linux agent under `Linux`
+(`os_update::OS_FAILURE_APPLICATION_NAME` in each), reported from the one place the install runs —
+`service::AgentService::install_os_updates` and `ServiceHandler::install_os_updates` — with the
+install's exit status and captured output as the details. All three names have to agree with
+`OperatingSystemUpdateFailure` and `ReportOperatingSystemPatchedCommandHandler` on the server, which
+closes the row when a success is reported; each agent has a test pinning its own string, and nothing
+checks the other side.
 
 **`MAX_REPORTED_FAILURE_BYTES` has to stay below the server's own ceiling.** A failing script's
 stderr is unbounded and `run_script` bails with all of it. 4000 bytes here against

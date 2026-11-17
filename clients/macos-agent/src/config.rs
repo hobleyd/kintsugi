@@ -64,6 +64,9 @@ const DAEMON_LOG_PATH: &str = "/Library/Application Support/kintsugi-agent/daemo
 /// invocations — see `checkin_schedule`. Deliberately separate from `CONFIG_PATH`: that file is
 /// always overwritten wholesale on every install/reinstall (see packaging/install.sh), whereas
 /// this needs to survive one.
+/// Where the time of the last health report is kept, so the next one reads only what is new.
+const HEALTH_STATE_PATH: &str = "/Library/Application Support/kintsugi-agent/health-reported";
+
 const CHECKIN_SCHEDULE_PATH: &str = "/Library/Application Support/kintsugi-agent/checkin-schedule.json";
 
 /// Where the root LaunchDaemon's own job definition lives — `checkin_schedule` rewrites this file
@@ -246,6 +249,28 @@ impl Config {
         format!("{}/api/os-patch-results", self.api_base_url.trim_end_matches('/'))
     }
 
+    /// Tells the server what this Mac's own log says about it shutting down by itself — see
+    /// `health::report_new_events` and Kintsugi.WebApi/Controllers/HostHealthController.cs.
+    pub fn health_events_url(&self) -> String {
+        format!("{}/api/host-health-events", self.api_base_url.trim_end_matches('/'))
+    }
+
+    /// Asks for a pending log collection request — see `log_collection::collect_and_upload_if_requested`
+    /// and the server's log collection controller.
+    pub fn log_collection_requests_url(&self) -> String {
+        format!("{}/api/log-collection-requests", self.api_base_url.trim_end_matches('/'))
+    }
+
+    /// Sends the collected log (gzipped JSON) for a request.
+    pub fn log_collection_results_url(&self) -> String {
+        format!("{}/api/log-collection-results", self.api_base_url.trim_end_matches('/'))
+    }
+
+    /// Says a requested log could not be read.
+    pub fn log_collection_failures_url(&self) -> String {
+        format!("{}/api/log-collection-failures", self.api_base_url.trim_end_matches('/'))
+    }
+
     /// Tells the server this host finished uninstalling itself completely, after a check-in
     /// response marked it for removal — see `self_removal::run` and
     /// Kintsugi.WebApi/Controllers/HostsController.cs.
@@ -283,6 +308,11 @@ pub fn os_install_pending_path() -> PathBuf {
 
 pub fn os_download_progress_path() -> PathBuf {
     PathBuf::from(OS_DOWNLOAD_PROGRESS_PATH)
+}
+
+/// Where the time of the last health report is kept.
+pub fn health_state_path() -> PathBuf {
+    PathBuf::from(HEALTH_STATE_PATH)
 }
 
 pub fn checkin_schedule_path() -> PathBuf {

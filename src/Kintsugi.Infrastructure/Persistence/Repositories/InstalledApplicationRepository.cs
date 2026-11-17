@@ -33,63 +33,97 @@ public class InstalledApplicationRepository : IInstalledApplicationRepository
         // applications and package managers exist, not by how many hosts report them (a host
         // contributes at most one row per distinct name, so summing each group's host count back
         // up per name is exact, not a double-count). Keeps this cheap across a fleet of any size.
+        //
+        // **Names that differ only in case are one application.** An agent reports a name the way
+        // its platform spells it — "Slack" from a Mac, "slack" from a Linux package — and every other
+        // name comparison here and in the upgrade-path code already ignores case, so this list was the
+        // odd one out, showing a product twice with each row holding part of its hosts. The merge keys
+        // on the database's own `lower(name)`, used throughout this method, so what is grouped, counted
+        // and looked up always agrees with itself.
         var rows = await _context.InstalledApplications
             .GroupBy(a => new { a.Name, a.ParentApplicationId })
-            .Select(g => new { g.Key.Name, g.Key.ParentApplicationId, HostCount = g.Select(a => a.HostId).Distinct().Count() })
+            .Select(g => new
+            {
+                g.Key.Name,
+                Lower = g.Key.Name.ToLower(),
+                g.Key.ParentApplicationId,
+                HostCount = g.Select(a => a.HostId).Distinct().Count(),
+            })
             .ToListAsync(cancellationToken);
 
+        // The same count, over every spelling at once. Not the sum of the rows above: a host that has
+        // reported two spellings (a stale row from an older agent) is one host, and summing would
+        // count it twice.
+        var mergedHostCounts = (await _context.InstalledApplications
+            .GroupBy(a => new { Lower = a.Name.ToLower(), a.ParentApplicationId })
+            .Select(g => new { g.Key.Lower, g.Key.ParentApplicationId, HostCount = g.Select(a => a.HostId).Distinct().Count() })
+            .ToListAsync(cancellationToken))
+            .ToDictionary(x => (x.Lower, x.ParentApplicationId), x => x.HostCount);
+
         var parentIds = rows.Where(r => r.ParentApplicationId.HasValue).Select(r => r.ParentApplicationId!.Value).Distinct().ToList();
-        var parentNames = await _context.InstalledApplications
+        var parentLowerById = await _context.InstalledApplications
             .Where(a => parentIds.Contains(a.Id))
-            .Select(a => new { a.Id, a.Name })
-            .ToDictionaryAsync(a => a.Id, a => a.Name, cancellationToken);
+            .Select(a => new { a.Id, Lower = a.Name.ToLower() })
+            .ToDictionaryAsync(a => a.Id, a => a.Lower, cancellationToken);
 
         // Names of every host reporting each application, for filtering by host in the UI — a
         // separate query grouped at the database level, same reasoning as HostCount above.
-        var hostNamesByAppName = (await _context.InstalledApplications
-            .Join(_context.Hosts, a => a.HostId, h => h.Id, (a, h) => new { a.Name, h.Hostname })
+        var hostNamesByLower = (await _context.InstalledApplications
+            .Join(_context.Hosts, a => a.HostId, h => h.Id, (a, h) => new { Lower = a.Name.ToLower(), h.Hostname })
             .Distinct()
             .ToListAsync(cancellationToken))
-            .GroupBy(x => x.Name)
+            .GroupBy(x => x.Lower)
             .ToDictionary(
                 g => g.Key,
                 g => (IReadOnlyList<string>)g.Select(x => x.Hostname).OrderBy(h => h, StringComparer.OrdinalIgnoreCase).ToList());
 
         var byName = rows
-            .GroupBy(r => r.Name)
+            .GroupBy(r => r.Lower)
             .Select(g => new
             {
-                Name = g.Key,
-                HostCount = g.Sum(r => r.HostCount),
+                Lower = g.Key,
+                // The spelling most hosts report, so the row reads as the fleet writes it. A tie goes
+                // to a mixed-case spelling ("Slack" over "SLACK" and "slack", which are how a
+                // package id or a shouting installer writes it), then to ordinal order, so the answer is
+                // the same every time.
+                Name = g.GroupBy(r => r.Name)
+                    .OrderByDescending(spelling => spelling.Sum(r => r.HostCount))
+                    .ThenByDescending(spelling => IsMixedCase(spelling.Key))
+                    .ThenBy(spelling => spelling.Key, StringComparer.Ordinal)
+                    .First().Key,
+                HostCount = g.Select(r => r.ParentApplicationId).Distinct().Sum(parent => mergedHostCounts[(g.Key, parent)]),
                 // A name is treated as a child if any row reporting it named a
                 // parent that resolves to another app in this same dataset.
-                ParentName = g
-                    .Select(r => r.ParentApplicationId.HasValue && parentNames.TryGetValue(r.ParentApplicationId.Value, out var parentName)
-                        ? parentName
+                ParentLower = g
+                    .Select(r => r.ParentApplicationId.HasValue && parentLowerById.TryGetValue(r.ParentApplicationId.Value, out var parentLower)
+                        ? parentLower
                         : null)
-                    .FirstOrDefault(name => name is not null)
+                    .FirstOrDefault(lower => lower is not null)
             })
             .ToList();
 
-        IReadOnlyList<string> HostNamesFor(string name) =>
-            hostNamesByAppName.TryGetValue(name, out var names) ? names : Array.Empty<string>();
+        IReadOnlyList<string> HostNamesFor(string lower) =>
+            hostNamesByLower.TryGetValue(lower, out var names) ? names : Array.Empty<string>();
 
-        var childrenByParentName = byName
-            .Where(x => x.ParentName is not null)
+        var childrenByParentLower = byName
+            .Where(x => x.ParentLower is not null)
             .ToLookup(
-                x => x.ParentName!,
-                x => new ApplicationSummaryDto(x.Name, x.HostCount, HostNamesFor(x.Name), Array.Empty<ApplicationSummaryDto>()));
+                x => x.ParentLower!,
+                x => new ApplicationSummaryDto(x.Name, x.HostCount, HostNamesFor(x.Lower), Array.Empty<ApplicationSummaryDto>()));
 
         return byName
-            .Where(x => x.ParentName is null)
+            .Where(x => x.ParentLower is null)
             .OrderBy(x => x.Name)
             .Select(x => new ApplicationSummaryDto(
                 x.Name,
                 x.HostCount,
-                HostNamesFor(x.Name),
-                childrenByParentName[x.Name].OrderBy(c => c.Name).ToList()))
+                HostNamesFor(x.Lower),
+                childrenByParentLower[x.Lower].OrderBy(c => c.Name).ToList()))
             .ToList();
     }
+
+    /// <summary>Whether <paramref name="name"/> has both capitals and lower case in it.</summary>
+    private static bool IsMixedCase(string name) => name.Any(char.IsUpper) && name.Any(char.IsLower);
 
     public async Task<IReadOnlyList<ApplicationVersionVariantDto>> GetApplicationVersionVariantsAsync(CancellationToken cancellationToken)
     {

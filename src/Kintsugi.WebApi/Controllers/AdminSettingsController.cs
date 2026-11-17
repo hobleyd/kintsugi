@@ -8,7 +8,10 @@ using Kintsugi.Application.Auditing.Queries.GetAuditSettings;
 using Kintsugi.Application.Authentication;
 using Kintsugi.Domain.Exceptions;
 using Kintsugi.Application.Common.Interfaces;
+using Kintsugi.Application.Authentication.Commands.AddAdministrators;
+using Kintsugi.Application.Authentication.Commands.RemoveAdministrator;
 using Kintsugi.Application.Authentication.Commands.UpdateAuthenticationSettings;
+using Kintsugi.Application.Authentication.Queries.GetAdministrators;
 using Kintsugi.Application.Authentication.Queries.GetAuthenticationSettings;
 using Kintsugi.Application.GitHub;
 using Kintsugi.Application.GitHub.Commands.UpdateGitHubSettings;
@@ -148,6 +151,28 @@ public class AdminSettingsController : ControllerBase
             return;
         }
 
+        EnsureCallerIsOnList(effective);
+
+        if (stored.IsEnabled && ChangesIdentitySource(stored, command))
+        {
+            throw new DomainException(
+                "Changing the sign-in provider, tenant, issuer or hosted domain while an administrators list is set could lock "
+                + "everyone out. Clear the list first, make the change, sign in again, then restore the list.");
+        }
+    }
+
+    /// <summary>
+    /// The half of the lockout guard that does not depend on how the list is being changed: a
+    /// non-empty list <paramref name="effective"/> as it will be stored must include the caller's own
+    /// verified email, or their next request is a 403.
+    /// </summary>
+    private void EnsureCallerIsOnList(IReadOnlyList<string> effective)
+    {
+        if (effective.Count == 0)
+        {
+            return;
+        }
+
         var callerEmail = AdminIdentity.VerifiedEmailOf(User);
         if (callerEmail is null)
         {
@@ -160,13 +185,57 @@ public class AdminSettingsController : ControllerBase
         {
             throw new DomainException("The administrators list must include your own email, or you would lock yourself out.");
         }
+    }
 
-        if (stored.IsEnabled && ChangesIdentitySource(stored, command))
+    /// <summary>The administrators list with who added each and when — what the Administrators page shows.</summary>
+    [HttpGet("administrators")]
+    [ProducesResponseType(typeof(IReadOnlyList<AdministratorDto>), StatusCodes.Status200OK)]
+    public async Task<ActionResult<IReadOnlyList<AdministratorDto>>> GetAdministrators(CancellationToken cancellationToken) =>
+        Ok(await _sender.Send(new GetAdministratorsQuery(), cancellationToken));
+
+    /// <remarks>
+    /// Held to the same lockout guard as saving the list from the Authentication screen, judged on the
+    /// list as it will be stored. The consequence worth knowing: while sign-in is required and the
+    /// list is empty (every account is an administrator), the first address added must be the
+    /// caller's own — otherwise the list would stop including them and the next request would be a 403.
+    /// The adder is the signed-in caller's verified email, never anything from the request body.
+    /// </remarks>
+    [HttpPost("administrators")]
+    [ProducesResponseType(typeof(IReadOnlyList<AdministratorDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<IReadOnlyList<AdministratorDto>>> AddAdministrators(
+        AddAdministratorsRequest request, CancellationToken cancellationToken)
+    {
+        var stored = await _sender.Send(new GetAuthenticationSettingsQuery(), cancellationToken);
+        if (stored.IsEnabled)
         {
-            throw new DomainException(
-                "Changing the sign-in provider, tenant, issuer or hosted domain while an administrators list is set could lock "
-                + "everyone out. Clear the list first, make the change, sign in again, then restore the list.");
+            EnsureCallerIsOnList(AuthenticationSettings.NormaliseAdminEmails(stored.AdminEmails.Concat(request.Emails ?? Array.Empty<string>())));
         }
+
+        return Ok(await _sender.Send(new AddAdministratorsCommand(request.Emails ?? Array.Empty<string>(), AdminIdentity.VerifiedEmailOf(User)), cancellationToken));
+    }
+
+    /// <remarks>
+    /// By query string, not path: an email's dots and <c>@</c> are exactly what route constraints and
+    /// proxies mangle. Removing the caller's own address is refused while sign-in is required, as is
+    /// any removal that leaves a non-empty list without them. Removing the last address is refused
+    /// by <see cref="AuthenticationSettings.RemoveAdmin"/> (a 400): an empty list reopens the site to
+    /// every signed-in account, so it is only done deliberately, from the Authentication screen.
+    /// </remarks>
+    [HttpDelete("administrators")]
+    [ProducesResponseType(typeof(IReadOnlyList<AdministratorDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<ActionResult<IReadOnlyList<AdministratorDto>>> RemoveAdministrator(
+        [FromQuery] string email, CancellationToken cancellationToken)
+    {
+        var stored = await _sender.Send(new GetAuthenticationSettingsQuery(), cancellationToken);
+        if (stored.IsEnabled)
+        {
+            var removed = AuthenticationSettings.NormaliseAdminEmails(new[] { email });
+            EnsureCallerIsOnList(stored.AdminEmails.Where(e => !removed.Contains(e, StringComparer.OrdinalIgnoreCase)).ToList());
+        }
+
+        return Ok(await _sender.Send(new RemoveAdministratorCommand(email), cancellationToken));
     }
 
     /// <summary>Whether the save points sign-in at a different identity source than the stored one,
@@ -290,3 +359,6 @@ public class AdminSettingsController : ControllerBase
     [ProducesResponseType(typeof(VantaSyncStatusDto), StatusCodes.Status200OK)]
     public ActionResult<VantaSyncStatusDto> GetVantaSyncStatus() => Ok(_vantaSyncCoordinator.GetStatus());
 }
+
+/// <summary>The body of <c>POST /api/admin/settings/administrators</c>.</summary>
+public record AddAdministratorsRequest(IReadOnlyList<string>? Emails);

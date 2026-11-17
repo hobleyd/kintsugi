@@ -93,7 +93,7 @@ public class SessionController : ControllerBase
             AdminIdentity.DisplayNameOf(User),
             // The caller's own verified email, for the access-denied screen: DisplayNameOf stops at
             // the '@', so "jake" cannot tell someone they signed in with jake@gmail.com rather than
-            // jake@htw.com.au. The same value the allowlist is compared against, so an email the
+            // jake@corp.example.com. The same value the allowlist is compared against, so an email the
             // provider has not verified is never reflected back here.
             AdminIdentity.VerifiedEmailOf(User),
             DescribeProvider(settings.Provider),
