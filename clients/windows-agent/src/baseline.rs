@@ -879,12 +879,13 @@ mod tests {
     }
 
     /// The real write path against the real registry: what it writes is what `read_machine_value` reads.
-    /// CI's Windows runner is elevated; a developer's unelevated shell skips rather than fails.
+    /// A developer's unelevated shell skips rather than fails. CI (which sets `CI`) never skips: its
+    /// runner is elevated, and a passing test's output is hidden, so a skip there would look like a pass.
     #[test]
     fn write_machine_value_round_trips_through_the_registry() {
         let path = format!(r"SOFTWARE\Kintsugi-agent-test-{}", std::process::id());
         match write_machine_value(&path, "D", &ValueKind::Dword, "0") {
-            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied && std::env::var_os("CI").is_none() => {
                 eprintln!("skipped: writing under HKLM needs an elevated shell");
                 return;
             }
