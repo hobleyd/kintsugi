@@ -20,7 +20,7 @@ public class LogCollectionEntityTests
 {
     private static readonly DateTimeOffset Now = new(2026, 11, 9, 12, 0, 0, TimeSpan.Zero);
 
-    private static LogCollection New(int days = 30) => LogCollection.Request(Guid.NewGuid(), "juan@htw.com.au", days, LogCollectionDetail.WarningsAndErrors, Now);
+    private static LogCollection New(int days = 30) => LogCollection.Request(Guid.NewGuid(), "admin@example.com", days, LogCollectionDetail.WarningsAndErrors, Now);
 
     [Fact]
     public void ARequestWaitsForTheDevice_AndExpiresAfter24Hours()
@@ -220,11 +220,11 @@ public class LogCollectionHandlerTests
     public async Task AdministratorsRequestLogs_AndItIsOnTheTimelineWithTheirName()
     {
         var dto = await new RequestLogCollectionCommandHandler(_hosts.Object, _collections.Object, _events.Object, _unit.Object)
-            .Handle(new RequestLogCollectionCommand(_host.Id, 30, "WarningsAndErrors", "juan@htw.com.au"), CancellationToken.None);
+            .Handle(new RequestLogCollectionCommand(_host.Id, 30, "WarningsAndErrors", "admin@example.com"), CancellationToken.None);
 
-        Assert.Equal(("Requested", 30, "juan@htw.com.au"), (dto.Status, dto.PeriodDays, dto.RequestedBy));
+        Assert.Equal(("Requested", 30, "admin@example.com"), (dto.Status, dto.PeriodDays, dto.RequestedBy));
         _collections.Verify(r => r.AddAsync(It.IsAny<LogCollection>(), It.IsAny<CancellationToken>()), Times.Once);
-        _events.Verify(e => e.LogsRequestedAsync(_host.Id, "juan@htw.com.au", It.IsAny<string>(), It.IsAny<DateTimeOffset>(), It.IsAny<CancellationToken>()), Times.Once);
+        _events.Verify(e => e.LogsRequestedAsync(_host.Id, "admin@example.com", It.IsAny<string>(), It.IsAny<DateTimeOffset>(), It.IsAny<CancellationToken>()), Times.Once);
         _unit.Verify(u => u.SaveChangesAsync(It.IsAny<CancellationToken>()), Times.Once);
     }
 
@@ -328,10 +328,10 @@ public class LogCollectionHandlerTests
         var handler = new DeleteLogCollectionCommandHandler(_collections.Object, _events.Object, _unit.Object);
 
         await Assert.ThrowsAsync<NotFoundException>(() => handler.Handle(new DeleteLogCollectionCommand(_other.Id, c.Id, "a"), CancellationToken.None));
-        await handler.Handle(new DeleteLogCollectionCommand(_host.Id, c.Id, "juan@htw.com.au"), CancellationToken.None);
+        await handler.Handle(new DeleteLogCollectionCommand(_host.Id, c.Id, "admin@example.com"), CancellationToken.None);
 
         _collections.Verify(r => r.DeleteAsync(c, It.IsAny<CancellationToken>()), Times.Once);
-        _events.Verify(e => e.LogsDeletedAsync(_host.Id, "juan@htw.com.au", "Request cancelled", It.IsAny<DateTimeOffset>(), It.IsAny<CancellationToken>()), Times.Once);
+        _events.Verify(e => e.LogsDeletedAsync(_host.Id, "admin@example.com", "Request cancelled", It.IsAny<DateTimeOffset>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
@@ -341,15 +341,15 @@ public class LogCollectionHandlerTests
         c.Complete(DateTimeOffset.UtcNow, LogPayload.Sanitise(Upload(), 30, DateTimeOffset.UtcNow).Content, 1, null);
 
         var file = await new GetLogDownloadQueryHandler(_hosts.Object, _collections.Object, _events.Object, _unit.Object)
-            .Handle(new GetLogDownloadQuery(_host.Id, c.Id, "juan@htw.com.au"), CancellationToken.None);
+            .Handle(new GetLogDownloadQuery(_host.Id, c.Id, "admin@example.com"), CancellationToken.None);
 
         Assert.Equal("pc-logs.zip", file.FileName);
         using var zip = new ZipArchive(new MemoryStream(file.Zip));
         using var reader = new StreamReader(zip.GetEntry("logs.txt")!.Open());
         var text = await reader.ReadToEndAsync();
-        Assert.Contains("downloaded by juan@htw.com.au", text);
+        Assert.Contains("downloaded by admin@example.com", text);
         Assert.Contains("ERROR\tx\ty", text);
-        _events.Verify(e => e.LogsDownloadedAsync(_host.Id, "juan@htw.com.au", It.IsAny<DateTimeOffset>(), It.IsAny<CancellationToken>()), Times.Once);
+        _events.Verify(e => e.LogsDownloadedAsync(_host.Id, "admin@example.com", It.IsAny<DateTimeOffset>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 
     [Fact]
